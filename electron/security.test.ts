@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import { buildContentSecurityPolicy, isAllowedAppUrl, isSafeExternalUrl } from "./security";
+
+describe("isAllowedAppUrl", () => {
+  it("allows the local dev server origin", () => {
+    expect(isAllowedAppUrl("http://localhost:5173/studio")).toBe(true);
+  });
+
+  it("allows the packaged app origin", () => {
+    expect(isAllowedAppUrl("app://-/reader")).toBe(true);
+  });
+
+  it("rejects unrelated origins", () => {
+    expect(isAllowedAppUrl("https://example.com")).toBe(false);
+  });
+});
+
+describe("isSafeExternalUrl", () => {
+  it("allows trusted https links", () => {
+    expect(isSafeExternalUrl("https://github.com/neuphonic/neutts")).toBe(true);
+    expect(isSafeExternalUrl("https://huggingface.co/neuphonic/neutts-nano")).toBe(true);
+  });
+
+  it("rejects non-https and unknown hosts", () => {
+    expect(isSafeExternalUrl("http://github.com/neuphonic/neutts")).toBe(false);
+    expect(isSafeExternalUrl("https://example.com")).toBe(false);
+    expect(isSafeExternalUrl("javascript:alert(1)")).toBe(false);
+  });
+});
+
+describe("buildContentSecurityPolicy", () => {
+  it("includes dev-only allowances when requested", () => {
+    const policy = buildContentSecurityPolicy(true);
+    expect(policy).toContain("http://localhost:5173");
+    expect(policy).toContain("ws://localhost:5173");
+    expect(policy).toContain("'unsafe-eval'");
+    expect(policy).toContain("'unsafe-inline'");
+  });
+
+  it("omits dev-only allowances in production mode", () => {
+    const policy = buildContentSecurityPolicy(false);
+    expect(policy).not.toContain("http://localhost:5173");
+    expect(policy).not.toContain("ws://localhost:5173");
+    expect(policy).not.toContain("'unsafe-eval'");
+    expect(policy).toContain("style-src 'self' 'unsafe-inline'");
+    expect(policy).toContain("script-src 'self' 'wasm-unsafe-eval'");
+  });
+});

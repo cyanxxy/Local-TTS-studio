@@ -1,0 +1,260 @@
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/outfit";
+@import "@fontsource-variable/jetbrains-mono";
+@import "tailwindcss";
+
+@theme {
+  /* ── Fonts ────────────────────────────────────────────────── */
+  --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+  --font-display: "Outfit Variable", "Outfit", system-ui, sans-serif;
+
+  /* ── Colors ───────────────────────────────────────────────── */
+  --color-surface: #F5F5F7;
+  --color-panel: #FFFFFF;
+  --color-border: #E5E5EA;
+  --color-border-strong: #D1D1D6;
+  --color-text-primary: #1D1D1F;
+  --color-text-secondary: #58585D;
+  --color-text-muted: #76767B;
+  --color-accent: #0071E3;
+  --color-accent-hover: #0077ED;
+  --color-accent-light: rgba(0, 113, 227, 0.1);
+  --color-danger: #FF3B30;
+  --color-danger-light: rgba(255, 59, 48, 0.1);
+  --color-success: #34C759;
+
+  /* ── Shadows ──────────────────────────────────────────────── */
+  --shadow-xs: 0 1px 2px rgb(0 0 0 / 0.04);
+  --shadow-sm: 0 2px 8px rgb(0 0 0 / 0.06);
+  --shadow-md: 0 4px 20px rgb(0 0 0 / 0.03);
+  --shadow-lg: 0 8px 24px rgb(0 0 0 / 0.08), 0 2px 6px rgb(0 0 0 / 0.04);
+  --shadow-accent-sm: 0 2px 8px color-mix(in srgb, var(--color-accent) 20%, transparent);
+  --shadow-accent-md: 0 4px 20px color-mix(in srgb, var(--color-accent) 25%, transparent);
+  --shadow-accent-lg: 0 6px 20px color-mix(in srgb, var(--color-accent) 30%, transparent);
+
+  /* ── Type scale ───────────────────────────────────────────── */
+  --text-2xs: 9px;
+  --text-xs: 10px;
+  --text-sm: 11px;
+  --text-base: 13px;
+  --text-lg: 14px;
+  --text-xl: 16px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: var(--color-surface);
+  color: var(--color-text-primary);
+  min-height: 100vh;
+  /* subtle warm ambient glow from top in light mode */
+  background-image: radial-gradient(
+    ellipse 140% 35% at 50% -5%,
+    color-mix(in srgb, var(--color-accent) 4%, transparent),
+    transparent
+  );
+}
+
+::selection {
+  background: var(--color-accent);
+  color: var(--color-panel);
+}
+
+/* ── Range inputs ─────────────────────────────────────────── */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 99px;
+  background: var(--color-border-strong);
+  outline: none;
+  cursor: pointer;
+  width: 100%;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-panel);
+  cursor: pointer;
+  border: 1px solid var(--color-border-strong);
+  box-shadow:
+    0 1px 4px rgb(0 0 0 / 0.15),
+    0 0 0 1.5px color-mix(in srgb, var(--color-accent) 0%, transparent);
+  transition:
+    transform 0.15s cubic-bezier(0.4, 0, 0.2, 1),
+    box-shadow 0.2s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow:
+    0 2px 8px rgb(0 0 0 / 0.2),
+    0 0 0 4px color-mix(in srgb, var(--color-accent) 15%, transparent);
+}
+
+input[type="range"]::-webkit-slider-thumb:active {
+  transform: scale(0.95);
+  box-shadow:
+    0 1px 3px rgb(0 0 0 / 0.15),
+    0 0 0 6px color-mix(in srgb, var(--color-accent) 25%, transparent);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-panel);
+  cursor: pointer;
+  border: 1px solid var(--color-border-strong);
+}
+
+/* ── Scrollbar ────────────────────────────────────────────── */
+::-webkit-scrollbar {
+  width: 5px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-text-muted);
+}
+
+/* ── Animations ───────────────────────────────────────────── */
+@theme {
+  --animate-fade-up: fade-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  @keyframes fade-up {
+    0%   { opacity: 0; transform: translateY(12px) scale(0.97);  }
+    60%  { opacity: 1; transform: translateY(-2px)  scale(1.005);}
+    100% { opacity: 1; transform: translateY(0)     scale(1);    }
+  }
+
+  --animate-scale-in: scale-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  @keyframes scale-in {
+    0%   { opacity: 0; transform: scale(0.90); }
+    70%  { opacity: 1; transform: scale(1.03); }
+    100% { opacity: 1; transform: scale(1);    }
+  }
+
+  --animate-ping-ring: ping-ring 1.4s cubic-bezier(0, 0, 0.2, 1) infinite;
+  @keyframes ping-ring {
+    0%   { transform: scale(1);   opacity: 0.55; }
+    100% { transform: scale(2.2); opacity: 0;    }
+  }
+}
+
+/* Keyframes referenced from inline `style` or non-Tailwind CSS — kept outside
+   @theme so Tailwind v4 doesn't tree-shake them when no `animate-*` utility
+   class consumes them. */
+@keyframes wave-bar {
+  0%   { transform: scaleY(0.15); }
+  20%  { transform: scaleY(0.85); }
+  40%  { transform: scaleY(0.40); }
+  60%  { transform: scaleY(1);    }
+  80%  { transform: scaleY(0.50); }
+  100% { transform: scaleY(0.15); }
+}
+
+@keyframes progress-slide {
+  from { background-position:  200% 0; }
+  to   { background-position: -200% 0; }
+}
+
+.progress-animated {
+  background-image: linear-gradient(
+    90deg,
+    var(--color-accent)        0%,
+    color-mix(in srgb, var(--color-accent) 40%, transparent) 40%,
+    var(--color-accent)        80%
+  );
+  background-size: 200% 100%;
+  animation: progress-slide 1.4s linear infinite;
+}
+
+.reader-chunk-highlight {
+  background: transparent;
+  border-radius: 8px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  padding: 0;
+}
+
+.reader-chunk-highlight-active {
+  background: rgba(90, 197, 245, 0.40);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #5AC5F5 50%, transparent);
+  animation: reader-highlight-pulse 2.8s ease-in-out infinite;
+}
+
+@keyframes reader-highlight-pulse {
+  0%, 100% { background: rgba(90, 197, 245, 0.33); }
+  50%       { background: rgba(90, 197, 245, 0.52); }
+}
+
+/* ── Reader section tints ─────────────────────────────────── */
+.reader-section-even {
+  background-color: transparent;
+}
+
+.reader-section-odd {
+  background-color: color-mix(in srgb, var(--color-accent) 5%, transparent);
+  border-radius: 2px;
+}
+
+.reader-section-odd.reader-chunk-highlight-active,
+.reader-section-even.reader-chunk-highlight-active {
+  background: rgba(90, 197, 245, 0.45);
+}
+
+/* ── Reader section badge ─────────────────────────────────── */
+.reader-section-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  min-width: 14px;
+  height: 14px;
+  padding: 0 2px;
+  border-radius: 3px;
+  vertical-align: text-top;
+  margin-right: 2px;
+  user-select: none;
+}
+
+.reader-section-badge-preview {
+  background-color: rgba(0, 0, 0, 0.04);
+  color: var(--color-text-muted);
+  border: 1px dashed var(--color-border);
+}
+
+.reader-section-badge-generated {
+  background-color: var(--color-accent-light);
+  color: var(--color-accent);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 25%, transparent);
+  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.reader-section-badge-generated:hover {
+  background-color: var(--color-accent);
+  color: var(--color-panel);
+  box-shadow: var(--shadow-accent-sm);
+}

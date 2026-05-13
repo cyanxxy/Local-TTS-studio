@@ -1,0 +1,90 @@
+import path from "path";
+
+export type LocalModelId = "neutts" | "kani";
+
+export interface PythonSearchContext {
+  appPath: string;
+  cwd: string;
+  execPath: string;
+  isPackaged: boolean;
+  platform: NodeJS.Platform;
+  resourcesPath?: string;
+}
+
+const PACKAGED_EXEC_ANCESTOR_DEPTH = 5;
+
+function appendUnique(target: string[], value: string | undefined): void {
+  if (!value) return;
+
+  const normalized = path.resolve(value);
+  if (!target.includes(normalized)) {
+    target.push(normalized);
+  }
+}
+
+function appendAncestors(target: string[], start: string | undefined, depth: number): void {
+  if (!start) return;
+
+  let current = path.resolve(start);
+  for (let index = 0; index <= depth; index += 1) {
+    appendUnique(target, current);
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      break;
+    }
+    current = parent;
+  }
+}
+
+function shouldIncludeContainingDirectory(appPath: string): boolean {
+  const baseName = path.basename(appPath);
+  return baseName === "dist-electron" || baseName.endsWith(".asar");
+}
+
+export function getPythonSearchRoots(context: PythonSearchContext): string[] {
+  const roots: string[] = [];
+
+  appendUnique(roots, context.appPath);
+
+  if (shouldIncludeContainingDirectory(context.appPath)) {
+    appendUnique(roots, path.dirname(context.appPath));
+  }
+
+  appendUnique(roots, context.resourcesPath);
+
+  if (context.isPackaged) {
+    appendAncestors(roots, path.dirname(context.execPath), PACKAGED_EXEC_ANCESTOR_DEPTH);
+  }
+
+  appendUnique(roots, context.cwd);
+
+  return roots;
+}
+
+export function getVirtualEnvPythonPath(rootDir: string, envName: string, platform: NodeJS.Platform): string {
+  const executable = platform === "win32" ? "python.exe" : "python";
+  const binDir = platform === "win32" ? "Scripts" : "bin";
+  return path.join(rootDir, envName, binDir, executable);
+}
+
+export function getVirtualEnvPythonCandidates(envName: string, context: PythonSearchContext): string[] {
+  return getPythonSearchRoots(context).map((rootDir) => getVirtualEnvPythonPath(rootDir, envName, context.platform));
+}
+
+export function getPythonDependencyCheckSnippet(model: LocalModelId): string {
+  if (model === "neutts") {
+    return [
+      "import importlib.util, sys",
+      "assert (3, 10) <= sys.version_info < (3, 14)",
+      "assert importlib.util.find_spec('neutts') is not None",
+    ].join("; ");
+  }
+
+  return [
+    "import importlib.metadata, importlib.util",
+    "assert importlib.util.find_spec('kani_tts') is not None",
+    "importlib.metadata.version('kani-tts-2')",
+    "assert importlib.metadata.version('transformers') == '4.56.0'",
+  ].join("; ");
+}

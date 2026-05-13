@@ -1,0 +1,25 @@
+import { describe, expect, it } from "vitest";
+import { getCanonicalPagePath, getPageFromPath, PAGE_PATH } from "./appRouting";
+
+describe("appRouting", () => {
+  it("resolves supported paths to their pages", () => {
+    expect(getPageFromPath("/studio", false)).toBe("studio");
+    expect(getPageFromPath("/reader", false)).toBe("reader");
+    expect(getPageFromPath("/neutts", true)).toBe("neutts");
+    expect(getPageFromPath("/kani", true)).toBe("kani");
+  });
+
+  it("falls back unsupported web-only desktop paths to studio", () => {
+    expect(getPageFromPath("/neutts", false)).toBe("studio");
+    expect(getPageFromPath("/kani", false)).toBe("studio");
+  });
+
+  it("computes canonical paths for supported and unsupported routes", () => {
+    expect(getCanonicalPagePath("/", false)).toBe(PAGE_PATH.studio);
+    expect(getCanonicalPagePath("/reader/", false)).toBe(PAGE_PATH.reader);
+    expect(getCanonicalPagePath("/studio/", false)).toBe(PAGE_PATH.studio);
+    expect(getCanonicalPagePath("/neutts", false)).toBe(PAGE_PATH.studio);
+    expect(getCanonicalPagePath("/kani", true)).toBe(PAGE_PATH.kani);
+    expect(getCanonicalPagePath("/unknown", true)).toBe(PAGE_PATH.studio);
+  });
+});

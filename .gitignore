@@ -1,0 +1,74 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-electron/
+electron/dist/
+electron/build/
+release/
+
+# AI assistant metadata (local dev only)
+/.agents/
+/.claude/
+/.codex/
+/.cursor/
+/.windsurf/
+/.zed/
+/.roo/
+/.opencode/
+/.aider*
+/.cursorrules
+/.windsurfrules
+/AGENT.md
+/COPILOT.md
+/CURSOR.md
+/GEMINI.md
+/QWEN.md
+
+# Environment & local config
+.env
+.env.*
+*.local
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Python virtual environments & cache
+__pycache__/
+*.pyc
+.python-version
+.coverage
+.hypothesis/
+.mypy_cache/
+.nox/
+.pytest_cache/
+.ruff_cache/
+.tox/
+htmlcov/
+.venv/
+.venv*/
+
+# TypeScript cache
+*.tsbuildinfo
+.eslintcache
+coverage/
+
+# Generated benchmark reports
+reports/
+
+# Vercel
+.vercel

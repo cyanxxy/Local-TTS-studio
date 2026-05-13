@@ -1,0 +1,583 @@
+import { useState, useRef, useCallback, useEffect } from "react";
+import type { AudioExportOptions, CaptionExportFormat } from "../types";
+import { AUDIO_PLAYER_MAX_BUFFER_SECONDS } from "../constants";
+import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
+import { downloadAudioChunks } from "../lib/audioExportClient";
+import { downloadBlob } from "../lib/exportAudio";
+import {
+  buildAudioSegments,
+  buildCaptionSegments,
+  getChunkDuration,
+  retimeStoredChunks,
+  toAudioSegment,
+  type AudioChunkData,
+  type AudioSegment,
+  type StoredAudioChunk,
+} from "../lib/audioTimeline";
+
+export type { AudioChunkData, AudioSegment } from "../lib/audioTimeline";
+
+export interface UseAudioPlayerReturn {
+  isPlaying: boolean;
+  currentTime: number;
+  totalDuration: number;
+  playbackRate: number;
+  segments: AudioSegment[];
+  activeSegmentId: string | null;
+  scheduleChunk: (chunk: AudioChunkData) => Promise<void>;
+  togglePlay: () => void;
+  seek: (percentage: number) => void;
+  seekTo: (seconds: number) => void;
+  skip: (deltaSeconds: number) => void;
+  jumpToSegment: (segmentId: string) => void;
+  setPlaybackRate: (rate: number) => void;
+  download: (options?: AudioExportOptions) => Promise<void>;
+  downloadCaptions: (format: CaptionExportFormat) => void;
+  replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
+  reset: () => void;
+  stopAll: () => void;
+}
+
+const MIN_PLAYBACK_RATE = 0.75;
+const MAX_PLAYBACK_RATE = 2.0;
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+/**
+ * Web Audio API playback hook.
+ * Uses AudioContext with createBufferSource() for streaming Float32 chunks.
+ * Does NOT use <audio> element — it cannot handle streaming PCM Float32 chunks.
+ */
+export function useAudioPlayer(): UseAudioPlayerReturn {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [totalDuration, setTotalDuration] = useState(0);
+  const [playbackRate, setPlaybackRateState] = useState(1);
+  const [segments, setSegments] = useState<AudioSegment[]>([]);
+  const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
+
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const nextPlayTimeRef = useRef(0);
+  const activeNodesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
+  const allChunksRef = useRef<StoredAudioChunk[]>([]);
+  const samplingRateRef = useRef(24000);
+  const animFrameRef = useRef(0);
+  const interruptedRef = useRef(false);
+  const isPlayingRef = useRef(false);
+  const scheduleCursorRef = useRef(0);
+  const playbackRateRef = useRef(1);
+  const currentTimeRef = useRef(0);
+  const totalDurationRef = useRef(0);
+  const timelineAnchorRef = useRef(0);
+  const contextAnchorRef = useRef(0);
+  const segmentCounterRef = useRef(0);
+  const autoPlayOnChunkRef = useRef(true);
+
+  const getContext = useCallback((): AudioContext => {
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContext();
+    }
+    return audioContextRef.current;
+  }, []);
+
+  const rebuildSegmentState = useCallback(() => {
+    setSegments(buildAudioSegments(allChunksRef.current));
+  }, []);
+
+  const activeSegmentCursorRef = useRef(0);
+
+  const updateActiveSegment = useCallback((timeSec: number) => {
+    const chunks = allChunksRef.current;
+    if (chunks.length === 0) {
+      setActiveSegmentId(null);
+      return;
+    }
+
+    // Start from the cached cursor for O(1) forward playback lookups.
+    let cursor = activeSegmentCursorRef.current;
+    if (cursor >= chunks.length) cursor = 0;
+
+    // Advance cursor forward if time has moved past the current chunk.
+    while (cursor < chunks.length - 1 && timeSec >= chunks[cursor].endSec) {
+      cursor += 1;
+    }
+    // Move cursor backward if time is before the current chunk (e.g., seek).
+    while (cursor > 0 && timeSec < chunks[cursor].startSec) {
+      cursor -= 1;
+    }
+
+    activeSegmentCursorRef.current = cursor;
+    const chunk = chunks[cursor];
+    setActiveSegmentId(timeSec >= chunk.startSec && timeSec < chunk.endSec ? chunk.segmentId : null);
+  }, []);
+
+  const syncCurrentTime = useCallback((nextTime: number) => {
+    const clamped = clamp(nextTime, 0, totalDurationRef.current);
+    currentTimeRef.current = clamped;
+    setCurrentTime(clamped);
+    updateActiveSegment(clamped);
+    return clamped;
+  }, [updateActiveSegment]);
+
+  const syncTotalDuration = useCallback((nextDuration: number) => {
+    const clamped = Math.max(0, nextDuration);
+    totalDurationRef.current = clamped;
+    setTotalDuration(clamped);
+    if (currentTimeRef.current > clamped) {
+      syncCurrentTime(clamped);
+    }
+  }, [syncCurrentTime]);
+
+  const getLiveTimelineTime = useCallback((): number => {
+    const ctx = audioContextRef.current;
+    if (!ctx || !isPlayingRef.current) return currentTimeRef.current;
+
+    const elapsed = (ctx.currentTime - contextAnchorRef.current) * playbackRateRef.current;
+    return timelineAnchorRef.current + elapsed;
+  }, []);
+
+  const stopAllNodes = useCallback(() => {
+    activeNodesRef.current.forEach((node) => {
+      node.onended = null;
+      try { node.stop(); } catch { /* already stopped */ }
+      try { node.disconnect(); } catch { /* already disconnected */ }
+    });
+    activeNodesRef.current.clear();
+  }, []);
+
+  const registerSource = useCallback((source: AudioBufferSourceNode) => {
+    activeNodesRef.current.add(source);
+    source.onended = () => {
+      activeNodesRef.current.delete(source);
+      source.onended = null;
+      try { source.disconnect(); } catch { /* already disconnected */ }
+    };
+  }, []);
+
+  const copyToChannel = useCallback((buffer: AudioBuffer, data: Float32Array) => {
+    buffer.getChannelData(0).set(data);
+  }, []);
+
+  const ensureAudioBuffer = useCallback((ctx: AudioContext, chunk: StoredAudioChunk): AudioBuffer => {
+    if (!chunk.audioBuffer) {
+      chunk.audioBuffer = ctx.createBuffer(1, chunk.audio.length, chunk.samplingRate);
+      copyToChannel(chunk.audioBuffer, chunk.audio);
+    }
+    return chunk.audioBuffer;
+  }, [copyToChannel]);
+
+  const pruneBufferedAudio = useCallback(() => {
+    let retainedDuration = 0;
+
+    for (let index = allChunksRef.current.length - 1; index >= 0; index -= 1) {
+      const chunk = allChunksRef.current[index];
+      if (!chunk.audioBuffer) continue;
+
+      const duration = chunk.endSec - chunk.startSec;
+      if (retainedDuration === 0 || retainedDuration + duration <= AUDIO_PLAYER_MAX_BUFFER_SECONDS) {
+        retainedDuration += duration;
+        continue;
+      }
+
+      chunk.audioBuffer = undefined;
+    }
+  }, []);
+
+  const findChunkIndexAtTime = useCallback((timeSec: number): number => {
+    const chunks = allChunksRef.current;
+    for (let index = 0; index < chunks.length; index += 1) {
+      if (chunks[index].endSec > timeSec) {
+        return index;
+      }
+    }
+    return chunks.length;
+  }, []);
+
+  const scheduleBufferedChunks = useCallback((ctx: AudioContext, seekTimeSec?: number) => {
+    if (allChunksRef.current.length === 0) return;
+
+    const liveTime = isPlayingRef.current ? getLiveTimelineTime() : currentTimeRef.current;
+    const horizonSec = liveTime + AUDIO_PLAYER_MAX_BUFFER_SECONDS;
+    const playbackRate = playbackRateRef.current;
+    let nextPlay = nextPlayTimeRef.current;
+    let cursor = scheduleCursorRef.current;
+    let firstChunkSeekTime = seekTimeSec;
+
+    while (cursor < allChunksRef.current.length) {
+      const chunk = allChunksRef.current[cursor];
+      if (chunk.startSec >= horizonSec) break;
+
+      const chunkDuration = getChunkDuration(chunk);
+      const offset = firstChunkSeekTime === undefined
+        ? 0
+        : Math.max(0, firstChunkSeekTime - chunk.startSec);
+
+      firstChunkSeekTime = undefined;
+      if (offset >= chunkDuration) {
+        cursor += 1;
+        continue;
+      }
+
+      const audioBuffer = ensureAudioBuffer(ctx, chunk);
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.playbackRate.value = playbackRate;
+      source.connect(ctx.destination);
+      source.start(nextPlay, offset);
+      registerSource(source);
+
+      nextPlay += Math.max(0, (chunkDuration - offset) / playbackRate);
+      cursor += 1;
+    }
+
+    nextPlayTimeRef.current = nextPlay;
+    scheduleCursorRef.current = cursor;
+    pruneBufferedAudio();
+  }, [ensureAudioBuffer, getLiveTimelineTime, pruneBufferedAudio, registerSource]);
+
+  const replayFromOffset = useCallback(async (seekTimeSec: number, shouldPlay: boolean) => {
+    const ctx = getContext();
+    const clampedSeek = clamp(seekTimeSec, 0, totalDurationRef.current);
+
+    interruptedRef.current = true;
+    stopAllNodes();
+    nextPlayTimeRef.current = 0;
+    scheduleCursorRef.current = findChunkIndexAtTime(clampedSeek);
+    timelineAnchorRef.current = clampedSeek;
+    contextAnchorRef.current = ctx.currentTime;
+
+    if (allChunksRef.current.length === 0) {
+      syncCurrentTime(0);
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      interruptedRef.current = false;
+      return;
+    }
+
+    syncCurrentTime(clampedSeek);
+
+    if (!shouldPlay || clampedSeek >= totalDurationRef.current) {
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      interruptedRef.current = false;
+      return;
+    }
+
+    nextPlayTimeRef.current = ctx.currentTime;
+    scheduleBufferedChunks(ctx, clampedSeek);
+
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch {
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+        interruptedRef.current = false;
+        return;
+      }
+    }
+
+    contextAnchorRef.current = ctx.currentTime;
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+    interruptedRef.current = false;
+  }, [findChunkIndexAtTime, getContext, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
+
+  useEffect(() => {
+    const update = () => {
+      if (isPlayingRef.current && audioContextRef.current) {
+        scheduleBufferedChunks(audioContextRef.current);
+        const live = getLiveTimelineTime();
+        const clamped = syncCurrentTime(live);
+
+        if (
+          clamped >= totalDurationRef.current
+          && totalDurationRef.current > 0
+          && allChunksRef.current.length > 0
+        ) {
+          setIsPlaying(false);
+          isPlayingRef.current = false;
+          syncCurrentTime(totalDurationRef.current);
+          stopAllNodes();
+          // Stop the loop — playback ended.
+          return;
+        }
+        // Continue updating while playing.
+        animFrameRef.current = requestAnimationFrame(update);
+      }
+      // Not playing — don't reschedule. The loop restarts when playback begins.
+    };
+
+    // Only start the loop if currently playing.
+    if (isPlaying) {
+      animFrameRef.current = requestAnimationFrame(update);
+    }
+    return () => cancelAnimationFrame(animFrameRef.current);
+  }, [isPlaying, getLiveTimelineTime, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
+
+  const scheduleChunk = useCallback(async (chunk: AudioChunkData) => {
+    const ctx = getContext();
+
+    samplingRateRef.current = chunk.samplingRate;
+    const chunkDuration = getChunkDuration(chunk);
+
+    const startSec = totalDurationRef.current;
+    const endSec = startSec + chunkDuration;
+    segmentCounterRef.current += 1;
+    const segmentId = `segment-${segmentCounterRef.current}`;
+
+    const storedChunk: StoredAudioChunk = {
+      ...chunk,
+      startSec,
+      endSec,
+      segmentId,
+    };
+    allChunksRef.current.push(storedChunk);
+
+    syncTotalDuration(totalDurationRef.current + chunkDuration);
+    setSegments((prev) => [...prev, toAudioSegment(storedChunk, prev.length, allChunksRef.current.length)]);
+
+    if (interruptedRef.current) return;
+
+    const hasQueuedPlayback = nextPlayTimeRef.current > 0 || activeNodesRef.current.size > 0;
+    if (!autoPlayOnChunkRef.current && !hasQueuedPlayback) {
+      return;
+    }
+
+    if (nextPlayTimeRef.current === 0) {
+      nextPlayTimeRef.current = ctx.currentTime + 0.15;
+      timelineAnchorRef.current = currentTimeRef.current;
+      contextAnchorRef.current = nextPlayTimeRef.current;
+    }
+    scheduleBufferedChunks(ctx);
+
+    if (!autoPlayOnChunkRef.current) {
+      return;
+    }
+
+    if (ctx.state === "suspended") {
+      try {
+        await ctx.resume();
+      } catch {
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+        return;
+      }
+    }
+
+    if (!isPlayingRef.current) {
+      setIsPlaying(true);
+      isPlayingRef.current = true;
+    }
+  }, [getContext, scheduleBufferedChunks, syncTotalDuration]);
+
+  const togglePlay = useCallback(async () => {
+    const ctx = getContext();
+
+    if (isPlayingRef.current) {
+      autoPlayOnChunkRef.current = false;
+      const snapshot = syncCurrentTime(getLiveTimelineTime());
+      timelineAnchorRef.current = snapshot;
+      contextAnchorRef.current = ctx.currentTime;
+
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      await ctx.suspend();
+      return;
+    }
+
+    autoPlayOnChunkRef.current = true;
+    await ctx.resume();
+
+    if (currentTimeRef.current >= totalDurationRef.current && totalDurationRef.current > 0) {
+      await replayFromOffset(0, true);
+      return;
+    }
+
+    if (activeNodesRef.current.size === 0 && allChunksRef.current.length > 0) {
+      await replayFromOffset(currentTimeRef.current, true);
+      return;
+    }
+
+    timelineAnchorRef.current = currentTimeRef.current;
+    contextAnchorRef.current = ctx.currentTime;
+    setIsPlaying(true);
+    isPlayingRef.current = true;
+  }, [getContext, getLiveTimelineTime, replayFromOffset, syncCurrentTime]);
+
+  const seekTo = useCallback((seconds: number) => {
+    const shouldPlay = isPlayingRef.current;
+    autoPlayOnChunkRef.current = shouldPlay;
+    void replayFromOffset(seconds, shouldPlay);
+  }, [replayFromOffset]);
+
+  const seek = useCallback((percentage: number) => {
+    const seekTime = totalDurationRef.current * clamp(percentage, 0, 1);
+    seekTo(seekTime);
+  }, [seekTo]);
+
+  const skip = useCallback((deltaSeconds: number) => {
+    seekTo(currentTimeRef.current + deltaSeconds);
+  }, [seekTo]);
+
+  const jumpToSegment = useCallback((segmentId: string) => {
+    const segment = allChunksRef.current.find((entry) => entry.segmentId === segmentId);
+    if (!segment) return;
+    seekTo(segment.startSec);
+  }, [seekTo]);
+
+  const setPlaybackRate = useCallback((rate: number) => {
+    const nextRate = clamp(rate, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE);
+    if (Math.abs(nextRate - playbackRateRef.current) < 0.001) return;
+
+    const live = getLiveTimelineTime();
+
+    playbackRateRef.current = nextRate;
+    setPlaybackRateState(nextRate);
+
+    // Rebuild scheduling at the new rate to avoid drift/gaps for pre-scheduled nodes.
+    if (isPlayingRef.current && allChunksRef.current.length > 0) {
+      autoPlayOnChunkRef.current = true;
+      void replayFromOffset(live, true);
+      return;
+    }
+
+    if ((activeNodesRef.current.size > 0 || nextPlayTimeRef.current > 0) && allChunksRef.current.length > 0) {
+      autoPlayOnChunkRef.current = false;
+      void replayFromOffset(live, false);
+      return;
+    }
+
+    syncCurrentTime(live);
+  }, [getLiveTimelineTime, replayFromOffset, syncCurrentTime]);
+
+  const download = useCallback(async (options?: AudioExportOptions) => {
+    if (allChunksRef.current.length === 0) return;
+
+    await downloadAudioChunks(allChunksRef.current.map((chunk) => ({
+      audio: chunk.audio,
+      samplingRate: chunk.samplingRate,
+    })), options);
+  }, []);
+
+  const downloadCaptions = useCallback((format: CaptionExportFormat) => {
+    if (allChunksRef.current.length === 0) return;
+
+    const segments = buildCaptionSegments(allChunksRef.current);
+
+    if (segments.length === 0) return;
+
+    if (format === "srt") {
+      downloadBlob(new Blob([buildSrt(segments)], { type: "application/x-subrip" }), "tts-captions.srt");
+      return;
+    }
+
+    if (format === "vtt") {
+      downloadBlob(new Blob([buildVtt(segments)], { type: "text/vtt" }), "tts-captions.vtt");
+      return;
+    }
+
+    downloadBlob(new Blob([buildCaptionJson(segments)], { type: "application/json" }), "tts-timestamps.json");
+  }, []);
+
+  const replaceSegment = useCallback((segmentId: string, replacement: AudioChunkData) => {
+    const index = allChunksRef.current.findIndex((chunk) => chunk.segmentId === segmentId);
+    if (index < 0) return;
+
+    const current = allChunksRef.current[index];
+    allChunksRef.current[index] = {
+      ...current,
+      ...replacement,
+      segmentId: current.segmentId,
+      startSec: current.startSec,
+      endSec: current.endSec,
+      audioBuffer: undefined,
+    };
+
+    allChunksRef.current = retimeStoredChunks(allChunksRef.current);
+    const nextDuration = allChunksRef.current.at(-1)?.endSec ?? 0;
+
+    samplingRateRef.current = replacement.samplingRate;
+    const playbackSnapshot = currentTimeRef.current;
+    syncTotalDuration(nextDuration);
+    rebuildSegmentState();
+    syncCurrentTime(playbackSnapshot);
+
+    if (isPlayingRef.current && allChunksRef.current.length > 0) {
+      autoPlayOnChunkRef.current = true;
+      void replayFromOffset(playbackSnapshot, true);
+    } else if ((activeNodesRef.current.size > 0 || nextPlayTimeRef.current > 0) && allChunksRef.current.length > 0) {
+      autoPlayOnChunkRef.current = false;
+      void replayFromOffset(playbackSnapshot, false);
+    }
+    pruneBufferedAudio();
+  }, [pruneBufferedAudio, rebuildSegmentState, replayFromOffset, syncCurrentTime, syncTotalDuration]);
+
+  const reset = useCallback(() => {
+    stopAllNodes();
+
+    allChunksRef.current = [];
+    nextPlayTimeRef.current = 0;
+    scheduleCursorRef.current = 0;
+    timelineAnchorRef.current = 0;
+    contextAnchorRef.current = 0;
+    interruptedRef.current = false;
+    autoPlayOnChunkRef.current = true;
+
+    setSegments([]);
+    setActiveSegmentId(null);
+
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+
+    syncCurrentTime(0);
+    syncTotalDuration(0);
+  }, [stopAllNodes, syncCurrentTime, syncTotalDuration]);
+
+  const stopAll = useCallback(() => {
+    stopAllNodes();
+    nextPlayTimeRef.current = 0;
+    scheduleCursorRef.current = 0;
+    timelineAnchorRef.current = 0;
+    contextAnchorRef.current = 0;
+    interruptedRef.current = false;
+    autoPlayOnChunkRef.current = false;
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+    syncCurrentTime(0);
+    setActiveSegmentId(null);
+  }, [stopAllNodes, syncCurrentTime]);
+
+  useEffect(() => {
+    return () => {
+      cancelAnimationFrame(animFrameRef.current);
+      stopAllNodes();
+      if (audioContextRef.current) {
+        void audioContextRef.current.close();
+      }
+    };
+  }, [stopAllNodes]);
+
+  return {
+    isPlaying,
+    currentTime,
+    totalDuration,
+    playbackRate,
+    segments,
+    activeSegmentId,
+    scheduleChunk,
+    togglePlay,
+    seek,
+    seekTo,
+    skip,
+    jumpToSegment,
+    setPlaybackRate,
+    download,
+    downloadCaptions,
+    replaceSegment,
+    reset,
+    stopAll,
+  };
+}

@@ -1,0 +1,612 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type {
+  LocalTtsCacheInfo,
+  LocalTtsGenerateResult,
+  LocalTtsModel,
+  LocalTtsProgressEvent,
+  LocalTtsProbeResult,
+} from "../electron";
+import { LocalRuntimeModelInputs } from "./localRuntime/LocalRuntimeModelInputs";
+import { LocalRuntimeRuntimeSettings } from "./localRuntime/LocalRuntimeRuntimeSettings";
+import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
+import { KANI_OPTIONS, NEUTTS_OPTIONS } from "./localRuntime/modelOptions";
+import {
+  arrayBufferToBase64,
+  getNeuttsReferenceGuidance,
+  inspectAudioFile,
+  isLikelyWavBuffer,
+  wavBase64ToUrl,
+  type StatusTone,
+} from "./localRuntime/utils";
+
+interface LocalRuntimePageProps {
+  model: LocalTtsModel;
+  name: string;
+  releaseDate: string;
+  params: string;
+  highlights: string[];
+  links: Array<{ label: string; href: string }>;
+}
+
+type StatusMessage = { tone: StatusTone; text: string } | null;
+
+function createLocalRequestId(model: LocalTtsModel): string {
+  return `${model}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function LocalRuntimePage({
+  model,
+  name,
+  releaseDate,
+  params,
+  highlights,
+  links,
+}: LocalRuntimePageProps) {
+  const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const [cacheInfo, setCacheInfo] = useState<LocalTtsCacheInfo | null>(null);
+  const [cacheBusy, setCacheBusy] = useState(false);
+  const [status, setStatus] = useState<StatusMessage>(null);
+  const [pythonOverride, setPythonOverride] = useState("");
+  const [text, setText] = useState(
+    "This synthesis runs fully local on your machine through a Python runtime bridge.",
+  );
+
+  const [neuttsModel, setNeuttsModel] = useState(NEUTTS_OPTIONS[0].value);
+  const [referenceText, setReferenceText] = useState("");
+  const [referenceAudioName, setReferenceAudioName] = useState("");
+  const [referenceAudioBase64, setReferenceAudioBase64] = useState<string | null>(null);
+  const [referenceAudioGuidance, setReferenceAudioGuidance] = useState<StatusMessage>(null);
+
+  const [kaniModel, setKaniModel] = useState(KANI_OPTIONS[0].value);
+  const [languageTag, setLanguageTag] = useState("");
+  const [temperature, setTemperature] = useState(1.0);
+  const [topP, setTopP] = useState(0.95);
+  const [repetitionPenalty, setRepetitionPenalty] = useState(1.1);
+  const [maxNewTokens, setMaxNewTokens] = useState(3000);
+
+  const [generateBusy, setGenerateBusy] = useState(false);
+  const [generationProgress, setGenerationProgress] = useState<LocalTtsProgressEvent | null>(null);
+  const [result, setResult] = useState<LocalTtsGenerateResult | null>(null);
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+
+  const audioUrlRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
+  const pageVersionRef = useRef(0);
+  const runtimeVersionRef = useRef(0);
+  const generationVersionRef = useRef(0);
+  const activeRequestIdRef = useRef<string | null>(null);
+  const activeRequestGenerationVersionRef = useRef<number | null>(null);
+
+  const electronAvailable = !!window.electron?.localTts;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (audioUrlRef.current) {
+        URL.revokeObjectURL(audioUrlRef.current);
+      }
+    };
+  }, []);
+
+  const isCurrentPageVersion = useCallback((pageVersion: number) => (
+    mountedRef.current && pageVersionRef.current === pageVersion
+  ), []);
+
+  const setNewAudioUrl = useCallback((nextUrl: string) => {
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+    }
+    audioUrlRef.current = nextUrl;
+    setAudioUrl(nextUrl);
+  }, []);
+
+  const clearGeneratedResult = useCallback(() => {
+    if (audioUrlRef.current) {
+      URL.revokeObjectURL(audioUrlRef.current);
+      audioUrlRef.current = null;
+    }
+    setAudioUrl(null);
+    setResult(null);
+  }, []);
+
+  const invalidateGeneration = useCallback((options: { runtimeChanged?: boolean } = {}) => {
+    generationVersionRef.current += 1;
+    clearGeneratedResult();
+    setGenerationProgress(null);
+
+    if (options.runtimeChanged) {
+      setRuntime(null);
+      setStatus({
+        tone: "info",
+        text: "Runtime settings changed. Re-check the Python runtime before generating again.",
+      });
+    } else if (generateBusy) {
+      setStatus({
+        tone: "info",
+        text: "Inputs changed. The current generation is now outdated.",
+      });
+    }
+  }, [clearGeneratedResult, generateBusy]);
+
+  const cancelActiveGeneration = useCallback(async (nextStatusText: string = "Cancelling generation...") => {
+    const requestId = activeRequestIdRef.current;
+    if (!requestId || !window.electron?.localTts) return false;
+
+    setStatus({ tone: "info", text: nextStatusText });
+    setGenerationProgress({
+      requestId,
+      model,
+      phase: "cancelling",
+      message: nextStatusText,
+    });
+
+    try {
+      await window.electron.localTts.cancel({ model, requestId });
+      return true;
+    } catch (err) {
+      if (!mountedRef.current) return false;
+      setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+      return false;
+    }
+  }, [model]);
+
+  const refreshCacheInfo = useCallback(async (pageVersion: number = pageVersionRef.current) => {
+    if (!window.electron?.localTts) return;
+    const info = await window.electron.localTts.getCacheInfo({ model });
+    if (!isCurrentPageVersion(pageVersion)) return;
+    setCacheInfo(info);
+  }, [isCurrentPageVersion, model]);
+
+  const runProbe = useCallback(async (pageVersion: number = pageVersionRef.current) => {
+    if (!window.electron?.localTts) return;
+    runtimeVersionRef.current += 1;
+    const runtimeVersion = runtimeVersionRef.current;
+
+    setRuntimeBusy(true);
+    setGenerationProgress(null);
+    setStatus({ tone: "info", text: "Checking local runtime..." });
+    try {
+      const probe = await window.electron.localTts.probe({
+        model,
+        pythonBinary: pythonOverride.trim() || undefined,
+      });
+      if (!isCurrentPageVersion(pageVersion) || runtimeVersionRef.current !== runtimeVersion) return;
+      setRuntime(probe);
+      setStatus({
+        tone: probe.ready ? "success" : "error",
+        text: probe.message,
+      });
+    } catch (err) {
+      if (!isCurrentPageVersion(pageVersion) || runtimeVersionRef.current !== runtimeVersion) return;
+      setRuntime(null);
+      setStatus({
+        tone: "error",
+        text: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      if (isCurrentPageVersion(pageVersion) && runtimeVersionRef.current === runtimeVersion) {
+        setRuntimeBusy(false);
+      }
+    }
+  }, [isCurrentPageVersion, model, pythonOverride]);
+
+  useEffect(() => {
+    pageVersionRef.current += 1;
+    runtimeVersionRef.current += 1;
+    generationVersionRef.current += 1;
+    activeRequestIdRef.current = null;
+    activeRequestGenerationVersionRef.current = null;
+    setRuntime(null);
+    setRuntimeBusy(false);
+    setCacheInfo(null);
+    setCacheBusy(false);
+    setGenerationProgress(null);
+    setStatus(null);
+    setGenerateBusy(false);
+    setPythonOverride("");
+    clearGeneratedResult();
+  }, [clearGeneratedResult, model]);
+
+  useEffect(() => {
+    if (!electronAvailable) return;
+    const pageVersion = pageVersionRef.current;
+
+    const run = async () => {
+      await Promise.allSettled([runProbe(pageVersion), refreshCacheInfo(pageVersion)]);
+    };
+
+    void run();
+  }, [electronAvailable, model, refreshCacheInfo, runProbe]);
+
+  useEffect(() => {
+    if (!electronAvailable || !window.electron?.localTts) return;
+
+    return window.electron.localTts.subscribeProgress((event) => {
+      if (!mountedRef.current) return;
+      if (event.model !== model) return;
+      if (event.requestId !== activeRequestIdRef.current) return;
+      if (activeRequestGenerationVersionRef.current !== generationVersionRef.current) return;
+
+      setGenerationProgress(event);
+      setStatus({
+        tone: "info",
+        text: event.elapsedSec != null
+          ? `${event.message} (${event.elapsedSec.toFixed(1)}s)`
+          : event.message,
+      });
+    });
+  }, [electronAvailable, model]);
+
+  useEffect(() => () => {
+    if (!window.electron?.localTts) return;
+    const requestId = activeRequestIdRef.current;
+    if (!requestId) return;
+    void window.electron.localTts.cancel({ model, requestId }).catch(() => undefined);
+    activeRequestIdRef.current = null;
+    activeRequestGenerationVersionRef.current = null;
+  }, [model]);
+
+  const canGenerate = useMemo(() => {
+    if (text.trim().length < 10) return false;
+    if (model === "neutts") {
+      return referenceText.trim().length > 0 && !!referenceAudioBase64;
+    }
+    return true;
+  }, [model, referenceAudioBase64, referenceText, text]);
+
+  const handleTextChange = useCallback((nextText: string) => {
+    invalidateGeneration();
+    setText(nextText);
+  }, [invalidateGeneration]);
+
+  const handleNeuttsModelChange = useCallback((nextModel: string) => {
+    invalidateGeneration();
+    setNeuttsModel(nextModel);
+  }, [invalidateGeneration]);
+
+  const handleReferenceTextChange = useCallback((nextReferenceText: string) => {
+    invalidateGeneration();
+    setReferenceText(nextReferenceText);
+  }, [invalidateGeneration]);
+
+  const handleKaniModelChange = useCallback((nextModel: string) => {
+    invalidateGeneration();
+    setKaniModel(nextModel);
+  }, [invalidateGeneration]);
+
+  const handleLanguageTagChange = useCallback((nextLanguageTag: string) => {
+    invalidateGeneration();
+    setLanguageTag(nextLanguageTag);
+  }, [invalidateGeneration]);
+
+  const handleTemperatureChange = useCallback((nextTemperature: number) => {
+    invalidateGeneration();
+    setTemperature(nextTemperature);
+  }, [invalidateGeneration]);
+
+  const handleTopPChange = useCallback((nextTopP: number) => {
+    invalidateGeneration();
+    setTopP(nextTopP);
+  }, [invalidateGeneration]);
+
+  const handleRepetitionPenaltyChange = useCallback((nextRepetitionPenalty: number) => {
+    invalidateGeneration();
+    setRepetitionPenalty(nextRepetitionPenalty);
+  }, [invalidateGeneration]);
+
+  const handleMaxNewTokensChange = useCallback((nextMaxNewTokens: number) => {
+    invalidateGeneration();
+    setMaxNewTokens(nextMaxNewTokens);
+  }, [invalidateGeneration]);
+
+  const handlePythonOverrideChange = useCallback((nextPythonOverride: string) => {
+    runtimeVersionRef.current += 1;
+    invalidateGeneration({ runtimeChanged: true });
+    setPythonOverride(nextPythonOverride);
+  }, [invalidateGeneration]);
+
+  const handleReferenceAudioChange = useCallback(async (file: File | null) => {
+    const pageVersion = pageVersionRef.current;
+    invalidateGeneration();
+
+    if (!file) {
+      if (!isCurrentPageVersion(pageVersion)) return;
+      setReferenceAudioName("");
+      setReferenceAudioBase64(null);
+      setReferenceAudioGuidance(null);
+      return;
+    }
+
+    try {
+      const buffer = await file.arrayBuffer();
+      if (!isLikelyWavBuffer(buffer)) {
+        throw new Error("NeuTTS references should be uploaded as real .wav files. Convert MP3/M4A clips to WAV before generating.");
+      }
+
+      const guidance = getNeuttsReferenceGuidance(await inspectAudioFile(buffer));
+      if (!isCurrentPageVersion(pageVersion)) return;
+      setReferenceAudioBase64(arrayBufferToBase64(buffer));
+      setReferenceAudioName(file.name);
+      setReferenceAudioGuidance(guidance);
+      setStatus({ tone: "info", text: `Loaded reference audio: ${file.name}. Enter the exact transcript of that clip before generating.` });
+    } catch (err) {
+      if (!isCurrentPageVersion(pageVersion)) return;
+      setReferenceAudioName("");
+      setReferenceAudioBase64(null);
+      setReferenceAudioGuidance(null);
+      setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+    }
+  }, [invalidateGeneration, isCurrentPageVersion]);
+
+  const runGeneration = useCallback(async () => {
+    if (!window.electron?.localTts) return;
+    const pageVersion = pageVersionRef.current;
+    const generationVersion = generationVersionRef.current;
+    const requestId = createLocalRequestId(model);
+
+    clearGeneratedResult();
+    setGenerateBusy(true);
+    setGenerationProgress({
+      requestId,
+      model,
+      phase: "queued",
+      message: "Starting local generation...",
+      elapsedSec: 0,
+    });
+    setStatus({ tone: "info", text: "Starting local generation..." });
+    activeRequestIdRef.current = requestId;
+    activeRequestGenerationVersionRef.current = generationVersion;
+
+    try {
+      const payload: Record<string, unknown> = { text: text.trim() };
+
+      if (model === "neutts") {
+        payload.modelRepo = neuttsModel;
+        payload.referenceText = referenceText.trim();
+        payload.referenceAudioBase64 = referenceAudioBase64;
+      } else {
+        payload.modelRepo = kaniModel;
+        payload.languageTag = languageTag.trim() || undefined;
+        payload.temperature = temperature;
+        payload.topP = topP;
+        payload.repetitionPenalty = repetitionPenalty;
+        payload.maxNewTokens = maxNewTokens;
+      }
+
+      const generated = await window.electron.localTts.generate({
+        model,
+        requestId,
+        pythonBinary: pythonOverride.trim() || undefined,
+        payload,
+      });
+
+      if (!isCurrentPageVersion(pageVersion)) return;
+      if (activeRequestIdRef.current !== requestId) return;
+      if (generationVersionRef.current !== generationVersion) return;
+      setResult(generated);
+      setNewAudioUrl(wavBase64ToUrl(generated.wavBase64));
+      setGenerationProgress(null);
+      setStatus({
+        tone: "success",
+        text: `Generated ${generated.durationSec.toFixed(2)}s audio in ${generated.elapsedSec.toFixed(2)}s.`,
+      });
+      await refreshCacheInfo(pageVersion);
+    } catch (err) {
+      if (!isCurrentPageVersion(pageVersion)) return;
+      if (activeRequestIdRef.current !== requestId) return;
+      clearGeneratedResult();
+      setGenerationProgress(null);
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus({
+        tone: /cancelled/i.test(message) ? "info" : "error",
+        text: message,
+      });
+    } finally {
+      if (isCurrentPageVersion(pageVersion) && activeRequestIdRef.current === requestId) {
+        activeRequestIdRef.current = null;
+        activeRequestGenerationVersionRef.current = null;
+        setGenerateBusy(false);
+      }
+    }
+  }, [
+    clearGeneratedResult,
+    kaniModel,
+    isCurrentPageVersion,
+    languageTag,
+    maxNewTokens,
+    model,
+    neuttsModel,
+    pythonOverride,
+    referenceAudioBase64,
+    referenceText,
+    refreshCacheInfo,
+    repetitionPenalty,
+    setNewAudioUrl,
+    temperature,
+    text,
+    topP,
+  ]);
+
+  const handleClearCache = useCallback(async () => {
+    if (!window.electron?.localTts) return;
+    const pageVersion = pageVersionRef.current;
+    setCacheBusy(true);
+    setStatus({ tone: "info", text: "Clearing local model cache..." });
+
+    try {
+      await window.electron.localTts.clearCache({ model });
+      await refreshCacheInfo(pageVersion);
+      if (!isCurrentPageVersion(pageVersion)) return;
+      setStatus({ tone: "success", text: "Local model cache cleared." });
+    } catch (err) {
+      if (!isCurrentPageVersion(pageVersion)) return;
+      setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+    } finally {
+      if (isCurrentPageVersion(pageVersion)) {
+        setCacheBusy(false);
+      }
+    }
+  }, [isCurrentPageVersion, model, refreshCacheInfo]);
+
+  const handleRedownload = useCallback(async () => {
+    const pageVersion = pageVersionRef.current;
+    await handleClearCache();
+    if (!isCurrentPageVersion(pageVersion)) return;
+    if (!canGenerate) {
+      setStatus({
+        tone: "info",
+        text: "Cache cleared. Provide required inputs and generate once to re-download model files.",
+      });
+      return;
+    }
+    await runGeneration();
+  }, [canGenerate, handleClearCache, isCurrentPageVersion, runGeneration]);
+
+  const busy = runtimeBusy || cacheBusy || generateBusy;
+  const runtimeReady = runtime?.ready ?? false;
+
+  return (
+    <div className="mt-6 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-5">
+      <section className="flex flex-col gap-4 rounded-2xl border border-border/60 bg-panel p-4 shadow-md transition-all duration-300 hover:border-border hover:shadow-lg sm:p-6 lg:col-span-3">
+        <div>
+          <h2 className="text-xl font-semibold text-text-primary">{name}</h2>
+          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-sm text-text-secondary">
+            <span>Released: {releaseDate}</span>
+            <span className="hidden sm:inline">•</span>
+            <span>Size: {params}</span>
+          </div>
+        </div>
+
+        <div>
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Highlights</h3>
+          <ul className="mt-2 space-y-1 text-sm text-text-primary">
+            {highlights.map((item) => (
+              <li key={item} className="leading-relaxed">{item}</li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="space-y-2">
+          <label className="block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+            Text
+          </label>
+          <textarea
+            value={text}
+            onChange={(event) => handleTextChange(event.target.value)}
+            className="w-full min-h-32 px-3 py-2 rounded-xl border border-border bg-surface text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
+            placeholder="Enter text to synthesize"
+          />
+        </div>
+
+        {model === "neutts" && (
+          <LocalRuntimeRuntimeSettings
+            modelName={name}
+            onRecheckRuntime={() => { void runProbe(); }}
+            onPythonOverrideChange={handlePythonOverrideChange}
+            pythonOverride={pythonOverride}
+            runtime={runtime}
+            runtimeBusy={runtimeBusy}
+          />
+        )}
+
+        <LocalRuntimeModelInputs
+          model={model}
+          neuttsModel={neuttsModel}
+          onNeuttsModelChange={handleNeuttsModelChange}
+          referenceText={referenceText}
+          onReferenceTextChange={handleReferenceTextChange}
+          referenceAudioName={referenceAudioName}
+          referenceAudioGuidance={referenceAudioGuidance}
+          onReferenceAudioChange={handleReferenceAudioChange}
+          kaniModel={kaniModel}
+          onKaniModelChange={handleKaniModelChange}
+          languageTag={languageTag}
+          onLanguageTagChange={handleLanguageTagChange}
+          temperature={temperature}
+          onTemperatureChange={handleTemperatureChange}
+          topP={topP}
+          onTopPChange={handleTopPChange}
+          repetitionPenalty={repetitionPenalty}
+          onRepetitionPenaltyChange={handleRepetitionPenaltyChange}
+          maxNewTokens={maxNewTokens}
+          onMaxNewTokensChange={handleMaxNewTokensChange}
+        />
+
+        {generateBusy && generationProgress && (
+          <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface/60 p-3 text-sm text-text-primary">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                  {generationProgress.phase.replace(/_/g, " ")}
+                </p>
+                <p>{generationProgress.message}</p>
+              </div>
+              <div className="text-xs text-text-muted">
+                {generationProgress.elapsedSec != null ? `${generationProgress.elapsedSec.toFixed(1)}s` : "-"}
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={runGeneration}
+            disabled={!electronAvailable || !runtimeReady || !canGenerate || busy}
+            className={`
+              w-full rounded-xl px-5 py-2.5 text-[14px] font-bold transition-all duration-300 sm:w-auto
+              ${!electronAvailable || !runtimeReady || !canGenerate || busy
+                ? "bg-border/50 text-text-muted cursor-not-allowed"
+                : "bg-text-primary text-panel hover:bg-accent hover:text-white shadow-accent-sm hover:shadow-accent-lg hover:-translate-y-0.5"
+              }
+            `}
+          >
+            {generateBusy ? "Generating..." : "Generate Locally"}
+          </button>
+
+          {generateBusy && (
+            <button
+              type="button"
+              onClick={() => { void cancelActiveGeneration(); }}
+              className="w-full rounded-xl border border-border-strong px-5 py-2.5 text-[14px] font-semibold text-text-primary transition-colors hover:border-text-primary sm:w-auto"
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+
+        {audioUrl && (
+          <div className="border border-border rounded-lg p-3 bg-surface/70">
+            <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2">Output Audio</p>
+            <audio controls src={audioUrl} className="w-full" />
+            {result && (
+              <p className="text-[11px] mt-2 text-text-muted">
+                {result.modelRepo} • {result.sampleRate} Hz • {result.durationSec.toFixed(2)}s
+              </p>
+            )}
+          </div>
+        )}
+
+        {!electronAvailable && (
+          <p className="text-xs text-danger">
+            This integration runs only in the Electron desktop app because it calls local Python runtimes.
+          </p>
+        )}
+      </section>
+
+      <LocalRuntimeSidebar
+        busy={busy}
+        cacheInfo={cacheInfo}
+        electronAvailable={electronAvailable}
+        links={links}
+        onClearCache={handleClearCache}
+        onRedownload={handleRedownload}
+        runtime={runtime}
+        runtimeBusy={runtimeBusy}
+        runtimeReady={runtimeReady}
+        status={status}
+      />
+    </div>
+  );
+}
