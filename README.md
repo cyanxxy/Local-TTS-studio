@@ -1,42 +1,83 @@
+<div align="center">
+
 # Open TTS
 
-Repository name: `offline-voice-studio`
+**A local-first text-to-speech studio that runs entirely on your device.**
+Browser-native inference through WebGPU. No cloud. No subscription. No usage caps.
 
-Open TTS is a local-first text-to-speech app that runs Kokoro and Supertonic in the browser and adds optional Electron desktop runtimes for NeuTTS Nano and Kani-TTS-2.
+[![React 19](https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white)](https://react.dev)
+[![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
+[![Vite 7](https://img.shields.io/badge/Vite-7-646CFF?style=flat-square&logo=vite&logoColor=white)](https://vite.dev)
+[![Tailwind 4](https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
+[![Electron 41](https://img.shields.io/badge/Electron-41-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
+[![WebGPU](https://img.shields.io/badge/WebGPU-Preferred-FF6F00?style=flat-square)](https://www.w3.org/TR/webgpu/)
+[![License](https://img.shields.io/badge/License-See%20LICENSE-1D1D1F?style=flat-square)](./LICENSE)
 
-- Browser-native inference through Web Workers, with WebGPU preferred and WASM fallback available
-- Two main workflows: `Studio` for generation/export and `Reader` for long-form narration and retakes
-- Optional Electron-only Python bridge for additional desktop local runtimes
+</div>
 
-## Overview
+---
 
-Open TTS keeps inference on-device. In the browser, it runs Kokoro and Supertonic locally and caches model assets after the first download. In Electron, the same app can expose additional desktop-only tools for NeuTTS Nano and Kani-TTS-2 through a local Python bridge.
+## The Problem
 
-The browser app focuses on script writing, playback, creator tuning, audio export, caption export, and browser cache controls. The Electron local-runtime pages are separate desktop tools for Python-backed generation and runtime/cache management.
+Modern text-to-speech is **gated, metered, and centralized**. The good voices live behind API keys, monthly minutes, and "free tier" rate limits. Every request is a network hop. Every script you generate gets logged, processed, and stored on infrastructure you do not control.
 
-Audio export supports WAV Float32, WAV PCM24, WAV PCM16, and MP3. Caption export supports SRT, VTT, and JSON.
+That model breaks for the people who actually need TTS the most:
+
+- **Writers and creators** who churn through thousands of words and hit billing walls before they hit a deliverable.
+- **Audiobook narrators and podcasters** who need to retake a single sentence at 2 a.m. without burning credits or waiting on a queue.
+- **Privacy-sensitive workflows** — medical, legal, internal corporate, journalism — where uploading the script to a third-party API is simply not allowed.
+- **Offline-first environments** — flights, field work, classrooms, regions with unreliable connectivity — where "the API is down" means the work stops.
+- **Developers and tinkerers** who want to ship a TTS feature without renting GPUs or signing enterprise contracts.
+
+The hardware already exists. Modern laptops and phones have GPUs sitting idle while we pay someone else to run inference in another data center.
+
+## The Approach
+
+**Open TTS moves the entire pipeline onto the device.** State-of-the-art neural TTS models, compiled to ONNX, executed in your browser through WebGPU — with a WASM fallback for everything that doesn't support it yet.
+
+You open the page. The model downloads once. It caches. From that point on, generation is local, instant, unmetered, and offline-capable. The same codebase ships as an Electron desktop app, with optional Python-backed runtimes for higher-end models that don't yet fit in a browser tab.
+
+> **Local-first, not cloud-optional.** There is no server. There is no telemetry. There is no account. The model weights live on your disk; the inference happens on your silicon; the audio never leaves the machine.
+
+---
+
+## Highlights
+
+| | |
+|---|---|
+| **Two browser models, zero servers** | Kokoro-82M and Supertonic TTS run natively in the browser through Web Workers, with WebGPU acceleration preferred and WASM fallback when it isn't. |
+| **Two desktop runtimes, optional** | NeuTTS Nano and Kani-TTS-2 run through a local Python bridge inside Electron — for users who want bleeding-edge voice cloning or multilingual synthesis on their own machine. |
+| **Studio + Reader workflows** | A Studio mode for script generation, voice tuning, and export. A Reader mode for long-form narration with chunk highlighting, section navigation, and per-segment retake. |
+| **Professional export pipeline** | WAV (Float32 / PCM24 / PCM16) and MP3 audio output. SRT / VTT / JSON caption export. Sample rate is taken from the model, never hardcoded. |
+| **Designed to feel native** | Self-hosted Inter / Outfit / JetBrains Mono. Flat, minimal interface. A design system built on tokens, not hex values. |
+
+---
+
+## Models
+
+| Model | Source | Library | Sample Rate | Voices | Runs In |
+|---|---|---|---:|---:|---|
+| **Kokoro-82M** | `onnx-community/Kokoro-82M-v1.0-ONNX` | `kokoro-js` | 24 kHz | 24 | Web + Electron |
+| **Supertonic TTS** | `onnx-community/Supertonic-TTS-2-ONNX` | `@huggingface/transformers` | 44.1 kHz | 10 (F1–F5, M1–M5) | Web + Electron |
+| **NeuTTS Nano** | Neuphonic | Python bridge | model-defined | reference-cloned | Electron only |
+| **Kani-TTS-2** | `nineninesix/kani-tts-2-en` | Python bridge | model-defined | model-defined | Electron only |
+
+Model assets download on first use and cache locally. Subsequent generations are fully offline.
+
+---
 
 ## Feature Matrix
 
-| Surface | Web | Electron | Notes |
-| --- | --- | --- | --- |
-| `Studio` | Yes | Yes | Main workspace for Kokoro and Supertonic, voice selection, creator presets, pause/speed/pronunciation tuning, playback, audio export, caption export, and browser cache controls |
-| `Reader` | Yes | Yes | Long-form reading view with chunk highlighting, section navigation, playback sync, and per-segment retake |
-| `NeuTTS Nano` | No | Yes | Desktop-only Python runtime page with reference-text + reference-audio synthesis, runtime probe, and cache management |
-| `Kani-TTS-2` | No | Yes | Desktop-only Python runtime page with Kani-TTS-2 model selection, optional language-tag/sampling controls, runtime probe, and cache management |
+| Surface | Web | Desktop | What it does |
+|---|:---:|:---:|---|
+| `/studio` | ✓ | ✓ | Primary workspace — Kokoro & Supertonic, voice selection, creator presets, pause/speed/pronunciation tuning, playback, audio export, caption export, cache controls |
+| `/reader` | ✓ | ✓ | Long-form narration view — chunk highlighting, section navigation, playback sync, per-segment retake |
+| `/neutts` | — | ✓ | Python-backed NeuTTS Nano page — reference-text + reference-audio synthesis, runtime probe, cache management |
+| `/kani` | — | ✓ | Python-backed Kani-TTS-2 page — model selection, optional language-tag and sampling controls, runtime probe, cache management |
 
-Electron includes `Studio` and `Reader`, then adds the `NeuTTS Nano` and `Kani-TTS-2` pages. Those desktop local-runtime pages do not expose the browser creator/export/caption pipeline.
+The desktop local-runtime pages are dedicated tools for Python-backed generation. They do not duplicate the browser export pipeline.
 
-## Models and Runtime Support
-
-| Runtime | Model | Notes |
-| --- | --- | --- |
-| Browser worker | `Kokoro` | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` |
-| Browser worker | `Supertonic` | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers`; current browser UI exposes 10 voice presets (F1–F5, M1–M5) |
-| Electron local runtime | `NeuTTS Nano` | Python bridge; requires reference text and reference audio |
-| Electron local runtime | `Kani-TTS-2` | Python bridge for `nineninesix/kani-tts-2-en`; supports optional language-tag and sampling controls |
-
-Model assets download on first use and then cache locally. The browser app prefers WebGPU when it can initialize a real device, and falls back to WASM when it cannot.
+---
 
 ## Quick Start
 
@@ -50,8 +91,9 @@ npm install
 
 ```bash
 npm run dev
-# http://localhost:5173/studio
 ```
+
+Opens at [`http://localhost:5173/studio`](http://localhost:5173/studio).
 
 ### Run the desktop app in development
 
@@ -59,17 +101,17 @@ npm run dev
 npm run dev:electron
 ```
 
-This starts Vite and launches Electron against the local app.
+Starts Vite and launches Electron against the local dev server in one command.
 
-### Build and verify locally
+### Verify the build
 
 ```bash
-npm run lint
-npm run test
-npm run build
-npm run build:electron
-npm run eval:inference
-npm run preview
+npm run lint           # ESLint
+npm run test           # Vitest
+npm run build          # tsc -b + vite build
+npm run build:electron # Web + Electron compile
+npm run eval:inference # Benchmark inference speed
+npm run preview        # Preview the production build
 ```
 
 ### Package the desktop app
@@ -78,58 +120,138 @@ npm run preview
 npm run dist
 ```
 
-Packaged desktop builds are written to `release/`. `Studio` and `Reader` work inside Electron without extra setup. The optional `NeuTTS Nano` and `Kani-TTS-2` pages still require the Python dependencies listed below.
+Packaged builds land in `release/`. Studio and Reader work out of the box. NeuTTS and Kani still require their Python dependencies — see [Desktop Local Runtime Setup](#desktop-local-runtime-setup) below.
+
+---
+
+## Architecture
+
+### Tech Stack
+
+- **React 19** + **TypeScript 5.9** (strict mode) + **Vite 7** + **Tailwind CSS 4**
+- **`@huggingface/transformers` v4** — Supertonic TTS pipeline
+- **`kokoro-js` v1** — Kokoro-82M streaming with custom phonemization
+- **Electron 41.1.0** — optional desktop wrapper
+- **Vitest 3** + **@testing-library/react** — testing
+- **lucide-react** — icons
+
+### Source Map
+
+```text
+electron/        Desktop shell, custom protocol, preload bridge, Python runtime helpers
+python/          Local TTS bridge for NeuTTS Nano and Kani-TTS-2
+src/
+├── App.tsx          Root app shell, routing, shared state
+├── components/      Studio, Reader, player, settings, local-runtime UI
+├── hooks/           Model loading, playback, generation, routing, creator state
+├── lib/             Audio, chunking, captions, cache, browser/runtime helpers
+├── workers/         Browser inference workers (Kokoro, Supertonic, export)
+└── types.ts         Worker protocol + shared UI types
+```
+
+### Worker Protocol
+
+The browser inference path is a strict message contract between the main thread and Web Workers, defined in `src/types.ts`:
+
+```text
+Main → Worker:   LOAD · GENERATE · CANCEL
+Worker → Main:   LOAD_PROGRESS · READY · AUDIO_CHUNK · GENERATION_COMPLETE · ERROR
+```
+
+Workers are created at startup and load models lazily on selection.
+
+### Audio Path
+
+- Playback uses the **Web Audio API** (`AudioContext` + `AudioBufferSourceNode`) — not `<audio>`.
+- Chunks are scheduled with `source.start(nextPlayTime)` for gapless streaming.
+- WAV export is **IEEE Float 32-bit PCM** (`AudioFormat = 3`) via `src/lib/audio.ts`.
+- Sample rate is taken from model output. **Never hardcoded.**
+
+### Model-Specific Notes
+
+- **Kokoro** splits text via a local `split()` helper and calls `tts.generate(string, ...)` per sentence. Adjacent short sentences are grouped into larger inference chunks, with a fallback to smaller retry chunks. `list_voices()` may return `void` in some `kokoro-js` versions — a fallback array is always provided.
+- **Supertonic** chunks text with min 100 / max 1000 chars per chunk, with 0.5 s silence padding between chunks. Per-file download progress is aggregated dynamically — no hardcoded file counts.
+
+---
+
+## Performance
+
+### Inference Speed Eval
+
+A reproducible benchmark runs the same Web Worker inference path the app uses in production:
+
+```bash
+npm run eval:inference
+npm run eval:inference -- --model kokoro     --iterations 3 --warmups 1
+npm run eval:inference -- --model supertonic --iterations 3 --warmups 1
+```
+
+The eval launches a hidden Electron window, serves `public/inference-speed.html` through Vite, loads the selected model, runs warmups, then records generation latency, first-chunk latency, chars/sec, RTF, backend, and WebGPU status. Reports are written to `reports/inference-speed/*.json`. Compare against a saved baseline with `--baseline <path>`.
+
+### Recent Local Results — WebGPU on Mac
+
+| Model | Baseline | Current | Δ |
+|---|---:|---:|---:|
+| Kokoro | 5,382.7 ms | 4,567.8 ms | **15.14 % faster** |
+| Supertonic | 375.1 ms | 377.2 ms | 0.55 % slower |
+
+The current browser WebGPU tuning improves Kokoro raw generation by ~15 %. Larger gains likely require a native Mac backend (MLX, Core ML, native ONNX Runtime) or trading off quality settings.
+
+### Browser Support Notes
+
+- Desktop browsers expose both browser models.
+- iPhone and iPad browsers expose **Supertonic only**. Kokoro is intentionally disabled on iOS.
+- Open TTS **prefers** WebGPU but does not require it. WASM is the fallback.
+- Kokoro uses WebGPU `fp16` when available, WASM `q8` as fallback.
+- **Cross-origin isolation matters.** Without the COOP/COEP headers, WASM fallback can degrade to single-threaded. `vercel.json` ships with the required headers preconfigured.
+
+---
 
 ## Deploy the Web App
 
-If you want to host the browser app yourself, Vercel is already configured for the web build in `vercel.json`.
+Vercel is preconfigured in `vercel.json`. Import the repository in Vercel — no additional setup is required.
 
-- Vercel deploys the web app only. It does not package Electron or the Python bridge.
-- Import the repository into Vercel instead of relying on a hardcoded clone URL in this README.
-- The deployed app exposes the browser workflows, including `Studio` and `Reader`.
-- On the web, visiting `/neutts` or `/kani` normalizes back to `/studio`. Those workflows render only inside Electron.
-- `vercel.json` already includes SPA rewrites plus the COOP/COEP headers used by the browser build.
-- If Vercel does not auto-detect the project settings, use `npm run build` as the build command and `dist` as the output directory.
+- Vercel deploys the web app **only**. It does not package Electron or the Python bridge.
+- The deployed app exposes Studio and Reader.
+- On the web, visits to `/neutts` or `/kani` normalize back to `/studio` — those routes render only inside Electron.
+- `vercel.json` already includes SPA rewrites and the COOP/COEP headers used by the browser build.
+- If Vercel does not auto-detect settings, use `npm run build` as the build command and `dist` as the output directory.
+
+---
 
 ## Desktop Local Runtime Setup
 
-The Electron build packages the desktop shell and the Python bridge script from `python/local_tts_bridge.py`. It does not bundle Python itself, it does not ship prebuilt virtual environments, and it does not install `neutts`, `kani-tts-2`, or `espeak-ng` for you.
+The Electron build packages the desktop shell and the Python bridge script. It **does not bundle Python**, ship prebuilt virtual environments, or install `neutts`, `kani-tts-2`, or `espeak-ng` for you.
 
-Supported bridge environment variables:
-
-- `TTS_NEUTTS_PYTHON_BIN`
-- `TTS_KANI_PYTHON_BIN`
-- `TTS_PYTHON_BIN`
+### Python Discovery Order
 
 Electron resolves a usable Python runtime in this order:
 
-1. the Python executable entered in the app runtime settings
+1. The Python executable entered in the app's runtime settings
 2. `TTS_NEUTTS_PYTHON_BIN` or `TTS_KANI_PYTHON_BIN` for the selected model
 3. `TTS_PYTHON_BIN`
-4. local virtualenv names, if they exist:
-   - NeuTTS checks `.venv-neutts`, then `.venv313`, then the optional shared `.venv`
-   - Kani checks `.venv-kani`, then `.venv313`, then the optional shared `.venv`
-5. system Python executables (`python3.13` through `python` on macOS/Linux, `py` or `python` on Windows)
+4. Local virtualenv names, if they exist:
+   - **NeuTTS** — `.venv-neutts` → `.venv313` → shared `.venv`
+   - **Kani**   — `.venv-kani`   → `.venv313` → shared `.venv`
+5. System Python (`python3.13` → `python` on macOS/Linux; `py` → `python` on Windows)
 
-Today this repo uses `.venv-neutts` for NeuTTS and `.venv313` as the shared Python 3.13 environment for Kani and fallback checks. `.venv-kani` remains a supported compatibility name, while `.venv` is only a catch-all fallback if you create it yourself.
-
-In development, Electron can resolve those virtualenv names from the repo root. In packaged apps, runtime discovery is stricter: Electron searches the packaged app path, bundle-adjacent locations, nearby executable parents, and only then the current working directory. It does not search an arbitrary source checkout elsewhere on disk.
+In development, Electron resolves virtualenv names from the repo root. **In packaged apps, runtime discovery is stricter** — Electron searches the packaged app path, bundle-adjacent locations, nearby executable parents, and only then the current working directory. It will not search an arbitrary source checkout elsewhere on disk.
 
 ### NeuTTS Nano
 
-This app supports both:
+Open TTS supports both:
 
 - legacy repo environments like `.venv-neutts` with `neutts 0.1.x`
-- current official NeuTTS installs from Neuphonic docs, which are preferred
+- current official NeuTTS installs from Neuphonic docs (**preferred**)
 
-Current NeuTTS requirements:
+**Current requirements:**
 
-- Python `3.10` to `3.13`
+- Python 3.10 – 3.13
 - `pip install neutts`
-- `espeak-ng` available on `PATH` (`espeak` fallback can work on some legacy setups)
-- reference text plus a real mono WAV clip for generation
+- `espeak-ng` on `PATH` (`espeak` fallback may work on some legacy setups)
+- A reference transcript plus a real mono WAV clip
 
-Development example:
+**Development setup:**
 
 ```bash
 python3.13 -m venv .venv-neutts
@@ -139,118 +261,116 @@ pip install neutts
 brew install espeak-ng   # macOS
 ```
 
-Packaged app guidance:
+**Packaged-app caveats:**
 
 - Python remains external. `npm run dist` packages the bridge script, not the runtime.
-- `TTS_NEUTTS_PYTHON_BIN` is the most reliable packaged override.
-- Finder / Explorer launches may not inherit a useful `PATH`, so probe can fail on `espeak-ng` even when terminal runs work.
+- `TTS_NEUTTS_PYTHON_BIN` is the most reliable override for packaged builds.
+- Finder / Explorer launches may not inherit a useful `PATH`, so the probe can fail on `espeak-ng` even when terminal runs succeed.
 - On Windows, install eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` and `PHONEMIZER_ESPEAK_PATH` if phonemizer still cannot locate it.
 
 ### Kani-TTS-2
 
-Kani requirements:
+**Requirements:**
 
-- Python `3.10+`
-- install `kani-tts-2`
-- install `transformers==4.56.0`
-- importable `kani_tts`
-- local model downloads on first use
-- on macOS, the bridge defaults Kani to CPU to avoid known MPS issues
+- Python 3.10+
+- `pip install kani-tts-2`
+- `pip install transformers==4.56.0`
+- An importable `kani_tts`
+- First-use model download (cached afterward)
+- On macOS, the bridge defaults Kani to **CPU** to avoid known MPS issues
 
-The Electron local-runtime pages can probe the runtime, show cache location and size, clear cached files, and trigger a redownload by generating again. They are desktop-only tools, not drop-in replacements for the browser export workflow.
+### Runtime Probe
 
-### What Probe Proves
-
-The runtime probe now reports:
+The probe reports:
 
 - resolved interpreter path
 - where that interpreter came from
 - Python version
-- detected package and package version
+- detected package and version
 - NeuTTS compatibility mode (`legacy_0_1_x` or current `1.2.x+`)
 - `espeak-ng` status
 
-Probe success means the selected interpreter can launch the bridge and expose the required package. It does not prove that every reference WAV or generation request is valid.
+A successful probe means the interpreter can launch the bridge and expose the required package. It does **not** prove that every reference WAV or generation request will succeed.
 
 ### Troubleshooting
 
-| App state | Meaning | Fix |
-| --- | --- | --- |
-| `No usable Python runtime found` | Electron could not resolve a Python interpreter for that page | Set the Python executable in the app, or set `TTS_NEUTTS_PYTHON_BIN` / `TTS_KANI_PYTHON_BIN` |
-| `NeuTTS currently requires Python 3.10-3.13` | The selected interpreter is too new or too old for current NeuTTS | Point the app at Python 3.10, 3.11, 3.12, or 3.13 |
-| `Failed to import neutts` | Python launched, but the selected environment does not expose `neutts` cleanly | Activate that environment and run `pip install neutts` |
-| `espeak-ng was not found` | NeuTTS package is installed, but phonemizer support is missing from the packaged app environment | Install `espeak-ng`, then relaunch with a usable PATH or keep using `TTS_NEUTTS_PYTHON_BIN` with a shell-launched app |
-| `Reference audio must be a valid WAV file` | The uploaded reference clip is not a readable WAV | Convert the clip to WAV before uploading |
+| App message | Meaning | Fix |
+|---|---|---|
+| `No usable Python runtime found` | Electron could not resolve a Python interpreter | Set Python in app settings, or set `TTS_NEUTTS_PYTHON_BIN` / `TTS_KANI_PYTHON_BIN` |
+| `NeuTTS currently requires Python 3.10-3.13` | Interpreter is too new/old for current NeuTTS | Point the app at Python 3.10 – 3.13 |
+| `Failed to import neutts` | Python launched, but the environment does not expose `neutts` | Activate that environment and run `pip install neutts` |
+| `espeak-ng was not found` | NeuTTS is installed, but phonemizer support is missing | Install `espeak-ng`, then relaunch with a usable PATH (or use `TTS_NEUTTS_PYTHON_BIN`) |
+| `Reference audio must be a valid WAV file` | Uploaded reference clip is not a readable WAV | Convert the clip to WAV before uploading |
 | `Reference text is required` | NeuTTS needs the exact transcript of the reference clip | Paste the spoken transcript exactly as heard in the WAV |
 
-## Browser Support and Performance Notes
+---
 
-- Desktop browsers expose both browser models: `Kokoro` and `Supertonic`.
-- iPhone and iPad browsers currently expose `Supertonic` only. `Kokoro` is intentionally disabled on iOS browsers.
-- Open TTS prefers WebGPU, but it is not required. If WebGPU is unavailable, the app falls back to WASM.
-- Kokoro currently uses WebGPU `fp16` when available and WASM `q8` as fallback.
-- Kokoro generation groups adjacent short sentences into larger inference chunks, then falls back to smaller retry chunks if needed.
-- Cross-origin isolation matters for performance. Without the required COOP/COEP headers, WASM fallback can become single-threaded.
-- If you deploy the web app yourself, preserve the cross-origin isolation headers used in local development and `vercel.json`.
+## Design System
 
-### Inference Speed Eval
+Open TTS aims for a flat, minimal, "OS-native" feel — typography forward, with subtle ambient depth.
 
-Use the Electron-backed eval to measure the same Web Worker inference path the app uses in the browser runtime:
+| Token | Value |
+|---|---|
+| `font-sans` | Inter Variable (self-hosted) |
+| `font-display` | Outfit Variable (self-hosted) |
+| `font-mono` | JetBrains Mono Variable (self-hosted) |
+| `--color-surface` | `#F5F5F7` |
+| `--color-panel` | `#FFFFFF` |
+| `--color-accent` | `#0071E3` |
+| `--color-text-primary` | `#1D1D1F` |
+| Shadows | `--shadow-xs/sm/md/lg`, `--shadow-accent-sm/md/lg` |
+| Icon sizes | `xs=12px` (tight) · `sm=14px` (standard) · `md=16px` (standalone) |
 
-```bash
-npm run eval:inference
-```
+All colors and effects flow through `@theme` variables in `src/index.css`. No hardcoded hex values in components — use tokens or `color-mix()`.
 
-Useful focused runs:
+---
 
-```bash
-npm run eval:inference -- --model kokoro --iterations 3 --warmups 1
-npm run eval:inference -- --model supertonic --iterations 3 --warmups 1
-```
-
-Reports are written to `reports/inference-speed/*.json`. To compare against a saved baseline:
-
-```bash
-npm run eval:inference -- --model kokoro --baseline reports/inference-speed/<baseline>.json
-```
-
-The eval launches a hidden Electron window, serves `public/inference-speed.html` through Vite, loads the selected model, runs warmup iterations, then records generation latency, first-chunk latency, chars/sec, RTF, backend, and WebGPU status.
-
-Recent local WebGPU results from the current Mac development environment:
-
-| Model | Baseline | Current | Change |
-| --- | ---: | ---: | ---: |
-| Kokoro | 5382.7 ms | 4567.8 ms | 15.14% faster |
-| Supertonic | 375.1 ms | 377.2 ms | 0.55% slower |
-
-The current browser WebGPU tuning improves Kokoro raw generation speed by about 15% in this local eval. Larger gains likely require a native Mac backend such as MLX, Core ML, or native ONNX Runtime, or accepting lower quality/runtime settings.
-
-## Routes and Main Workflows
+## Routes
 
 | Route | Surface | Purpose |
-| --- | --- | --- |
-| `/studio` | Web + Electron | Main TTS workspace with script editing, model selection, playback, creator tuning, export, and cache controls |
-| `/reader` | Web + Electron | Reading-focused workflow with chunk overlays, active section tracking, navigation, and section retake |
+|---|---|---|
+| `/studio` | Web + Electron | Main TTS workspace — script editing, model selection, playback, creator tuning, export, cache |
+| `/reader` | Web + Electron | Reading-focused workflow — chunk overlays, active section tracking, navigation, retake |
 | `/neutts` | Electron only | Desktop page for Python-backed NeuTTS Nano generation |
-| `/kani` | Electron only | Desktop page for Python-backed Kani-TTS-2 generation |
+| `/kani`   | Electron only | Desktop page for Python-backed Kani-TTS-2 generation |
 
-`Studio` and `Reader` are the main public workflows. The Electron-only routes are separate desktop tools for local Python runtimes.
+---
 
-## Project Structure
+## Limitations — Honestly
 
-```text
-electron/      Electron shell, custom app protocol, preload bridge, desktop IPC
-python/        Local runtime probe/generate bridge for NeuTTS and Kani
-src/           React app, UI components, hooks, browser support helpers, audio/export logic
-src/lib/       Chunking, audio, captions, cache, routing, runtime helpers
-src/workers/   Browser inference workers for Kokoro/Supertonic and the export worker
+Open TTS is local-first, not magic. Knowing where the seams are makes it easier to use well.
+
+- **Not fully offline from first launch.** Browser and desktop runtimes download model assets on first use, then cache them.
+- **Not every model runs in the browser.** NeuTTS Nano and Kani-TTS-2 are Electron + Python only.
+- **Browser Supertonic is English-focused today.** This README does not claim broad multilingual browser support.
+- **Not WebGPU-only.** WASM fallback is part of the intended behavior.
+- **Packaged Electron builds do not bundle Python.** You install it yourself.
+- **Electron local-runtime pages are not feature-parity with Studio/Reader.** They focus on Python-backed generation, probing, and cache management — not the full creator/export/caption pipeline.
+
+---
+
+## Contributing
+
+The canonical project map and runtime contracts live in [`AGENTS.md`](./AGENTS.md). Read it before refactors.
+
+Before sending changes:
+
+```bash
+npm run lint
+npm run test
+npm run build
 ```
 
-## Current Limitations
+Tests live beside source as `*.test.ts` / `*.test.tsx`. The repo follows TDD where practical. `jsdom` does not implement `Blob.arrayBuffer()` — test WAV headers through `buildWavHeader()` directly, not through a `Blob`.
 
-- Open TTS is local-first, but it is not fully offline from first launch. Browser and desktop runtimes download model assets on first use before caching them locally.
-- Not all models run in the browser. `NeuTTS Nano` and `Kani-TTS-2` are Electron + Python only.
-- Browser `Supertonic` should be treated as an English-focused runtime today; this README does not claim broad multilingual browser support.
-- The app is not WebGPU-only. WASM fallback is part of the intended behavior.
-- Packaged Electron builds do not bundle Python.
-- The Electron local-runtime pages do not provide feature parity with `Studio` and `Reader`; they focus on Python-backed generation, probing, and cache management rather than the browser creator/export/caption pipeline.
+---
+
+## License
+
+See [LICENSE](./LICENSE).
+
+<div align="center">
+
+**Built to run on your machine. Yours to keep.**
+
+</div>
