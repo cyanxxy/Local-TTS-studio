@@ -69,7 +69,8 @@ describe("useTTS", () => {
     });
 
     expect(result.current.isGenerating).toBe(true);
-    expect(kokoroWorker.postedMessages).toEqual([{
+    expect(kokoroWorker.postedMessages).toHaveLength(1);
+    expect(kokoroWorker.postedMessages[0]).toMatchObject({
       type: "GENERATE",
       text: "Hello world",
       voice: "af_heart",
@@ -79,12 +80,17 @@ describe("useTTS", () => {
       sentenceSpeedVariance: 0.2,
       pronunciationRules: SETTINGS.pronunciationRules,
       emphasisStrength: 0.5,
-    }]);
+    });
+    const generationId = kokoroWorker.postedMessages[0].type === "GENERATE"
+      ? kokoroWorker.postedMessages[0].generationId
+      : undefined;
+    expect(generationId).toMatch(/^browser-/);
 
     act(() => {
       now = 1000;
       kokoroWorker.emit({
         type: "AUDIO_CHUNK",
+        generationId,
         audio: new Float32Array(4),
         samplingRate: 4,
         text: "Hello",
@@ -105,7 +111,7 @@ describe("useTTS", () => {
     expect(result.current.generationProgress).toBe(50);
 
     act(() => {
-      kokoroWorker.emit({ type: "GENERATION_COMPLETE" });
+      kokoroWorker.emit({ type: "GENERATION_COMPLETE", generationId });
     });
 
     expect(result.current.isGenerating).toBe(false);

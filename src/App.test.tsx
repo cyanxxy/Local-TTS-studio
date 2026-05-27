@@ -62,6 +62,7 @@ const mock = vi.hoisted(() => {
     },
     player: {
       isPlaying: false,
+      error: null as string | null,
       currentTime: 0,
       totalDuration: 4,
       playbackRate: 1,

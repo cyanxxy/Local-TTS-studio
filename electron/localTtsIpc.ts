@@ -22,6 +22,8 @@ const ALLOWED_KANI_MODELS = new Set([
 ]);
 
 const ALLOWED_QWEN3_MODELS = new Set([
+  // This page is intentionally scoped to the CustomVoice release because its
+  // speaker and language controls map to that repository's built-in voices.
   "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
 ]);
 
@@ -131,9 +133,12 @@ export interface BridgeProgressResult {
   elapsedSec?: number;
 }
 
-export function assertTrustedIpcSender(event: IpcMainInvokeEvent): void {
+export function assertTrustedIpcSender(
+  event: IpcMainInvokeEvent,
+  options: { allowDevServer?: boolean } = { allowDevServer: true },
+): void {
   const senderUrl = event.senderFrame?.url ?? event.sender.getURL();
-  if (!isAllowedAppUrl(senderUrl)) {
+  if (!isAllowedAppUrl(senderUrl, options)) {
     throw new Error("Rejected IPC from untrusted sender.");
   }
 }
@@ -223,6 +228,9 @@ export function parseRequestId(value: unknown, { required = false }: { required?
   if (requestId.length > 120) throw new Error("`requestId` exceeds 120 characters.");
   if (!/^[A-Za-z0-9._-]+$/.test(requestId)) {
     throw new Error("`requestId` may contain only letters, numbers, dots, underscores, and dashes.");
+  }
+  if (requestId.includes("..")) {
+    throw new Error("`requestId` may not contain consecutive dots.");
   }
   return requestId;
 }

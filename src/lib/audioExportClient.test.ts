@@ -89,7 +89,7 @@ describe("audioExportClient", () => {
     expect(worker.terminated).toBe(true);
   });
 
-  it("logs worker export errors and terminates the worker", async () => {
+  it("rejects worker export errors and terminates the worker", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const { downloadAudioChunks } = await loadModule();
     const promise = downloadAudioChunks([{
@@ -99,14 +99,14 @@ describe("audioExportClient", () => {
 
     const worker = MockExportWorker.instances[0];
     worker.onmessage?.({ data: { type: "EXPORT_ERROR", message: "bad export" } } as MessageEvent);
-    await promise;
+    await expect(promise).rejects.toThrow("bad export");
 
     expect(consoleError).toHaveBeenCalledWith("Failed to export audio:", expect.any(Error));
     expect(downloadBlob).not.toHaveBeenCalled();
     expect(worker.terminated).toBe(true);
   });
 
-  it("logs generic worker failures", async () => {
+  it("rejects generic worker failures", async () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     const { downloadAudioChunks } = await loadModule();
     const promise = downloadAudioChunks([{
@@ -116,7 +116,7 @@ describe("audioExportClient", () => {
 
     const worker = MockExportWorker.instances[0];
     worker.onerror?.({ message: "worker failed" } as ErrorEvent);
-    await promise;
+    await expect(promise).rejects.toThrow("worker failed");
 
     expect(consoleError).toHaveBeenCalledWith("Failed to export audio:", expect.any(Error));
     expect(worker.terminated).toBe(true);

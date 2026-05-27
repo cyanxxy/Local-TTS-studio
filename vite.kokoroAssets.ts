@@ -4,17 +4,22 @@ import { normalizePath, type Plugin } from "vite";
 
 const VIRTUAL_MODULE_ID = "virtual:kokoro-onnx-wasm-assets";
 const RESOLVED_VIRTUAL_MODULE_ID = `\0${VIRTUAL_MODULE_ID}`;
-const KOKORO_ONNX_RUNTIME_DIST = "node_modules/kokoro-js/node_modules/onnxruntime-web/dist";
+const KOKORO_ONNX_RUNTIME_DIST_CANDIDATES = [
+  "node_modules/kokoro-js/node_modules/onnxruntime-web/dist",
+  "node_modules/onnxruntime-web/dist",
+];
 
 function resolveKokoroOnnxRuntimeAsset(rootDir: string, filename: string): string {
-  const assetPath = resolve(rootDir, KOKORO_ONNX_RUNTIME_DIST, filename);
-  if (!existsSync(assetPath)) {
-    throw new Error(
-      `Missing Kokoro ONNX Runtime asset: ${assetPath}. Check kokoro-js dependency layout before building.`,
-    );
+  for (const runtimeDist of KOKORO_ONNX_RUNTIME_DIST_CANDIDATES) {
+    const assetPath = resolve(rootDir, runtimeDist, filename);
+    if (existsSync(assetPath)) {
+      return normalizePath(assetPath);
+    }
   }
 
-  return normalizePath(assetPath);
+  throw new Error(
+    `Missing Kokoro ONNX Runtime asset: ${filename}. Check kokoro-js dependency layout before building.`,
+  );
 }
 
 export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plugin {

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { concatFloat32Arrays, createSilence } from "../lib/audio";
+import { concatFloat32Arrays } from "../lib/audio";
 import type {
   GenerationTuningSettings,
   ModelType,
@@ -49,6 +49,7 @@ export function useGenerationControl({
 
   const retakeWorkerRef = useRef<Worker | null>(null);
   const retakeListenerRef = useRef<((event: MessageEvent<WorkerOutMessage>) => void) | null>(null);
+  const retakeGenerationSeqRef = useRef(0);
 
   const clearRetakeListener = useCallback(() => {
     if (retakeWorkerRef.current && retakeListenerRef.current) {
@@ -118,10 +119,15 @@ export function useGenerationControl({
 
     clearRetakeListener();
     retakeWorkerRef.current = worker;
+    retakeGenerationSeqRef.current += 1;
+    const generationId = `retake-${retakeGenerationSeqRef.current}`;
 
     const chunks: Array<{ audio: Float32Array; samplingRate: number }> = [];
     const handleMessage = (event: MessageEvent<WorkerOutMessage>) => {
       const msg = event.data;
+      if ("generationId" in msg && msg.generationId !== undefined && msg.generationId !== generationId) {
+        return;
+      }
       switch (msg.type) {
         case "AUDIO_CHUNK":
           chunks.push({ audio: msg.audio, samplingRate: msg.samplingRate });
@@ -130,13 +136,7 @@ export function useGenerationControl({
           clearRetakeListener();
           if (chunks.length === 0) return;
           const samplingRate = chunks[0].samplingRate;
-          const trailingPause = segment.pauseAfterSec && segment.pauseAfterSec > 0
-            ? createSilence(segment.pauseAfterSec, samplingRate)
-            : null;
-          const merged = concatFloat32Arrays([
-            ...chunks.map((chunk) => chunk.audio),
-            ...(trailingPause ? [trailingPause] : []),
-          ]);
+          const merged = concatFloat32Arrays(chunks.map((chunk) => chunk.audio));
           player.replaceSegment(segment.id, {
             audio: merged,
             samplingRate,
@@ -163,10 +163,12 @@ export function useGenerationControl({
     setIsRetakingSegment(true);
     worker.postMessage({
       type: "GENERATE",
+      generationId,
       text: segment.text,
       voice,
       speed: generationSettings.speed,
       quality: generationSettings.quality,
+      finalPauseSec: segment.pauseAfterSec,
       pauseOverridesSec: generationSettings.pauseOverridesSec,
       sentenceSpeedVariance: generationSettings.sentenceSpeedVariance,
       pronunciationRules: generationSettings.pronunciationRules,

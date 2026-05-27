@@ -23,7 +23,47 @@ export function isLikelyWavBuffer(buffer: ArrayBuffer): boolean {
   return asciiChunk(header, 0, 4) === "RIFF" && asciiChunk(header, 8, 4) === "WAVE";
 }
 
+function inspectWavHeader(buffer: ArrayBuffer): DecodedAudioFileInfo | null {
+  if (!isLikelyWavBuffer(buffer) || buffer.byteLength < 44) return null;
+
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  let offset = 12;
+  let channelCount: number | null = null;
+  let sampleRate: number | null = null;
+  let blockAlign: number | null = null;
+  let dataSize: number | null = null;
+
+  while (offset + 8 <= bytes.byteLength) {
+    const chunkId = asciiChunk(bytes, offset, 4);
+    const chunkSize = view.getUint32(offset + 4, true);
+    const chunkDataOffset = offset + 8;
+    if (chunkDataOffset + chunkSize > bytes.byteLength) break;
+
+    if (chunkId === "fmt " && chunkSize >= 16) {
+      channelCount = view.getUint16(chunkDataOffset + 2, true);
+      sampleRate = view.getUint32(chunkDataOffset + 4, true);
+      blockAlign = view.getUint16(chunkDataOffset + 12, true);
+    } else if (chunkId === "data") {
+      dataSize = chunkSize;
+    }
+
+    offset = chunkDataOffset + chunkSize + (chunkSize % 2);
+  }
+
+  if (!channelCount || !sampleRate || !blockAlign || dataSize === null) return null;
+
+  return {
+    channelCount,
+    sampleRate,
+    durationSec: dataSize > 0 ? dataSize / blockAlign / sampleRate : 0,
+  };
+}
+
 export async function inspectAudioFile(buffer: ArrayBuffer): Promise<DecodedAudioFileInfo> {
+  const wavInfo = inspectWavHeader(buffer);
+  if (wavInfo) return wavInfo;
+
   const audioContext = new AudioContext();
 
   try {

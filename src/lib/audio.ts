@@ -34,9 +34,17 @@ function clampSample(value: number): number {
   return Math.max(-1, Math.min(1, value));
 }
 
-function floatToPcm16(value: number): number {
+export function floatToPcm16Sample(value: number): number {
   const clamped = clampSample(value);
   return clamped < 0 ? Math.round(clamped * 0x8000) : Math.round(clamped * 0x7fff);
+}
+
+export function floatToPcm16Array(audio: Float32Array): Int16Array {
+  const pcm = new Int16Array(audio.length);
+  for (let i = 0; i < audio.length; i += 1) {
+    pcm[i] = floatToPcm16Sample(audio[i]);
+  }
+  return pcm;
 }
 
 function floatToPcm24(value: number): number {
@@ -44,19 +52,28 @@ function floatToPcm24(value: number): number {
   return clamped < 0 ? Math.round(clamped * 0x800000) : Math.round(clamped * 0x7fffff);
 }
 
+function assertValidChannelCount(channelCount: number): void {
+  if (!Number.isInteger(channelCount) || channelCount < 1 || channelCount > 32) {
+    throw new Error("WAV channel count must be an integer between 1 and 32.");
+  }
+}
+
 /**
- * Build a 44-byte WAV header for IEEE Float 32-bit PCM mono audio.
+ * Build a 44-byte WAV header. `totalFrames` is the per-channel frame count;
+ * interleaved sample data must contain `totalFrames * channelCount` samples.
  * Exported for testability.
  */
 export function buildWavHeader(
-  totalSamples: number,
+  totalFrames: number,
   samplingRate: number,
   encoding: WavEncoding = "float32",
+  channelCount: number = 1,
 ): ArrayBuffer {
+  assertValidChannelCount(channelCount);
   const details = getEncodingDetails(encoding);
   const buffer = new ArrayBuffer(44);
   const view = new DataView(buffer);
-  const dataSize = totalSamples * details.bytesPerSample;
+  const dataSize = totalFrames * channelCount * details.bytesPerSample;
 
   // RIFF chunk descriptor
   writeString(view, 0, "RIFF");
@@ -67,10 +84,10 @@ export function buildWavHeader(
   writeString(view, 12, "fmt ");
   view.setUint32(16, 16, true);
   view.setUint16(20, details.formatCode, true);
-  view.setUint16(22, 1, true); // Mono
+  view.setUint16(22, channelCount, true);
   view.setUint32(24, samplingRate, true);
-  view.setUint32(28, samplingRate * details.bytesPerSample, true);
-  view.setUint16(32, details.bytesPerSample, true);
+  view.setUint32(28, samplingRate * channelCount * details.bytesPerSample, true);
+  view.setUint16(32, channelCount * details.bytesPerSample, true);
   view.setUint16(34, details.bitsPerSample, true);
 
   // data sub-chunk
@@ -87,11 +104,18 @@ export function buildWavHeader(
 export function createWavBlob(
   chunks: Float32Array[],
   samplingRate: number,
-  options?: { encoding?: WavEncoding },
+  options?: { encoding?: WavEncoding; channelCount?: number },
 ): Blob {
   const encoding = options?.encoding ?? "float32";
+  const channelCount = options?.channelCount ?? 1;
+  assertValidChannelCount(channelCount);
   const merged = concatFloat32Arrays(chunks);
-  const header = buildWavHeader(merged.length, samplingRate, encoding);
+  if (merged.length % channelCount !== 0) {
+    throw new Error("Interleaved WAV sample count must be divisible by channel count.");
+  }
+
+  const frameCount = merged.length / channelCount;
+  const header = buildWavHeader(frameCount, samplingRate, encoding, channelCount);
   const details = getEncodingDetails(encoding);
   const dataBuffer = new ArrayBuffer(merged.length * details.bytesPerSample);
 
@@ -100,7 +124,7 @@ export function createWavBlob(
   } else if (encoding === "pcm16") {
     const view = new DataView(dataBuffer);
     for (let i = 0; i < merged.length; i += 1) {
-      view.setInt16(i * 2, floatToPcm16(merged[i]), true);
+      view.setInt16(i * 2, floatToPcm16Sample(merged[i]), true);
     }
   } else {
     const view = new DataView(dataBuffer);

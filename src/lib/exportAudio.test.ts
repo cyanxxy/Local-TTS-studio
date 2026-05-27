@@ -119,6 +119,20 @@ describe("exportAudio", () => {
     expect(encoderInstances[0].flush).toHaveBeenCalledOnce();
   });
 
+  it("clamps mp3 bitrate to the UI-supported floor", async () => {
+    await buildExportAudio([
+      { audio: new Float32Array([0, 0.5]), samplingRate: 24000 },
+    ], {
+      ...BASE_OPTIONS,
+      format: "mp3",
+      bitrateKbps: 96,
+    });
+
+    expect(encoderInstances[0]).toMatchObject({
+      bitrate: 128,
+    });
+  });
+
   it("rejects unsupported export formats", async () => {
     await expect(buildExportAudio([
       { audio: new Float32Array([0]), samplingRate: 24000 },

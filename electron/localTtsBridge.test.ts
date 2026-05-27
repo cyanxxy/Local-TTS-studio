@@ -132,7 +132,7 @@ assert spec.loader is not None
 spec.loader.exec_module(bridge)
 
 bridge.detect_kani_package = lambda: ("kani-tts-2", "2.0.0")
-bridge.detect_kani_transformers_version = lambda: "4.56.0"
+bridge.detect_kani_transformers_version = lambda: "4.56.1"
 bridge.array_to_wav_base64 = lambda _audio, _sample_rate: "UklGRg=="
 
 class FakeKaniTTS:
@@ -149,6 +149,48 @@ sys.modules["kani_tts"] = module
 result = bridge.generate_kani({"text": "Hello from Kani."})
 if result["sampleRate"] != 44100:
     raise AssertionError(f"Expected Kani sampleRate 44100, got {result['sampleRate']}")
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("rejects NeuTTS reference WAV files with unsupported metadata", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import io
+import wave
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+def make_wav(channels, sample_rate):
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(sample_rate)
+        wav_file.writeframes(b"\\x00\\x00" * channels)
+    return buffer.getvalue()
+
+bridge.validate_reference_wav(make_wav(1, 24000))
+
+try:
+    bridge.validate_reference_wav(make_wav(2, 24000))
+except ValueError as exc:
+    if "mono" not in str(exc):
+        raise
+else:
+    raise AssertionError("Stereo reference WAV was accepted")
+
+try:
+    bridge.validate_reference_wav(make_wav(1, 8000))
+except ValueError as exc:
+    if "sample rate" not in str(exc):
+        raise
+else:
+    raise AssertionError("Low sample-rate reference WAV was accepted")
 `);
 
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);

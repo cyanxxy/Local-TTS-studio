@@ -43,7 +43,12 @@ function isStaticFileRequest(requestPath: string): boolean {
 }
 
 export function resolveElectronAppPath(distDir: string, requestUrl: string): string {
-  const requestPath = sanitizeRequestPath(new URL(requestUrl).pathname);
+  const parsedUrl = new URL(requestUrl);
+  if (parsedUrl.protocol !== `${ELECTRON_APP_SCHEME}:` || parsedUrl.host !== ELECTRON_APP_HOST) {
+    throw new Error("Unsupported app protocol request.");
+  }
+
+  const requestPath = sanitizeRequestPath(parsedUrl.pathname);
   const distRoot = path.resolve(distDir);
 
   if (!isStaticFileRequest(requestPath)) {

@@ -30,7 +30,7 @@ describe("pythonRuntime", () => {
     );
   });
 
-  it("walks packaged executable ancestors so project-level virtualenvs remain discoverable", () => {
+  it("keeps packaged Python search roots scoped to the app bundle", () => {
     const repoRoot = path.join("/tmp", "Open TTS");
     const contentsDir = path.join(repoRoot, "release", "mac-arm64", "Open TTS.app", "Contents");
     const resourcesDir = path.join(contentsDir, "Resources");
@@ -46,15 +46,8 @@ describe("pythonRuntime", () => {
     expect(getPythonSearchRoots(context)).toEqual([
       path.join(resourcesDir, "app.asar"),
       resourcesDir,
-      path.join(contentsDir, "MacOS"),
-      contentsDir,
-      path.join(repoRoot, "release", "mac-arm64", "Open TTS.app"),
-      path.join(repoRoot, "release", "mac-arm64"),
-      path.join(repoRoot, "release"),
-      repoRoot,
-      "/",
     ]);
-    expect(getVirtualEnvPythonCandidates(".venv-neutts", context)).toContain(
+    expect(getVirtualEnvPythonCandidates(".venv-neutts", context)).not.toContain(
       path.join(repoRoot, ".venv-neutts", "bin", "python"),
     );
   });
@@ -68,7 +61,7 @@ describe("pythonRuntime", () => {
   it("uses lightweight dependency checks for auto-detect", () => {
     expect(getPythonDependencyCheckSnippet("kani")).toContain("find_spec('kani_tts')");
     expect(getPythonDependencyCheckSnippet("kani")).toContain("version('kani-tts-2')");
-    expect(getPythonDependencyCheckSnippet("kani")).toContain("version('transformers') == '4.56.0'");
+    expect(getPythonDependencyCheckSnippet("kani")).toContain("(4, 56, 0) <= version < (5, 0, 0)");
     expect(getPythonDependencyCheckSnippet("kani")).not.toContain("import kani_tts");
     expect(getPythonDependencyCheckSnippet("neutts")).toContain("find_spec('neutts')");
     expect(getPythonDependencyCheckSnippet("neutts")).toContain("sys.version_info");

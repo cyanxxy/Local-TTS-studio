@@ -51,6 +51,7 @@ export async function downloadAudioChunks(
     });
   } catch (error) {
     console.error("Failed to export audio:", error);
+    throw error;
   } finally {
     worker.terminate();
   }

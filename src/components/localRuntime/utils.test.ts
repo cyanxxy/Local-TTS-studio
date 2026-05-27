@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getNeuttsReferenceGuidance, isLikelyWavBuffer } from "./utils";
+import { getNeuttsReferenceGuidance, inspectAudioFile, isLikelyWavBuffer } from "./utils";
 
 function makeWavHeader(): ArrayBuffer {
   const bytes = new Uint8Array(12);
@@ -34,5 +34,22 @@ describe("localRuntime utils", () => {
 
     expect(guidance.tone).toBe("info");
     expect(guidance.text).toContain("Best results use mono audio, 16-44 kHz, and a 3-15 second clip.");
+  });
+
+  it("inspects WAV metadata directly from the header", async () => {
+    const bytes = new Uint8Array([
+      0x52, 0x49, 0x46, 0x46, 0x28, 0x00, 0x00, 0x00,
+      0x57, 0x41, 0x56, 0x45, 0x66, 0x6d, 0x74, 0x20,
+      0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x00,
+      0x80, 0xbb, 0x00, 0x00, 0x00, 0xee, 0x02, 0x00,
+      0x04, 0x00, 0x10, 0x00, 0x64, 0x61, 0x74, 0x61,
+      0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ]);
+
+    await expect(inspectAudioFile(bytes.buffer)).resolves.toEqual({
+      channelCount: 2,
+      sampleRate: 48_000,
+      durationSec: 1 / 48_000,
+    });
   });
 });

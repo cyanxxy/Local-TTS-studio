@@ -34,6 +34,7 @@ class MockWorker {
 function createPlayerMock(overrides: Partial<UseAudioPlayerReturn> = {}): UseAudioPlayerReturn {
   return {
     isPlaying: false,
+    error: null,
     currentTime: 0,
     totalDuration: 0,
     playbackRate: 1,
@@ -169,11 +170,17 @@ describe("useGenerationControl", () => {
       quality: BASE_SETTINGS.quality,
       sentenceSpeedVariance: BASE_SETTINGS.sentenceSpeedVariance,
       emphasisStrength: BASE_SETTINGS.emphasisStrength,
+      finalPauseSec: segment.pauseAfterSec,
     });
+    const generationId = worker.postedMessages[0].type === "GENERATE"
+      ? worker.postedMessages[0].generationId
+      : undefined;
+    expect(generationId).toMatch(/^retake-/);
 
     act(() => {
       worker.emit({
         type: "AUDIO_CHUNK",
+        generationId,
         audio: new Float32Array([0.1, 0.2]),
         samplingRate: 4,
         text: segment.text,
@@ -182,13 +189,14 @@ describe("useGenerationControl", () => {
       });
       worker.emit({
         type: "AUDIO_CHUNK",
-        audio: new Float32Array([0.3, 0.4]),
+        generationId,
+        audio: new Float32Array([0.3, 0.4, 0, 0]),
         samplingRate: 4,
         text: segment.text,
         index: 2,
         total: 2,
       });
-      worker.emit({ type: "GENERATION_COMPLETE" });
+      worker.emit({ type: "GENERATION_COMPLETE", generationId });
     });
 
     expect(replaceSegment).toHaveBeenCalledTimes(1);

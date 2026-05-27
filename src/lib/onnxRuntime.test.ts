@@ -3,14 +3,18 @@ import {
   configureKokoroOnnxRuntime,
   configureTransformersOnnxRuntime,
   getSafeWasmThreadCount,
-  type OnnxWasmAssetSet,
+  type KokoroOnnxWasmAssets,
+  type TransformersOnnxWasmAssets,
 } from "./onnxRuntime";
 
-const assets: OnnxWasmAssetSet = {
+const transformersAssets: TransformersOnnxWasmAssets = {
   asyncify: {
     mjs: "/assets/ort-wasm-simd-threaded.asyncify.mjs",
     wasm: "/assets/ort-wasm-simd-threaded.asyncify.wasm",
   },
+};
+
+const kokoroAssets: KokoroOnnxWasmAssets = {
   jsep: {
     mjs: "/assets/ort-wasm-simd-threaded.jsep.mjs",
     wasm: "/assets/ort-wasm-simd-threaded.jsep.wasm",
@@ -36,7 +40,7 @@ describe("onnxRuntime", () => {
       },
     };
 
-    configureTransformersOnnxRuntime(runtimeEnv, assets, {
+    configureTransformersOnnxRuntime(runtimeEnv, transformersAssets, {
       backend: "wasm",
       maxWasmThreads: 4,
       crossOriginIsolated: true,
@@ -45,7 +49,7 @@ describe("onnxRuntime", () => {
 
     expect(runtimeEnv.backends.onnx.wasm).toMatchObject({
       numThreads: 4,
-      wasmPaths: assets.asyncify,
+      wasmPaths: transformersAssets.asyncify,
     });
   });
 
@@ -54,8 +58,8 @@ describe("onnxRuntime", () => {
       wasmPaths: "",
     };
 
-    configureKokoroOnnxRuntime(runtimeEnv, assets);
+    configureKokoroOnnxRuntime(runtimeEnv, kokoroAssets);
 
-    expect(runtimeEnv.wasmPaths).toEqual(assets.jsep);
+    expect(runtimeEnv.wasmPaths).toEqual(kokoroAssets.jsep);
   });
 });

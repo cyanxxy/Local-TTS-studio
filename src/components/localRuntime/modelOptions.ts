@@ -44,6 +44,26 @@ export const QWEN3_LANGUAGE_OPTIONS: LocalRuntimeOption[] = [
   { value: "Italian", label: "Italian" },
 ];
 
+export const QWEN3_SPEAKER_PRIMARY_LANGUAGE: Record<string, string> = {
+  Ryan: "English",
+  Aiden: "English",
+  Vivian: "Chinese",
+  Serena: "Chinese",
+  Uncle_Fu: "Chinese",
+  Dylan: "Chinese",
+  Eric: "Chinese",
+  Ono_Anna: "Japanese",
+  Sohee: "Korean",
+};
+
+export function getQwen3LanguageOptionsForSpeaker(speaker: string): LocalRuntimeOption[] {
+  const primaryLanguage = QWEN3_SPEAKER_PRIMARY_LANGUAGE[speaker];
+  if (!primaryLanguage) return QWEN3_LANGUAGE_OPTIONS;
+  return QWEN3_LANGUAGE_OPTIONS.filter((option) => (
+    option.value === "Auto" || option.value === primaryLanguage
+  ));
+}
+
 export const QWEN3_DEVICE_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto" },
   { value: "cuda:0", label: "CUDA 0" },

@@ -6,9 +6,9 @@ import {
   QWEN3_ATTENTION_OPTIONS,
   QWEN3_DEVICE_OPTIONS,
   QWEN3_DTYPE_OPTIONS,
-  QWEN3_LANGUAGE_OPTIONS,
   QWEN3_OPTIONS,
   QWEN3_SPEAKER_OPTIONS,
+  type LocalRuntimeOption,
 } from "./modelOptions";
 import { statusClass, type StatusTone } from "./utils";
 
@@ -40,6 +40,7 @@ interface LocalRuntimeModelInputsProps {
   qwen3Speaker: string;
   onQwen3SpeakerChange: (value: string) => void;
   qwen3Language: string;
+  qwen3LanguageOptions: LocalRuntimeOption[];
   onQwen3LanguageChange: (value: string) => void;
   qwen3Instruct: string;
   onQwen3InstructChange: (value: string) => void;
@@ -83,6 +84,7 @@ export function LocalRuntimeModelInputs({
   qwen3Speaker,
   onQwen3SpeakerChange,
   qwen3Language,
+  qwen3LanguageOptions,
   onQwen3LanguageChange,
   qwen3Instruct,
   onQwen3InstructChange,
@@ -193,7 +195,7 @@ export function LocalRuntimeModelInputs({
               onChange={(event) => onQwen3LanguageChange(event.target.value)}
               className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
             >
-              {QWEN3_LANGUAGE_OPTIONS.map((option) => (
+              {qwen3LanguageOptions.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>

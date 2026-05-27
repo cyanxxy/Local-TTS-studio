@@ -41,6 +41,10 @@ describe("localTtsIpc sender and primitive parsers", () => {
   it("accepts trusted app senders and rejects untrusted IPC senders", () => {
     expect(() => assertTrustedIpcSender(makeEvent("https://evil.test", "app://-/studio") as never)).not.toThrow();
     expect(() => assertTrustedIpcSender(makeEvent("http://localhost:5173/kani") as never)).not.toThrow();
+    expect(() => assertTrustedIpcSender(
+      makeEvent("http://localhost:5173/kani") as never,
+      { allowDevServer: false },
+    )).toThrow("Rejected IPC");
     expect(() => assertTrustedIpcSender(makeEvent("https://example.com") as never)).toThrow("Rejected IPC");
   });
 
@@ -88,6 +92,7 @@ describe("localTtsIpc sender and primitive parsers", () => {
     expect(() => parseRequestId(1)).toThrow("must be a string");
     expect(() => parseRequestId("x".repeat(121))).toThrow("exceeds 120");
     expect(() => parseRequestId("bad/id")).toThrow("may contain only");
+    expect(() => parseRequestId("bad..id")).toThrow("consecutive dots");
   });
 
   it("parses optional string arrays", () => {

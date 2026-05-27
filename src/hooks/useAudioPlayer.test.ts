@@ -106,6 +106,7 @@ describe("useAudioPlayer", () => {
 
     const ctx = MockAudioContext.instances[0];
     expect(result.current.isPlaying).toBe(true);
+    expect(result.current.error).toBeNull();
     expect(ctx.resume).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -324,6 +325,7 @@ describe("useAudioPlayer", () => {
     });
 
     expect(result.current.isPlaying).toBe(false);
+    expect(result.current.error).toContain("Audio playback was blocked");
     expect(MockAudioContext.instances[0].resume).toHaveBeenCalledTimes(1);
   });
 

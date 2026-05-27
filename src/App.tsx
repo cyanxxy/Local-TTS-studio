@@ -65,6 +65,7 @@ export default function App() {
   const [quality, setQuality] = useState(initialState.quality);
   const [showPlayer, setShowPlayer] = useState(false);
   const [webgpuStatus, setWebgpuStatus] = useState<WebGPUStatus | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   const {
     kokoroState,
@@ -135,7 +136,7 @@ export default function App() {
     isGenerationBusy,
     cancelActiveGeneration,
     resetGeneratedAudio,
-    handleGenerate,
+    handleGenerate: runBrowserGeneration,
     handleStop,
     handleRetakeSegment,
   } = useGenerationControl({
@@ -193,6 +194,7 @@ export default function App() {
     resetGeneratedAudio();
     setActiveModel(model);
     loadModel(model);
+    setExportError(null);
   }, [activeModel, browserSupport, cancelActiveGeneration, loadModel, resetGeneratedAudio]);
 
   const handleTextChange = useCallback((nextText: string) => {
@@ -205,6 +207,7 @@ export default function App() {
     }
 
     setText(nextText);
+    setExportError(null);
   }, [cancelActiveGeneration, isRetakingSegment, player.segments.length, player.totalDuration, resetGeneratedAudio, text, tts.isGenerating]);
 
   const handleVoiceChange = useCallback((nextVoice: string) => {
@@ -212,6 +215,7 @@ export default function App() {
     cancelActiveGeneration();
     resetGeneratedAudio();
     setVoicesByModel((prev) => ({ ...prev, [activeModel]: nextVoice }));
+    setExportError(null);
   }, [activeModel, cancelActiveGeneration, resetGeneratedAudio, voice]);
 
   const handleQualityChange = useCallback((nextQuality: number) => {
@@ -219,6 +223,7 @@ export default function App() {
     cancelActiveGeneration();
     resetGeneratedAudio();
     setQuality(nextQuality);
+    setExportError(null);
   }, [cancelActiveGeneration, quality, resetGeneratedAudio]);
 
   useEffect(() => {
@@ -246,8 +251,16 @@ export default function App() {
     setShowPlayer(true);
   }, [player]);
 
+  const handleGenerate = useCallback(() => {
+    setExportError(null);
+    runBrowserGeneration();
+  }, [runBrowserGeneration]);
+
   const handleDownloadAudio = useCallback(() => {
-    void player.download(creator.exportOptions);
+    setExportError(null);
+    void player.download(creator.exportOptions).catch((error: unknown) => {
+      setExportError(error instanceof Error ? error.message : String(error));
+    });
   }, [creator.exportOptions, player]);
 
   const handleDownloadCaptions = useCallback((format: "srt" | "vtt" | "json") => {
@@ -287,6 +300,7 @@ export default function App() {
     : null;
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
   const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
+  const visibleError = tts.error ?? currentModelState.error ?? exportError ?? player.error;
   const activeSegmentIndex = player.activeSegmentId
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
     : -1;
@@ -373,9 +387,9 @@ export default function App() {
           <div className="mb-4">{browserSupportPanel}</div>
         )}
 
-        {localInferenceSupported && (isStudioPage || isReaderPage) && (tts.error || currentModelState.error) && (
+        {localInferenceSupported && (isStudioPage || isReaderPage) && visibleError && (
           <div className="mb-4 rounded-lg border border-danger/30 bg-danger-light px-3 py-2 text-xs text-danger">
-            {tts.error ?? currentModelState.error}
+            {visibleError}
           </div>
         )}
 

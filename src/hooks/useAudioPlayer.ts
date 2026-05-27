@@ -19,6 +19,7 @@ export type { AudioChunkData, AudioSegment } from "../lib/audioTimeline";
 
 export interface UseAudioPlayerReturn {
   isPlaying: boolean;
+  error: string | null;
   currentTime: number;
   totalDuration: number;
   playbackRate: number;
@@ -52,6 +53,7 @@ function clamp(value: number, min: number, max: number): number {
  */
 export function useAudioPlayer(): UseAudioPlayerReturn {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState(0);
   const [totalDuration, setTotalDuration] = useState(0);
   const [playbackRate, setPlaybackRateState] = useState(1);
@@ -80,6 +82,13 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       audioContextRef.current = new AudioContext();
     }
     return audioContextRef.current;
+  }, []);
+
+  const failPlaybackStart = useCallback(() => {
+    setError("Audio playback was blocked. Press Play again to enable audio output.");
+    setIsPlaying(false);
+    isPlayingRef.current = false;
+    interruptedRef.current = false;
   }, []);
 
   const rebuildSegmentState = useCallback(() => {
@@ -272,18 +281,17 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       try {
         await ctx.resume();
       } catch {
-        setIsPlaying(false);
-        isPlayingRef.current = false;
-        interruptedRef.current = false;
+        failPlaybackStart();
         return;
       }
     }
 
+    setError(null);
     contextAnchorRef.current = ctx.currentTime;
     setIsPlaying(true);
     isPlayingRef.current = true;
     interruptedRef.current = false;
-  }, [findChunkIndexAtTime, getContext, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
+  }, [failPlaybackStart, findChunkIndexAtTime, getContext, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
 
   useEffect(() => {
     const update = () => {
@@ -361,17 +369,17 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       try {
         await ctx.resume();
       } catch {
-        setIsPlaying(false);
-        isPlayingRef.current = false;
+        failPlaybackStart();
         return;
       }
     }
 
+    setError(null);
     if (!isPlayingRef.current) {
       setIsPlaying(true);
       isPlayingRef.current = true;
     }
-  }, [getContext, scheduleBufferedChunks, syncTotalDuration]);
+  }, [failPlaybackStart, getContext, scheduleBufferedChunks, syncTotalDuration]);
 
   const togglePlay = useCallback(async () => {
     const ctx = getContext();
@@ -389,7 +397,13 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }
 
     autoPlayOnChunkRef.current = true;
-    await ctx.resume();
+    try {
+      await ctx.resume();
+    } catch {
+      failPlaybackStart();
+      return;
+    }
+    setError(null);
 
     if (currentTimeRef.current >= totalDurationRef.current && totalDurationRef.current > 0) {
       await replayFromOffset(0, true);
@@ -405,7 +419,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     contextAnchorRef.current = ctx.currentTime;
     setIsPlaying(true);
     isPlayingRef.current = true;
-  }, [getContext, getLiveTimelineTime, replayFromOffset, syncCurrentTime]);
+  }, [failPlaybackStart, getContext, getLiveTimelineTime, replayFromOffset, syncCurrentTime]);
 
   const seekTo = useCallback((seconds: number) => {
     const shouldPlay = isPlayingRef.current;
@@ -525,6 +539,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     contextAnchorRef.current = 0;
     interruptedRef.current = false;
     autoPlayOnChunkRef.current = true;
+    setError(null);
 
     setSegments([]);
     setActiveSegmentId(null);
@@ -544,6 +559,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     contextAnchorRef.current = 0;
     interruptedRef.current = false;
     autoPlayOnChunkRef.current = false;
+    setError(null);
     setIsPlaying(false);
     isPlayingRef.current = false;
     syncCurrentTime(0);
@@ -562,6 +578,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   return {
     isPlaying,
+    error,
     currentTime,
     totalDuration,
     playbackRate,

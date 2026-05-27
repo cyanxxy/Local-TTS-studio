@@ -9,8 +9,11 @@ export type OnnxWasmFilePaths = OnnxWasmMaybeFilePaths & {
   wasm: NonNullable<OnnxWasmMaybeFilePaths["wasm"]>;
 };
 
-export interface OnnxWasmAssetSet {
+export interface TransformersOnnxWasmAssets {
   asyncify: OnnxWasmFilePaths;
+}
+
+export interface KokoroOnnxWasmAssets {
   jsep: OnnxWasmFilePaths;
 }
 
@@ -61,7 +64,7 @@ export function getSafeWasmThreadCount(
 
 export function configureTransformersOnnxRuntime(
   runtimeEnv: TransformersOnnxEnv,
-  assets: OnnxWasmAssetSet,
+  assets: TransformersOnnxWasmAssets,
   { backend, maxWasmThreads, ...capabilities }: ConfigureTransformersOnnxRuntimeOptions,
 ): void {
   const wasmEnv = runtimeEnv.backends.onnx.wasm;
@@ -77,7 +80,7 @@ export function configureTransformersOnnxRuntime(
 
 export function configureKokoroOnnxRuntime(
   runtimeEnv: KokoroOnnxEnv,
-  assets: OnnxWasmAssetSet,
+  assets: KokoroOnnxWasmAssets,
 ): void {
   // kokoro-js bundles its own ORT runtime, so these assets must come from its
   // nested onnxruntime-web version rather than the app-level Transformers.js one.

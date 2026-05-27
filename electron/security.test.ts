@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildContentSecurityPolicy, isAllowedAppUrl, isSafeExternalUrl } from "./security";
+import { buildContentSecurityPolicy, isAllowedAppUrl, isSafeExternalUrl, shouldGrantPermission } from "./security";
 
 describe("isAllowedAppUrl", () => {
   it("allows the local dev server origin", () => {
     expect(isAllowedAppUrl("http://localhost:5173/studio")).toBe(true);
+  });
+
+  it("rejects the local dev server origin when dev trust is disabled", () => {
+    expect(isAllowedAppUrl("http://localhost:5173/studio", { allowDevServer: false })).toBe(false);
   });
 
   it("allows the packaged app origin", () => {
@@ -41,8 +45,15 @@ describe("buildContentSecurityPolicy", () => {
     const policy = buildContentSecurityPolicy(false);
     expect(policy).not.toContain("http://localhost:5173");
     expect(policy).not.toContain("ws://localhost:5173");
+    const connectDirective = policy.split("; ").find((directive) => directive.startsWith("connect-src"));
+    expect(connectDirective?.split(/\s+/)).not.toContain("https:");
     expect(policy).not.toContain("'unsafe-eval'");
     expect(policy).toContain("style-src 'self' 'unsafe-inline'");
     expect(policy).toContain("script-src 'self' 'wasm-unsafe-eval'");
+    expect(policy).toContain("https://huggingface.co");
+  });
+
+  it("denies renderer permission requests by default", () => {
+    expect(shouldGrantPermission()).toBe(false);
   });
 });

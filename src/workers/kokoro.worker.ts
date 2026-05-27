@@ -86,8 +86,17 @@ function post(msg: WorkerOutMessage) {
   }
 }
 
+function generationMeta(generationId: string | undefined): { generationId?: string } {
+  return generationId === undefined ? {} : { generationId };
+}
+
 function clampSpeed(speed: number): number {
   return Math.max(SPEED_MIN_SAFE, Math.min(SPEED_MAX_SAFE, speed));
+}
+
+function normalizeFinalPauseSec(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(5, value));
 }
 
 function listVoices(instance: KokoroTTSInstance): string[] {
@@ -287,9 +296,11 @@ async function loadModel(forceReload: boolean = false) {
 }
 
 async function generate(
+  generationId: string | undefined,
   text: string,
   voice: string,
   speed: number,
+  finalPauseSec?: number,
   pauseOverridesSec?: Partial<Record<"none" | "comma" | "sentence" | "paragraph", number>>,
   sentenceSpeedVariance: number = 0,
   pronunciationRules: PronunciationRule[] = [],
@@ -297,7 +308,7 @@ async function generate(
 ) {
   const ttsInstance = tts;
   if (!ttsInstance) {
-    post({ type: "ERROR", message: "Model not loaded yet", scope: "generate" });
+    post({ type: "ERROR", message: "Model not loaded yet", scope: "generate", ...generationMeta(generationId) });
     return;
   }
 
@@ -308,14 +319,14 @@ async function generate(
     const selectedVoice = resolveKokoroVoice(voice, voices);
 
     if (!selectedVoice) {
-      post({ type: "ERROR", message: "No Kokoro voices are available.", scope: "generate" });
+      post({ type: "ERROR", message: "No Kokoro voices are available.", scope: "generate", ...generationMeta(generationId) });
       return;
     }
 
     const normalizedSpeed = clampSpeed(speed);
     const units = buildInferenceUnits(text);
     if (units.length === 0) {
-      post({ type: "ERROR", message: "Input text is empty.", scope: "generate" });
+      post({ type: "ERROR", message: "Input text is empty.", scope: "generate", ...generationMeta(generationId) });
       return;
     }
 
@@ -398,10 +409,11 @@ async function generate(
         const currentIndex = emitted + 1;
         const hasFollowing = queue.length > 0;
         const total = currentIndex + queue.length;
-        const audio = hasFollowing && resolvedPauseSec > 0
+        const pauseSec = hasFollowing ? resolvedPauseSec : normalizeFinalPauseSec(finalPauseSec);
+        const audio = pauseSec > 0
           ? concatFloat32Arrays([
             normalized.audio,
-            createSilence(resolvedPauseSec, normalized.samplingRate),
+            createSilence(pauseSec, normalized.samplingRate),
           ])
           : normalized.audio;
 
@@ -409,6 +421,7 @@ async function generate(
         if (!isGenerationCurrent(generationEpoch)) return;
         post({
           type: "AUDIO_CHUNK",
+          ...generationMeta(generationId),
           audio,
           samplingRate: normalized.samplingRate,
           text: unit.text,
@@ -416,7 +429,7 @@ async function generate(
           total,
           textStart: unit.start,
           textEnd: unit.end,
-          pauseAfterSec: hasFollowing ? resolvedPauseSec : 0,
+          pauseAfterSec: pauseSec,
           pauseKind: unit.pauseKind,
         });
       } catch (error) {
@@ -443,10 +456,10 @@ async function generate(
       throw new Error("Model returned no audio chunks.");
     }
 
-    post({ type: "GENERATION_COMPLETE" });
+    post({ type: "GENERATION_COMPLETE", ...generationMeta(generationId) });
   } catch (err) {
     if (!isGenerationCurrent(generationEpoch)) return;
-    post({ type: "ERROR", message: err instanceof Error ? err.message : String(err), scope: "generate" });
+    post({ type: "ERROR", message: err instanceof Error ? err.message : String(err), scope: "generate", ...generationMeta(generationId) });
   }
 }
 
@@ -458,9 +471,11 @@ self.onmessage = (e: MessageEvent<WorkerInMessage>) => {
       break;
     case "GENERATE":
       generate(
+        msg.generationId,
         msg.text,
         msg.voice,
         msg.speed,
+        msg.finalPauseSec,
         msg.pauseOverridesSec,
         msg.sentenceSpeedVariance ?? 0,
         msg.pronunciationRules ?? [],

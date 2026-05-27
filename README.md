@@ -124,6 +124,8 @@ npm run dist
 
 Packaged builds land in `release/`. Studio and Reader work out of the box. NeuTTS, Kani, and Qwen3 still require their Python dependencies — see [Desktop Local Runtime Setup](#desktop-local-runtime-setup) below.
 
+The default macOS package is unsigned for local development (`build.mac.identity = null`). For distribution, configure a Developer ID signing identity and notarization in electron-builder. If you intentionally share an unsigned build, users may need to remove quarantine locally after downloading it.
+
 ---
 
 ## Architecture
@@ -204,6 +206,7 @@ The current browser WebGPU tuning improves Kokoro raw generation by ~15 %. Large
 - Desktop browsers expose both browser models.
 - iPhone and iPad browsers expose **Supertonic only**. Kokoro is intentionally disabled on iOS.
 - Open TTS **prefers** WebGPU but does not require it. WASM is the fallback.
+- Electron enables Chromium's `enable-unsafe-webgpu` switch because WebGPU is otherwise unavailable in the packaged desktop shell. Re-check this switch during Electron upgrades and remove it when regular WebGPU is sufficient.
 - Kokoro uses WebGPU `fp16` when available, WASM `q8` as fallback.
 - **Cross-origin isolation matters.** Without the COOP/COEP headers, WASM fallback can degrade to single-threaded. `vercel.json` ships with the required headers preconfigured.
 
@@ -238,7 +241,7 @@ Electron resolves a usable Python runtime in this order:
    - **Qwen3**  — `.venv-qwen3`  → `.venv-qwen` → `.venv312` → shared `.venv`
 5. System Python (`python3.13` → `python3.12` → `python3.11` → `python3.10` → `python3` → `python` on macOS/Linux; `py` → `python` on Windows)
 
-In development, Electron resolves virtualenv names from the repo root. **In packaged apps, runtime discovery is stricter** — Electron searches the packaged app path, bundle-adjacent locations, nearby executable parents, and only then the current working directory. It will not search an arbitrary source checkout elsewhere on disk.
+In development, Electron resolves virtualenv names from the repo root. **In packaged apps, runtime discovery is stricter** — Electron searches only the packaged app path and its resources directory unless you provide an explicit Python executable or environment variable. It will not search arbitrary working directories or executable parent paths.
 
 ### NeuTTS Nano
 
@@ -277,7 +280,7 @@ brew install espeak-ng   # macOS
 
 - Python 3.10+
 - `pip install kani-tts-2`
-- `pip install transformers==4.56.0`
+- `pip install "transformers>=4.56,<5"`
 - An importable `kani_tts`
 - First-use model download (cached afterward)
 - On macOS, the bridge defaults Kani to **CPU** to avoid known MPS issues

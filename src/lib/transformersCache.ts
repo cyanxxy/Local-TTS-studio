@@ -27,6 +27,10 @@ export async function initializeTransformersCache(): Promise<CacheAdapterLike | 
   return transformersCachePromise;
 }
 
+export function resetTransformersCacheInitialization(): void {
+  transformersCachePromise = null;
+}
+
 export async function getTransformersModelCache(): Promise<ModelCacheStore | null> {
   const persistentCache = await initializeTransformersCache();
   if (persistentCache) return persistentCache;

@@ -45,6 +45,21 @@ describe("split", () => {
     const result = split('"Is this real?" she asked. He nodded.');
     expect(result).toHaveLength(2);
   });
+
+  it("splits after quoted sentence endings", () => {
+    const result = split('"Hello." Next sentence.');
+    expect(result).toEqual(['"Hello."', "Next sentence."]);
+  });
+
+  it("splits when a multi-letter acronym ends the sentence", () => {
+    const result = split("We live in the U.S. It is large.");
+    expect(result).toEqual(["We live in the U.S.", "It is large."]);
+  });
+
+  it("does not classify malformed comma URLs as valid URLs", () => {
+    const result = split("Visit https,//example. This should split.");
+    expect(result).toEqual(["Visit https,//example.", "This should split."]);
+  });
 });
 
 describe("TextSplitterStream", () => {

@@ -11,29 +11,12 @@ export interface PythonSearchContext {
   resourcesPath?: string;
 }
 
-const PACKAGED_EXEC_ANCESTOR_DEPTH = 5;
-
 function appendUnique(target: string[], value: string | undefined): void {
   if (!value) return;
 
   const normalized = path.resolve(value);
   if (!target.includes(normalized)) {
     target.push(normalized);
-  }
-}
-
-function appendAncestors(target: string[], start: string | undefined, depth: number): void {
-  if (!start) return;
-
-  let current = path.resolve(start);
-  for (let index = 0; index <= depth; index += 1) {
-    appendUnique(target, current);
-
-    const parent = path.dirname(current);
-    if (parent === current) {
-      break;
-    }
-    current = parent;
   }
 }
 
@@ -53,11 +36,9 @@ export function getPythonSearchRoots(context: PythonSearchContext): string[] {
 
   appendUnique(roots, context.resourcesPath);
 
-  if (context.isPackaged) {
-    appendAncestors(roots, path.dirname(context.execPath), PACKAGED_EXEC_ANCESTOR_DEPTH);
+  if (!context.isPackaged) {
+    appendUnique(roots, context.cwd);
   }
-
-  appendUnique(roots, context.cwd);
 
   return roots;
 }
@@ -93,6 +74,7 @@ export function getPythonDependencyCheckSnippet(model: LocalModelId): string {
     "import importlib.metadata, importlib.util",
     "assert importlib.util.find_spec('kani_tts') is not None",
     "importlib.metadata.version('kani-tts-2')",
-    "assert importlib.metadata.version('transformers') == '4.56.0'",
+    "version = tuple(int(part) for part in importlib.metadata.version('transformers').split('+', 1)[0].split('.')[:3])",
+    "assert (4, 56, 0) <= version < (5, 0, 0)",
   ].join("; ");
 }

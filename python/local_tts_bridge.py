@@ -28,6 +28,8 @@ RESULT_PREFIX = "__RESULT__"
 PROGRESS_PREFIX = "__PROGRESS__"
 NEUTTS_MIN_PYTHON = (3, 10)
 NEUTTS_MAX_EXCLUSIVE_PYTHON = (3, 14)
+KANI_MIN_TRANSFORMERS = (4, 56, 0)
+KANI_MAX_TRANSFORMERS_EXCLUSIVE = (5, 0, 0)
 QWEN3_CUSTOM_VOICE_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
 QWEN3_DEFAULT_SPEAKER = "Ryan"
 QWEN3_DEFAULT_LANGUAGE = "Auto"
@@ -58,10 +60,10 @@ QWEN3_LANGUAGES = [
 
 
 @contextmanager
-def swallow_stdout() -> Any:
+def redirect_stdout_to_stderr() -> Any:
     original = sys.stdout
     try:
-        sys.stdout = io.StringIO()
+        sys.stdout = sys.stderr
         yield
     finally:
         sys.stdout = original
@@ -204,6 +206,37 @@ def detect_kani_transformers_version() -> str | None:
     return get_installed_package_version("transformers")
 
 
+def parse_version_tuple(version: str | None) -> tuple[int, int, int] | None:
+    if not version:
+        return None
+    parts = version.split("+", 1)[0].split(".", 3)
+    parsed: list[int] = []
+    for part in parts[:3]:
+        digits = ""
+        for char in part:
+            if char.isdigit():
+                digits += char
+            else:
+                break
+        if not digits:
+            return None
+        parsed.append(int(digits))
+    while len(parsed) < 3:
+        parsed.append(0)
+    return tuple(parsed)  # type: ignore[return-value]
+
+
+def is_kani_transformers_compatible(version: str | None) -> bool:
+    parsed = parse_version_tuple(version)
+    if parsed is None:
+        return False
+    return KANI_MIN_TRANSFORMERS <= parsed < KANI_MAX_TRANSFORMERS_EXCLUSIVE
+
+
+def kani_transformers_requirement_message() -> str:
+    return "Kani-TTS-2 requires transformers>=4.56,<5 in the selected Python environment."
+
+
 def is_module_available(module_name: str) -> bool:
     import importlib.util
 
@@ -244,6 +277,11 @@ def validate_reference_wav(reference_audio_bytes: bytes) -> None:
         with wave.open(io.BytesIO(reference_audio_bytes), "rb") as wav_file:
             if wav_file.getnframes() <= 0:
                 raise ValueError("Reference WAV file does not contain audio frames.")
+            if wav_file.getnchannels() != 1:
+                raise ValueError("Reference WAV must be mono audio.")
+            sample_rate = wav_file.getframerate()
+            if sample_rate < 16_000 or sample_rate > 48_000:
+                raise ValueError("Reference WAV sample rate must be between 16 kHz and 48 kHz.")
     except wave.Error as exc:
         raise ValueError("Reference audio must be a readable WAV file.") from exc
 
@@ -337,11 +375,11 @@ def probe_kani() -> dict[str, Any]:
             "pythonVersion": sys.version.split()[0],
         }
 
-    if transformers_version != "4.56.0":
+    if not is_kani_transformers_compatible(transformers_version):
         return {
             "ready": False,
             "message": (
-                "Kani-TTS-2 requires transformers==4.56.0 in the selected Python environment. "
+                f"{kani_transformers_requirement_message()} "
                 f"Detected {transformers_version or 'no transformers package'}."
             ),
             "pythonVersion": sys.version.split()[0],
@@ -487,7 +525,7 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
             temp_audio.write(reference_audio_bytes)
             temp_path = temp_audio.name
 
-        with swallow_stdout():
+        with redirect_stdout_to_stderr():
             tts = NeuTTS(
                 backbone_repo=backbone_repo,
                 backbone_device=backbone_device,
@@ -518,6 +556,7 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
+    emit_progress("runtime_check", "Checking Kani-TTS-2 runtime...", started_at=None)
     package_name, package_version = detect_kani_package()
     if package_name != "kani-tts-2":
         installed = (
@@ -528,9 +567,9 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
         )
 
     transformers_version = detect_kani_transformers_version()
-    if transformers_version != "4.56.0":
+    if not is_kani_transformers_compatible(transformers_version):
         raise RuntimeError(
-            "Kani-TTS-2 generation requires transformers==4.56.0. "
+            f"{kani_transformers_requirement_message()} "
             f"The selected interpreter exposes {transformers_version or 'no transformers package'}."
         )
 
@@ -557,7 +596,8 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
     from kani_tts import KaniTTS
 
     started = time.time()
-    with swallow_stdout():
+    emit_progress("model_load", f"Loading {model_repo}...", started_at=started)
+    with redirect_stdout_to_stderr():
         tts = KaniTTS(
             model_repo,
             device_map=device_map,
@@ -566,6 +606,7 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
             show_info=False,
         )
 
+    emit_progress("inference", "Running Kani-TTS-2 inference...", started_at=started)
     wav, generated_sample_rate = tts.generate(
         text,
         language_tag=language_tag,
@@ -580,6 +621,7 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
         getattr(tts, "sample_rate", None),
     )
 
+    emit_progress("output_encoding", "Encoding generated WAV output...", started_at=started)
     return {
         "wavBase64": array_to_wav_base64(wav, sample_rate),
         "sampleRate": sample_rate,
@@ -642,7 +684,7 @@ def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
     if attn_implementation and attn_implementation != "auto":
         load_kwargs["attn_implementation"] = attn_implementation
 
-    with swallow_stdout():
+    with redirect_stdout_to_stderr():
         model = Qwen3TTSModel.from_pretrained(model_repo, **load_kwargs)
 
     generation_kwargs: dict[str, Any] = {}

@@ -28,4 +28,9 @@ describe("appProtocol", () => {
       path.join(DIST_DIR, "assets", "model.wasm"),
     );
   });
+
+  it("rejects app protocol requests for unexpected hosts", () => {
+    expect(() => resolveElectronAppPath(DIST_DIR, "app://evil/studio")).toThrow("Unsupported app protocol");
+    expect(() => resolveElectronAppPath(DIST_DIR, "https://example.com/studio")).toThrow("Unsupported app protocol");
+  });
 });

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, net, protocol, session, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, net, protocol, session, shell, type IpcMainInvokeEvent } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
@@ -10,7 +10,13 @@ import {
   getVirtualEnvPythonCandidates,
   type PythonSearchContext,
 } from "./pythonRuntime";
-import { buildContentSecurityPolicy, DEV_SERVER_URL, isAllowedAppUrl, isSafeExternalUrl } from "./security";
+import {
+  buildContentSecurityPolicy,
+  DEV_SERVER_URL,
+  isAllowedAppUrl,
+  isSafeExternalUrl,
+  shouldGrantPermission,
+} from "./security";
 import {
   BRIDGE_PROGRESS_PREFIX,
   assertLocalModel,
@@ -34,6 +40,10 @@ import {
 const isDev = !app.isPackaged;
 const PYTHON_BINARY_NAME_RE = /^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/i;
 const PYTHON_BRIDGE_TIMEOUT_MS = 5 * 60 * 1000;
+const PYTHON_EXECUTABLE_TIMEOUT_MS = 20_000;
+const PYTHON_BRIDGE_MAX_STDOUT_BYTES = 125_000_000;
+const PYTHON_BRIDGE_MAX_STDERR_BYTES = 1_000_000;
+const PYTHON_CANCEL_KILL_AFTER_MS = 2_000;
 const GENERATE_RATE_WINDOW_MS = 500;
 protocol.registerSchemesAsPrivileged([
   {
@@ -106,15 +116,19 @@ function registerProductionAppProtocol() {
 
   const distDir = path.join(__dirname, "../dist");
   protocol.handle(ELECTRON_APP_SCHEME, (request) => {
-    const resolvedPath = resolveElectronAppPath(distDir, request.url);
-    return net.fetch(pathToFileURL(resolvedPath).toString());
+    try {
+      const resolvedPath = resolveElectronAppPath(distDir, request.url);
+      return net.fetch(pathToFileURL(resolvedPath).toString());
+    } catch {
+      return new Response("Forbidden", { status: 403 });
+    }
   });
 }
 
 function registerNavigationSecurityHandlers() {
   app.on("web-contents-created", (_event, contents) => {
     contents.on("will-navigate", (event, navigationUrl) => {
-      if (isAllowedAppUrl(navigationUrl)) return;
+      if (isAllowedAppUrl(navigationUrl, { allowDevServer: isDev })) return;
 
       event.preventDefault();
       if (isSafeExternalUrl(navigationUrl)) {
@@ -129,6 +143,12 @@ function registerNavigationSecurityHandlers() {
 
       return { action: "deny" };
     });
+  });
+}
+
+function registerPermissionHandlers() {
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(shouldGrantPermission());
   });
 }
 
@@ -231,7 +251,7 @@ async function assertPythonExecutable(binary: string): Promise<void> {
     const timeoutHandle = setTimeout(() => {
       child.kill();
       reject(new Error("Timed out while validating Python executable."));
-    }, 8_000);
+    }, PYTHON_EXECUTABLE_TIMEOUT_MS);
 
     const cleanup = () => {
       if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -417,6 +437,51 @@ function getBridgeScriptPath(): string {
   return path.join(process.resourcesPath, "python", "local_tts_bridge.py");
 }
 
+function shouldForwardPythonEnv(key: string): boolean {
+  return [
+    "CUDA_",
+    "HF_",
+    "HUGGINGFACE_",
+    "OPEN_TTS_",
+    "PHONEMIZER_",
+    "PYTORCH_",
+    "TORCH_",
+    "TTS_",
+  ].some((prefix) => key.startsWith(prefix))
+    || [
+      "HOME",
+      "LANG",
+      "LC_ALL",
+      "LOGNAME",
+      "PATH",
+      "REQUESTS_CA_BUNDLE",
+      "SSL_CERT_FILE",
+      "SHELL",
+      "SystemRoot",
+      "TEMP",
+      "TMP",
+      "TMPDIR",
+      "TRANSFORMERS_CACHE",
+      "USER",
+      "USERPROFILE",
+      "WINDIR",
+    ].includes(key);
+}
+
+function buildPythonBridgeEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    PYTHONIOENCODING: "utf-8",
+  };
+
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value !== undefined && shouldForwardPythonEnv(key)) {
+      env[key] = value;
+    }
+  }
+
+  return env;
+}
+
 async function runPythonBridge(
   action: BridgeAction,
   request: unknown,
@@ -451,10 +516,7 @@ async function runPythonBridge(
         ],
         {
           stdio: ["pipe", "pipe", "pipe"],
-          env: {
-            ...process.env,
-            PYTHONIOENCODING: "utf-8",
-          },
+          env: buildPythonBridgeEnv(),
         },
       );
 
@@ -465,6 +527,8 @@ async function runPythonBridge(
       let stdout = "";
       let stdoutLineBuffer = "";
       let stderr = "";
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
       let settled = false;
 
       const timeoutHandle = setTimeout(() => {
@@ -485,7 +549,24 @@ async function runPythonBridge(
         }
       };
 
+      const rejectForOutputLimit = (streamName: "stdout" | "stderr", limitBytes: number) => {
+        if (settled) return true;
+        settled = true;
+        child.kill();
+        cleanup();
+        if (requestId) {
+          cancelledBridgeRequests.delete(requestId);
+        }
+        reject(new Error(`Python bridge ${streamName} exceeded ${limitBytes} bytes.`));
+        return true;
+      };
+
       child.stdout.on("data", (chunk: Buffer) => {
+        stdoutBytes += chunk.byteLength;
+        if (stdoutBytes > PYTHON_BRIDGE_MAX_STDOUT_BYTES) {
+          rejectForOutputLimit("stdout", PYTHON_BRIDGE_MAX_STDOUT_BYTES);
+          return;
+        }
         const text = chunk.toString("utf-8");
         stdout += text;
         stdoutLineBuffer += text;
@@ -513,6 +594,11 @@ async function runPythonBridge(
       });
 
       child.stderr.on("data", (chunk: Buffer) => {
+        stderrBytes += chunk.byteLength;
+        if (stderrBytes > PYTHON_BRIDGE_MAX_STDERR_BYTES) {
+          rejectForOutputLimit("stderr", PYTHON_BRIDGE_MAX_STDERR_BYTES);
+          return;
+        }
         stderr += chunk.toString("utf-8");
       });
 
@@ -613,10 +699,17 @@ async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
   }
 
   cancelledBridgeRequests.add(requestId);
-  activeBridgeProcesses.delete(requestId);
 
   try {
     child.kill();
+    setTimeout(() => {
+      if (activeBridgeProcesses.get(requestId) !== child) return;
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Process has already exited.
+      }
+    }, PYTHON_CANCEL_KILL_AFTER_MS).unref();
   } catch {
     cancelledBridgeRequests.delete(requestId);
     throw new Error("Failed to cancel Python generation.");
@@ -625,37 +718,41 @@ async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
   return { cancelled: true };
 }
 
-// Enable WebGPU in Electron — it is off by default
+// Electron 41 still requires this Chromium switch for WebGPU in the desktop shell.
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
 
 app.whenReady().then(() => {
+  if (!isDev) {
+    Menu.setApplicationMenu(null);
+  }
   registerProductionAppProtocol();
   registerRendererSecurityHeaders();
   registerNavigationSecurityHandlers();
+  registerPermissionHandlers();
   createMainWindow();
 
   ipcMain.handle("local-tts:probe", (event, request: unknown) => {
-    assertTrustedIpcSender(event);
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
     return runPythonBridge("probe", request, event);
   });
 
   ipcMain.handle("local-tts:generate", (event, request: unknown) => {
-    assertTrustedIpcSender(event);
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
     return runPythonBridge("generate", request, event);
   });
 
   ipcMain.handle("local-tts:cancel", (event, request: unknown) => {
-    assertTrustedIpcSender(event);
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
     return handleCancel(request);
   });
 
   ipcMain.handle("local-tts:cache-info", (event, request: unknown) => {
-    assertTrustedIpcSender(event);
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
     return handleCacheInfo(request);
   });
 
   ipcMain.handle("local-tts:clear-cache", (event, request: unknown) => {
-    assertTrustedIpcSender(event);
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
     return handleClearCache(request);
   });
 });

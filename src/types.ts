@@ -40,10 +40,12 @@ export type WorkerInMessage =
   | { type: "LOAD"; forceReload?: boolean; preferredVoice?: string; debugProfiling?: boolean }
   | {
       type: "GENERATE";
+      generationId?: string;
       text: string;
       voice: string;
       speed: number;
       quality: number;
+      finalPauseSec?: number;
       pauseOverridesSec?: Partial<Record<ChunkPauseKind, number>>;
       sentenceSpeedVariance?: number;
       pronunciationRules?: PronunciationRule[];
@@ -57,6 +59,7 @@ export type WorkerOutMessage =
   | { type: "READY"; voices?: string[]; backend?: InferenceBackend }
   | {
       type: "AUDIO_CHUNK";
+      generationId?: string;
       audio: Float32Array;
       samplingRate: number;
       text: string;
@@ -67,8 +70,8 @@ export type WorkerOutMessage =
       pauseAfterSec?: number;
       pauseKind?: ChunkPauseKind;
     }
-  | { type: "GENERATION_COMPLETE" }
-  | { type: "ERROR"; message: string; scope?: WorkerErrorScope };
+  | { type: "GENERATION_COMPLETE"; generationId?: string }
+  | { type: "ERROR"; message: string; scope?: WorkerErrorScope; generationId?: string };
 
 /** Per-model state tracked by the app */
 export interface ModelState {

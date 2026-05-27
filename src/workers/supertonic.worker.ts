@@ -71,12 +71,21 @@ function post(msg: WorkerOutMessage) {
   }
 }
 
+function generationMeta(generationId: string | undefined): { generationId?: string } {
+  return generationId === undefined ? {} : { generationId };
+}
+
 function clampPercent(percent: number): number {
   return Math.max(0, Math.min(100, percent));
 }
 
 function clampSpeed(speed: number): number {
   return Math.max(SPEED_MIN_SAFE, Math.min(SPEED_MAX_SAFE, speed));
+}
+
+function normalizeFinalPauseSec(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(5, value));
 }
 
 function createPerfTrace(label: string, initial: Record<string, unknown> = {}) {
@@ -338,13 +347,14 @@ function appendPauseToAudio(
   chunk: TextChunk,
   output: RawAudio,
   hasFollowing: boolean,
+  finalPauseSec?: number,
   pauseOverridesSec?: Partial<Record<"none" | "comma" | "sentence" | "paragraph", number>>,
 ) {
   const normalized = normalizeRawAudioOutput(output);
   const fallbackPause = hasFollowing ? SUPERTONIC_INTER_CHUNK_SILENCE_SEC : 0;
   const pauseSec = hasFollowing
     ? resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec > 0 ? chunk.pauseAfterSec : fallbackPause, pauseOverridesSec)
-    : 0;
+    : normalizeFinalPauseSec(finalPauseSec);
 
   const audio = pauseSec > 0
     ? concatFloat32Arrays([
@@ -361,18 +371,21 @@ function appendPauseToAudio(
 }
 
 function emitChunk(
+  generationId: string | undefined,
   chunk: TextChunk,
   output: RawAudio,
   emitted: number,
   total: number,
   hasFollowing: boolean,
+  finalPauseSec?: number,
   pauseOverridesSec?: Partial<Record<"none" | "comma" | "sentence" | "paragraph", number>>,
 ): number {
-  const normalized = appendPauseToAudio(chunk, output, hasFollowing, pauseOverridesSec);
+  const normalized = appendPauseToAudio(chunk, output, hasFollowing, finalPauseSec, pauseOverridesSec);
   const nextIndex = emitted + 1;
 
   post({
     type: "AUDIO_CHUNK",
+    ...generationMeta(generationId),
     audio: normalized.audio,
     samplingRate: normalized.samplingRate,
     text: chunk.text,
@@ -475,10 +488,12 @@ async function loadModel(
 }
 
 async function generate(
+  generationId: string | undefined,
   text: string,
   voice: string,
   speed: number,
   quality: number,
+  finalPauseSec?: number,
   pauseOverridesSec?: Partial<Record<"none" | "comma" | "sentence" | "paragraph", number>>,
   sentenceSpeedVariance: number = 0,
   pronunciationRules: PronunciationRule[] = [],
@@ -486,7 +501,7 @@ async function generate(
 ) {
   const ttsInstance = tts;
   if (!ttsInstance) {
-    post({ type: "ERROR", message: "Model not loaded yet", scope: "generate" });
+    post({ type: "ERROR", message: "Model not loaded yet", scope: "generate", ...generationMeta(generationId) });
     return;
   }
 
@@ -500,7 +515,7 @@ async function generate(
       voice: resolveSupertonicVoice(voice),
     });
     if (!isSupertonicVoice(voice)) {
-      post({ type: "ERROR", message: `Unknown voice: ${voice}`, scope: "generate" });
+      post({ type: "ERROR", message: `Unknown voice: ${voice}`, scope: "generate", ...generationMeta(generationId) });
       return;
     }
     const hadCachedVoice = voiceStore.get(voice) !== null;
@@ -559,11 +574,13 @@ async function generate(
           for (const [index, item] of selectedBatch.entries()) {
             const hasFollowing = index < selectedBatch.length - 1 || queue.length > 0;
             emitted = emitChunk(
+              generationId,
               item.chunk,
               outputs[index],
               emitted,
               total,
               hasFollowing,
+              !hasFollowing ? finalPauseSec : undefined,
               pauseOverridesSec,
             );
             if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
@@ -590,7 +607,17 @@ async function generate(
           speed: chunkSpeed,
         })) as RawAudio;
         if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
-        emitted = emitChunk(chunk, output, emitted, total, queue.length > 0, pauseOverridesSec);
+        const hasFollowing = queue.length > 0;
+        emitted = emitChunk(
+          generationId,
+          chunk,
+          output,
+          emitted,
+          total,
+          hasFollowing,
+          !hasFollowing ? finalPauseSec : undefined,
+          pauseOverridesSec,
+        );
         if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
         if (!recordedFirstChunk) {
           perf.mark("firstChunkReady");
@@ -632,10 +659,10 @@ async function generate(
     }
 
     perf.finish({ emitted });
-    post({ type: "GENERATION_COMPLETE" });
+    post({ type: "GENERATION_COMPLETE", ...generationMeta(generationId) });
   } catch (err) {
     if (!isGenerationCurrent(generationEpoch)) return;
-    post({ type: "ERROR", message: err instanceof Error ? err.message : String(err), scope: "generate" });
+    post({ type: "ERROR", message: err instanceof Error ? err.message : String(err), scope: "generate", ...generationMeta(generationId) });
   }
 }
 
@@ -647,10 +674,12 @@ self.onmessage = (e: MessageEvent<WorkerInMessage>) => {
       break;
     case "GENERATE":
       generate(
+        msg.generationId,
         msg.text,
         msg.voice,
         msg.speed,
         msg.quality,
+        msg.finalPauseSec,
         msg.pauseOverridesSec,
         msg.sentenceSpeedVariance ?? 0,
         msg.pronunciationRules ?? [],

@@ -20,10 +20,10 @@ function getTokenFromBuffer(buffer: string, start: number): string {
 const ABBREVIATIONS: Set<string> = new Set([
   "mr", "mrs", "ms", "dr", "prof", "sr", "jr", "sgt", "col", "gen",
   "rep", "sen", "gov", "lt", "maj", "capt", "st", "mt", "etc", "co",
-  "inc", "ltd", "dept", "vs", "p", "pg",
+  "inc", "ltd", "dept", "vs", "pg", "e.g", "i.e", "cf", "ph.d",
   "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept",
   "oct", "nov", "dec",
-  "sun", "mon", "tu", "tue", "tues", "wed", "th", "thu", "thur", "thurs", "fri", "sat",
+  "sun", "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat",
 ]);
 
 function isAbbreviation(token: string): boolean {
@@ -59,6 +59,32 @@ function updateStack(c: string, stack: string[], i: number, buffer: string): voi
   if (expectedOpening && stack.length && stack.at(-1) === expectedOpening) {
     stack.pop();
   }
+}
+
+function trailingCharsCloseStack(stack: string[], boundaryIndex: number, buffer: string): boolean {
+  if (stack.length === 0) return true;
+
+  const pending = [...stack];
+  let end = boundaryIndex;
+  while (end + 1 < buffer.length && isSentenceTerminator(buffer[end + 1], false)) ++end;
+
+  let cursor = end + 1;
+  while (cursor < buffer.length && isTrailingChar(buffer[cursor])) {
+    const c = buffer[cursor];
+    if (c === '"' || c === "'") {
+      const stackIndex = pending.lastIndexOf(c);
+      if (stackIndex === -1) return false;
+      pending.splice(stackIndex);
+    } else {
+      const expectedOpening = MATCHING.get(c);
+      if (!expectedOpening || pending.at(-1) !== expectedOpening) return false;
+      pending.pop();
+    }
+
+    cursor += 1;
+  }
+
+  return pending.length === 0;
 }
 
 export class TextSplitterStream implements AsyncIterable<string>, Iterable<string> {
@@ -121,7 +147,7 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
       const c = buffer[i];
       updateStack(c, stack, i, buffer);
 
-      if (stack.length === 0 && isSentenceTerminator(c)) {
+      if (isSentenceTerminator(c) && trailingCharsCloseStack(stack, i, buffer)) {
         const currentSegment = buffer.slice(sentenceStart, i);
         if (/(^|\n)\d+$/.test(currentSegment)) { ++i; continue; }
 
@@ -136,14 +162,17 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
         const token = getTokenFromBuffer(buffer, tokenStart);
         if (!token) { ++i; continue; }
 
-        if ((/https?[,:]\/\//.test(token) || token.includes("@")) && token.at(-1) && !isSentenceTerminator(token.at(-1)!)) {
+        if ((/https?:\/\//.test(token) || token.includes("@")) && token.at(-1) && !isSentenceTerminator(token.at(-1)!)) {
           i = tokenStart + token.length;
           continue;
         }
 
         if (isAbbreviation(token)) { ++i; continue; }
 
-        if (/^([A-Za-z]\.)+$/.test(token) && nextNonSpace < len && /[A-Z]/.test(buffer[nextNonSpace])) { ++i; continue; }
+        // Only suppress sentence breaks for single initials like "A. Lincoln".
+        // Multi-letter initialisms such as "U.S." may end a sentence ("U.S. It is..."),
+        // accepting that phrases like "U.S. Senator" can split conservatively.
+        if (/^[A-Za-z]\.$/.test(token) && nextNonSpace < len && /[A-Z]/.test(buffer[nextNonSpace])) { ++i; continue; }
 
         if (c === "." && nextNonSpace < len && /[a-z]/.test(buffer[nextNonSpace])) { ++i; continue; }
 

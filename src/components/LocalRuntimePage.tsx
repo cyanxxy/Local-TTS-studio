@@ -18,6 +18,7 @@ import {
   QWEN3_LANGUAGE_OPTIONS,
   QWEN3_OPTIONS,
   QWEN3_SPEAKER_OPTIONS,
+  getQwen3LanguageOptionsForSpeaker,
 } from "./localRuntime/modelOptions";
 import {
   arrayBufferToBase64,
@@ -41,6 +42,15 @@ type StatusMessage = { tone: StatusTone; text: string } | null;
 
 function createLocalRequestId(model: LocalTtsModel): string {
   return `${model}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function clampNumber(value: number, fallback: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, value));
+}
+
+function clampInteger(value: number, fallback: number, min: number, max: number): number {
+  return Math.round(clampNumber(value, fallback, min, max));
 }
 
 export function LocalRuntimePage({
@@ -98,6 +108,10 @@ export function LocalRuntimePage({
   const activeRequestGenerationVersionRef = useRef<number | null>(null);
 
   const electronAvailable = !!window.electron?.localTts;
+  const qwen3LanguageOptions = useMemo(
+    () => getQwen3LanguageOptionsForSpeaker(qwen3Speaker),
+    [qwen3Speaker],
+  );
 
   useEffect(() => {
     mountedRef.current = true;
@@ -132,6 +146,10 @@ export function LocalRuntimePage({
 
   const invalidateGeneration = useCallback((options: { runtimeChanged?: boolean } = {}) => {
     generationVersionRef.current += 1;
+    const activeRequestId = activeRequestIdRef.current;
+    if (generateBusy && activeRequestId && window.electron?.localTts) {
+      void window.electron.localTts.cancel({ model, requestId: activeRequestId }).catch(() => undefined);
+    }
     clearGeneratedResult();
     setGenerationProgress(null);
 
@@ -147,7 +165,7 @@ export function LocalRuntimePage({
         text: "Inputs changed. The current generation is now outdated.",
       });
     }
-  }, [clearGeneratedResult, generateBusy]);
+  }, [clearGeneratedResult, generateBusy, model]);
 
   const cancelActiveGeneration = useCallback(async (nextStatusText: string = "Cancelling generation...") => {
     const requestId = activeRequestIdRef.current;
@@ -302,22 +320,22 @@ export function LocalRuntimePage({
 
   const handleTemperatureChange = useCallback((nextTemperature: number) => {
     invalidateGeneration();
-    setTemperature(nextTemperature);
+    setTemperature((current) => clampNumber(nextTemperature, current, 0.2, 2));
   }, [invalidateGeneration]);
 
   const handleTopPChange = useCallback((nextTopP: number) => {
     invalidateGeneration();
-    setTopP(nextTopP);
+    setTopP((current) => clampNumber(nextTopP, current, 0.5, 1));
   }, [invalidateGeneration]);
 
   const handleRepetitionPenaltyChange = useCallback((nextRepetitionPenalty: number) => {
     invalidateGeneration();
-    setRepetitionPenalty(nextRepetitionPenalty);
+    setRepetitionPenalty((current) => clampNumber(nextRepetitionPenalty, current, 1, 2));
   }, [invalidateGeneration]);
 
   const handleMaxNewTokensChange = useCallback((nextMaxNewTokens: number) => {
     invalidateGeneration();
-    setMaxNewTokens(nextMaxNewTokens);
+    setMaxNewTokens((current) => clampInteger(nextMaxNewTokens, current, 64, 4096));
   }, [invalidateGeneration]);
 
   const handleQwen3ModelChange = useCallback((nextModel: string) => {
@@ -328,6 +346,11 @@ export function LocalRuntimePage({
   const handleQwen3SpeakerChange = useCallback((nextSpeaker: string) => {
     invalidateGeneration();
     setQwen3Speaker(nextSpeaker);
+    setQwen3Language((currentLanguage) => (
+      getQwen3LanguageOptionsForSpeaker(nextSpeaker).some((option) => option.value === currentLanguage)
+        ? currentLanguage
+        : "Auto"
+    ));
   }, [invalidateGeneration]);
 
   const handleQwen3LanguageChange = useCallback((nextLanguage: string) => {
@@ -357,17 +380,17 @@ export function LocalRuntimePage({
 
   const handleQwen3TemperatureChange = useCallback((nextTemperature: number) => {
     invalidateGeneration();
-    setQwen3Temperature(nextTemperature);
+    setQwen3Temperature((current) => clampNumber(nextTemperature, current, 0.2, 2));
   }, [invalidateGeneration]);
 
   const handleQwen3TopPChange = useCallback((nextTopP: number) => {
     invalidateGeneration();
-    setQwen3TopP(nextTopP);
+    setQwen3TopP((current) => clampNumber(nextTopP, current, 0.5, 1));
   }, [invalidateGeneration]);
 
   const handleQwen3MaxNewTokensChange = useCallback((nextMaxNewTokens: number) => {
     invalidateGeneration();
-    setQwen3MaxNewTokens(nextMaxNewTokens);
+    setQwen3MaxNewTokens((current) => clampInteger(nextMaxNewTokens, current, 64, 4096));
   }, [invalidateGeneration]);
 
   const handlePythonOverrideChange = useCallback((nextPythonOverride: string) => {
@@ -472,7 +495,9 @@ export function LocalRuntimePage({
         tone: "success",
         text: `Generated ${generated.durationSec.toFixed(2)}s audio in ${generated.elapsedSec.toFixed(2)}s.`,
       });
-      await refreshCacheInfo(pageVersion);
+      void refreshCacheInfo(pageVersion).catch((err: unknown) => {
+        console.warn("Failed to refresh local cache info:", err);
+      });
     } catch (err) {
       if (!isCurrentPageVersion(pageVersion)) return;
       if (activeRequestIdRef.current !== requestId) return;
@@ -519,8 +544,8 @@ export function LocalRuntimePage({
     topP,
   ]);
 
-  const handleClearCache = useCallback(async () => {
-    if (!window.electron?.localTts) return;
+  const handleClearCache = useCallback(async (): Promise<boolean> => {
+    if (!window.electron?.localTts) return false;
     const pageVersion = pageVersionRef.current;
     setCacheBusy(true);
     setStatus({ tone: "info", text: "Clearing local model cache..." });
@@ -528,11 +553,13 @@ export function LocalRuntimePage({
     try {
       await window.electron.localTts.clearCache({ model });
       await refreshCacheInfo(pageVersion);
-      if (!isCurrentPageVersion(pageVersion)) return;
+      if (!isCurrentPageVersion(pageVersion)) return false;
       setStatus({ tone: "success", text: "Local model cache cleared." });
+      return true;
     } catch (err) {
-      if (!isCurrentPageVersion(pageVersion)) return;
+      if (!isCurrentPageVersion(pageVersion)) return false;
       setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+      return false;
     } finally {
       if (isCurrentPageVersion(pageVersion)) {
         setCacheBusy(false);
@@ -542,7 +569,8 @@ export function LocalRuntimePage({
 
   const handleRedownload = useCallback(async () => {
     const pageVersion = pageVersionRef.current;
-    await handleClearCache();
+    const cleared = await handleClearCache();
+    if (!cleared) return;
     if (!isCurrentPageVersion(pageVersion)) return;
     if (!canGenerate) {
       setStatus({
@@ -590,7 +618,7 @@ export function LocalRuntimePage({
           />
         </div>
 
-        {(model === "neutts" || model === "qwen3") && (
+        {(model === "neutts" || model === "kani" || model === "qwen3") && (
           <LocalRuntimeRuntimeSettings
             modelName={name}
             onRecheckRuntime={() => { void runProbe(); }}
@@ -629,6 +657,7 @@ export function LocalRuntimePage({
           qwen3Speaker={qwen3Speaker}
           onQwen3SpeakerChange={handleQwen3SpeakerChange}
           qwen3Language={qwen3Language}
+          qwen3LanguageOptions={qwen3LanguageOptions}
           onQwen3LanguageChange={handleQwen3LanguageChange}
           qwen3Instruct={qwen3Instruct}
           onQwen3InstructChange={handleQwen3InstructChange}

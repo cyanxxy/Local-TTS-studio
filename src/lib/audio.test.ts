@@ -70,6 +70,19 @@ describe("buildWavHeader", () => {
     // 36 + (5 * 4) = 56
     expect(view.getUint32(4, true)).toBe(56);
   });
+
+  it("calculates byte rate and block align with channel count", () => {
+    const view = new DataView(buildWavHeader(5, 24000, "pcm16", 2));
+    expect(view.getUint16(22, true)).toBe(2);
+    expect(view.getUint32(28, true)).toBe(24000 * 2 * 2);
+    expect(view.getUint16(32, true)).toBe(4);
+    expect(view.getUint32(40, true)).toBe(5 * 2 * 2);
+  });
+
+  it("rejects invalid WAV channel counts", () => {
+    expect(() => buildWavHeader(5, 24000, "float32", 0)).toThrow("channel count");
+    expect(() => buildWavHeader(5, 24000, "float32", 1.5)).toThrow("channel count");
+  });
 });
 
 describe("createWavBlob", () => {
@@ -96,6 +109,17 @@ describe("createWavBlob", () => {
     const chunk = new Float32Array([0.25, -0.25, 0]);
     const blob = createWavBlob([chunk], 24000, { encoding: "pcm24" });
     expect(blob.size).toBe(44 + (3 * 3));
+  });
+
+  it("creates stereo WAV blobs from interleaved samples", () => {
+    const chunk = new Float32Array([0.25, -0.25, 0.5, -0.5]);
+    const blob = createWavBlob([chunk], 24000, { encoding: "pcm16", channelCount: 2 });
+    expect(blob.size).toBe(44 + (4 * 2));
+  });
+
+  it("rejects interleaved sample data that does not fit the channel count", () => {
+    const chunk = new Float32Array([0.25, -0.25, 0.5]);
+    expect(() => createWavBlob([chunk], 24000, { channelCount: 2 })).toThrow("divisible");
   });
 });
 

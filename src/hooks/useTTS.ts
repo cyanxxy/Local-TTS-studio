@@ -65,6 +65,7 @@ export function useTTS({
   const activeWorkerRef = useRef<Worker | null>(null);
   const listenerWorkerRef = useRef<Worker | null>(null);
   const listenerRef = useRef<((e: MessageEvent<WorkerOutMessage>) => void) | null>(null);
+  const generationSeqRef = useRef(0);
 
   const cleanup = useCallback(() => {
     if (listenerWorkerRef.current && listenerRef.current) {
@@ -94,9 +95,14 @@ export function useTTS({
       inputCharsRef.current = Math.max(1, text.trim().length);
       generatedAudioSecsRef.current = 0;
       activeWorkerRef.current = worker;
+      generationSeqRef.current += 1;
+      const generationId = `browser-${generationSeqRef.current}`;
 
       const handleMessage = (e: MessageEvent<WorkerOutMessage>) => {
         const msg = e.data;
+        if ("generationId" in msg && msg.generationId !== undefined && msg.generationId !== generationId) {
+          return;
+        }
 
         switch (msg.type) {
           case "AUDIO_CHUNK": {
@@ -148,6 +154,7 @@ export function useTTS({
 
       const message: WorkerInMessage = {
         type: "GENERATE",
+        generationId,
         text,
         voice,
         speed: settings.speed,

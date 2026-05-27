@@ -6,6 +6,7 @@ import {
   clearPersistentCacheStorage,
   getPersistentCacheNames,
 } from "./persistentCache";
+import { resetTransformersCacheInitialization } from "./transformersCache";
 
 export interface ClearModelCacheResult {
   deletedKeys: string[];
@@ -74,6 +75,7 @@ export async function clearModelCache(): Promise<ClearModelCacheResult> {
     ...clearedIndexedDbCaches.map(toIndexedDbLabel),
   );
 
+  resetTransformersCacheInitialization();
   return { deletedKeys: Array.from(new Set(deletedKeys)) };
 }
 
