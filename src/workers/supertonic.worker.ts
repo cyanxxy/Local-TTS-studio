@@ -279,11 +279,12 @@ async function disposeSupertonicPipeline(instance: TextToAudioPipeline | null): 
 async function createPipelineWithFallback(
   progressMap: Map<string, number>,
   debugProfiling: boolean,
+  backends: readonly InferenceBackend[] = BACKENDS,
 ): Promise<{ pipeline: TextToAudioPipeline; backend: InferenceBackend }> {
   await initializeTransformersCache();
   let lastError: unknown = null;
 
-  for (const backend of BACKENDS) {
+  for (const backend of backends) {
     try {
       configureDebugProfiling(debugProfiling && backend === "webgpu");
       configureTransformersOnnxRuntime(env, TRANSFORMERS_ONNX_WASM_ASSETS, {
@@ -317,6 +318,20 @@ async function createPipelineWithFallback(
 
 function getTaggedText(text: string): string {
   return `<en>${text}</en>`;
+}
+
+async function warmUpPipeline(
+  instance: TextToAudioPipeline,
+  speakerEmbeddings: Float32Array,
+): Promise<void> {
+  // Warm up — compiles WebGPU shaders on first run.
+  // Use 1 step to minimize warmup time (the denoiser shader is the same
+  // regardless of step count, so a single pass is sufficient).
+  await instance(getTaggedText("Hello"), {
+    speaker_embeddings: createSpeakerEmbeddingsTensor(speakerEmbeddings),
+    num_inference_steps: 1,
+    speed: 1.0,
+  });
 }
 
 function appendPauseToAudio(
@@ -406,25 +421,42 @@ async function loadModel(
 
     postLoadProgress(0);
     const progressMap = new Map<string, number>();
-    const loaded = await createPipelineWithFallback(progressMap, debugProfiling);
+    let loaded = await createPipelineWithFallback(progressMap, debugProfiling);
     nextTts = loaded.pipeline;
-    const nextBackend = loaded.backend;
+    let nextBackend = loaded.backend;
     perf.mark("pipelineReady");
     supertonicStyleDim = getSupertonicStyleDim(nextTts);
 
     postLoadProgress(PIPELINE_PROGRESS_MAX);
-    const speakerEmbeddings = await preloadPreferredVoice(preferredVoice);
+    let speakerEmbeddings = await preloadPreferredVoice(preferredVoice);
     perf.mark("voicePreloadReady");
     postLoadProgress(WARMUP_PROGRESS_PERCENT);
 
-    // Warm up — compiles WebGPU shaders on first run.
-    // Use 1 step to minimize warmup time (the denoiser shader is the same
-    // regardless of step count, so a single pass is sufficient).
-    await nextTts(getTaggedText("Hello"), {
-      speaker_embeddings: createSpeakerEmbeddingsTensor(speakerEmbeddings),
-      num_inference_steps: 1,
-      speed: 1.0,
-    });
+    try {
+      await warmUpPipeline(nextTts, speakerEmbeddings);
+    } catch (warmupError) {
+      if (nextBackend !== "webgpu") {
+        throw warmupError;
+      }
+
+      await disposeSupertonicPipeline(nextTts);
+      nextTts = null;
+      supertonicStyleDim = null;
+      progressMap.clear();
+      postLoadProgress(0);
+
+      loaded = await createPipelineWithFallback(progressMap, debugProfiling, ["wasm"]);
+      nextTts = loaded.pipeline;
+      nextBackend = loaded.backend;
+      perf.mark("pipelineReady");
+      supertonicStyleDim = getSupertonicStyleDim(nextTts);
+
+      postLoadProgress(PIPELINE_PROGRESS_MAX);
+      speakerEmbeddings = await preloadPreferredVoice(preferredVoice);
+      perf.mark("voicePreloadReady");
+      postLoadProgress(WARMUP_PROGRESS_PERCENT);
+      await warmUpPipeline(nextTts, speakerEmbeddings);
+    }
     postLoadProgress(EMBEDDINGS_READY_PROGRESS);
     perf.mark("warmupReady");
 

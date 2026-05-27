@@ -18,6 +18,7 @@ interface MockPipelineInstance extends ReturnType<typeof vi.fn> {
 
 interface LoadWorkerModuleOptions {
   allowRemoteModels?: boolean;
+  canInitializeWebGPU?: boolean;
   chunkTexts?: string[];
   fetchMode?: "valid" | "invalid";
   pipelineInstances?: MockPipelineInstance[];
@@ -66,6 +67,7 @@ async function flushPromises(): Promise<void> {
 
 async function loadWorkerModule({
   allowRemoteModels = true,
+  canInitializeWebGPU = false,
   chunkTexts = ["First sentence.", "Second sentence.", "Third sentence."],
   fetchMode = "valid",
   pipelineInstances,
@@ -143,7 +145,7 @@ async function loadWorkerModule({
   }));
 
   vi.doMock("../lib/webgpu", () => ({
-    canInitializeWebGPU: vi.fn(async () => false),
+    canInitializeWebGPU: vi.fn(async () => canInitializeWebGPU),
   }));
 
   vi.doMock("../lib/onnxRuntime", () => ({
@@ -271,6 +273,29 @@ describe("supertonic.worker", () => {
     });
 
     expect(failingInstance.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back to wasm when WebGPU warmup inference fails", async () => {
+    const webgpuCalls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const wasmCalls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const webgpuInstance = createPipelineInstance([new Error("webgpu warmup failed")], webgpuCalls);
+    const wasmInstance = createPipelineInstance([createRawAudio()], wasmCalls);
+
+    const { dispatch, postedMessages } = await loadWorkerModule({
+      canInitializeWebGPU: true,
+      pipelineInstances: [webgpuInstance, wasmInstance],
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => {
+      expect(postedMessages.some((message) => message.type === "READY" && message.backend === "wasm")).toBe(true);
+    });
+
+    expect(webgpuInstance.dispose).toHaveBeenCalledTimes(1);
+    expect(wasmInstance.dispose).not.toHaveBeenCalled();
+    expect(webgpuCalls[0]?.text).toBe("<en>Hello</en>");
+    expect(wasmCalls[0]?.text).toBe("<en>Hello</en>");
+    expect(postedMessages.some((message) => message.type === "ERROR")).toBe(false);
   });
 
   it("sends batch-safe speaker embeddings once batching becomes active", async () => {

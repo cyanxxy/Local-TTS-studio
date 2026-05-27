@@ -332,6 +332,31 @@ def array_to_wav_base64(audio: Any, sample_rate: int) -> str:
         return base64.b64encode(wav_buffer.getvalue()).decode("ascii")
 
 
+def parse_sample_rate(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        sample_rate = value
+    elif isinstance(value, float) and value.is_integer():
+        sample_rate = int(value)
+    else:
+        return None
+
+    return sample_rate if sample_rate > 0 else None
+
+
+def require_sample_rate(runtime_name: str, *candidates: Any) -> int:
+    for candidate in candidates:
+        sample_rate = parse_sample_rate(candidate)
+        if sample_rate is not None:
+            return sample_rate
+
+    raise RuntimeError(
+        f"{runtime_name} runtime did not expose a valid positive integer sample_rate."
+    )
+
+
 def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
     if not is_neutts_python_compatible():
         raise RuntimeError("NeuTTS requires Python <3.14. Choose a Python 3.10-3.13 executable.")
@@ -382,7 +407,7 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
         ref_codes = tts.encode_reference(temp_path)
         emit_progress("inference", "Running NeuTTS inference...", started_at=started)
         wav = tts.infer(text, ref_codes, ref_text)
-        sample_rate = int(getattr(tts, "sample_rate", 24000))
+        sample_rate = require_sample_rate("NeuTTS", getattr(tts, "sample_rate", None))
         emit_progress("output_encoding", "Encoding generated WAV output...", started_at=started)
 
         return {
@@ -449,7 +474,7 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
             show_info=False,
         )
 
-    wav, _ = tts.generate(
+    wav, generated_sample_rate = tts.generate(
         text,
         language_tag=language_tag,
         temperature=temperature,
@@ -457,7 +482,11 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
         repetition_penalty=repetition_penalty,
     )
 
-    sample_rate = int(getattr(tts, "sample_rate", 22050))
+    sample_rate = require_sample_rate(
+        "Kani-TTS-2",
+        generated_sample_rate,
+        getattr(tts, "sample_rate", None),
+    )
 
     return {
         "wavBase64": array_to_wav_base64(wav, sample_rate),
