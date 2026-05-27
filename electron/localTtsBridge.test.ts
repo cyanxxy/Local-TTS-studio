@@ -154,6 +154,75 @@ if result["sampleRate"] != 44100:
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);
   });
 
+  it.runIf(HAS_SYSTEM_PYTHON)("uses the sample rate returned by Qwen3 generation", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.array_to_wav_base64 = lambda _audio, _sample_rate: "UklGRg=="
+
+class FakeCuda:
+    @staticmethod
+    def is_available():
+        return True
+
+torch_module = types.ModuleType("torch")
+torch_module.cuda = FakeCuda()
+torch_module.bfloat16 = "bfloat16"
+torch_module.float16 = "float16"
+torch_module.float32 = "float32"
+sys.modules["torch"] = torch_module
+
+class FakeQwen3TTSModel:
+    loaded_kwargs = None
+    generated_kwargs = None
+
+    @classmethod
+    def from_pretrained(cls, _model_repo, **kwargs):
+        cls.loaded_kwargs = kwargs
+        return cls()
+
+    def generate_custom_voice(self, **kwargs):
+        FakeQwen3TTSModel.generated_kwargs = kwargs
+        return [[0.0, 0.1]], 24000
+
+    def get_supported_speakers(self):
+        return ["Ryan", "Aiden"]
+
+module = types.ModuleType("qwen_tts")
+module.Qwen3TTSModel = FakeQwen3TTSModel
+sys.modules["qwen_tts"] = module
+
+result = bridge.generate_qwen3({
+    "text": "Hello from Qwen.",
+    "speaker": "Aiden",
+    "language": "English",
+    "deviceMap": "cuda:0",
+    "dtype": "bfloat16",
+    "attnImplementation": "flash_attention_2",
+    "temperature": 0.75,
+    "topP": 0.9,
+    "maxNewTokens": 512,
+})
+if result["sampleRate"] != 24000:
+    raise AssertionError(f"Expected Qwen3 sampleRate 24000, got {result['sampleRate']}")
+if FakeQwen3TTSModel.loaded_kwargs["device_map"] != "cuda:0":
+    raise AssertionError("Qwen3 device_map was not forwarded")
+if FakeQwen3TTSModel.generated_kwargs["speaker"] != "Aiden":
+    raise AssertionError("Qwen3 speaker was not forwarded")
+if FakeQwen3TTSModel.generated_kwargs["top_p"] != 0.9:
+    raise AssertionError("Qwen3 top_p was not forwarded")
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
   it.runIf(RUN_LOCAL_BRIDGE_TESTS)("reports NeuTTS compatibility metadata during probe", () => {
     const completed = runNeuttsBridge("probe");
 

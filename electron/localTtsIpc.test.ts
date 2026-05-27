@@ -47,6 +47,7 @@ describe("localTtsIpc sender and primitive parsers", () => {
   it("validates local model identifiers and records", () => {
     expect(assertLocalModel("neutts")).toBe("neutts");
     expect(assertLocalModel("kani")).toBe("kani");
+    expect(assertLocalModel("qwen3")).toBe("qwen3");
     expect(() => assertLocalModel("remote")).toThrow("Unsupported local model");
     expect(isRecord({ ok: true })).toBe(true);
     expect(isRecord(null)).toBe(false);
@@ -163,8 +164,44 @@ describe("localTtsIpc request sanitizers", () => {
     })).toThrow("Unsupported NeuTTS codec");
   });
 
+  it("sanitizes Qwen3 generate payloads", () => {
+    expect(sanitizeGeneratePayload("qwen3", {
+      text: "  Hello from Qwen3. ",
+      modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      speaker: "Ryan",
+      language: "English",
+      instruct: " Calm and warm. ",
+      deviceMap: "CUDA:0",
+      dtype: "BFLOAT16",
+      attnImplementation: "flash_attention_2",
+      temperature: 0.8,
+      topP: 0.95,
+      maxNewTokens: 2048,
+    })).toEqual({
+      text: "Hello from Qwen3.",
+      modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      speaker: "Ryan",
+      language: "English",
+      instruct: "Calm and warm.",
+      deviceMap: "cuda:0",
+      dtype: "bfloat16",
+      attnImplementation: "flash_attention_2",
+      temperature: 0.8,
+      topP: 0.95,
+      maxNewTokens: 2048,
+    });
+
+    expect(() => sanitizeGeneratePayload("qwen3", null)).toThrow("Qwen3 payload");
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", modelRepo: "bad/repo" })).toThrow("Unsupported Qwen3-TTS model");
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", speaker: "Unknown" })).toThrow("Unsupported Qwen3-TTS speaker");
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", language: "Dutch" })).toThrow("Unsupported Qwen3-TTS language");
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", deviceMap: "../bad" })).toThrow("invalid format");
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", dtype: "int8" })).toThrow("Unsupported Qwen3-TTS dtype");
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", attnImplementation: "bad" })).toThrow("Unsupported Qwen3-TTS attention");
+  });
+
   it("sanitizes cache and cancel requests", () => {
-    expect(sanitizeCacheRequest({ model: "kani" })).toEqual({ model: "kani" });
+    expect(sanitizeCacheRequest({ model: "qwen3" })).toEqual({ model: "qwen3" });
     expect(sanitizeCancelRequest({ model: "neutts", requestId: "abc-123" })).toEqual({
       model: "neutts",
       requestId: "abc-123",

@@ -528,7 +528,7 @@ export default function App() {
               { label: "GitHub", href: "https://github.com/neuphonic/neutts" },
             ]}
           />
-        ) : (
+        ) : activePage === "kani" ? (
           <LocalRuntimePage
             model="kani"
             name="Kani-TTS-2 (nineninesix)"
@@ -542,6 +542,23 @@ export default function App() {
             links={[
               { label: "HF Model", href: "https://huggingface.co/nineninesix/kani-tts-2-en" },
               { label: "GitHub", href: "https://github.com/nineninesix-ai/kani-tts-2" },
+            ]}
+          />
+        ) : (
+          <LocalRuntimePage
+            model="qwen3"
+            name="Qwen3-TTS 12Hz CustomVoice"
+            releaseDate="January 29, 2026"
+            params="~1.9B"
+            highlights={[
+              "CustomVoice model with nine built-in premium speakers and instruction-guided style control.",
+              "Supports Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.",
+              "Runs through the Electron Python bridge because the released model ships qwen-tts/safetensors assets, not browser ONNX artifacts.",
+            ]}
+            links={[
+              { label: "HF Model", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" },
+              { label: "HF Tokenizer", href: "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz" },
+              { label: "GitHub", href: "https://github.com/QwenLM/Qwen3-TTS" },
             ]}
           />
         )}

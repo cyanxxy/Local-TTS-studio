@@ -9,7 +9,16 @@ import type {
 import { LocalRuntimeModelInputs } from "./localRuntime/LocalRuntimeModelInputs";
 import { LocalRuntimeRuntimeSettings } from "./localRuntime/LocalRuntimeRuntimeSettings";
 import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
-import { KANI_OPTIONS, NEUTTS_OPTIONS } from "./localRuntime/modelOptions";
+import {
+  KANI_OPTIONS,
+  NEUTTS_OPTIONS,
+  QWEN3_ATTENTION_OPTIONS,
+  QWEN3_DEVICE_OPTIONS,
+  QWEN3_DTYPE_OPTIONS,
+  QWEN3_LANGUAGE_OPTIONS,
+  QWEN3_OPTIONS,
+  QWEN3_SPEAKER_OPTIONS,
+} from "./localRuntime/modelOptions";
 import {
   arrayBufferToBase64,
   getNeuttsReferenceGuidance,
@@ -64,6 +73,16 @@ export function LocalRuntimePage({
   const [topP, setTopP] = useState(0.95);
   const [repetitionPenalty, setRepetitionPenalty] = useState(1.1);
   const [maxNewTokens, setMaxNewTokens] = useState(3000);
+  const [qwen3Model, setQwen3Model] = useState(QWEN3_OPTIONS[0].value);
+  const [qwen3Speaker, setQwen3Speaker] = useState(QWEN3_SPEAKER_OPTIONS[0].value);
+  const [qwen3Language, setQwen3Language] = useState(QWEN3_LANGUAGE_OPTIONS[0].value);
+  const [qwen3Instruct, setQwen3Instruct] = useState("");
+  const [qwen3DeviceMap, setQwen3DeviceMap] = useState(QWEN3_DEVICE_OPTIONS[0].value);
+  const [qwen3Dtype, setQwen3Dtype] = useState(QWEN3_DTYPE_OPTIONS[0].value);
+  const [qwen3Attention, setQwen3Attention] = useState(QWEN3_ATTENTION_OPTIONS[0].value);
+  const [qwen3Temperature, setQwen3Temperature] = useState(0.8);
+  const [qwen3TopP, setQwen3TopP] = useState(0.95);
+  const [qwen3MaxNewTokens, setQwen3MaxNewTokens] = useState(2048);
 
   const [generateBusy, setGenerateBusy] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<LocalTtsProgressEvent | null>(null);
@@ -301,6 +320,56 @@ export function LocalRuntimePage({
     setMaxNewTokens(nextMaxNewTokens);
   }, [invalidateGeneration]);
 
+  const handleQwen3ModelChange = useCallback((nextModel: string) => {
+    invalidateGeneration();
+    setQwen3Model(nextModel);
+  }, [invalidateGeneration]);
+
+  const handleQwen3SpeakerChange = useCallback((nextSpeaker: string) => {
+    invalidateGeneration();
+    setQwen3Speaker(nextSpeaker);
+  }, [invalidateGeneration]);
+
+  const handleQwen3LanguageChange = useCallback((nextLanguage: string) => {
+    invalidateGeneration();
+    setQwen3Language(nextLanguage);
+  }, [invalidateGeneration]);
+
+  const handleQwen3InstructChange = useCallback((nextInstruct: string) => {
+    invalidateGeneration();
+    setQwen3Instruct(nextInstruct);
+  }, [invalidateGeneration]);
+
+  const handleQwen3DeviceMapChange = useCallback((nextDeviceMap: string) => {
+    invalidateGeneration();
+    setQwen3DeviceMap(nextDeviceMap);
+  }, [invalidateGeneration]);
+
+  const handleQwen3DtypeChange = useCallback((nextDtype: string) => {
+    invalidateGeneration();
+    setQwen3Dtype(nextDtype);
+  }, [invalidateGeneration]);
+
+  const handleQwen3AttentionChange = useCallback((nextAttention: string) => {
+    invalidateGeneration();
+    setQwen3Attention(nextAttention);
+  }, [invalidateGeneration]);
+
+  const handleQwen3TemperatureChange = useCallback((nextTemperature: number) => {
+    invalidateGeneration();
+    setQwen3Temperature(nextTemperature);
+  }, [invalidateGeneration]);
+
+  const handleQwen3TopPChange = useCallback((nextTopP: number) => {
+    invalidateGeneration();
+    setQwen3TopP(nextTopP);
+  }, [invalidateGeneration]);
+
+  const handleQwen3MaxNewTokensChange = useCallback((nextMaxNewTokens: number) => {
+    invalidateGeneration();
+    setQwen3MaxNewTokens(nextMaxNewTokens);
+  }, [invalidateGeneration]);
+
   const handlePythonOverrideChange = useCallback((nextPythonOverride: string) => {
     runtimeVersionRef.current += 1;
     invalidateGeneration({ runtimeChanged: true });
@@ -366,6 +435,17 @@ export function LocalRuntimePage({
         payload.modelRepo = neuttsModel;
         payload.referenceText = referenceText.trim();
         payload.referenceAudioBase64 = referenceAudioBase64;
+      } else if (model === "qwen3") {
+        payload.modelRepo = qwen3Model;
+        payload.speaker = qwen3Speaker;
+        payload.language = qwen3Language;
+        payload.instruct = qwen3Instruct.trim() || undefined;
+        payload.deviceMap = qwen3DeviceMap;
+        payload.dtype = qwen3Dtype;
+        payload.attnImplementation = qwen3Attention;
+        payload.temperature = qwen3Temperature;
+        payload.topP = qwen3TopP;
+        payload.maxNewTokens = qwen3MaxNewTokens;
       } else {
         payload.modelRepo = kaniModel;
         payload.languageTag = languageTag.trim() || undefined;
@@ -419,6 +499,16 @@ export function LocalRuntimePage({
     model,
     neuttsModel,
     pythonOverride,
+    qwen3Attention,
+    qwen3DeviceMap,
+    qwen3Dtype,
+    qwen3Instruct,
+    qwen3Language,
+    qwen3MaxNewTokens,
+    qwen3Model,
+    qwen3Speaker,
+    qwen3Temperature,
+    qwen3TopP,
     referenceAudioBase64,
     referenceText,
     refreshCacheInfo,
@@ -500,7 +590,7 @@ export function LocalRuntimePage({
           />
         </div>
 
-        {model === "neutts" && (
+        {(model === "neutts" || model === "qwen3") && (
           <LocalRuntimeRuntimeSettings
             modelName={name}
             onRecheckRuntime={() => { void runProbe(); }}
@@ -508,6 +598,8 @@ export function LocalRuntimePage({
             pythonOverride={pythonOverride}
             runtime={runtime}
             runtimeBusy={runtimeBusy}
+            showCompatibility={model === "neutts"}
+            showEspeak={model === "neutts"}
           />
         )}
 
@@ -532,6 +624,26 @@ export function LocalRuntimePage({
           onRepetitionPenaltyChange={handleRepetitionPenaltyChange}
           maxNewTokens={maxNewTokens}
           onMaxNewTokensChange={handleMaxNewTokensChange}
+          qwen3Model={qwen3Model}
+          onQwen3ModelChange={handleQwen3ModelChange}
+          qwen3Speaker={qwen3Speaker}
+          onQwen3SpeakerChange={handleQwen3SpeakerChange}
+          qwen3Language={qwen3Language}
+          onQwen3LanguageChange={handleQwen3LanguageChange}
+          qwen3Instruct={qwen3Instruct}
+          onQwen3InstructChange={handleQwen3InstructChange}
+          qwen3DeviceMap={qwen3DeviceMap}
+          onQwen3DeviceMapChange={handleQwen3DeviceMapChange}
+          qwen3Dtype={qwen3Dtype}
+          onQwen3DtypeChange={handleQwen3DtypeChange}
+          qwen3Attention={qwen3Attention}
+          onQwen3AttentionChange={handleQwen3AttentionChange}
+          qwen3Temperature={qwen3Temperature}
+          onQwen3TemperatureChange={handleQwen3TemperatureChange}
+          qwen3TopP={qwen3TopP}
+          onQwen3TopPChange={handleQwen3TopPChange}
+          qwen3MaxNewTokens={qwen3MaxNewTokens}
+          onQwen3MaxNewTokensChange={handleQwen3MaxNewTokensChange}
         />
 
         {generateBusy && generationProgress && (

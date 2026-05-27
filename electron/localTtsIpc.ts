@@ -3,7 +3,7 @@ import { isAllowedAppUrl } from "./security";
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
 export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
-export const LOCAL_MODELS = ["neutts", "kani"] as const;
+export const LOCAL_MODELS = ["neutts", "kani", "qwen3"] as const;
 
 const MAX_GENERATED_AUDIO_BASE64_LENGTH = 100_000_000;
 const MAX_TEXT_LENGTH = 6000;
@@ -19,6 +19,50 @@ const ALLOWED_NEUTTS_MODELS = new Set([
 
 const ALLOWED_KANI_MODELS = new Set([
   "nineninesix/kani-tts-2-en",
+]);
+
+const ALLOWED_QWEN3_MODELS = new Set([
+  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+]);
+
+const ALLOWED_QWEN3_SPEAKERS = new Set([
+  "Vivian",
+  "Serena",
+  "Uncle_Fu",
+  "Dylan",
+  "Eric",
+  "Ryan",
+  "Aiden",
+  "Ono_Anna",
+  "Sohee",
+]);
+
+const ALLOWED_QWEN3_LANGUAGES = new Set([
+  "Auto",
+  "Chinese",
+  "English",
+  "Japanese",
+  "Korean",
+  "German",
+  "French",
+  "Russian",
+  "Portuguese",
+  "Spanish",
+  "Italian",
+]);
+
+const ALLOWED_QWEN3_DTYPES = new Set([
+  "auto",
+  "bfloat16",
+  "float16",
+  "float32",
+]);
+
+const ALLOWED_QWEN3_ATTENTION = new Set([
+  "auto",
+  "flash_attention_2",
+  "sdpa",
+  "eager",
 ]);
 
 const ALLOWED_NEUTTS_CODECS = new Set([
@@ -255,10 +299,65 @@ export function sanitizeKaniPayload(payload: unknown): Record<string, unknown> {
   };
 }
 
+export function sanitizeQwen3Payload(payload: unknown): Record<string, unknown> {
+  if (!isRecord(payload)) throw new Error("Qwen3 payload must be an object.");
+
+  const text = parseRequiredText(payload.text, "text");
+  const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
+  if (modelRepo && !ALLOWED_QWEN3_MODELS.has(modelRepo)) {
+    throw new Error("Unsupported Qwen3-TTS model repository.");
+  }
+
+  const speaker = parseOptionalString(payload.speaker, "speaker", { maxLength: 64 });
+  if (speaker && !ALLOWED_QWEN3_SPEAKERS.has(speaker)) {
+    throw new Error("Unsupported Qwen3-TTS speaker.");
+  }
+
+  const language = parseOptionalString(payload.language, "language", { maxLength: 32 });
+  if (language && !ALLOWED_QWEN3_LANGUAGES.has(language)) {
+    throw new Error("Unsupported Qwen3-TTS language.");
+  }
+
+  const instruct = parseOptionalString(payload.instruct, "instruct", { maxLength: 1000 });
+
+  const deviceMap = parseOptionalString(payload.deviceMap, "deviceMap", {
+    maxLength: 32,
+    pattern: /^(auto|cpu|mps|cuda(?::\d+)?)$/i,
+  })?.toLowerCase();
+
+  const dtype = parseOptionalString(payload.dtype, "dtype", { maxLength: 16 })?.toLowerCase();
+  if (dtype && !ALLOWED_QWEN3_DTYPES.has(dtype)) {
+    throw new Error("Unsupported Qwen3-TTS dtype.");
+  }
+
+  const attnImplementation = parseOptionalString(payload.attnImplementation, "attnImplementation", { maxLength: 32 });
+  if (attnImplementation && !ALLOWED_QWEN3_ATTENTION.has(attnImplementation)) {
+    throw new Error("Unsupported Qwen3-TTS attention implementation.");
+  }
+
+  const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
+  const topP = parseOptionalNumber(payload.topP, "topP", { min: 0.5, max: 1.0 });
+  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 4096 });
+
+  return {
+    text,
+    modelRepo,
+    speaker,
+    language,
+    instruct,
+    deviceMap,
+    dtype,
+    attnImplementation,
+    temperature,
+    topP,
+    maxNewTokens,
+  };
+}
+
 export function sanitizeGeneratePayload(model: LocalModel, payload: unknown): Record<string, unknown> {
-  return model === "neutts"
-    ? sanitizeNeuttsPayload(payload)
-    : sanitizeKaniPayload(payload);
+  if (model === "neutts") return sanitizeNeuttsPayload(payload);
+  if (model === "qwen3") return sanitizeQwen3Payload(payload);
+  return sanitizeKaniPayload(payload);
 }
 
 export function sanitizeCacheRequest(request: unknown): CacheRequest {

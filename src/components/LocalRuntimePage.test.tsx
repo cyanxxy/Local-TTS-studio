@@ -470,6 +470,97 @@ describe("LocalRuntimePage", () => {
     });
   });
 
+  it("generates Qwen3 audio with speaker, language, and runtime options", async () => {
+    probe.mockResolvedValue({
+      ready: true,
+      message: "Qwen3-TTS runtime is ready.",
+      pythonVersion: "3.12.4",
+      pythonBinary: "/qwen/bin/python",
+      resolvedFrom: "appPath:.venv-qwen3",
+      package: "qwen-tts",
+      packageVersion: "1.0.0",
+      warnings: ["CUDA was not detected."],
+    } satisfies LocalTtsProbeResult);
+    getCacheInfo.mockResolvedValue({
+      path: "/cache/qwen3",
+      exists: true,
+      sizeBytes: 4096,
+    } satisfies LocalTtsCacheInfo);
+    generate.mockResolvedValue({
+      ...baseGenerateResult,
+      modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+      speakerStatus: "Aiden · English",
+      speakers: ["Ryan", "Aiden"],
+    } satisfies LocalTtsGenerateResult);
+
+    renderPage({
+      model: "qwen3",
+      name: "Qwen3-TTS",
+      links: [{ label: "HF Model", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" }],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+    });
+
+    expect(screen.getByPlaceholderText("/absolute/path/to/python")).toBeInTheDocument();
+    expect(screen.getByText("Qwen3-TTS runtime is ready.")).toBeInTheDocument();
+    expect(screen.getAllByText("CUDA was not detected.")).toHaveLength(2);
+
+    fireEvent.change(screen.getByLabelText(/^speaker$/i), {
+      target: { value: "Aiden" },
+    });
+    fireEvent.change(screen.getByLabelText(/^language$/i), {
+      target: { value: "English" },
+    });
+    fireEvent.change(screen.getByLabelText(/^device map$/i), {
+      target: { value: "cpu" },
+    });
+    fireEvent.change(screen.getByLabelText(/^dtype$/i), {
+      target: { value: "float32" },
+    });
+    fireEvent.change(screen.getByLabelText(/^attention$/i), {
+      target: { value: "eager" },
+    });
+    fireEvent.change(screen.getByLabelText(/instruction/i), {
+      target: { value: "Speak warmly with a calm documentary narration style." },
+    });
+    fireEvent.change(screen.getByLabelText(/^temperature$/i), {
+      target: { value: "0.75" },
+    });
+    fireEvent.change(screen.getByLabelText(/^top-p$/i), {
+      target: { value: "0.88" },
+    });
+    fireEvent.change(screen.getByLabelText(/^max tokens$/i), {
+      target: { value: "2304" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+
+    await waitFor(() => {
+      expect(generate).toHaveBeenCalledTimes(1);
+      expect(screen.getByText("Output Audio")).toBeInTheDocument();
+    });
+
+    expect(generate.mock.calls[0][0]).toMatchObject({
+      model: "qwen3",
+      pythonBinary: undefined,
+      payload: {
+        modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        speaker: "Aiden",
+        language: "English",
+        instruct: "Speak warmly with a calm documentary narration style.",
+        deviceMap: "cpu",
+        dtype: "float32",
+        attnImplementation: "eager",
+        temperature: 0.75,
+        topP: 0.88,
+        maxNewTokens: 2304,
+      },
+    });
+    expect(screen.getByText(/Qwen\/Qwen3-TTS-12Hz-1\.7B-CustomVoice/)).toBeInTheDocument();
+  });
+
   it("handles runtime startup errors", async () => {
     probe.mockRejectedValueOnce(new Error("runtime missing"));
     getCacheInfo.mockRejectedValueOnce(new Error("cache unavailable"));

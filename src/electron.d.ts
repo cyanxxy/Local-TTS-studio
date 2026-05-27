@@ -1,4 +1,4 @@
-export type LocalTtsModel = "neutts" | "kani";
+export type LocalTtsModel = "neutts" | "kani" | "qwen3";
 
 export interface LocalTtsProbeResult {
   ready: boolean;

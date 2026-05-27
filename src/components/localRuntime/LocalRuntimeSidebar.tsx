@@ -48,7 +48,7 @@ export function LocalRuntimeSidebar({
             {runtime.package && <p>Package: {runtime.package}{runtime.packageVersion ? ` ${runtime.packageVersion}` : ""}</p>}
             {runtime.compatibilityMode && <p>Mode: {runtime.compatibilityMode}</p>}
             {runtime.requiresPython && <p>Requirement: {runtime.requiresPython}</p>}
-            <p>espeak-ng: {runtime.espeakVersion ?? "Not detected"}</p>
+            {runtime.espeakVersion != null && <p>espeak-ng: {runtime.espeakVersion}</p>}
             {runtime.warnings?.map((warning) => (
               <p key={warning} className="text-warning">{warning}</p>
             ))}

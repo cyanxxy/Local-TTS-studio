@@ -167,7 +167,18 @@ function getAutoPythonCandidates(model: LocalModel): AutoPythonCandidate[] {
     candidates.push({ binary: value, resolvedFrom });
   };
 
-  append(model === "neutts" ? process.env.TTS_NEUTTS_PYTHON_BIN : process.env.TTS_KANI_PYTHON_BIN, model === "neutts" ? "TTS_NEUTTS_PYTHON_BIN" : "TTS_KANI_PYTHON_BIN");
+  const modelSpecificEnv = model === "neutts"
+    ? process.env.TTS_NEUTTS_PYTHON_BIN
+    : model === "qwen3"
+      ? process.env.TTS_QWEN3_PYTHON_BIN
+      : process.env.TTS_KANI_PYTHON_BIN;
+  const modelSpecificEnvName = model === "neutts"
+    ? "TTS_NEUTTS_PYTHON_BIN"
+    : model === "qwen3"
+      ? "TTS_QWEN3_PYTHON_BIN"
+      : "TTS_KANI_PYTHON_BIN";
+
+  append(modelSpecificEnv, modelSpecificEnvName);
   append(process.env.TTS_PYTHON_BIN, "TTS_PYTHON_BIN");
 
   const appendVenvCandidates = (envName: string) => {
@@ -181,6 +192,10 @@ function getAutoPythonCandidates(model: LocalModel): AutoPythonCandidate[] {
   if (model === "neutts") {
     appendVenvCandidates(".venv-neutts");
     appendVenvCandidates(".venv313");
+  } else if (model === "qwen3") {
+    appendVenvCandidates(".venv-qwen3");
+    appendVenvCandidates(".venv-qwen");
+    appendVenvCandidates(".venv312");
   } else {
     appendVenvCandidates(".venv-kani");
     appendVenvCandidates(".venv313");
@@ -278,7 +293,11 @@ async function assertPythonModelDependency(binary: string, model: LocalModel): P
         resolve();
         return;
       }
-      const missing = model === "neutts" ? "neutts (Python 3.10-3.13)" : "kani-tts-2";
+      const missing = model === "neutts"
+        ? "neutts (Python 3.10-3.13)"
+        : model === "qwen3"
+          ? "qwen-tts"
+          : "kani-tts-2";
       reject(new Error(`Interpreter is missing required package support for ${missing}. ${stderr.trim()}`.trim()));
     });
   });
@@ -350,10 +369,23 @@ async function sanitizePythonBinary(
     }
   }
 
-  const recommendedEnv = model === "neutts" ? ".venv-neutts" : ".venv313";
-  const installHint = model === "neutts" ? "neutts" : "kani-tts-2";
+  const recommendedEnv = model === "neutts"
+    ? ".venv-neutts"
+    : model === "qwen3"
+      ? ".venv-qwen3"
+      : ".venv313";
+  const installHint = model === "neutts"
+    ? "neutts"
+    : model === "qwen3"
+      ? "qwen-tts"
+      : "kani-tts-2";
+  const envHint = model === "neutts"
+    ? "TTS_NEUTTS_PYTHON_BIN"
+    : model === "qwen3"
+      ? "TTS_QWEN3_PYTHON_BIN"
+      : "TTS_KANI_PYTHON_BIN";
   throw new Error(
-    `No usable Python runtime found for ${model}. Install ${installHint} in ${recommendedEnv}, set the Python executable in the app, or use ${model === "neutts" ? "TTS_NEUTTS_PYTHON_BIN" : "TTS_KANI_PYTHON_BIN"}.`,
+    `No usable Python runtime found for ${model}. Install ${installHint} in ${recommendedEnv}, set the Python executable in the app, or use ${envHint}.`,
   );
 }
 

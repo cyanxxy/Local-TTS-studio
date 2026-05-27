@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
-type LocalModel = "neutts" | "kani";
+type LocalModel = "neutts" | "kani" | "qwen3";
 
 interface LocalBridgeRequest {
   model: LocalModel;

@@ -28,6 +28,33 @@ RESULT_PREFIX = "__RESULT__"
 PROGRESS_PREFIX = "__PROGRESS__"
 NEUTTS_MIN_PYTHON = (3, 10)
 NEUTTS_MAX_EXCLUSIVE_PYTHON = (3, 14)
+QWEN3_CUSTOM_VOICE_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+QWEN3_DEFAULT_SPEAKER = "Ryan"
+QWEN3_DEFAULT_LANGUAGE = "Auto"
+QWEN3_SPEAKERS = [
+    "Vivian",
+    "Serena",
+    "Uncle_Fu",
+    "Dylan",
+    "Eric",
+    "Ryan",
+    "Aiden",
+    "Ono_Anna",
+    "Sohee",
+]
+QWEN3_LANGUAGES = [
+    "Auto",
+    "Chinese",
+    "English",
+    "Japanese",
+    "Korean",
+    "German",
+    "French",
+    "Russian",
+    "Portuguese",
+    "Spanish",
+    "Italian",
+]
 
 
 @contextmanager
@@ -177,6 +204,28 @@ def detect_kani_transformers_version() -> str | None:
     return get_installed_package_version("transformers")
 
 
+def is_module_available(module_name: str) -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec(module_name) is not None
+
+
+def detect_qwen3_runtime() -> tuple[str | None, bool, bool, str | None]:
+    package_version = get_installed_package_version("qwen-tts")
+    torch_cuda_available = False
+    torch_version: str | None = None
+
+    try:
+        import torch
+
+        torch_cuda_available = bool(torch.cuda.is_available())
+        torch_version = getattr(torch, "__version__", None)
+    except Exception:
+        pass
+
+    return package_version, torch_cuda_available, is_module_available("flash_attn"), torch_version
+
+
 def decode_reference_audio(ref_audio_base64: Any) -> bytes:
     if not isinstance(ref_audio_base64, str) or not ref_audio_base64.strip():
         raise ValueError("Reference audio is required for NeuTTS voice cloning.")
@@ -306,6 +355,49 @@ def probe_kani() -> dict[str, Any]:
         "pythonVersion": sys.version.split()[0],
         "package": package_name,
         "packageVersion": package_version,
+    }
+
+
+def probe_qwen3() -> dict[str, Any]:
+    package_version, cuda_available, flash_attn_available, torch_version = detect_qwen3_runtime()
+    warnings: list[str] = []
+
+    try:
+        __import__("qwen_tts")
+    except Exception as exc:
+        return {
+            "ready": False,
+            "message": f"Failed to import qwen_tts: {exc}",
+            "pythonVersion": sys.version.split()[0],
+            "package": "qwen-tts",
+            "packageVersion": package_version,
+        }
+
+    try:
+        __import__("torch")
+    except Exception as exc:
+        return {
+            "ready": False,
+            "message": f"Qwen3-TTS requires torch in the selected Python environment: {exc}",
+            "pythonVersion": sys.version.split()[0],
+            "package": "qwen-tts",
+            "packageVersion": package_version,
+        }
+
+    if not cuda_available:
+        warnings.append("CUDA was not detected. Qwen3-TTS can attempt CPU/MPS generation, but the 1.7B model is expected to be slow and memory-heavy.")
+    if not flash_attn_available:
+        warnings.append("FlashAttention 2 was not detected. It is optional, but recommended by Qwen for lower GPU memory usage.")
+    if torch_version:
+        warnings.append(f"Detected torch {torch_version}.")
+
+    return {
+        "ready": True,
+        "message": "Qwen3-TTS runtime is ready.",
+        "pythonVersion": sys.version.split()[0],
+        "package": "qwen-tts",
+        "packageVersion": package_version,
+        "warnings": warnings,
     }
 
 
@@ -497,10 +589,111 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def parse_qwen3_dtype(dtype_name: str, cuda_available: bool) -> Any:
+    import torch
+
+    if dtype_name == "bfloat16":
+        return torch.bfloat16
+    if dtype_name == "float16":
+        return torch.float16
+    if dtype_name == "float32":
+        return torch.float32
+
+    return torch.bfloat16 if cuda_available else torch.float32
+
+
+def normalize_qwen3_choice(value: Any, choices: list[str], default: str) -> str:
+    if not isinstance(value, str):
+        return default
+    stripped = value.strip()
+    return stripped if stripped in choices else default
+
+
+def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise ValueError("Text is required.")
+
+    model_repo = str(payload.get("modelRepo") or QWEN3_CUSTOM_VOICE_REPO)
+    speaker = normalize_qwen3_choice(payload.get("speaker"), QWEN3_SPEAKERS, QWEN3_DEFAULT_SPEAKER)
+    language = normalize_qwen3_choice(payload.get("language"), QWEN3_LANGUAGES, QWEN3_DEFAULT_LANGUAGE)
+    instruct = str(payload.get("instruct") or "").strip()
+    dtype_name = str(payload.get("dtype") or "auto").strip().lower()
+    attn_implementation = str(payload.get("attnImplementation") or "auto").strip()
+
+    import torch
+    from qwen_tts import Qwen3TTSModel
+
+    cuda_available = bool(torch.cuda.is_available())
+    device_map = str(
+        payload.get("deviceMap")
+        or ("cuda:0" if cuda_available else "cpu")
+    ).strip().lower()
+    if device_map == "auto":
+        device_map = "cuda:0" if cuda_available else "cpu"
+
+    started = time.time()
+    emit_progress("model_load", f"Loading {model_repo} with {device_map}...", started_at=started)
+
+    load_kwargs: dict[str, Any] = {
+        "device_map": device_map,
+        "dtype": parse_qwen3_dtype(dtype_name, cuda_available),
+    }
+    if attn_implementation and attn_implementation != "auto":
+        load_kwargs["attn_implementation"] = attn_implementation
+
+    with swallow_stdout():
+        model = Qwen3TTSModel.from_pretrained(model_repo, **load_kwargs)
+
+    generation_kwargs: dict[str, Any] = {}
+    if isinstance(payload.get("maxNewTokens"), int):
+        generation_kwargs["max_new_tokens"] = int(payload["maxNewTokens"])
+    if isinstance(payload.get("temperature"), (int, float)):
+        generation_kwargs["temperature"] = float(payload["temperature"])
+    if isinstance(payload.get("topP"), (int, float)):
+        generation_kwargs["top_p"] = float(payload["topP"])
+
+    emit_progress("inference", f"Generating {language} speech with {speaker}...", started_at=started)
+    call_kwargs: dict[str, Any] = {
+        "text": text,
+        "language": language,
+        "speaker": speaker,
+        **generation_kwargs,
+    }
+    if instruct:
+        call_kwargs["instruct"] = instruct
+
+    wavs, sample_rate = model.generate_custom_voice(**call_kwargs)
+    if not wavs:
+        raise RuntimeError("Qwen3-TTS returned no audio.")
+    wav = wavs[0]
+
+    supported_speakers: list[str] = []
+    try:
+        maybe_speakers = model.get_supported_speakers()
+        if isinstance(maybe_speakers, list):
+            supported_speakers = [str(item) for item in maybe_speakers]
+    except Exception:
+        supported_speakers = QWEN3_SPEAKERS
+
+    sample_rate = require_sample_rate("Qwen3-TTS", sample_rate)
+    emit_progress("output_encoding", "Encoding generated WAV output...", started_at=started)
+
+    return {
+        "wavBase64": array_to_wav_base64(wav, sample_rate),
+        "sampleRate": sample_rate,
+        "modelRepo": model_repo,
+        "durationSec": len(wav) / sample_rate,
+        "elapsedSec": time.time() - started,
+        "speakerStatus": f"{speaker} · {language}",
+        "speakers": supported_speakers or QWEN3_SPEAKERS,
+    }
+
+
 def run() -> None:
     parser = argparse.ArgumentParser(description="Run local NeuTTS/Kani inference tasks.")
     parser.add_argument("--action", required=True, choices=["probe", "generate"])
-    parser.add_argument("--model", required=True, choices=["neutts", "kani"])
+    parser.add_argument("--model", required=True, choices=["neutts", "kani", "qwen3"])
     parser.add_argument("--cache-dir", required=True)
     args = parser.parse_args()
 
@@ -511,12 +704,19 @@ def run() -> None:
     payload = parse_stdin_payload()
 
     if args.action == "probe":
-        result = probe_neutts() if args.model == "neutts" else probe_kani()
+        if args.model == "neutts":
+            result = probe_neutts()
+        elif args.model == "qwen3":
+            result = probe_qwen3()
+        else:
+            result = probe_kani()
         emit({"ok": True, "result": result})
         return
 
     if args.model == "neutts":
         result = generate_neutts(payload)
+    elif args.model == "qwen3":
+        result = generate_qwen3(payload)
     else:
         result = generate_kani(payload)
 

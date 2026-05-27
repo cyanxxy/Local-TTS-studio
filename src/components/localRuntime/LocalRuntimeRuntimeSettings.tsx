@@ -7,6 +7,8 @@ interface LocalRuntimeRuntimeSettingsProps {
   pythonOverride: string;
   runtime: LocalTtsProbeResult | null;
   runtimeBusy: boolean;
+  showCompatibility?: boolean;
+  showEspeak?: boolean;
 }
 
 function getCompatibilityLabel(mode: LocalTtsProbeResult["compatibilityMode"]): string {
@@ -22,6 +24,8 @@ export function LocalRuntimeRuntimeSettings({
   pythonOverride,
   runtime,
   runtimeBusy,
+  showCompatibility = false,
+  showEspeak = false,
 }: LocalRuntimeRuntimeSettingsProps) {
   return (
     <section className="rounded-lg border border-border bg-surface/60 p-4">
@@ -58,8 +62,8 @@ export function LocalRuntimeRuntimeSettings({
         <p>Resolved from: {runtime?.resolvedFrom ?? "-"}</p>
         <p>Python version: {runtime?.pythonVersion ?? "-"}</p>
         <p>Package version: {runtime?.packageVersion ?? "-"}</p>
-        <p>Compatibility mode: {getCompatibilityLabel(runtime?.compatibilityMode)}</p>
-        <p>espeak-ng: {runtime?.espeakVersion ?? "Not detected"}</p>
+        {showCompatibility && <p>Compatibility mode: {getCompatibilityLabel(runtime?.compatibilityMode)}</p>}
+        {showEspeak && <p>espeak-ng: {runtime?.espeakVersion ?? "Not detected"}</p>}
       </div>
 
       {runtime?.warnings?.length ? (

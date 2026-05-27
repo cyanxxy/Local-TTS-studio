@@ -46,7 +46,7 @@ You open the page. The model downloads once. It caches. From that point on, gene
 | | |
 |---|---|
 | **Two browser models, zero servers** | Kokoro-82M and Supertonic TTS run natively in the browser through Web Workers, with WebGPU acceleration preferred and WASM fallback when it isn't. |
-| **Two desktop runtimes, optional** | NeuTTS Nano and Kani-TTS-2 run through a local Python bridge inside Electron — for users who want bleeding-edge voice cloning or multilingual synthesis on their own machine. |
+| **Three desktop runtimes, optional** | NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS run through a local Python bridge inside Electron — for users who want bleeding-edge voice cloning, multilingual synthesis, or larger local models on their own machine. |
 | **Studio + Reader workflows** | A Studio mode for script generation, voice tuning, and export. A Reader mode for long-form narration with chunk highlighting, section navigation, and per-segment retake. |
 | **Professional export pipeline** | WAV (Float32 / PCM24 / PCM16) and MP3 audio output. SRT / VTT / JSON caption export. Sample rate is taken from the model, never hardcoded. |
 | **Designed to feel native** | Self-hosted Inter / Outfit / JetBrains Mono. Flat, minimal interface. A design system built on tokens, not hex values. |
@@ -61,6 +61,7 @@ You open the page. The model downloads once. It caches. From that point on, gene
 | **Supertonic TTS** | `onnx-community/Supertonic-TTS-2-ONNX` | `@huggingface/transformers` | 44.1 kHz | 10 (F1–F5, M1–M5) | Web + Electron |
 | **NeuTTS Nano** | Neuphonic | Python bridge | model-defined | reference-cloned | Electron only |
 | **Kani-TTS-2** | `nineninesix/kani-tts-2-en` | Python bridge | model-defined | model-defined | Electron only |
+| **Qwen3-TTS CustomVoice** | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | Python bridge | model-defined | 9 built-in speakers | Electron only |
 
 Model assets download on first use and cache locally. Subsequent generations are fully offline.
 
@@ -74,6 +75,7 @@ Model assets download on first use and cache locally. Subsequent generations are
 | `/reader` | ✓ | ✓ | Long-form narration view — chunk highlighting, section navigation, playback sync, per-segment retake |
 | `/neutts` | — | ✓ | Python-backed NeuTTS Nano page — reference-text + reference-audio synthesis, runtime probe, cache management |
 | `/kani` | — | ✓ | Python-backed Kani-TTS-2 page — model selection, optional language-tag and sampling controls, runtime probe, cache management |
+| `/qwen3` | — | ✓ | Python-backed Qwen3-TTS page — speaker/language selection, instruction prompt, sampling controls, runtime probe, cache management |
 
 The desktop local-runtime pages are dedicated tools for Python-backed generation. They do not duplicate the browser export pipeline.
 
@@ -120,7 +122,7 @@ npm run preview        # Preview the production build
 npm run dist
 ```
 
-Packaged builds land in `release/`. Studio and Reader work out of the box. NeuTTS and Kani still require their Python dependencies — see [Desktop Local Runtime Setup](#desktop-local-runtime-setup) below.
+Packaged builds land in `release/`. Studio and Reader work out of the box. NeuTTS, Kani, and Qwen3 still require their Python dependencies — see [Desktop Local Runtime Setup](#desktop-local-runtime-setup) below.
 
 ---
 
@@ -139,7 +141,7 @@ Packaged builds land in `release/`. Studio and Reader work out of the box. NeuTT
 
 ```text
 electron/        Desktop shell, custom protocol, preload bridge, Python runtime helpers
-python/          Local TTS bridge for NeuTTS Nano and Kani-TTS-2
+python/          Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS
 src/
 ├── App.tsx          Root app shell, routing, shared state
 ├── components/      Studio, Reader, player, settings, local-runtime UI
@@ -213,7 +215,7 @@ Vercel is preconfigured in `vercel.json`. Import the repository in Vercel — no
 
 - Vercel deploys the web app **only**. It does not package Electron or the Python bridge.
 - The deployed app exposes Studio and Reader.
-- On the web, visits to `/neutts` or `/kani` normalize back to `/studio` — those routes render only inside Electron.
+- On the web, visits to `/neutts`, `/kani`, or `/qwen3` normalize back to `/studio` — those routes render only inside Electron.
 - `vercel.json` already includes SPA rewrites and the COOP/COEP headers used by the browser build.
 - If Vercel does not auto-detect settings, use `npm run build` as the build command and `dist` as the output directory.
 
@@ -221,19 +223,20 @@ Vercel is preconfigured in `vercel.json`. Import the repository in Vercel — no
 
 ## Desktop Local Runtime Setup
 
-The Electron build packages the desktop shell and the Python bridge script. It **does not bundle Python**, ship prebuilt virtual environments, or install `neutts`, `kani-tts-2`, or `espeak-ng` for you.
+The Electron build packages the desktop shell and the Python bridge script. It **does not bundle Python**, ship prebuilt virtual environments, or install `neutts`, `kani-tts-2`, `qwen-tts`, `torch`, or `espeak-ng` for you.
 
 ### Python Discovery Order
 
 Electron resolves a usable Python runtime in this order:
 
 1. The Python executable entered in the app's runtime settings
-2. `TTS_NEUTTS_PYTHON_BIN` or `TTS_KANI_PYTHON_BIN` for the selected model
+2. `TTS_NEUTTS_PYTHON_BIN`, `TTS_KANI_PYTHON_BIN`, or `TTS_QWEN3_PYTHON_BIN` for the selected model
 3. `TTS_PYTHON_BIN`
 4. Local virtualenv names, if they exist:
    - **NeuTTS** — `.venv-neutts` → `.venv313` → shared `.venv`
    - **Kani**   — `.venv-kani`   → `.venv313` → shared `.venv`
-5. System Python (`python3.13` → `python` on macOS/Linux; `py` → `python` on Windows)
+   - **Qwen3**  — `.venv-qwen3`  → `.venv-qwen` → `.venv312` → shared `.venv`
+5. System Python (`python3.13` → `python3.12` → `python3.11` → `python3.10` → `python3` → `python` on macOS/Linux; `py` → `python` on Windows)
 
 In development, Electron resolves virtualenv names from the repo root. **In packaged apps, runtime discovery is stricter** — Electron searches the packaged app path, bundle-adjacent locations, nearby executable parents, and only then the current working directory. It will not search an arbitrary source checkout elsewhere on disk.
 
@@ -279,6 +282,38 @@ brew install espeak-ng   # macOS
 - First-use model download (cached afterward)
 - On macOS, the bridge defaults Kani to **CPU** to avoid known MPS issues
 
+### Qwen3-TTS CustomVoice
+
+Open TTS supports `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` as an Electron-only local runtime. It is **not** wired into the browser WebGPU worker path because the released model ships Qwen-specific `qwen-tts` / safetensors assets rather than ONNX / Transformers.js browser artifacts.
+
+**Requirements:**
+
+- Python 3.10+
+- An importable `qwen_tts`
+- An importable `torch`
+- First-use model download (cached afterward)
+- CUDA-capable GPU strongly recommended for practical generation speed
+- FlashAttention 2 optional, but recommended by the Qwen runtime for lower GPU memory usage
+
+**Development setup:**
+
+```bash
+python3.12 -m venv .venv-qwen3
+source .venv-qwen3/bin/activate
+pip install --upgrade pip
+pip install qwen-tts torch
+```
+
+If you have a CUDA environment, install the PyTorch build and optional FlashAttention package that match your driver/toolkit before launching Electron. You can also point Open TTS at a pre-existing environment with `TTS_QWEN3_PYTHON_BIN=/absolute/path/to/python`.
+
+The Qwen3 page exposes:
+
+- speaker selection (`Ryan`, `Aiden`, `Vivian`, `Serena`, `Uncle_Fu`, `Dylan`, `Eric`, `Ono_Anna`, `Sohee`)
+- language selection (`Auto`, Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, Italian)
+- optional instruction prompt
+- device map, dtype, and attention implementation controls
+- temperature, top-p, and max token controls
+
 ### Runtime Probe
 
 The probe reports:
@@ -289,6 +324,7 @@ The probe reports:
 - detected package and version
 - NeuTTS compatibility mode (`legacy_0_1_x` or current `1.2.x+`)
 - `espeak-ng` status
+- Qwen3 CUDA / FlashAttention warnings when relevant
 
 A successful probe means the interpreter can launch the bridge and expose the required package. It does **not** prove that every reference WAV or generation request will succeed.
 
@@ -296,9 +332,12 @@ A successful probe means the interpreter can launch the bridge and expose the re
 
 | App message | Meaning | Fix |
 |---|---|---|
-| `No usable Python runtime found` | Electron could not resolve a Python interpreter | Set Python in app settings, or set `TTS_NEUTTS_PYTHON_BIN` / `TTS_KANI_PYTHON_BIN` |
+| `No usable Python runtime found` | Electron could not resolve a Python interpreter | Set Python in app settings, or set `TTS_NEUTTS_PYTHON_BIN`, `TTS_KANI_PYTHON_BIN`, or `TTS_QWEN3_PYTHON_BIN` |
 | `NeuTTS currently requires Python 3.10-3.13` | Interpreter is too new/old for current NeuTTS | Point the app at Python 3.10 – 3.13 |
 | `Failed to import neutts` | Python launched, but the environment does not expose `neutts` | Activate that environment and run `pip install neutts` |
+| `Failed to import qwen_tts` | Python launched, but the environment does not expose Qwen's TTS package | Activate that environment and install `qwen-tts` |
+| `Qwen3-TTS requires torch` | Qwen runtime is present, but PyTorch is missing | Install the PyTorch build that matches your CPU/GPU environment |
+| `CUDA was not detected` | Qwen3 can try CPU/MPS, but the 1.7B model is slow and memory-heavy there | Use a CUDA environment when possible, or expect long generation times |
 | `espeak-ng was not found` | NeuTTS is installed, but phonemizer support is missing | Install `espeak-ng`, then relaunch with a usable PATH (or use `TTS_NEUTTS_PYTHON_BIN`) |
 | `Reference audio must be a valid WAV file` | Uploaded reference clip is not a readable WAV | Convert the clip to WAV before uploading |
 | `Reference text is required` | NeuTTS needs the exact transcript of the reference clip | Paste the spoken transcript exactly as heard in the WAV |
@@ -333,6 +372,7 @@ All colors and effects flow through `@theme` variables in `src/index.css`. No ha
 | `/reader` | Web + Electron | Reading-focused workflow — chunk overlays, active section tracking, navigation, retake |
 | `/neutts` | Electron only | Desktop page for Python-backed NeuTTS Nano generation |
 | `/kani`   | Electron only | Desktop page for Python-backed Kani-TTS-2 generation |
+| `/qwen3`  | Electron only | Desktop page for Python-backed Qwen3-TTS CustomVoice generation |
 
 ---
 
@@ -341,7 +381,7 @@ All colors and effects flow through `@theme` variables in `src/index.css`. No ha
 Open TTS is local-first, not magic. Knowing where the seams are makes it easier to use well.
 
 - **Not fully offline from first launch.** Browser and desktop runtimes download model assets on first use, then cache them.
-- **Not every model runs in the browser.** NeuTTS Nano and Kani-TTS-2 are Electron + Python only.
+- **Not every model runs in the browser.** NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS are Electron + Python only. Qwen3 currently lacks ONNX / Transformers.js browser artifacts in the supported repo.
 - **Browser Supertonic is English-focused today.** This README does not claim broad multilingual browser support.
 - **Not WebGPU-only.** WASM fallback is part of the intended behavior.
 - **Packaged Electron builds do not bundle Python.** You install it yourself.

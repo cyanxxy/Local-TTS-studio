@@ -7,11 +7,13 @@ describe("appRouting", () => {
     expect(getPageFromPath("/reader", false)).toBe("reader");
     expect(getPageFromPath("/neutts", true)).toBe("neutts");
     expect(getPageFromPath("/kani", true)).toBe("kani");
+    expect(getPageFromPath("/qwen3", true)).toBe("qwen3");
   });
 
   it("falls back unsupported web-only desktop paths to studio", () => {
     expect(getPageFromPath("/neutts", false)).toBe("studio");
     expect(getPageFromPath("/kani", false)).toBe("studio");
+    expect(getPageFromPath("/qwen3", false)).toBe("studio");
   });
 
   it("computes canonical paths for supported and unsupported routes", () => {
@@ -20,6 +22,7 @@ describe("appRouting", () => {
     expect(getCanonicalPagePath("/studio/", false)).toBe(PAGE_PATH.studio);
     expect(getCanonicalPagePath("/neutts", false)).toBe(PAGE_PATH.studio);
     expect(getCanonicalPagePath("/kani", true)).toBe(PAGE_PATH.kani);
+    expect(getCanonicalPagePath("/qwen3", true)).toBe(PAGE_PATH.qwen3);
     expect(getCanonicalPagePath("/unknown", true)).toBe(PAGE_PATH.studio);
   });
 });

@@ -72,5 +72,7 @@ describe("pythonRuntime", () => {
     expect(getPythonDependencyCheckSnippet("kani")).not.toContain("import kani_tts");
     expect(getPythonDependencyCheckSnippet("neutts")).toContain("find_spec('neutts')");
     expect(getPythonDependencyCheckSnippet("neutts")).toContain("sys.version_info");
+    expect(getPythonDependencyCheckSnippet("qwen3")).toContain("find_spec('qwen_tts')");
+    expect(getPythonDependencyCheckSnippet("qwen3")).toContain("find_spec('torch')");
   });
 });

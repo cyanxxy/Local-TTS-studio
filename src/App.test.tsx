@@ -539,6 +539,14 @@ describe("App", () => {
     rerender(<App />);
 
     expect(screen.getByText("Kani-TTS-2 (nineninesix)")).toBeInTheDocument();
+
+    mock.routing = {
+      ...mock.routing,
+      activePage: "qwen3",
+    };
+    rerender(<App />);
+
+    expect(screen.getByText("Qwen3-TTS 12Hz CustomVoice")).toBeInTheDocument();
   });
 
   it("renders browser support fallback when local inference is unsupported", () => {

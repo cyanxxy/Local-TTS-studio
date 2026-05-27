@@ -1,6 +1,6 @@
 import path from "path";
 
-export type LocalModelId = "neutts" | "kani";
+export type LocalModelId = "neutts" | "kani" | "qwen3";
 
 export interface PythonSearchContext {
   appPath: string;
@@ -78,6 +78,14 @@ export function getPythonDependencyCheckSnippet(model: LocalModelId): string {
       "import importlib.util, sys",
       "assert (3, 10) <= sys.version_info < (3, 14)",
       "assert importlib.util.find_spec('neutts') is not None",
+    ].join("; ");
+  }
+
+  if (model === "qwen3") {
+    return [
+      "import importlib.util",
+      "assert importlib.util.find_spec('qwen_tts') is not None",
+      "assert importlib.util.find_spec('torch') is not None",
     ].join("; ");
   }
 
