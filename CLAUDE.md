@@ -117,9 +117,9 @@ Sample rate is read from each model's output at runtime, never hardcoded. Allowe
 |---|---|---|---|
 | NeuTTS Nano | `neuphonic/neutts-nano` (+ `-german`/`-french`/`-spanish`) | `neutts` (Python 3.10–3.13) | reference-audio voice cloning |
 | Kani-TTS-2 | `nineninesix/kani-tts-2-en` | `kani-tts-2` (transformers 4.56, NVIDIA NeMo) | language-tagged, no named voices |
-| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | `qwen-tts` (pins transformers 4.57.3) | 9 speakers × 11 languages |
+| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` (Auto default) + `…-1.7B-CustomVoice` | `qwen-tts` + device-profiled `torch` | 9 speakers, 11 language options |
 
 ## Maintenance Notes
 
-- Keep `.venv313` and `.venv-neutts` unchanged during normal cleanup work.
-- If you revisit Python env dedupe, test any `Janome` or `wandb` pruning in a disposable `.venv313` copy first, or rebuild both envs with a shared-link workflow such as `uv` before changing the runtime defaults.
+- Keep the managed runtime virtualenvs (`.venv-neutts`, `.venv-kani`, `.venv-qwen3`) and the shared `.venv313` unchanged during normal cleanup work.
+- If you revisit Python env dedupe, test any `Janome` or `wandb` pruning in a disposable `.venv313` copy first, or rebuild the runtime envs with a shared-link workflow such as `uv` before changing the runtime defaults.

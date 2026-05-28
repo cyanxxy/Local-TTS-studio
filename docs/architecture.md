@@ -24,7 +24,7 @@ src/
 |-- components/  Studio, Reader, player, settings, local-runtime UI
 |-- hooks/       Model loading, playback, generation, routing, creator state
 |-- lib/         Audio, chunking, captions, cache, browser/runtime helpers
-|-- workers/     Browser inference workers for Kokoro and Supertonic
+|-- workers/     Kokoro + Supertonic inference workers and the audio export worker
 `-- types.ts     Worker protocol and shared UI types
 ```
 

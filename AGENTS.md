@@ -59,6 +59,7 @@ src/
   workers/
     kokoro.worker.ts     # Kokoro model load/generate/cancel
     supertonic.worker.ts # Supertonic model load/generate/cancel
+    export.worker.ts     # Off-thread audio export (WAV/MP3 + mastering)
 
   lib/
     splitter.ts        # Sentence splitting with abbreviation/URL handling
