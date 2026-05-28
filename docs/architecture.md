@@ -17,7 +17,10 @@ This document keeps maintainer-facing architecture details out of the top-level 
 electron/        Desktop shell, custom protocol, preload bridge, Python runtime helpers
 python/          Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS
 src/
-|-- App.tsx      Root app shell, routing, shared state
+|-- apps/
+|   |-- web/      Browser renderer shell and entrypoint
+|   `-- desktop/  Electron renderer shell and entrypoint
+|-- shared/      Shared synthesis app orchestration and tests
 |-- components/  Studio, Reader, player, settings, local-runtime UI
 |-- hooks/       Model loading, playback, generation, routing, creator state
 |-- lib/         Audio, chunking, captions, cache, browser/runtime helpers

@@ -8,16 +8,25 @@ const DIST_DIR = path.join("/tmp", "open-tts-dist");
 
 describe("appProtocol", () => {
   it("builds production app URLs with clean routes", () => {
-    expect(getElectronAppUrl()).toBe("app://-/studio");
-    expect(getElectronAppUrl("/reader")).toBe("app://-/reader");
-    expect(getElectronAppUrl("kani")).toBe("app://-/kani");
+    expect(getElectronAppUrl()).toBe("app://-/desktop/studio");
+    expect(getElectronAppUrl("/reader")).toBe("app://-/desktop/reader");
+    expect(getElectronAppUrl("kani")).toBe("app://-/desktop/kani");
+    expect(getElectronAppUrl("/desktop/qwen3")).toBe("app://-/desktop/qwen3");
   });
 
-  it("falls back route requests to index.html", () => {
+  it("falls back web route requests to index.html", () => {
     expect(resolveElectronAppPath(DIST_DIR, "app://-/")).toBe(path.join(DIST_DIR, "index.html"));
     expect(resolveElectronAppPath(DIST_DIR, "app://-/studio")).toBe(path.join(DIST_DIR, "index.html"));
     expect(resolveElectronAppPath(DIST_DIR, "app://-/reader?profile=1")).toBe(path.join(DIST_DIR, "index.html"));
     expect(resolveElectronAppPath(DIST_DIR, "app://-/neutts")).toBe(path.join(DIST_DIR, "index.html"));
+  });
+
+  it("falls back desktop route requests to desktop.html", () => {
+    expect(resolveElectronAppPath(DIST_DIR, "app://-/desktop")).toBe(path.join(DIST_DIR, "desktop.html"));
+    expect(resolveElectronAppPath(DIST_DIR, "app://-/desktop/studio")).toBe(path.join(DIST_DIR, "desktop.html"));
+    expect(resolveElectronAppPath(DIST_DIR, "app://-/desktop/neutts?profile=1")).toBe(
+      path.join(DIST_DIR, "desktop.html"),
+    );
   });
 
   it("serves built asset files from dist", () => {

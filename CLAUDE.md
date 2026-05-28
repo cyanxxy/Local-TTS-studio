@@ -17,10 +17,14 @@ Browser-native TTS app with two WebGPU browser models (Kokoro-82M + Supertonic T
 ## Commands
 
 ```sh
-npm run dev          # Vite dev server (localhost:5173)
-npm run dev:electron # Vite + Electron concurrently
-npm run build        # TypeScript check + Vite production build
-npm run build:electron # Build web + compile Electron TS
+npm run dev          # Alias for dev:web
+npm run dev:web      # Vite web app (localhost:5173)
+npm run dev:desktop  # Vite + Electron concurrently
+npm run dev:electron # Alias for dev:desktop
+npm run build        # Alias for build:web
+npm run build:web    # TypeScript check + Vite production web build
+npm run build:desktop # Build web + compile Electron TS
+npm run build:electron # Alias for build:desktop
 npm run test         # vitest run
 npm run test:watch   # vitest watch mode
 npm run lint         # ESLint
@@ -37,7 +41,9 @@ Current high-level structure:
 
 ```txt
 src/
-  App.tsx            # Root app shell, routing, shared state
+  apps/web/          # Browser shell + entrypoint; routes /studio and /reader
+  apps/desktop/      # Electron renderer shell + entrypoint; routes /desktop/*
+  shared/            # Shared synthesis app orchestration and tests
   components/        # Studio, reader, player, settings, local runtime UI
   hooks/             # Model loading, playback, generation, routing, creator state
   lib/               # Audio, chunking, captions, cache, browser/runtime helpers

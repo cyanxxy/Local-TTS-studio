@@ -20,8 +20,30 @@ function normalizePathname(pathname: string): string {
   return pathname.toLowerCase().replace(/\/+$/, "") || "/";
 }
 
-export function getPageFromPath(pathname: string, showDesktopTabs: boolean): AppPage {
+export function normalizeRouteBasePath(routeBasePath = ""): string {
+  const normalized = normalizePathname(routeBasePath);
+  return normalized === "/" ? "" : normalized;
+}
+
+export function stripRouteBasePath(pathname: string, routeBasePath = ""): string {
   const normalized = normalizePathname(pathname);
+  const normalizedBase = normalizeRouteBasePath(routeBasePath);
+
+  if (!normalizedBase) return normalized;
+  if (normalized === normalizedBase) return "/";
+  if (normalized.startsWith(`${normalizedBase}/`)) {
+    return normalized.slice(normalizedBase.length) || "/";
+  }
+
+  return "/";
+}
+
+export function getPagePath(page: AppPage, routeBasePath = ""): string {
+  return `${normalizeRouteBasePath(routeBasePath)}${PAGE_PATH[page]}`;
+}
+
+export function getPageFromPath(pathname: string, showDesktopTabs: boolean, routeBasePath = ""): AppPage {
+  const normalized = stripRouteBasePath(pathname, routeBasePath);
   if (normalized === "/reader") return "reader";
   if (normalized === "/studio") return "studio";
   if (showDesktopTabs && normalized === "/neutts") return "neutts";
@@ -30,16 +52,16 @@ export function getPageFromPath(pathname: string, showDesktopTabs: boolean): App
   return "studio";
 }
 
-export function getCanonicalPagePath(pathname: string, showDesktopTabs: boolean): string {
-  const normalized = normalizePathname(pathname);
+export function getCanonicalPagePath(pathname: string, showDesktopTabs: boolean, routeBasePath = ""): string {
+  const normalized = stripRouteBasePath(pathname, routeBasePath);
   if (normalized === "/" || normalized === "") {
-    return PAGE_PATH.studio;
+    return getPagePath("studio", routeBasePath);
   }
 
-  return PAGE_PATH[getPageFromPath(normalized, showDesktopTabs)];
+  return getPagePath(getPageFromPath(pathname, showDesktopTabs, routeBasePath), routeBasePath);
 }
 
-export function getInitialPage(showDesktopTabs: boolean): AppPage {
+export function getInitialPage(showDesktopTabs: boolean, routeBasePath = ""): AppPage {
   if (typeof window === "undefined") return "studio";
-  return getPageFromPath(window.location.pathname, showDesktopTabs);
+  return getPageFromPath(window.location.pathname, showDesktopTabs, routeBasePath);
 }

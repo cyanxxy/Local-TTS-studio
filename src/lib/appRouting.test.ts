@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getCanonicalPagePath, getPageFromPath, PAGE_PATH } from "./appRouting";
+import { getCanonicalPagePath, getPageFromPath, getPagePath, PAGE_PATH } from "./appRouting";
 
 describe("appRouting", () => {
   it("resolves supported paths to their pages", () => {
@@ -24,5 +24,16 @@ describe("appRouting", () => {
     expect(getCanonicalPagePath("/kani", true)).toBe(PAGE_PATH.kani);
     expect(getCanonicalPagePath("/qwen3", true)).toBe(PAGE_PATH.qwen3);
     expect(getCanonicalPagePath("/unknown", true)).toBe(PAGE_PATH.studio);
+  });
+
+  it("scopes desktop routes under a base path", () => {
+    expect(getPagePath("studio", "/desktop")).toBe("/desktop/studio");
+    expect(getPagePath("kani", "/desktop")).toBe("/desktop/kani");
+    expect(getPageFromPath("/desktop/reader", true, "/desktop")).toBe("reader");
+    expect(getPageFromPath("/desktop/neutts", true, "/desktop")).toBe("neutts");
+    expect(getPageFromPath("/kani", true, "/desktop")).toBe("studio");
+    expect(getCanonicalPagePath("/desktop", true, "/desktop")).toBe("/desktop/studio");
+    expect(getCanonicalPagePath("/desktop/qwen3/", true, "/desktop")).toBe("/desktop/qwen3");
+    expect(getCanonicalPagePath("/desktop/unknown", true, "/desktop")).toBe("/desktop/studio");
   });
 });

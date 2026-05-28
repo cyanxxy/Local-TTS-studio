@@ -1,43 +1,48 @@
 import { useState, useCallback, useEffect, useMemo } from "react";
-import type { ChunkPauseKind, ModelType } from "./types";
-import { MIN_TEXT_LENGTH } from "./constants";
-import { useModelLoader } from "./hooks/useModelLoader";
-import { useAudioPlayer } from "./hooks/useAudioPlayer";
-import { useTTS } from "./hooks/useTTS";
-import { useAppRouting } from "./hooks/useAppRouting";
-import { useCreatorSettings } from "./hooks/useCreatorSettings";
-import { useGenerationControl } from "./hooks/useGenerationControl";
-import { useModelCacheControls } from "./hooks/useModelCacheControls";
-import { TextInput } from "./components/TextInput";
-import { ModelToggle } from "./components/ModelToggle";
-import { VoiceSelector } from "./components/VoiceSelector";
-import { Controls } from "./components/Controls";
-import { ControlsProvider } from "./components/ControlsContext";
-import { AudioPlayer } from "./components/AudioPlayer";
-import { DownloadProgress } from "./components/DownloadProgress";
-import { SettingsPanel } from "./components/SettingsPanel";
-import { CreatorToolsPanel } from "./components/CreatorToolsPanel";
-import { AdvancedReaderPage } from "./components/AdvancedReaderPage";
-import { LocalRuntimePage } from "./components/LocalRuntimePage";
-import { PAGE_PATH, type AppPage } from "./lib/appRouting";
+import type { ChunkPauseKind, ModelType } from "../types";
+import { MIN_TEXT_LENGTH } from "../constants";
+import { useModelLoader } from "../hooks/useModelLoader";
+import { useAudioPlayer } from "../hooks/useAudioPlayer";
+import { useTTS } from "../hooks/useTTS";
+import { useAppRouting } from "../hooks/useAppRouting";
+import { useCreatorSettings } from "../hooks/useCreatorSettings";
+import { useGenerationControl } from "../hooks/useGenerationControl";
+import { useModelCacheControls } from "../hooks/useModelCacheControls";
+import { TextInput } from "../components/TextInput";
+import { ModelToggle } from "../components/ModelToggle";
+import { VoiceSelector } from "../components/VoiceSelector";
+import { Controls } from "../components/Controls";
+import { ControlsProvider } from "../components/ControlsContext";
+import { AudioPlayer } from "../components/AudioPlayer";
+import { DownloadProgress } from "../components/DownloadProgress";
+import { SettingsPanel } from "../components/SettingsPanel";
+import { CreatorToolsPanel } from "../components/CreatorToolsPanel";
+import { AdvancedReaderPage } from "../components/AdvancedReaderPage";
+import { LocalRuntimePage } from "../components/LocalRuntimePage";
+import { getPagePath, type AppPage } from "../lib/appRouting";
 import {
   getDefaultSupportedModel,
   getLocalBrowserSupport,
   getUnsupportedModelMessage,
   isModelSupportedInBrowser,
-} from "./lib/browserSupport";
-import { getWebGPUStatus, type WebGPUStatus } from "./lib/webgpu";
+} from "../lib/browserSupport";
+import { getWebGPUStatus, type WebGPUStatus } from "../lib/webgpu";
 import {
   getInitialAppState,
   getInitialCreatorState,
   persistAppState,
   persistCreatorState,
   type PersistedAppState,
-} from "./lib/appState";
-import { resolveKokoroVoice } from "./lib/voices";
-import { hasMinimumSynthesisText } from "./lib/textValidation";
+} from "../lib/appState";
+import { resolveKokoroVoice } from "../lib/voices";
+import { hasMinimumSynthesisText } from "../lib/textValidation";
 
 type LocalRuntimePageKey = Extract<AppPage, "neutts" | "kani" | "qwen3">;
+
+interface SynthesisAppProps {
+  enableDesktopRuntimes: boolean;
+  routeBasePath?: string;
+}
 
 const LOCAL_RUNTIME_PAGE_KEYS = ["neutts", "kani", "qwen3"] as const satisfies readonly LocalRuntimePageKey[];
 
@@ -99,7 +104,7 @@ function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
   return (LOCAL_RUNTIME_PAGE_KEYS as readonly AppPage[]).includes(page);
 }
 
-export default function App() {
+export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: SynthesisAppProps) {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
   const debugProfiling = useMemo(
     () => typeof window !== "undefined"
@@ -123,7 +128,10 @@ export default function App() {
   );
   const localInferenceSupported = browserSupport.isSupported;
   const unavailableModels = browserSupport.unsupportedModelMessages;
-  const { activePage, availableTabs, isReaderPage, isStudioPage, navigateToPage } = useAppRouting(isElectronRuntime);
+  const { activePage, availableTabs, isReaderPage, isStudioPage, navigateToPage } = useAppRouting(
+    enableDesktopRuntimes,
+    routeBasePath,
+  );
 
   const [text, setText] = useState(initialState.text);
   const [activeModel, setActiveModel] = useState<ModelType>(() => (
@@ -137,7 +145,7 @@ export default function App() {
   const [webgpuStatus, setWebgpuStatus] = useState<WebGPUStatus | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [visitedLocalRuntimePages, setVisitedLocalRuntimePages] = useState<Set<LocalRuntimePageKey>>(
-    () => (isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
+    () => (enableDesktopRuntimes && isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
   );
 
   const {
@@ -317,31 +325,35 @@ export default function App() {
   }, [localInferenceSupported]);
 
   const rememberLocalRuntimePage = useCallback((page: LocalRuntimePageKey) => {
+    if (!enableDesktopRuntimes) return;
+
     setVisitedLocalRuntimePages((prev) => {
       if (prev.has(page)) return prev;
       const next = new Set(prev);
       next.add(page);
       return next;
     });
-  }, []);
+  }, [enableDesktopRuntimes]);
 
   const handlePageNavigation = useCallback((page: AppPage) => {
-    if (isLocalRuntimePage(activePage)) {
+    if (enableDesktopRuntimes && isLocalRuntimePage(activePage)) {
       rememberLocalRuntimePage(activePage);
     }
-    if (isLocalRuntimePage(page)) {
+    if (enableDesktopRuntimes && isLocalRuntimePage(page)) {
       rememberLocalRuntimePage(page);
     }
     navigateToPage(page);
-  }, [activePage, navigateToPage, rememberLocalRuntimePage]);
+  }, [activePage, enableDesktopRuntimes, navigateToPage, rememberLocalRuntimePage]);
 
   const mountedLocalRuntimePages = useMemo(() => {
+    if (!enableDesktopRuntimes) return [];
+
     const pages = new Set(visitedLocalRuntimePages);
     if (isLocalRuntimePage(activePage)) {
       pages.add(activePage);
     }
     return LOCAL_RUNTIME_PAGE_KEYS.filter((page) => pages.has(page));
-  }, [activePage, visitedLocalRuntimePages]);
+  }, [activePage, enableDesktopRuntimes, visitedLocalRuntimePages]);
 
   const isUsingWasmFallback = currentModelState.ready && currentModelState.backend === "wasm";
 
@@ -466,7 +478,7 @@ export default function App() {
             {availableTabs.map((tab) => (
               <a
                 key={tab.key}
-                href={PAGE_PATH[tab.key]}
+                href={getPagePath(tab.key, routeBasePath)}
                 onClick={(event) => {
                   event.preventDefault();
                   handlePageNavigation(tab.key);
@@ -686,3 +698,5 @@ export default function App() {
     </div>
   );
 }
+
+export default SynthesisApp;

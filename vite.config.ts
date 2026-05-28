@@ -1,13 +1,40 @@
-import { defineConfig } from "vite";
 import { resolve } from "path";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets";
 
 const rootDir = __dirname;
 
+function rewriteDesktopShellRequest(req: { url?: string }) {
+  const requestUrl = new URL(req.url ?? "/", "http://localhost");
+  const pathname = requestUrl.pathname.toLowerCase().replace(/\/+$/, "") || "/";
+
+  if (pathname === "/desktop" || pathname.startsWith("/desktop/")) {
+    req.url = `/desktop.html${requestUrl.search}`;
+  }
+}
+
+function desktopShellFallbackPlugin(): Plugin {
+  return {
+    name: "open-tts-desktop-shell-fallback",
+    configureServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        rewriteDesktopShellRequest(req);
+        next();
+      });
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        rewriteDesktopShellRequest(req);
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [kokoroOnnxWasmAssetPlugin(rootDir), react(), tailwindcss()],
+  plugins: [kokoroOnnxWasmAssetPlugin(rootDir), desktopShellFallbackPlugin(), react(), tailwindcss()],
   server: {
     port: 5173,
     strictPort: true,
@@ -17,8 +44,9 @@ export default defineConfig({
     },
     warmup: {
       clientFiles: [
-        "./src/main.tsx",
-        "./src/App.tsx",
+        "./src/apps/web/main.tsx",
+        "./src/apps/desktop/main.tsx",
+        "./src/shared/SynthesisApp.tsx",
         "./src/hooks/useModelLoader.ts",
       ],
     },
@@ -45,7 +73,8 @@ export default defineConfig({
       conditions: ["onnxruntime-web-use-extern-wasm"],
     },
     entries: [
-      "src/main.tsx",
+      "src/apps/web/main.tsx",
+      "src/apps/desktop/main.tsx",
       "src/workers/kokoro.worker.ts",
       "src/workers/supertonic.worker.ts",
     ],
@@ -61,5 +90,11 @@ export default defineConfig({
   build: {
     target: "esnext",
     chunkSizeWarningLimit: 2500,
+    rollupOptions: {
+      input: {
+        web: resolve(__dirname, "index.html"),
+        desktop: resolve(__dirname, "desktop.html"),
+      },
+    },
   },
 });

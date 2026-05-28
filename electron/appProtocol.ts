@@ -3,6 +3,7 @@ import path from "path";
 export const ELECTRON_APP_SCHEME = "app";
 const ELECTRON_APP_HOST = "-";
 const INDEX_FILENAME = "index.html";
+const DESKTOP_INDEX_FILENAME = "desktop.html";
 
 const STATIC_FILE_EXTENSIONS = new Set([
   ".css",
@@ -28,7 +29,10 @@ const STATIC_FILE_EXTENSIONS = new Set([
 
 export function getElectronAppUrl(routePath: string = "/studio"): string {
   const normalizedRoute = routePath.startsWith("/") ? routePath : `/${routePath}`;
-  return `${ELECTRON_APP_SCHEME}://${ELECTRON_APP_HOST}${normalizedRoute}`;
+  const desktopRoute = normalizedRoute === "/desktop" || normalizedRoute.startsWith("/desktop/")
+    ? normalizedRoute
+    : `/desktop${normalizedRoute}`;
+  return `${ELECTRON_APP_SCHEME}://${ELECTRON_APP_HOST}${desktopRoute}`;
 }
 
 function sanitizeRequestPath(requestPath: string): string {
@@ -42,6 +46,11 @@ function isStaticFileRequest(requestPath: string): boolean {
   return STATIC_FILE_EXTENSIONS.has(path.posix.extname(requestPath).toLowerCase());
 }
 
+function isDesktopRouteRequest(requestPath: string): boolean {
+  const normalized = requestPath.toLowerCase().replace(/\/+$/, "") || "/";
+  return normalized === "/desktop" || normalized.startsWith("/desktop/");
+}
+
 export function resolveElectronAppPath(distDir: string, requestUrl: string): string {
   const parsedUrl = new URL(requestUrl);
   if (parsedUrl.protocol !== `${ELECTRON_APP_SCHEME}:` || parsedUrl.host !== ELECTRON_APP_HOST) {
@@ -52,7 +61,7 @@ export function resolveElectronAppPath(distDir: string, requestUrl: string): str
   const distRoot = path.resolve(distDir);
 
   if (!isStaticFileRequest(requestPath)) {
-    return path.join(distRoot, INDEX_FILENAME);
+    return path.join(distRoot, isDesktopRouteRequest(requestPath) ? DESKTOP_INDEX_FILENAME : INDEX_FILENAME);
   }
 
   const relativePath = requestPath.replace(/^\/+/, "");

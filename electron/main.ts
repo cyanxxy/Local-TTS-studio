@@ -116,7 +116,7 @@ function createMainWindow() {
   });
 
   if (isDev) {
-    win.loadURL(`${DEV_SERVER_URL}/studio`);
+    win.loadURL(`${DEV_SERVER_URL}/desktop/studio`);
   } else {
     win.loadURL(getElectronAppUrl("/studio"));
   }

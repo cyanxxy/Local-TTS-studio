@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
-import type { ModelState } from "./types";
+import WebApp from "../apps/web/WebApp";
+import { SynthesisApp } from "./SynthesisApp";
+import type { ModelState } from "../types";
 
 const mock = vi.hoisted(() => {
   const readyState: ModelState = {
@@ -152,27 +153,27 @@ const mock = vi.hoisted(() => {
   };
 });
 
-vi.mock("./hooks/useAppRouting", () => ({
+vi.mock("../hooks/useAppRouting", () => ({
   useAppRouting: () => mock.routing,
 }));
 
-vi.mock("./hooks/useModelLoader", () => ({
+vi.mock("../hooks/useModelLoader", () => ({
   useModelLoader: vi.fn(() => mock.modelLoader),
 }));
 
-vi.mock("./hooks/useAudioPlayer", () => ({
+vi.mock("../hooks/useAudioPlayer", () => ({
   useAudioPlayer: () => mock.player,
 }));
 
-vi.mock("./hooks/useTTS", () => ({
+vi.mock("../hooks/useTTS", () => ({
   useTTS: vi.fn(() => mock.tts),
 }));
 
-vi.mock("./hooks/useCreatorSettings", () => ({
+vi.mock("../hooks/useCreatorSettings", () => ({
   useCreatorSettings: () => mock.creator,
 }));
 
-vi.mock("./hooks/useGenerationControl", () => ({
+vi.mock("../hooks/useGenerationControl", () => ({
   useGenerationControl: vi.fn((options: { setShowPlayer: (value: boolean) => void }) => ({
     ...mock.generation,
     handleGenerate: () => {
@@ -182,51 +183,51 @@ vi.mock("./hooks/useGenerationControl", () => ({
   })),
 }));
 
-vi.mock("./hooks/useModelCacheControls", () => ({
+vi.mock("../hooks/useModelCacheControls", () => ({
   useModelCacheControls: () => mock.cache,
 }));
 
-vi.mock("./lib/appState", () => ({
+vi.mock("../lib/appState", () => ({
   getInitialAppState: () => mock.initialAppState,
   getInitialCreatorState: () => mock.initialCreatorState,
   persistAppState: mock.persistAppState,
   persistCreatorState: mock.persistCreatorState,
 }));
 
-vi.mock("./lib/browserSupport", () => ({
+vi.mock("../lib/browserSupport", () => ({
   getLocalBrowserSupport: () => mock.browserSupport,
   getDefaultSupportedModel: () => mock.browserSupport.supportedModels[0],
   getUnsupportedModelMessage: (model: string) => mock.browserSupport.unsupportedModelMessages[model] ?? null,
   isModelSupportedInBrowser: (model: string) => mock.browserSupport.supportedModels.includes(model),
 }));
 
-vi.mock("./lib/webgpu", () => ({
+vi.mock("../lib/webgpu", () => ({
   getWebGPUStatus: () => mock.getWebGPUStatus(),
 }));
 
-vi.mock("./lib/voices", () => ({
+vi.mock("../lib/voices", () => ({
   resolveKokoroVoice: (voice: string, voices: string[]) => (voices.includes(voice) ? voice : voices[0] ?? null),
 }));
 
-vi.mock("./components/TextInput", () => ({
+vi.mock("../components/TextInput", () => ({
   TextInput: ({ text, onTextChange }: { text: string; onTextChange: (value: string) => void }) => (
     <textarea aria-label="script" value={text} onChange={(event) => onTextChange(event.target.value)} />
   ),
 }));
 
-vi.mock("./components/ModelToggle", () => ({
+vi.mock("../components/ModelToggle", () => ({
   ModelToggle: ({ onModelChange }: { onModelChange: (model: "kokoro" | "supertonic") => void }) => (
     <button type="button" onClick={() => onModelChange("supertonic")}>switch-supertonic</button>
   ),
 }));
 
-vi.mock("./components/VoiceSelector", () => ({
+vi.mock("../components/VoiceSelector", () => ({
   VoiceSelector: ({ onVoiceChange }: { onVoiceChange: (voice: string) => void }) => (
     <button type="button" onClick={() => onVoiceChange("af_bella")}>voice-bella</button>
   ),
 }));
 
-vi.mock("./components/ControlsContext", () => ({
+vi.mock("../components/ControlsContext", () => ({
   ControlsProvider: ({ value, children }: { value: {
     onGenerate: () => void;
     onRetryLoad: () => void;
@@ -244,15 +245,15 @@ vi.mock("./components/ControlsContext", () => ({
   ),
 }));
 
-vi.mock("./components/Controls", () => ({
+vi.mock("../components/Controls", () => ({
   Controls: () => <div data-testid="controls" />,
 }));
 
-vi.mock("./components/DownloadProgress", () => ({
+vi.mock("../components/DownloadProgress", () => ({
   DownloadProgress: () => <div data-testid="download-progress" />,
 }));
 
-vi.mock("./components/SettingsPanel", () => ({
+vi.mock("../components/SettingsPanel", () => ({
   SettingsPanel: ({ onClearCache, onRedownloadActive }: {
     onClearCache: () => void;
     onRedownloadActive: () => void;
@@ -264,7 +265,7 @@ vi.mock("./components/SettingsPanel", () => ({
   ),
 }));
 
-vi.mock("./components/CreatorToolsPanel", () => ({
+vi.mock("../components/CreatorToolsPanel", () => ({
   CreatorToolsPanel: ({ onDownloadAudio, onDownloadCaptions }: {
     onDownloadAudio: () => void;
     onDownloadCaptions: (format: "srt" | "vtt" | "json") => void;
@@ -276,7 +277,7 @@ vi.mock("./components/CreatorToolsPanel", () => ({
   ),
 }));
 
-vi.mock("./components/AudioPlayer", () => ({
+vi.mock("../components/AudioPlayer", () => ({
   AudioPlayer: ({ onTogglePlay, onSeek, onSkipBackward, onSkipForward, onDownload, onStop }: {
     onTogglePlay: () => void;
     onSeek: (value: number) => void;
@@ -296,7 +297,7 @@ vi.mock("./components/AudioPlayer", () => ({
   ),
 }));
 
-vi.mock("./components/AdvancedReaderPage", () => ({
+vi.mock("../components/AdvancedReaderPage", () => ({
   AdvancedReaderPage: ({
     onTextChange,
     onModelChange,
@@ -336,7 +337,7 @@ vi.mock("./components/AdvancedReaderPage", () => ({
   ),
 }));
 
-vi.mock("./components/LocalRuntimePage", () => ({
+vi.mock("../components/LocalRuntimePage", () => ({
   LocalRuntimePage: ({ model, name }: { model: string; name: string }) => (
     <div data-testid={`local-page-${model}`}>
       <div>{name}</div>
@@ -419,7 +420,7 @@ function resetMockState() {
   mock.getWebGPUStatus.mockResolvedValue({ available: false, message: "No GPU available" });
 }
 
-describe("App", () => {
+describe("SynthesisApp", () => {
   beforeEach(() => {
     resetMockState();
     Object.defineProperty(window, "electron", {
@@ -437,7 +438,7 @@ describe("App", () => {
   });
 
   it("orchestrates the supported studio page interactions", async () => {
-    render(<App />);
+    render(<WebApp />);
 
     expect(screen.getByText("Open TTS")).toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("No GPU available")).toBeInTheDocument());
@@ -502,7 +503,7 @@ describe("App", () => {
       navigateToPage: vi.fn(),
     };
 
-    render(<App />);
+    render(<WebApp />);
 
     fireEvent.click(screen.getByRole("button", { name: "reader-text" }));
     fireEvent.click(screen.getByRole("button", { name: "reader-model" }));
@@ -535,14 +536,14 @@ describe("App", () => {
       navigateToPage: vi.fn(),
     };
 
-    const { rerender } = render(<App />);
+    const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
     expect(screen.getByText("NeuTTS Nano (Neuphonic)")).toBeInTheDocument();
 
     mock.routing = {
       ...mock.routing,
       activePage: "kani",
     };
-    rerender(<App />);
+    rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByText("Kani-TTS-2 (nineninesix)")).toBeInTheDocument();
 
@@ -550,7 +551,7 @@ describe("App", () => {
       ...mock.routing,
       activePage: "qwen3",
     };
-    rerender(<App />);
+    rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByText("Qwen3-TTS 12Hz CustomVoice")).toBeInTheDocument();
   });
@@ -570,7 +571,7 @@ describe("App", () => {
       navigateToPage: vi.fn(),
     };
 
-    const { rerender } = render(<App />);
+    const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
     const neuttsState = screen.getByTestId("local-draft-neutts") as HTMLInputElement;
     fireEvent.change(neuttsState, { target: { value: "voice reference kept" } });
     expect(screen.queryByTestId("local-draft-kani")).not.toBeInTheDocument();
@@ -580,7 +581,7 @@ describe("App", () => {
       ...mock.routing,
       activePage: "kani",
     };
-    rerender(<App />);
+    rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
     const kaniState = screen.getByTestId("local-draft-kani") as HTMLInputElement;
@@ -592,7 +593,7 @@ describe("App", () => {
       activePage: "studio",
       isStudioPage: true,
     };
-    rerender(<App />);
+    rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
     expect(screen.getByTestId("local-runtime-panel-kani")).toHaveAttribute("hidden");
@@ -604,7 +605,7 @@ describe("App", () => {
       activePage: "neutts",
       isStudioPage: false,
     };
-    rerender(<App />);
+    rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).not.toHaveAttribute("hidden");
     expect(screen.getByTestId("local-runtime-panel-kani")).toHaveAttribute("hidden");
@@ -621,7 +622,7 @@ describe("App", () => {
       },
     };
 
-    render(<App />);
+    render(<WebApp />);
 
     expect(screen.getAllByText("iOS rollout")).toHaveLength(2);
     expect(screen.getAllByText("This browser only supports a guarded model set.")).toHaveLength(3);

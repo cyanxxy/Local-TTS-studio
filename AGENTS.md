@@ -20,9 +20,13 @@ Electron also exposes optional local Python-runtime integrations for NeuTTS Nano
 ## Commands
 ```sh
 npm run dev            # Web app on localhost:5173
-npm run dev:electron   # Vite + Electron together
+npm run dev:web        # Explicit web app on localhost:5173
+npm run dev:desktop    # Vite + Electron together
+npm run dev:electron   # Alias for dev:desktop
 npm run build          # Type check + production web build
-npm run build:electron # Build web + compile Electron main/preload
+npm run build:web      # Explicit production web build
+npm run build:desktop  # Build web + compile Electron main/preload
+npm run build:electron # Alias for build:desktop
 npm run dist           # Build + package desktop app via electron-builder
 npm run test           # Run tests once
 npm run test:watch     # Watch tests
@@ -36,11 +40,16 @@ electron/
   preload.ts           # Minimal contextBridge exposure
 
 src/
-  App.tsx              # Root orchestration for model loading, generation, UI state
-  main.tsx             # React entry
   index.css            # Tailwind + design tokens
   types.ts             # Worker protocol + shared app types
   constants.ts         # Model IDs/voices/ranges/defaults/example text
+
+  apps/
+    web/               # Browser shell + entrypoint; routes /studio and /reader
+    desktop/           # Electron renderer shell + entrypoint; routes /desktop/*
+  shared/
+    SynthesisApp.tsx   # Shared orchestration for model loading, generation, UI state
+    SynthesisApp.test.tsx
 
   hooks/
     useModelLoader.ts  # Creates workers, loads selected model lazily

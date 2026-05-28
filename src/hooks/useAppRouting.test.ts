@@ -38,4 +38,21 @@ describe("useAppRouting", () => {
     expect(window.location.search).toBe("?profile=1");
     expect(window.location.hash).toBe("#bench");
   });
+
+  it("uses a desktop route base without dropping search or hash", () => {
+    window.history.replaceState(null, "", "/desktop/kani?profile=1#bench");
+
+    const { result } = renderHook(() => useAppRouting(true, "/desktop"));
+
+    expect(result.current.activePage).toBe("kani");
+
+    act(() => {
+      result.current.navigateToPage("reader");
+    });
+
+    expect(result.current.activePage).toBe("reader");
+    expect(window.location.pathname).toBe("/desktop/reader");
+    expect(window.location.search).toBe("?profile=1");
+    expect(window.location.hash).toBe("#bench");
+  });
 });

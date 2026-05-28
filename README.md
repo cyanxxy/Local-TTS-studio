@@ -16,41 +16,61 @@ Browser-native inference through WebGPU where available, with no server, account
 
 </div>
 
-## What It Does
+## What It Is
 
-Open TTS moves text-to-speech generation onto the user's machine. Browser models run in Web Workers, prefer WebGPU, fall back to WASM where supported, and cache model assets after first use.
+Open TTS is two runnable apps in one repo:
 
-- **Studio**: script editing, browser model selection, voice tuning, playback, audio export, caption export, and cache controls.
-- **Reader**: long-form narration with chunk highlighting, section navigation, playback sync, and per-segment retake.
-- **Desktop local runtimes**: optional Electron-only pages for Python-backed NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS.
+- **Web app**: browser-native Studio and Reader at `/studio` and `/reader`.
+- **Desktop app**: Electron shell at `/desktop/*`, with the same Studio and Reader plus Python-backed local runtime pages.
+- **Shared core**: the synthesis UI, browser model loading, generation, playback, export, and routing contracts live in shared React/TypeScript modules.
 
-## Supported Models And Surfaces
+Browser models run in Web Workers, prefer WebGPU, fall back to WASM where supported, and cache model assets after first use. No server, account, subscription, API key, or usage cap is required for the browser synthesis path.
 
-| Model / runtime | Source | Route | Web | Desktop | Notes |
+## Surfaces
+
+| Model / runtime | Source | Routes | Web | Desktop | Notes |
 |---|---|---|:---:|:---:|---|
-| Kokoro-82M | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | `/studio`, `/reader` | Yes | Yes | 24 kHz browser model with Kokoro fallback voices |
-| Supertonic TTS | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` | Yes | Yes | 44.1 kHz browser model with 10 voices |
-| NeuTTS Nano | Neuphonic via local Python bridge | `/neutts` | No | Yes | Reference-audio generation; Python runtime is external |
-| Kani-TTS-2 | `nineninesix/kani-tts-2-en` via local Python bridge | `/kani` | No | Yes | Local desktop generation; Python runtime is external |
-| Qwen3-TTS CustomVoice | Qwen 0.6B/1.7B via local Python bridge | `/qwen3` | No | Yes | Auto-selects model/runtime for CUDA, Apple MPS, or CPU |
+| Kokoro-82M | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | Web: `/studio`, `/reader`; Desktop: `/desktop/studio`, `/desktop/reader` | Yes | Yes | 24 kHz browser model with Kokoro fallback voices |
+| Supertonic TTS | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | Web: `/studio`, `/reader`; Desktop: `/desktop/studio`, `/desktop/reader` | Yes | Yes | 44.1 kHz browser model with 10 voices |
+| NeuTTS Nano | Neuphonic via local Python bridge | `/desktop/neutts` | No | Yes | Reference-audio generation; Python runtime is external |
+| Kani-TTS-2 | `nineninesix/kani-tts-2-en` via local Python bridge | `/desktop/kani` | No | Yes | Local desktop generation; Python runtime is external |
+| Qwen3-TTS CustomVoice | Qwen 0.6B/1.7B via local Python bridge | `/desktop/qwen3` | No | Yes | Auto-selects model/runtime for CUDA, Apple MPS, or CPU |
 
-The deployed web app exposes Studio and Reader. Desktop-only routes are available inside Electron and normalize back to `/studio` in the browser.
+The deployed web app exposes Studio and Reader. Desktop-only routes live under `/desktop/*` and are opened by Electron.
 
 ## Quick Start
 
+Install once:
+
 ```bash
 npm install
-npm run dev
+```
+
+Run the web app:
+
+```bash
+npm run dev:web
 ```
 
 The web app is served at [`http://localhost:5173/studio`](http://localhost:5173/studio).
 
+Run the Electron desktop app:
+
 ```bash
-npm run dev:electron   # Vite + Electron in development
+npm run dev:desktop
+```
+
+Build targets:
+
+```bash
+npm run dev            # Alias for dev:web
+npm run dev:electron   # Alias for dev:desktop
 npm run lint           # ESLint
 npm run test           # Vitest
-npm run build          # Type check + production web build
-npm run build:electron # Web build + Electron compile
+npm run build:web      # Type check + production web build
+npm run build          # Alias for build:web
+npm run build:desktop  # Web build + Electron compile
+npm run build:electron # Alias for build:desktop
 npm run dist           # Package the desktop app into release/
 ```
 
@@ -58,8 +78,8 @@ Packaged desktop builds include the Electron shell and Python bridge script. The
 
 ## Runtime Notes
 
-- Browser model assets download on first use and cache locally for later offline use.
-- WebGPU is preferred where the selected model is enabled; WASM fallback is expected behavior.
+- Browser model assets download on first use and cache locally for offline reuse.
+- WebGPU is preferred where available; WASM fallback is expected behavior.
 - iPhone and iPad browsers expose Supertonic only. Kokoro is intentionally disabled on iOS.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.
 - `vercel.json` includes SPA rewrites plus COOP/COEP headers for the browser build.
@@ -70,7 +90,10 @@ Packaged desktop builds include the Electron shell and Python bridge script. The
 electron/        Desktop shell, custom protocol, preload bridge, Python runtime helpers
 python/          Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS
 src/
-|-- App.tsx      Root app shell, routing, shared state
+|-- apps/
+|   |-- web/      Browser renderer shell and entrypoint
+|   `-- desktop/  Electron renderer shell and entrypoint
+|-- shared/      Shared synthesis app orchestration and tests
 |-- components/  Studio, Reader, player, settings, local-runtime UI
 |-- hooks/       Model loading, playback, generation, routing, creator state
 |-- lib/         Audio, chunking, captions, cache, browser/runtime helpers
