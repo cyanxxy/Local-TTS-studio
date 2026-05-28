@@ -1209,7 +1209,7 @@ async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
   return { cancelled: true };
 }
 
-// Electron 41 still requires this Chromium switch for WebGPU in the desktop shell.
+// Keep WebGPU available in the desktop shell for browser-native model inference.
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
 
 app.whenReady().then(() => {
