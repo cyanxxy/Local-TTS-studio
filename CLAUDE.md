@@ -44,7 +44,7 @@ src/
   types.ts           # Worker protocol + shared UI types
 
 electron/            # Desktop shell, security, protocol, preload, Python runtime helpers
-python/              # Local TTS bridge for NeuTTS Nano and Kani-TTS-2
+python/              # Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS
 ```
 
 ## Key Patterns

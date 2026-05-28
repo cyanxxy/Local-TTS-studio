@@ -6,13 +6,13 @@ Build and maintain a browser-native, fully local text-to-speech app with two cor
 - Supertonic via `@huggingface/transformers`
 
 Inference runs client-side (WebGPU with fallback behavior), with optional Electron packaging from the same codebase.
-Electron also exposes optional local Python-runtime integrations for NeuTTS Nano and Kani-TTS-2.
+Electron also exposes optional local Python-runtime integrations for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS.
 
 ## Stack
 - React 19 + TypeScript 5.9 + Vite 7
 - Tailwind CSS 4
 - `@huggingface/transformers` (Supertonic pipeline)
-- `kokoro-js` (Kokoro streaming)
+- `kokoro-js` (Kokoro generation)
 - Electron 41.1.0 (desktop wrapper)
 - Python local bridge (`python/local_tts_bridge.py`) for Electron local-runtime models
 - Vitest + Testing Library + jsdom
