@@ -35,6 +35,8 @@ export interface UseAudioPlayerReturn {
   download: (options?: AudioExportOptions) => Promise<void>;
   downloadCaptions: (format: CaptionExportFormat) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
+  beginStream: () => void;
+  endStream: () => void;
   reset: () => void;
   stopAll: () => void;
 }
@@ -76,6 +78,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const contextAnchorRef = useRef(0);
   const segmentCounterRef = useRef(0);
   const autoPlayOnChunkRef = useRef(true);
+  const streamCompleteRef = useRef(true);
 
   const getContext = useCallback((): AudioContext => {
     if (!audioContextRef.current) {
@@ -305,6 +308,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
           && totalDurationRef.current > 0
           && allChunksRef.current.length > 0
         ) {
+          if (!streamCompleteRef.current) {
+            timelineAnchorRef.current = totalDurationRef.current;
+            contextAnchorRef.current = audioContextRef.current.currentTime;
+            syncCurrentTime(totalDurationRef.current);
+            animFrameRef.current = requestAnimationFrame(update);
+            return;
+          }
+
           setIsPlaying(false);
           isPlayingRef.current = false;
           syncCurrentTime(totalDurationRef.current);
@@ -354,6 +365,17 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       return;
     }
 
+    if (
+      isPlayingRef.current
+      && nextPlayTimeRef.current > 0
+      && nextPlayTimeRef.current <= ctx.currentTime
+    ) {
+      nextPlayTimeRef.current = ctx.currentTime;
+      scheduleCursorRef.current = findChunkIndexAtTime(currentTimeRef.current);
+      timelineAnchorRef.current = currentTimeRef.current;
+      contextAnchorRef.current = ctx.currentTime;
+    }
+
     if (nextPlayTimeRef.current === 0) {
       nextPlayTimeRef.current = ctx.currentTime + 0.15;
       timelineAnchorRef.current = currentTimeRef.current;
@@ -379,7 +401,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       setIsPlaying(true);
       isPlayingRef.current = true;
     }
-  }, [failPlaybackStart, getContext, scheduleBufferedChunks, syncTotalDuration]);
+  }, [failPlaybackStart, findChunkIndexAtTime, getContext, scheduleBufferedChunks, syncTotalDuration]);
 
   const togglePlay = useCallback(async () => {
     const ctx = getContext();
@@ -529,6 +551,26 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     pruneBufferedAudio();
   }, [pruneBufferedAudio, rebuildSegmentState, replayFromOffset, syncCurrentTime, syncTotalDuration]);
 
+  const beginStream = useCallback(() => {
+    streamCompleteRef.current = false;
+  }, []);
+
+  const endStream = useCallback(() => {
+    streamCompleteRef.current = true;
+
+    if (
+      isPlayingRef.current
+      && currentTimeRef.current >= totalDurationRef.current
+      && totalDurationRef.current > 0
+      && allChunksRef.current.length > 0
+    ) {
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      syncCurrentTime(totalDurationRef.current);
+      stopAllNodes();
+    }
+  }, [stopAllNodes, syncCurrentTime]);
+
   const reset = useCallback(() => {
     stopAllNodes();
 
@@ -539,6 +581,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     contextAnchorRef.current = 0;
     interruptedRef.current = false;
     autoPlayOnChunkRef.current = true;
+    streamCompleteRef.current = true;
     setError(null);
 
     setSegments([]);
@@ -559,6 +602,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     contextAnchorRef.current = 0;
     interruptedRef.current = false;
     autoPlayOnChunkRef.current = false;
+    streamCompleteRef.current = true;
     setError(null);
     setIsPlaying(false);
     isPlayingRef.current = false;
@@ -594,6 +638,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     download,
     downloadCaptions,
     replaceSegment,
+    beginStream,
+    endStream,
     reset,
     stopAll,
   };

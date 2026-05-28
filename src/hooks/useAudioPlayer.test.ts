@@ -82,11 +82,17 @@ function makeChunk(text: string, length: number, samplingRate: number) {
 }
 
 describe("useAudioPlayer", () => {
+  let animationFrameCallbacks: FrameRequestCallback[];
+
   beforeEach(() => {
+    animationFrameCallbacks = [];
     MockAudioContext.instances = [];
     MockAudioContext.resumeError = null;
     vi.stubGlobal("AudioContext", MockAudioContext as unknown as typeof AudioContext);
-    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      animationFrameCallbacks.push(callback);
+      return animationFrameCallbacks.length;
+    }));
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
   });
 
@@ -342,5 +348,48 @@ describe("useAudioPlayer", () => {
 
     expect(result.current.isPlaying).toBe(true);
     expect(result.current.currentTime).toBe(0);
+  });
+
+  it("keeps playback open at the generated buffer edge until streaming completes", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+
+    act(() => {
+      result.current.beginStream();
+    });
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 4, 4));
+    });
+
+    const ctx = MockAudioContext.instances[0];
+    ctx.currentTime = 1.3;
+
+    act(() => {
+      animationFrameCallbacks.shift()?.(0);
+    });
+
+    expect(result.current.currentTime).toBe(1);
+    expect(result.current.isPlaying).toBe(true);
+
+    ctx.createdSources[0]?.onended?.();
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Second", 4, 4));
+    });
+
+    const resumedSource = ctx.createdSources.at(-1);
+    expect(resumedSource?.startedWith?.[0]).toBeGreaterThanOrEqual(ctx.currentTime);
+
+    act(() => {
+      result.current.endStream();
+    });
+
+    ctx.currentTime = 2.4;
+    act(() => {
+      animationFrameCallbacks.shift()?.(0);
+    });
+
+    expect(result.current.currentTime).toBe(2);
+    expect(result.current.isPlaying).toBe(false);
   });
 });

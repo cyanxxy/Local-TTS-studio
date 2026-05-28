@@ -22,7 +22,7 @@ const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 type KokoroDtype = "fp32" | "fp16" | "q8";
 
 const BACKEND_CONFIG: ReadonlyArray<{ backend: InferenceBackend; dtype: KokoroDtype }> = [
-  { backend: "webgpu", dtype: "fp16" },
+  { backend: "webgpu", dtype: "fp32" },
   { backend: "wasm", dtype: "q8" },
 ];
 const KOKORO_LOAD_TIMEOUT_MS = 120_000;

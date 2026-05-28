@@ -11,9 +11,12 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import ctypes
+import ctypes.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -57,6 +60,8 @@ QWEN3_LANGUAGES = [
     "Spanish",
     "Italian",
 ]
+PHONEMIZER_ESPEAK_LIBRARY_ENV = "PHONEMIZER_ESPEAK_LIBRARY"
+PHONEMIZER_ESPEAK_LEGACY_PATH_ENV = "PHONEMIZER_ESPEAK_PATH"
 
 
 @contextmanager
@@ -114,37 +119,270 @@ def configure_cache_dir(cache_dir: str) -> None:
 
 
 def get_espeak_install_hint() -> str:
+    bundled_hint = (
+        "Current NeuTTS wheels normally bundle eSpeak NG. Reinstall `neutts` in this "
+        "Python environment first; if you are using a custom/source install, install "
+        "eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` plus `ESPEAK_DATA_PATH` if needed."
+    )
     if sys.platform == "darwin":
         return (
-            "Install espeak-ng with Homebrew (`brew install espeak-ng`). "
-            "Packaged app launches from Finder may not inherit your shell PATH, so set PATH "
-            "or point the app at a Python runtime that can already resolve espeak-ng."
+            f"{bundled_hint} On macOS, a system fallback can be installed with "
+            "`brew install espeak-ng`."
         )
     if sys.platform == "win32":
         return (
-            "Install eSpeak NG and, if phonemizer still cannot find it, set "
-            "`PHONEMIZER_ESPEAK_LIBRARY` and `PHONEMIZER_ESPEAK_PATH`."
+            f"{bundled_hint} On Windows, install eSpeak NG and set "
+            "`PHONEMIZER_ESPEAK_LIBRARY` if the bundled library is unavailable."
         )
-    return "Install espeak-ng with your system package manager and make sure it is available on PATH."
+    return f"{bundled_hint} On Linux, install espeak-ng with your system package manager if the bundled library is unavailable."
+
+
+def check_espeak_backend() -> tuple[bool, str | None, str | None]:
+    try:
+        from phonemizer.backend.espeak.wrapper import EspeakWrapper
+
+        wrapper = EspeakWrapper()
+        version = getattr(wrapper, "version", None)
+        data_path = getattr(wrapper, "data_path", None)
+        if isinstance(version, (tuple, list)):
+            version_text = ".".join(str(part) for part in version)
+        elif version is None:
+            version_text = "unknown"
+        else:
+            version_text = str(version)
+
+        suffix = f" data at: {data_path}" if data_path else ""
+        return True, f"eSpeak NG library {version_text}{suffix}", "library"
+    except Exception:
+        return False, None, None
+
+
+def load_espeak_library(path: str) -> tuple[bool, str | None]:
+    library_path = str(Path(path).expanduser())
+    if not Path(library_path).is_file():
+        return False, f"eSpeak library does not exist: {library_path}"
+
+    try:
+        from phonemizer.backend.espeak.wrapper import EspeakWrapper
+
+        EspeakWrapper.set_library(library_path)
+        return True, None
+    except Exception as phonemizer_exc:
+        try:
+            ctypes.CDLL(library_path)
+            return True, None
+        except Exception as ctypes_exc:
+            return False, f"{phonemizer_exc}; ctypes load failed: {ctypes_exc}"
+
+
+def unique_candidates(candidates: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        normalized = candidate.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique.append(normalized)
+    return unique
+
+
+def get_known_espeak_library_candidates() -> list[str]:
+    if sys.platform == "darwin":
+        return [
+            "/opt/homebrew/opt/espeak-ng/lib/libespeak-ng.dylib",
+            "/usr/local/opt/espeak-ng/lib/libespeak-ng.dylib",
+            "/opt/homebrew/lib/libespeak-ng.dylib",
+            "/usr/local/lib/libespeak-ng.dylib",
+            "/opt/homebrew/lib/libespeak.dylib",
+            "/usr/local/lib/libespeak.dylib",
+        ]
+    if sys.platform == "win32":
+        return [
+            r"C:\Program Files\eSpeak NG\libespeak-ng.dll",
+            r"C:\Program Files (x86)\eSpeak NG\libespeak-ng.dll",
+        ]
+    return [
+        "/usr/lib/libespeak-ng.so",
+        "/usr/lib/libespeak-ng.so.1",
+        "/usr/lib/x86_64-linux-gnu/libespeak-ng.so",
+        "/usr/lib/x86_64-linux-gnu/libespeak-ng.so.1",
+        "/usr/local/lib/libespeak-ng.so",
+        "/usr/local/lib/libespeak-ng.so.1",
+        "/usr/lib/libespeak.so",
+        "/usr/lib/libespeak.so.1",
+        "/usr/lib/x86_64-linux-gnu/libespeak.so",
+        "/usr/lib/x86_64-linux-gnu/libespeak.so.1",
+        "/usr/local/lib/libespeak.so",
+        "/usr/local/lib/libespeak.so.1",
+    ]
+
+
+def get_ctypes_espeak_library_candidates() -> list[str]:
+    candidates: list[str] = []
+    for library_name in ("espeak-ng", "espeak"):
+        try:
+            detected = ctypes.util.find_library(library_name)
+        except Exception:
+            detected = None
+        if detected:
+            candidates.append(detected)
+    return candidates
+
+
+def get_known_espeak_executable_candidates() -> list[str]:
+    candidates = ["espeak-ng", "espeak"]
+    if sys.platform == "darwin":
+        candidates.extend([
+            "/opt/homebrew/bin/espeak-ng",
+            "/usr/local/bin/espeak-ng",
+            "/opt/homebrew/bin/espeak",
+            "/usr/local/bin/espeak",
+        ])
+    elif sys.platform == "win32":
+        candidates.extend([
+            r"C:\Program Files\eSpeak NG\espeak-ng.exe",
+            r"C:\Program Files (x86)\eSpeak NG\espeak-ng.exe",
+            r"C:\Program Files\eSpeak NG\command_line\espeak-ng.exe",
+            r"C:\Program Files (x86)\eSpeak NG\command_line\espeak-ng.exe",
+        ])
+    else:
+        candidates.extend([
+            "/usr/bin/espeak-ng",
+            "/usr/local/bin/espeak-ng",
+            "/bin/espeak-ng",
+            "/usr/bin/espeak",
+            "/usr/local/bin/espeak",
+            "/bin/espeak",
+        ])
+    return candidates
+
+
+def resolve_executable_candidate(candidate: str) -> str | None:
+    if os.path.isabs(candidate) or os.sep in candidate or (os.altsep and os.altsep in candidate):
+        path = Path(candidate).expanduser()
+        return str(path) if path.is_file() else None
+    return shutil.which(candidate)
+
+
+def run_espeak_version(command: str) -> tuple[bool, str | None, str | None]:
+    try:
+        completed = subprocess.run(
+            [command, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, None, str(exc)
+
+    output = (completed.stdout or completed.stderr).strip()
+    if completed.returncode == 0:
+        first_line = output.splitlines()
+        version_line = first_line[0] if first_line else Path(command).name
+        return True, version_line, None
+    return False, None, output or f"exit code {completed.returncode}"
+
+
+def espeak_command_label(path_or_command: str) -> str:
+    name = Path(path_or_command).name.lower()
+    return "espeak-ng" if "espeak-ng" in name else "espeak"
+
+
+def detect_espeak() -> dict[str, Any]:
+    env_library = os.environ.get(PHONEMIZER_ESPEAK_LIBRARY_ENV, "").strip()
+    if env_library:
+        library_path = str(Path(env_library).expanduser())
+        ok, error = load_espeak_library(library_path)
+        if not ok:
+            return {
+                "ok": False,
+                "source": PHONEMIZER_ESPEAK_LIBRARY_ENV,
+                "path": library_path,
+                "message": f"{PHONEMIZER_ESPEAK_LIBRARY_ENV} points to an unusable eSpeak library: {library_path}. {error or ''}".strip(),
+            }
+        return {
+            "ok": True,
+            "source": PHONEMIZER_ESPEAK_LIBRARY_ENV,
+            "path": library_path,
+            "version": f"eSpeak NG library: {library_path}",
+            "message": "eSpeak NG backend is ready.",
+        }
+
+    legacy_path = os.environ.get(PHONEMIZER_ESPEAK_LEGACY_PATH_ENV, "").strip()
+    if legacy_path:
+        resolved_legacy_path = str(Path(legacy_path).expanduser())
+        if Path(resolved_legacy_path).is_file():
+            if "libespeak" in Path(resolved_legacy_path).name.lower():
+                ok, error = load_espeak_library(resolved_legacy_path)
+                if ok:
+                    os.environ[PHONEMIZER_ESPEAK_LIBRARY_ENV] = resolved_legacy_path
+                    return {
+                        "ok": True,
+                        "source": PHONEMIZER_ESPEAK_LEGACY_PATH_ENV,
+                        "path": resolved_legacy_path,
+                        "version": f"eSpeak NG library: {resolved_legacy_path}",
+                        "message": "eSpeak NG backend is ready.",
+                    }
+                return {
+                    "ok": False,
+                    "source": PHONEMIZER_ESPEAK_LEGACY_PATH_ENV,
+                    "path": resolved_legacy_path,
+                    "message": f"{PHONEMIZER_ESPEAK_LEGACY_PATH_ENV} points to an unusable eSpeak library: {resolved_legacy_path}. {error or ''}".strip(),
+                }
+            ok, version, error = run_espeak_version(resolved_legacy_path)
+            if ok:
+                return {
+                    "ok": True,
+                    "source": PHONEMIZER_ESPEAK_LEGACY_PATH_ENV,
+                    "path": resolved_legacy_path,
+                    "version": version,
+                    "message": "eSpeak NG backend is ready.",
+                }
+            return {
+                "ok": False,
+                "source": PHONEMIZER_ESPEAK_LEGACY_PATH_ENV,
+                "path": resolved_legacy_path,
+                "message": f"{PHONEMIZER_ESPEAK_LEGACY_PATH_ENV} points to an unusable eSpeak executable: {resolved_legacy_path}. {error or ''}".strip(),
+            }
+
+    ok, version, source = check_espeak()
+    return {
+        "ok": ok,
+        "source": source,
+        "path": None,
+        "version": version,
+        "message": (
+            "eSpeak NG backend is ready."
+            if ok
+            else f"No usable eSpeak NG backend was found. {get_espeak_install_hint()}"
+        ),
+    }
 
 
 def check_espeak() -> tuple[bool, str | None, str | None]:
-    candidates = ["espeak-ng", "espeak"]
-    for cmd in candidates:
-        try:
-            completed = subprocess.run(
-                [cmd, "--version"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            if completed.returncode == 0:
-                first_line = (completed.stdout or completed.stderr).splitlines()
-                version_line = first_line[0] if first_line else cmd
-                return True, version_line, cmd
-        except (OSError, subprocess.SubprocessError):
+    backend_ok, backend_version, backend_source = check_espeak_backend()
+    if backend_ok:
+        return backend_ok, backend_version, backend_source
+
+    for library_path in unique_candidates(get_known_espeak_library_candidates() + get_ctypes_espeak_library_candidates()):
+        if os.path.isabs(library_path) and not Path(library_path).is_file():
             continue
+        ok, _error = load_espeak_library(library_path)
+        if ok:
+            if os.path.isabs(library_path):
+                os.environ[PHONEMIZER_ESPEAK_LIBRARY_ENV] = library_path
+            return True, f"eSpeak NG library: {library_path}", "library"
+
+    for candidate in unique_candidates(get_known_espeak_executable_candidates()):
+        resolved = resolve_executable_candidate(candidate)
+        if not resolved:
+            continue
+        ok, version, _error = run_espeak_version(resolved)
+        if ok:
+            return True, version, espeak_command_label(resolved)
+
     return False, None, None
 
 
@@ -238,25 +476,21 @@ def kani_transformers_requirement_message() -> str:
 
 
 def is_module_available(module_name: str) -> bool:
+    if module_name in sys.modules:
+        return True
+
     import importlib.util
 
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        return False
 
 
 def detect_qwen3_runtime() -> tuple[str | None, bool, bool, str | None]:
     package_version = get_installed_package_version("qwen-tts")
-    torch_cuda_available = False
-    torch_version: str | None = None
-
-    try:
-        import torch
-
-        torch_cuda_available = bool(torch.cuda.is_available())
-        torch_version = getattr(torch, "__version__", None)
-    except Exception:
-        pass
-
-    return package_version, torch_cuda_available, is_module_available("flash_attn"), torch_version
+    torch_version = get_installed_package_version("torch")
+    return package_version, False, is_module_available("flash_attn"), torch_version
 
 
 def decode_reference_audio(ref_audio_base64: Any) -> bytes:
@@ -309,14 +543,21 @@ def probe_neutts() -> dict[str, Any]:
             "warnings": warnings,
         }
 
-    prepare_neutts_runtime(compatibility_mode)
-
-    try:
-        __import__("neutts")
-    except Exception as exc:
+    neutts_module_available = is_module_available("neutts")
+    if not package_version and not neutts_module_available:
         return {
             "ready": False,
-            "message": f"Failed to import neutts: {exc}",
+            "message": "NeuTTS is not installed. Install neutts in the selected Python environment.",
+            "pythonVersion": sys.version.split()[0],
+            "package": "neutts",
+            "packageVersion": package_version,
+            "compatibilityMode": compatibility_mode,
+            "warnings": warnings,
+        }
+    if not neutts_module_available:
+        return {
+            "ready": False,
+            "message": "NeuTTS package metadata is present, but Python cannot find the neutts module. Reinstall neutts in the selected Python environment.",
             "pythonVersion": sys.version.split()[0],
             "package": "neutts",
             "packageVersion": package_version,
@@ -324,40 +565,61 @@ def probe_neutts() -> dict[str, Any]:
             "warnings": warnings,
         }
 
-    espeak_ok, espeak_version, espeak_command = check_espeak()
-    if espeak_ok and espeak_command == "espeak":
+    espeak = detect_espeak()
+    espeak_ok = bool(espeak.get("ok"))
+    espeak_version = espeak.get("version")
+    espeak_source = espeak.get("source")
+    if espeak_ok and espeak_source == "espeak":
         warnings.append("Using `espeak` fallback. `espeak-ng` is preferred for current NeuTTS installs.")
 
+    if not espeak_ok:
+        return {
+            "ready": False,
+            "message": f"NeuTTS package is installed, but no usable eSpeak NG backend was found. {espeak.get('message') or get_espeak_install_hint()}",
+            "pythonVersion": sys.version.split()[0],
+            "package": "neutts",
+            "packageVersion": package_version,
+            "compatibilityMode": compatibility_mode,
+            "warnings": warnings,
+            "espeakVersion": espeak_version,
+            "espeakPath": espeak.get("path"),
+            "espeakSource": espeak_source,
+        }
+
+    prepare_neutts_runtime(compatibility_mode)
+    try:
+        __import__("neutts")
+    except Exception as exc:
+        return {
+            "ready": False,
+            "message": f"NeuTTS package and eSpeak were detected, but importing neutts failed: {exc}. Reinstall neutts in the selected Python environment.",
+            "pythonVersion": sys.version.split()[0],
+            "package": "neutts",
+            "packageVersion": package_version,
+            "compatibilityMode": compatibility_mode,
+            "warnings": warnings,
+            "espeakVersion": espeak_version,
+            "espeakPath": espeak.get("path"),
+            "espeakSource": espeak_source,
+        }
+
     return {
-        "ready": espeak_ok,
-        "message": (
-            "NeuTTS runtime is ready."
-            if espeak_ok
-            else f"NeuTTS package is installed, but espeak-ng was not found. {get_espeak_install_hint()}"
-        ),
+        "ready": True,
+        "message": "NeuTTS runtime is ready.",
         "pythonVersion": sys.version.split()[0],
         "package": "neutts",
         "packageVersion": package_version,
         "compatibilityMode": compatibility_mode,
         "warnings": warnings,
         "espeakVersion": espeak_version,
+        "espeakPath": espeak.get("path"),
+        "espeakSource": espeak_source,
     }
 
 
 def probe_kani() -> dict[str, Any]:
     package_name, package_version = detect_kani_package()
     transformers_version = detect_kani_transformers_version()
-
-    try:
-        __import__("kani_tts")
-    except Exception as exc:
-        return {
-            "ready": False,
-            "message": f"Failed to import kani_tts: {exc}",
-            "pythonVersion": sys.version.split()[0],
-            "package": package_name or "kani-tts-2",
-            "packageVersion": package_version,
-        }
 
     if package_name == "kani-tts":
         return {
@@ -373,6 +635,8 @@ def probe_kani() -> dict[str, Any]:
             "ready": False,
             "message": "Kani-TTS-2 is not installed. Install kani-tts-2 in the selected Python environment.",
             "pythonVersion": sys.version.split()[0],
+            "package": "kani-tts-2",
+            "packageVersion": package_version,
         }
 
     if not is_kani_transformers_compatible(transformers_version):
@@ -385,6 +649,29 @@ def probe_kani() -> dict[str, Any]:
             "pythonVersion": sys.version.split()[0],
             "package": package_name,
             "packageVersion": package_version,
+            "transformersVersion": transformers_version,
+        }
+
+    if not is_module_available("kani_tts"):
+        return {
+            "ready": False,
+            "message": "Kani-TTS-2 is installed, but Python cannot find the kani_tts module. Reinstall kani-tts-2 in the selected Python environment.",
+            "pythonVersion": sys.version.split()[0],
+            "package": package_name,
+            "packageVersion": package_version,
+            "transformersVersion": transformers_version,
+        }
+
+    try:
+        __import__("kani_tts")
+    except Exception as exc:
+        return {
+            "ready": False,
+            "message": f"Kani-TTS-2 is installed, but importing kani_tts failed: {exc}. Reinstall kani-tts-2 and transformers>=4.56,<5 in the selected Python environment.",
+            "pythonVersion": sys.version.split()[0],
+            "package": package_name,
+            "packageVersion": package_version,
+            "transformersVersion": transformers_version,
         }
 
     return {
@@ -393,6 +680,7 @@ def probe_kani() -> dict[str, Any]:
         "pythonVersion": sys.version.split()[0],
         "package": package_name,
         "packageVersion": package_version,
+        "transformersVersion": transformers_version,
     }
 
 
@@ -400,26 +688,60 @@ def probe_qwen3() -> dict[str, Any]:
     package_version, cuda_available, flash_attn_available, torch_version = detect_qwen3_runtime()
     warnings: list[str] = []
 
-    try:
-        __import__("qwen_tts")
-    except Exception as exc:
+    if not package_version:
         return {
             "ready": False,
-            "message": f"Failed to import qwen_tts: {exc}",
+            "message": "qwen-tts is not installed. Install qwen-tts in the selected Python environment.",
             "pythonVersion": sys.version.split()[0],
             "package": "qwen-tts",
             "packageVersion": package_version,
         }
 
-    try:
-        __import__("torch")
-    except Exception as exc:
+    if not is_module_available("qwen_tts"):
         return {
             "ready": False,
-            "message": f"Qwen3-TTS requires torch in the selected Python environment: {exc}",
+            "message": "qwen-tts is installed, but Python cannot find the qwen_tts module. Reinstall qwen-tts in the selected Python environment.",
             "pythonVersion": sys.version.split()[0],
             "package": "qwen-tts",
             "packageVersion": package_version,
+            "torchVersion": torch_version,
+        }
+
+    torch_package_version = get_installed_package_version("torch")
+    if not torch_package_version and not is_module_available("torch"):
+        return {
+            "ready": False,
+            "message": "Qwen3-TTS requires torch in the selected Python environment. Install torch alongside qwen-tts.",
+            "pythonVersion": sys.version.split()[0],
+            "package": "qwen-tts",
+            "packageVersion": package_version,
+            "torchVersion": torch_package_version,
+        }
+
+    try:
+        torch_module = __import__("torch")
+    except Exception as exc:
+        return {
+            "ready": False,
+            "message": f"Qwen3-TTS requires an importable torch package in the selected Python environment: {exc}. Reinstall torch alongside qwen-tts.",
+            "pythonVersion": sys.version.split()[0],
+            "package": "qwen-tts",
+            "packageVersion": package_version,
+            "torchVersion": torch_package_version,
+        }
+    cuda_available = bool(getattr(getattr(torch_module, "cuda", None), "is_available", lambda: False)())
+    torch_version = getattr(torch_module, "__version__", None) or torch_package_version
+
+    try:
+        __import__("qwen_tts")
+    except Exception as exc:
+        return {
+            "ready": False,
+            "message": f"qwen-tts is installed, but importing qwen_tts failed: {exc}. Reinstall qwen-tts in the selected Python environment.",
+            "pythonVersion": sys.version.split()[0],
+            "package": "qwen-tts",
+            "packageVersion": package_version,
+            "torchVersion": torch_package_version,
         }
 
     if not cuda_available:
@@ -435,6 +757,7 @@ def probe_qwen3() -> dict[str, Any]:
         "pythonVersion": sys.version.split()[0],
         "package": "qwen-tts",
         "packageVersion": package_version,
+        "torchVersion": torch_version or torch_package_version,
         "warnings": warnings,
     }
 
@@ -514,11 +837,12 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
 
     espeak_ok, _, _ = check_espeak()
     if not espeak_ok:
-        raise RuntimeError(f"NeuTTS requires espeak-ng before generation can start. {get_espeak_install_hint()}")
+        raise RuntimeError(f"NeuTTS requires a usable eSpeak NG backend before generation can start. {get_espeak_install_hint()}")
+
+    from neutts import NeuTTS
 
     started = time.time()
     emit_progress("model_load", f"Loading {backbone_repo} and {codec_repo}...", started_at=started)
-    from neutts import NeuTTS
     temp_path: str | None = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:

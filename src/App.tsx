@@ -19,7 +19,7 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { CreatorToolsPanel } from "./components/CreatorToolsPanel";
 import { AdvancedReaderPage } from "./components/AdvancedReaderPage";
 import { LocalRuntimePage } from "./components/LocalRuntimePage";
-import { PAGE_PATH } from "./lib/appRouting";
+import { PAGE_PATH, type AppPage } from "./lib/appRouting";
 import {
   getDefaultSupportedModel,
   getLocalBrowserSupport,
@@ -36,6 +36,67 @@ import {
 } from "./lib/appState";
 import { resolveKokoroVoice } from "./lib/voices";
 import { hasMinimumSynthesisText } from "./lib/textValidation";
+
+type LocalRuntimePageKey = Extract<AppPage, "neutts" | "kani" | "qwen3">;
+
+const LOCAL_RUNTIME_PAGE_KEYS = ["neutts", "kani", "qwen3"] as const satisfies readonly LocalRuntimePageKey[];
+
+const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
+  name: string;
+  releaseDate: string;
+  params: string;
+  highlights: string[];
+  links: Array<{ label: string; href: string }>;
+}> = {
+  neutts: {
+    name: "NeuTTS Nano (Neuphonic)",
+    releaseDate: "February 12, 2026",
+    params: "~120M active params (~229M incl. embeddings)",
+    highlights: [
+      "On-device, CPU-focused speech generation and instant voice cloning from short references.",
+      "Multilingual Nano variants published for English, German, French, and Spanish.",
+      "Uses local Python runtime bridge with cache controls in this desktop app.",
+    ],
+    links: [
+      { label: "HF Model", href: "https://huggingface.co/neuphonic/neutts-nano" },
+      { label: "HF Collection", href: "https://huggingface.co/collections/neuphonic/neutts-nano-multilingual-collection" },
+      { label: "GitHub", href: "https://github.com/neuphonic/neutts" },
+    ],
+  },
+  kani: {
+    name: "Kani-TTS-2 (nineninesix)",
+    releaseDate: "February 15, 2026",
+    params: "~400M",
+    highlights: [
+      "Open model with low-VRAM local inference profile for desktop generation.",
+      "Maintainer reports stable generation expectations around long utterances; docs note quality drops past ~40 seconds.",
+      "Uses local Python runtime bridge with cache controls in this desktop app.",
+    ],
+    links: [
+      { label: "HF Model", href: "https://huggingface.co/nineninesix/kani-tts-2-en" },
+      { label: "GitHub", href: "https://github.com/nineninesix-ai/kani-tts-2" },
+    ],
+  },
+  qwen3: {
+    name: "Qwen3-TTS 12Hz CustomVoice",
+    releaseDate: "January 29, 2026",
+    params: "~1.9B",
+    highlights: [
+      "CustomVoice model with nine built-in premium speakers and instruction-guided style control.",
+      "Supports Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.",
+      "Runs through the Electron Python bridge because the released model ships qwen-tts/safetensors assets, not browser ONNX artifacts.",
+    ],
+    links: [
+      { label: "HF Model", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" },
+      { label: "HF Tokenizer", href: "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz" },
+      { label: "GitHub", href: "https://github.com/QwenLM/Qwen3-TTS" },
+    ],
+  },
+};
+
+function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
+  return (LOCAL_RUNTIME_PAGE_KEYS as readonly AppPage[]).includes(page);
+}
 
 export default function App() {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
@@ -66,6 +127,9 @@ export default function App() {
   const [showPlayer, setShowPlayer] = useState(false);
   const [webgpuStatus, setWebgpuStatus] = useState<WebGPUStatus | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [visitedLocalRuntimePages, setVisitedLocalRuntimePages] = useState<Set<LocalRuntimePageKey>>(
+    () => (isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
+  );
 
   const {
     kokoroState,
@@ -243,6 +307,33 @@ export default function App() {
     };
   }, [localInferenceSupported]);
 
+  const rememberLocalRuntimePage = useCallback((page: LocalRuntimePageKey) => {
+    setVisitedLocalRuntimePages((prev) => {
+      if (prev.has(page)) return prev;
+      const next = new Set(prev);
+      next.add(page);
+      return next;
+    });
+  }, []);
+
+  const handlePageNavigation = useCallback((page: AppPage) => {
+    if (isLocalRuntimePage(activePage)) {
+      rememberLocalRuntimePage(activePage);
+    }
+    if (isLocalRuntimePage(page)) {
+      rememberLocalRuntimePage(page);
+    }
+    navigateToPage(page);
+  }, [activePage, navigateToPage, rememberLocalRuntimePage]);
+
+  const mountedLocalRuntimePages = useMemo(() => {
+    const pages = new Set(visitedLocalRuntimePages);
+    if (isLocalRuntimePage(activePage)) {
+      pages.add(activePage);
+    }
+    return LOCAL_RUNTIME_PAGE_KEYS.filter((page) => pages.has(page));
+  }, [activePage, visitedLocalRuntimePages]);
+
   const isUsingWasmFallback = currentModelState.ready && currentModelState.backend === "wasm";
 
   const handleJumpToSegment = useCallback((segmentId: string) => {
@@ -369,7 +460,7 @@ export default function App() {
                 href={PAGE_PATH[tab.key]}
                 onClick={(event) => {
                   event.preventDefault();
-                  navigateToPage(tab.key);
+                  handlePageNavigation(tab.key);
                 }}
                 className={`relative px-5 py-2 text-[13px] font-semibold transition-all duration-200 rounded-lg ${
                   activePage === tab.key
@@ -525,57 +616,29 @@ export default function App() {
               onJumpToSegment={handleJumpToSegment}
             />
           ) : browserSupportPanel
-        ) : activePage === "neutts" ? (
-          <LocalRuntimePage
-            model="neutts"
-            name="NeuTTS Nano (Neuphonic)"
-            releaseDate="February 12, 2026"
-            params="~120M active params (~229M incl. embeddings)"
-            highlights={[
-              "On-device, CPU-focused speech generation and instant voice cloning from short references.",
-              "Multilingual Nano variants published for English, German, French, and Spanish.",
-              "Uses local Python runtime bridge with cache controls in this desktop app.",
-            ]}
-            links={[
-              { label: "HF Model", href: "https://huggingface.co/neuphonic/neutts-nano" },
-              { label: "HF Collection", href: "https://huggingface.co/collections/neuphonic/neutts-nano-multilingual-collection" },
-              { label: "GitHub", href: "https://github.com/neuphonic/neutts" },
-            ]}
-          />
-        ) : activePage === "kani" ? (
-          <LocalRuntimePage
-            model="kani"
-            name="Kani-TTS-2 (nineninesix)"
-            releaseDate="February 15, 2026"
-            params="~400M"
-            highlights={[
-              "Open model with low-VRAM local inference profile for desktop generation.",
-              "Maintainer reports stable generation expectations around long utterances; docs note quality drops past ~40 seconds.",
-              "Uses local Python runtime bridge with cache controls in this desktop app.",
-            ]}
-            links={[
-              { label: "HF Model", href: "https://huggingface.co/nineninesix/kani-tts-2-en" },
-              { label: "GitHub", href: "https://github.com/nineninesix-ai/kani-tts-2" },
-            ]}
-          />
-        ) : (
-          <LocalRuntimePage
-            model="qwen3"
-            name="Qwen3-TTS 12Hz CustomVoice"
-            releaseDate="January 29, 2026"
-            params="~1.9B"
-            highlights={[
-              "CustomVoice model with nine built-in premium speakers and instruction-guided style control.",
-              "Supports Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.",
-              "Runs through the Electron Python bridge because the released model ships qwen-tts/safetensors assets, not browser ONNX artifacts.",
-            ]}
-            links={[
-              { label: "HF Model", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" },
-              { label: "HF Tokenizer", href: "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz" },
-              { label: "GitHub", href: "https://github.com/QwenLM/Qwen3-TTS" },
-            ]}
-          />
-        )}
+        ) : null}
+
+        {mountedLocalRuntimePages.map((page) => {
+          const config = LOCAL_RUNTIME_PAGE_CONFIG[page];
+          const isActive = activePage === page;
+          return (
+            <section
+              key={page}
+              data-testid={`local-runtime-panel-${page}`}
+              hidden={!isActive}
+              aria-hidden={!isActive}
+            >
+              <LocalRuntimePage
+                model={page}
+                name={config.name}
+                releaseDate={config.releaseDate}
+                params={config.params}
+                highlights={config.highlights}
+                links={config.links}
+              />
+            </section>
+          );
+        })}
 
         {/* Footer */}
         {!isReaderPage && (

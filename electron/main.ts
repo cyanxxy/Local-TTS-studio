@@ -6,8 +6,15 @@ import { pathToFileURL } from "url";
 import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import {
+  getBootstrapPythonCommandCandidates,
+  getDefaultPythonRuntimeSetup,
+  getManagedPythonVersionCheckSnippet,
+  getPythonBridgePathEntries,
   getPythonDependencyCheckSnippet,
+  getUvExecutableCandidates,
   getVirtualEnvPythonCandidates,
+  getVirtualEnvPythonPath,
+  type PythonCommandCandidate,
   type PythonSearchContext,
 } from "./pythonRuntime";
 import {
@@ -40,9 +47,11 @@ import {
 const isDev = !app.isPackaged;
 const PYTHON_BINARY_NAME_RE = /^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/i;
 const PYTHON_BRIDGE_TIMEOUT_MS = 5 * 60 * 1000;
+const PYTHON_BOOTSTRAP_TIMEOUT_MS = 20 * 60 * 1000;
 const PYTHON_EXECUTABLE_TIMEOUT_MS = 20_000;
 const PYTHON_BRIDGE_MAX_STDOUT_BYTES = 125_000_000;
 const PYTHON_BRIDGE_MAX_STDERR_BYTES = 1_000_000;
+const PYTHON_BOOTSTRAP_MAX_OUTPUT_BYTES = 4_000_000;
 const PYTHON_CANCEL_KILL_AFTER_MS = 2_000;
 const GENERATE_RATE_WINDOW_MS = 500;
 protocol.registerSchemesAsPrivileged([
@@ -62,12 +71,22 @@ interface AutoPythonCandidate {
   resolvedFrom: string;
 }
 
+interface SystemDependencySetup {
+  label: string;
+  commands: string[];
+  macHomebrewPackage?: string;
+}
+
 const activeBridgeProcesses = new Map<string, ChildProcessWithoutNullStreams>();
 const cancelledBridgeRequests = new Set<string>();
 const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
   rateWindowMs: GENERATE_RATE_WINDOW_MS,
 });
 const autoPythonBinaryCache = new Map<LocalModel, PythonResolution>();
+const defaultPythonRuntimeSetupPromises = new Map<LocalModel, Promise<PythonResolution>>();
+const dynamicPythonBridgePathEntries = new Set<string>();
+
+type RuntimeSetupProgress = (phase: string, message: string, startedAt?: number) => void;
 
 function createMainWindow() {
   const win = new BrowserWindow({
@@ -241,10 +260,7 @@ async function assertPythonExecutable(binary: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(binary, ["--version"], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: "utf-8",
-      },
+      env: buildPythonBridgeEnv(),
     });
 
     let output = "";
@@ -284,10 +300,7 @@ async function assertPythonModelDependency(binary: string, model: LocalModel): P
   await new Promise<void>((resolve, reject) => {
     const child = spawn(binary, ["-c", snippet], {
       stdio: ["ignore", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        PYTHONIOENCODING: "utf-8",
-      },
+      env: buildPythonBridgeEnv(),
     });
 
     let stderr = "";
@@ -323,6 +336,442 @@ async function assertPythonModelDependency(binary: string, model: LocalModel): P
   });
 }
 
+async function assertBootstrapPythonVersion(binary: string, pythonVersion: string): Promise<void> {
+  await assertBootstrapPythonCommandVersion({ executable: binary, args: [], resolvedFrom: binary }, pythonVersion);
+}
+
+async function assertBootstrapPythonCommandVersion(
+  command: PythonCommandCandidate,
+  pythonVersion: string,
+): Promise<void> {
+  const snippet = getManagedPythonVersionCheckSnippet(pythonVersion);
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(command.executable, [...command.args, "-c", snippet], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: buildPythonBridgeEnv(),
+    });
+
+    const timeoutHandle = setTimeout(() => {
+      child.kill();
+      reject(new Error("Timed out while checking Python version for runtime setup."));
+    }, PYTHON_EXECUTABLE_TIMEOUT_MS);
+
+    const cleanup = () => clearTimeout(timeoutHandle);
+    child.on("error", (err) => {
+      cleanup();
+      reject(new Error(`Failed to inspect Python runtime: ${err.message}`));
+    });
+    child.on("close", (code) => {
+      cleanup();
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(new Error(`Python ${pythonVersion} is required for managed runtime setup.`));
+    });
+  });
+}
+
+async function runPythonSetupCommand(binary: string, args: string[], description: string): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const child = spawn(binary, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: buildPythonBridgeEnv(),
+    });
+
+    let output = "";
+    let outputBytes = 0;
+    let settled = false;
+    const timeoutHandle = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error(`${description} timed out after ${PYTHON_BOOTSTRAP_TIMEOUT_MS / 1000}s.`));
+    }, PYTHON_BOOTSTRAP_TIMEOUT_MS);
+
+    const cleanup = () => clearTimeout(timeoutHandle);
+    const appendOutput = (chunk: Buffer) => {
+      outputBytes += chunk.byteLength;
+      if (outputBytes <= PYTHON_BOOTSTRAP_MAX_OUTPUT_BYTES) {
+        output += chunk.toString("utf-8");
+      }
+    };
+
+    child.stdout.on("data", appendOutput);
+    child.stderr.on("data", appendOutput);
+    child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`${description} failed to start: ${err.message}`));
+    });
+    child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (code === 0) {
+        resolve(output);
+        return;
+      }
+
+      const details = output.trim();
+      reject(new Error(
+        `${description} failed with exit code ${code}.${details ? `\n${details}` : ""}`,
+      ));
+    });
+  });
+}
+
+function getDefaultRuntimeRoot(): string {
+  return isDev
+    ? process.cwd()
+    : path.join(app.getPath("userData"), "python-runtimes");
+}
+
+async function findBootstrapPython(model: LocalModel, pythonVersion: string): Promise<PythonCommandCandidate> {
+  for (const candidate of getBootstrapPythonCommandCandidates(model, pythonVersion, process.platform)) {
+    try {
+      const validated = await validatePythonBinary(candidate.executable, "pythonBinary");
+      const command = { ...candidate, executable: validated };
+      await assertBootstrapPythonCommandVersion(command, pythonVersion);
+      return command;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  throw new Error(`No Python ${pythonVersion} interpreter was found for first-run runtime setup.`);
+}
+
+async function assertUvExecutable(binary: string): Promise<string> {
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(binary, ["--version"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: buildPythonBridgeEnv(),
+    });
+
+    let output = "";
+    const timeoutHandle = setTimeout(() => {
+      child.kill();
+      reject(new Error("Timed out while validating uv executable."));
+    }, PYTHON_EXECUTABLE_TIMEOUT_MS);
+
+    const cleanup = () => clearTimeout(timeoutHandle);
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf-8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf-8");
+    });
+    child.on("error", (err) => {
+      cleanup();
+      reject(new Error(`Failed to execute uv: ${err.message}`));
+    });
+    child.on("close", (code) => {
+      cleanup();
+      if (code === 0 && /\buv\b/i.test(output)) {
+        resolve();
+        return;
+      }
+      reject(new Error("Configured uv executable is not valid."));
+    });
+  });
+
+  return binary;
+}
+
+async function findUvExecutable(): Promise<string | null> {
+  for (const candidate of getUvExecutableCandidates(process.platform)) {
+    try {
+      return await assertUvExecutable(candidate);
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return null;
+}
+
+function getSystemDependenciesForModel(model: LocalModel): SystemDependencySetup[] {
+  if (model !== "neutts") return [];
+  return [{
+    label: "espeak-ng",
+    commands: ["espeak-ng", "espeak"],
+    macHomebrewPackage: "espeak-ng",
+  }];
+}
+
+function getHomebrewExecutableCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
+  if (process.platform !== "darwin") return [];
+
+  const candidates: string[] = [];
+  const append = (value: string | undefined) => {
+    if (value && !candidates.includes(value)) candidates.push(value);
+  };
+
+  append(env.TTS_BREW_BIN);
+  append(env.BREW_BIN);
+  append("/opt/homebrew/bin/brew");
+  append("/usr/local/bin/brew");
+  append("/opt/local/bin/brew");
+  append("brew");
+
+  return candidates;
+}
+
+function homebrewListVersionsIncludesPackage(output: string, packageName: string): boolean {
+  return output
+    .split(/\r?\n/)
+    .some((line) => line.trim().split(/\s+/)[0] === packageName);
+}
+
+function getSystemDependencyInstallHint(dependency: SystemDependencySetup): string {
+  if (process.platform === "darwin") {
+    const brewCommand = dependency.macHomebrewPackage
+      ? `brew install ${dependency.macHomebrewPackage}`
+      : `install ${dependency.label} with Homebrew`;
+    return `${dependency.label} is required. Install it with \`${brewCommand}\`, or install it another way and make the command available on PATH.`;
+  }
+
+  if (process.platform === "win32") {
+    return `${dependency.label} is required. Install eSpeak NG for Windows, add its install folder to PATH, then retry.`;
+  }
+
+  if (process.platform === "linux") {
+    return `${dependency.label} is required. Install espeak-ng with your distribution package manager, for example \`sudo apt install espeak-ng\`, \`sudo dnf install espeak-ng\`, or \`sudo pacman -S espeak-ng\`, then retry.`;
+  }
+
+  return `${dependency.label} is required. Install it with your system package manager and make the command available on PATH.`;
+}
+
+async function findHomebrewExecutable(): Promise<string | null> {
+  for (const candidate of getHomebrewExecutableCandidates()) {
+    try {
+      await runPythonSetupCommand(candidate, ["--version"], "Validate Homebrew");
+      return candidate;
+    } catch {
+      // Try the next candidate.
+    }
+  }
+
+  return null;
+}
+
+function addDynamicPythonBridgePathEntry(entry: string | undefined): void {
+  if (entry) {
+    dynamicPythonBridgePathEntries.add(entry);
+  }
+}
+
+async function addHomebrewPackagePath(brewBinary: string, packageName: string): Promise<void> {
+  try {
+    const output = await runPythonSetupCommand(
+      brewBinary,
+      ["--prefix", packageName],
+      `Resolve ${packageName} Homebrew prefix`,
+    );
+    const prefix = output.trim().split(/\r?\n/)[0];
+    if (prefix) {
+      addDynamicPythonBridgePathEntry(path.join(prefix, "bin"));
+      addDynamicPythonBridgePathEntry(path.join(prefix, "sbin"));
+    }
+  } catch {
+    // Static PATH fallbacks cover standard Homebrew layouts.
+  }
+}
+
+async function findSystemDependencyCommand(dependency: SystemDependencySetup): Promise<string | null> {
+  for (const command of dependency.commands) {
+    try {
+      await runPythonSetupCommand(command, ["--version"], `Validate ${dependency.label}`);
+      return command;
+    } catch {
+      // Try the next supported command name.
+    }
+  }
+
+  return null;
+}
+
+async function installHomebrewSystemDependency(
+  dependency: SystemDependencySetup,
+  onProgress: RuntimeSetupProgress | undefined,
+  startedAt: number,
+): Promise<void> {
+  if (!dependency.macHomebrewPackage) {
+    throw new Error(getSystemDependencyInstallHint(dependency));
+  }
+
+  const brewBinary = await findHomebrewExecutable();
+  if (!brewBinary) {
+    throw new Error(
+      `${getSystemDependencyInstallHint(dependency)} Automatic install was not possible because Homebrew was not found.`,
+    );
+  }
+
+  const listOutput = await runPythonSetupCommand(
+    brewBinary,
+    ["list", "--versions", dependency.macHomebrewPackage],
+    `Check ${dependency.macHomebrewPackage}`,
+  ).catch(() => "");
+  const isInstalled = homebrewListVersionsIncludesPackage(listOutput, dependency.macHomebrewPackage);
+
+  if (isInstalled) {
+    await addHomebrewPackagePath(brewBinary, dependency.macHomebrewPackage);
+    if (await findSystemDependencyCommand(dependency)) return;
+    throw new Error(
+      `${dependency.label} is installed with Homebrew but its command was not found from the app. Restart the app and verify \`${dependency.commands[0]}\` is available on PATH.`,
+    );
+  }
+
+  onProgress?.("runtime_setup", `Installing ${dependency.macHomebrewPackage} with Homebrew...`, startedAt);
+  await runPythonSetupCommand(
+    brewBinary,
+    ["install", dependency.macHomebrewPackage],
+    `Install ${dependency.macHomebrewPackage}`,
+  );
+  await addHomebrewPackagePath(brewBinary, dependency.macHomebrewPackage);
+}
+
+async function ensureSystemDependencies(
+  dependencies: SystemDependencySetup[],
+  onProgress: RuntimeSetupProgress | undefined,
+  startedAt: number,
+): Promise<void> {
+  for (const dependency of dependencies) {
+    if (await findSystemDependencyCommand(dependency)) continue;
+
+    if (process.platform === "darwin") {
+      await installHomebrewSystemDependency(dependency, onProgress, startedAt);
+      if (await findSystemDependencyCommand(dependency)) continue;
+    }
+
+    throw new Error(getSystemDependencyInstallHint(dependency));
+  }
+}
+
+async function createManagedPythonVirtualEnv(
+  model: LocalModel,
+  envDir: string,
+  pythonVersion: string,
+  onProgress: RuntimeSetupProgress | undefined,
+  startedAt: number,
+): Promise<void> {
+  try {
+    const bootstrapPython = await findBootstrapPython(model, pythonVersion);
+    onProgress?.("runtime_setup", `Creating Python ${pythonVersion} environment...`, startedAt);
+    await runPythonSetupCommand(
+      bootstrapPython.executable,
+      [...bootstrapPython.args, "-m", "venv", envDir],
+      `Create ${path.basename(envDir)}`,
+    );
+    return;
+  } catch {
+    // Fall back to uv below; uv can download managed Python when the requested
+    // interpreter is not already present on the system.
+  }
+
+  const uvBinary = await findUvExecutable();
+  if (!uvBinary) {
+    throw new Error(
+      `No Python ${pythonVersion} interpreter or uv executable was found for first-run runtime setup. Install Python ${pythonVersion} or uv, then retry.`,
+    );
+  }
+
+  onProgress?.("runtime_setup", `Creating Python ${pythonVersion} environment with uv...`, startedAt);
+  await runPythonSetupCommand(
+    uvBinary,
+    ["venv", "--python", pythonVersion, envDir],
+    `Create ${path.basename(envDir)} with uv`,
+  );
+}
+
+async function ensureDefaultPythonRuntime(
+  model: LocalModel,
+  onProgress?: RuntimeSetupProgress,
+): Promise<PythonResolution> {
+  const existing = defaultPythonRuntimeSetupPromises.get(model);
+  if (existing) return existing;
+
+  const setupPromise = (async () => {
+    const setup = getDefaultPythonRuntimeSetup(model);
+    const rootDir = getDefaultRuntimeRoot();
+    const envDir = path.join(rootDir, setup.envName);
+    const pythonBinary = getVirtualEnvPythonPath(rootDir, setup.envName, process.platform);
+    const resolvedFrom = isDev ? `cwd:${setup.envName}` : `userData:${setup.envName}`;
+    const startedAt = Date.now();
+    const systemDependencies = getSystemDependenciesForModel(model);
+
+    try {
+      await validatePythonBinary(pythonBinary, "pythonBinary");
+      await assertBootstrapPythonVersion(pythonBinary, setup.pythonVersion);
+      await assertPythonModelDependency(pythonBinary, model);
+      await ensureSystemDependencies(systemDependencies, onProgress, startedAt);
+      return { pythonBinary, resolvedFrom };
+    } catch {
+      // Create or repair the managed runtime below.
+    }
+
+    onProgress?.("runtime_setup", `Preparing ${setup.dependencyLabel} runtime in ${setup.envName}...`, startedAt);
+    await fs.mkdir(rootDir, { recursive: true });
+
+    let shouldCreateEnv = false;
+    try {
+      await validatePythonBinary(pythonBinary, "pythonBinary");
+      await assertBootstrapPythonVersion(pythonBinary, setup.pythonVersion);
+    } catch {
+      shouldCreateEnv = true;
+    }
+
+    if (shouldCreateEnv) {
+      await fs.rm(envDir, { recursive: true, force: true });
+      await createManagedPythonVirtualEnv(model, envDir, setup.pythonVersion, onProgress, startedAt);
+    }
+
+    await validatePythonBinary(pythonBinary, "pythonBinary");
+    await assertBootstrapPythonVersion(pythonBinary, setup.pythonVersion);
+
+    try {
+      onProgress?.("runtime_setup", `Ensuring pip is available in ${setup.envName}...`, startedAt);
+      await runPythonSetupCommand(pythonBinary, ["-m", "ensurepip", "--upgrade"], `Bootstrap pip in ${setup.envName}`);
+    } catch {
+      // Some Python distributions omit ensurepip but still provide pip in venvs.
+    }
+
+    onProgress?.("runtime_setup", `Upgrading pip in ${setup.envName}...`, startedAt);
+    await runPythonSetupCommand(
+      pythonBinary,
+      ["-m", "pip", "install", "--upgrade", "pip"],
+      `Upgrade pip in ${setup.envName}`,
+    );
+
+    for (const packages of setup.installSteps) {
+      onProgress?.("runtime_setup", `Installing ${packages.join(" and ")}...`, startedAt);
+      await runPythonSetupCommand(
+        pythonBinary,
+        ["-m", "pip", "install", ...packages],
+        `Install ${packages.join(" ")}`,
+      );
+    }
+
+    await assertPythonModelDependency(pythonBinary, model);
+    await ensureSystemDependencies(systemDependencies, onProgress, startedAt);
+    onProgress?.("runtime_setup", `${setup.dependencyLabel} runtime is installed.`, startedAt);
+
+    return { pythonBinary, resolvedFrom };
+  })();
+
+  defaultPythonRuntimeSetupPromises.set(model, setupPromise);
+  try {
+    const resolution = await setupPromise;
+    autoPythonBinaryCache.set(model, resolution);
+    return resolution;
+  } catch (err) {
+    defaultPythonRuntimeSetupPromises.delete(model);
+    throw err;
+  }
+}
+
 async function validatePythonBinary(raw: string, fieldName: string): Promise<string> {
   if (raw.includes("\u0000")) throw new Error(`\`${fieldName}\` contains invalid characters.`);
 
@@ -348,7 +797,10 @@ async function validatePythonBinary(raw: string, fieldName: string): Promise<str
 async function sanitizePythonBinary(
   input: unknown,
   model: LocalModel,
-  { requireModelDependency }: { requireModelDependency: boolean },
+  {
+    onProgress,
+    requireModelDependency,
+  }: { onProgress?: RuntimeSetupProgress; requireModelDependency: boolean },
 ): Promise<PythonResolution> {
   const explicit = parseOptionalString(input, "pythonBinary", { maxLength: 1024 });
   if (explicit) {
@@ -365,6 +817,7 @@ async function sanitizePythonBinary(
       if (requireModelDependency) {
         await assertPythonModelDependency(validated, model);
       }
+      await ensureSystemDependencies(getSystemDependenciesForModel(model), onProgress, Date.now());
       return cached;
     } catch {
       autoPythonBinaryCache.delete(model);
@@ -378,6 +831,7 @@ async function sanitizePythonBinary(
       if (requireModelDependency) {
         await assertPythonModelDependency(validated, model);
       }
+      await ensureSystemDependencies(getSystemDependenciesForModel(model), onProgress, Date.now());
       const resolvedCandidate = {
         pythonBinary: validated,
         resolvedFrom: candidate.resolvedFrom,
@@ -389,11 +843,15 @@ async function sanitizePythonBinary(
     }
   }
 
+  if (process.env.OPEN_TTS_DISABLE_AUTO_PYTHON_SETUP !== "1") {
+    return await ensureDefaultPythonRuntime(model, onProgress);
+  }
+
   const recommendedEnv = model === "neutts"
     ? ".venv-neutts"
     : model === "qwen3"
       ? ".venv-qwen3"
-      : ".venv313";
+      : ".venv-kani";
   const installHint = model === "neutts"
     ? "neutts"
     : model === "qwen3"
@@ -409,14 +867,19 @@ async function sanitizePythonBinary(
   );
 }
 
-async function sanitizeLocalBridgeRequest(action: BridgeAction, request: unknown): Promise<ValidatedLocalBridgeRequest> {
+async function sanitizeLocalBridgeRequest(
+  action: BridgeAction,
+  request: unknown,
+  onProgress?: RuntimeSetupProgress,
+): Promise<ValidatedLocalBridgeRequest> {
   if (!isRecord(request)) throw new Error("Invalid IPC request payload.");
   const model = assertLocalModel(String(request.model));
   const requestId = action === "generate"
     ? parseRequestId(request.requestId, { required: true })
     : parseRequestId(request.requestId);
   const pythonResolution = await sanitizePythonBinary(request.pythonBinary, model, {
-    requireModelDependency: action === "generate" && request.pythonBinary == null,
+    onProgress,
+    requireModelDependency: request.pythonBinary == null,
   });
 
   const payload = action === "generate"
@@ -471,10 +934,11 @@ function shouldForwardPythonEnv(key: string): boolean {
 function buildPythonBridgeEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     PYTHONIOENCODING: "utf-8",
+    PATH: getPythonBridgePathEntries(process.platform).join(path.delimiter),
   };
 
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && shouldForwardPythonEnv(key)) {
+    if (key !== "PATH" && value !== undefined && shouldForwardPythonEnv(key)) {
       env[key] = value;
     }
   }
@@ -482,12 +946,39 @@ function buildPythonBridgeEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+function getLocalBridgeProgressTarget(
+  action: BridgeAction,
+  request: unknown,
+): { model: LocalModel; requestId: string } | null {
+  if (!isRecord(request)) return null;
+
+  try {
+    const model = assertLocalModel(String(request.model));
+    const requestId = parseRequestId(request.requestId, { required: action === "generate" });
+    return requestId ? { model, requestId } : null;
+  } catch {
+    return null;
+  }
+}
+
 async function runPythonBridge(
   action: BridgeAction,
   request: unknown,
   event?: IpcMainInvokeEvent,
 ): Promise<unknown> {
-  const sanitized = await sanitizeLocalBridgeRequest(action, request);
+  const progressTarget = getLocalBridgeProgressTarget(action, request);
+  const sendProgress: RuntimeSetupProgress | undefined = event && progressTarget
+    ? (phase, message, startedAt) => {
+      event.sender.send("local-tts:progress", {
+        requestId: progressTarget.requestId,
+        model: progressTarget.model,
+        phase,
+        message,
+        ...(startedAt == null ? {} : { elapsedSec: Number(((Date.now() - startedAt) / 1000).toFixed(3)) }),
+      });
+    }
+    : undefined;
+  const sanitized = await sanitizeLocalBridgeRequest(action, request, sendProgress);
   const model = sanitized.model;
   const cacheDir = getCacheDir(model);
   const pythonBinary = sanitized.pythonResolution.pythonBinary;

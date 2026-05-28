@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import type { ComponentProps } from "react";
+import { useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalRuntimePage } from "./LocalRuntimePage";
 import type {
   LocalTtsCacheInfo,
   LocalTtsGenerateResult,
+  LocalTtsModel,
   LocalTtsProgressEvent,
   LocalTtsProbeResult,
 } from "../electron";
@@ -71,6 +72,74 @@ function renderPage(overrides: Partial<ComponentProps<typeof LocalRuntimePage>> 
       links={[{ label: "HF Model", href: "https://huggingface.co/nineninesix/kani-tts-2-en" }]}
       {...overrides}
     />,
+  );
+}
+
+function getRuntimePageProps(model: LocalTtsModel): ComponentProps<typeof LocalRuntimePage> {
+  if (model === "neutts") {
+    return {
+      model,
+      name: "NeuTTS Nano",
+      releaseDate: "2026-02-12",
+      params: "~120M",
+      highlights: ["Local Python bridge"],
+      links: [{ label: "HF Model", href: "https://huggingface.co/neuphonic/neutts-nano" }],
+    };
+  }
+
+  if (model === "qwen3") {
+    return {
+      model,
+      name: "Qwen3-TTS",
+      releaseDate: "2026-01-29",
+      params: "~1.9B",
+      highlights: ["Local Python bridge"],
+      links: [{ label: "HF Model", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" }],
+    };
+  }
+
+  return {
+    model,
+    name: "Kani-TTS-2",
+    releaseDate: "2026-02-15",
+    params: "~400M",
+    highlights: ["Local Python bridge"],
+    links: [{ label: "HF Model", href: "https://huggingface.co/nineninesix/kani-tts-2-en" }],
+  };
+}
+
+function LocalRuntimeTabsHarness({ initialModel }: { initialModel: LocalTtsModel }) {
+  const [activeTab, setActiveTab] = useState<LocalTtsModel | "studio">(initialModel);
+  const [visitedTabs, setVisitedTabs] = useState<Set<LocalTtsModel>>(() => new Set([initialModel]));
+  const switchTab = (tab: LocalTtsModel | "studio") => {
+    if (tab !== "studio") {
+      setVisitedTabs((prev) => {
+        if (prev.has(tab)) return prev;
+        const next = new Set(prev);
+        next.add(tab);
+        return next;
+      });
+    }
+    setActiveTab(tab);
+  };
+
+  return (
+    <div>
+      <nav aria-label="Test tabs">
+        <button type="button" onClick={() => switchTab("studio")}>Studio</button>
+        <button type="button" onClick={() => switchTab("neutts")}>NeuTTS</button>
+        <button type="button" onClick={() => switchTab("kani")}>Kani</button>
+        <button type="button" onClick={() => switchTab("qwen3")}>Qwen3</button>
+      </nav>
+      {activeTab === "studio" && <div>Studio tab content</div>}
+      {(["neutts", "kani", "qwen3"] as const)
+        .filter((model) => visitedTabs.has(model))
+        .map((model) => (
+          <section key={model} hidden={activeTab !== model} aria-hidden={activeTab !== model}>
+            <LocalRuntimePage {...getRuntimePageProps(model)} />
+          </section>
+        ))}
+    </div>
   );
 }
 
@@ -180,13 +249,22 @@ describe("LocalRuntimePage", () => {
     });
 
     await waitFor(() => {
-      expect(probe).toHaveBeenCalledWith({ model: "neutts", pythonBinary: undefined });
+      expect(probe).toHaveBeenCalledWith(expect.objectContaining({
+        model: "neutts",
+        pythonBinary: undefined,
+      }));
     });
 
     fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
       target: { value: "/custom/venv/bin/python" },
     });
 
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(probe).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: /generate locally/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /re-download model/i })).toBeDisabled();
 
@@ -194,10 +272,10 @@ describe("LocalRuntimePage", () => {
     fireEvent.click(recheckButton);
 
     await waitFor(() => {
-      expect(probe).toHaveBeenLastCalledWith({
+      expect(probe).toHaveBeenLastCalledWith(expect.objectContaining({
         model: "neutts",
         pythonBinary: "/custom/venv/bin/python",
-      });
+      }));
     });
 
     const runtimeSettingsSection = screen.getByPlaceholderText("/absolute/path/to/python").closest("section");
@@ -285,6 +363,201 @@ describe("LocalRuntimePage", () => {
 
     expect(await screen.findByText("Generation cancelled.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /cancel/i })).not.toBeInTheDocument();
+  });
+
+  it("does not re-probe or stay busy when the Python override changes during an in-flight probe", async () => {
+    const pendingProbe = createDeferred<LocalTtsProbeResult>();
+    probe.mockReturnValue(pendingProbe.promise);
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: /checking/i })).toBeDisabled();
+
+    fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
+      target: { value: "/custom/bin/python" },
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole("button", { name: /re-check runtime/i })).toBeEnabled();
+
+    await act(async () => {
+      pendingProbe.resolve(baseProbe);
+      await pendingProbe.promise;
+    });
+
+    expect(screen.queryByText(baseProbe.message)).not.toBeInTheDocument();
+  });
+
+  it("renders progress for first-run runtime setup during probe", async () => {
+    const pendingProbe = createDeferred<LocalTtsProbeResult>();
+    probe.mockReturnValue(pendingProbe.promise);
+
+    renderPage({
+      model: "qwen3",
+      name: "Qwen3-TTS",
+      links: [{ label: "HF Model", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" }],
+    });
+
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
+
+    const request = probe.mock.calls[0][0] as { requestId: string };
+    expect(request.requestId).toMatch(/^qwen3-probe-/);
+
+    await emitProgress(progressListener, {
+      requestId: request.requestId,
+      model: "qwen3",
+      phase: "runtime_setup",
+      message: "Installing qwen-tts and torch...",
+      elapsedSec: 1.2,
+    });
+
+    expect(await screen.findByText("Installing qwen-tts and torch... (1.2s)")).toBeInTheDocument();
+
+    await emitProgress(progressListener, {
+      requestId: "stale-probe",
+      model: "qwen3",
+      phase: "runtime_setup",
+      message: "Stale setup progress",
+      elapsedSec: 2.4,
+    });
+
+    expect(screen.queryByText(/Stale setup progress/)).not.toBeInTheDocument();
+
+    await act(async () => {
+      pendingProbe.resolve({
+        ...baseProbe,
+        message: "Qwen3-TTS runtime is ready.",
+        package: "qwen-tts",
+      });
+      await pendingProbe.promise;
+    });
+
+    expect(await screen.findByText("Qwen3-TTS runtime is ready.")).toBeInTheDocument();
+  });
+
+  it("clears runtime busy after probe setup fails and ignores late setup progress", async () => {
+    const pendingProbe = createDeferred<LocalTtsProbeResult>();
+    probe.mockReturnValue(pendingProbe.promise);
+
+    renderPage();
+
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalledTimes(1);
+    });
+
+    const request = probe.mock.calls[0][0] as { requestId: string };
+
+    await emitProgress(progressListener, {
+      requestId: request.requestId,
+      model: "kani",
+      phase: "runtime_setup",
+      message: "Installing Kani runtime...",
+      elapsedSec: 3.1,
+    });
+
+    expect(await screen.findByText("Installing Kani runtime... (3.1s)")).toBeInTheDocument();
+
+    await act(async () => {
+      pendingProbe.reject(new Error("Kani setup failed."));
+      await pendingProbe.promise.catch(() => undefined);
+    });
+
+    expect(await screen.findByText("Kani setup failed.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /re-check runtime/i })).toBeEnabled();
+    expect(screen.queryByText("Checking local runtime...")).not.toBeInTheDocument();
+
+    await emitProgress(progressListener, {
+      requestId: request.requestId,
+      model: "kani",
+      phase: "runtime_setup",
+      message: "Late setup progress must stay hidden.",
+      elapsedSec: 5.7,
+    });
+
+    expect(screen.queryByText(/Late setup progress/)).not.toBeInTheDocument();
+    expect(screen.getByText("Kani setup failed.")).toBeInTheDocument();
+  });
+
+  it("ties setup progress to the newest explicit probe after Python override edits", async () => {
+    const initialProbe = createDeferred<LocalTtsProbeResult>();
+    const explicitProbe = createDeferred<LocalTtsProbeResult>();
+    probe
+      .mockReturnValueOnce(initialProbe.promise)
+      .mockReturnValueOnce(explicitProbe.promise);
+
+    renderPage();
+
+    expect(await screen.findByRole("button", { name: /checking/i })).toBeDisabled();
+    const initialRequest = probe.mock.calls[0][0] as { requestId: string };
+
+    fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
+      target: { value: "/custom/bin/python" },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /re-check runtime/i })).toBeEnabled();
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /re-check runtime/i }));
+
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalledTimes(2);
+    });
+
+    const explicitRequest = probe.mock.calls[1][0] as {
+      requestId: string;
+      pythonBinary?: string;
+    };
+    expect(explicitRequest.pythonBinary).toBe("/custom/bin/python");
+
+    await emitProgress(progressListener, {
+      requestId: initialRequest.requestId,
+      model: "kani",
+      phase: "runtime_setup",
+      message: "Old setup progress must stay hidden.",
+      elapsedSec: 2.2,
+    });
+
+    expect(screen.queryByText(/Old setup progress/)).not.toBeInTheDocument();
+
+    await emitProgress(progressListener, {
+      requestId: explicitRequest.requestId,
+      model: "kani",
+      phase: "runtime_setup",
+      message: "Installing explicit runtime...",
+      elapsedSec: 0.8,
+    });
+
+    expect(await screen.findByText("Installing explicit runtime... (0.8s)")).toBeInTheDocument();
+
+    await act(async () => {
+      initialProbe.resolve({
+        ...baseProbe,
+        message: "Initial probe should stay hidden.",
+      });
+      await initialProbe.promise;
+    });
+
+    expect(screen.queryByText("Initial probe should stay hidden.")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /checking/i })).toBeDisabled();
+
+    await act(async () => {
+      explicitProbe.resolve({
+        ...baseProbe,
+        message: "Explicit runtime is ready.",
+      });
+      await explicitProbe.promise;
+    });
+
+    expect(await screen.findByText("Explicit runtime is ready.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /re-check runtime/i })).toBeEnabled();
   });
 
   it("suppresses stale progress and results after inputs change mid-generation", async () => {
@@ -405,6 +678,178 @@ describe("LocalRuntimePage", () => {
       expect(screen.queryByText("Python: 3.10.14")).not.toBeInTheDocument();
       expect(screen.queryByText("Path: /cache/neutts")).not.toBeInTheDocument();
     });
+  });
+
+  it("preserves Kani runtime and input state when switching away from the tab and back", async () => {
+    const returningProbe = createDeferred<LocalTtsProbeResult>();
+    probe.mockReset();
+    probe
+      .mockResolvedValueOnce(baseProbe)
+      .mockReturnValue(returningProbe.promise);
+
+    render(<LocalRuntimeTabsHarness initialModel="kani" />);
+
+    expect(await screen.findByText("Kani runtime is ready.")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Enter text to synthesize"), {
+      target: { value: "Kani tab text should still be here after tab navigation." },
+    });
+    fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
+      target: { value: "/runtimes/kani/bin/python" },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Example: en_US"), {
+      target: { value: "en_GB" },
+    });
+    fireEvent.change(screen.getByLabelText(/^temperature$/i), {
+      target: { value: "0.85" },
+    });
+    fireEvent.change(screen.getByLabelText(/^top-p$/i), {
+      target: { value: "0.9" },
+    });
+    fireEvent.change(screen.getByLabelText(/^repetition penalty$/i), {
+      target: { value: "1.3" },
+    });
+    fireEvent.change(screen.getByLabelText(/^max tokens$/i), {
+      target: { value: "3584" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Studio$/i }));
+    expect(screen.getByText("Studio tab content")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Kani$/i }));
+
+    expect(await screen.findByText("Runtime settings changed. Re-check the Python runtime before generating again.")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Enter text to synthesize")).toHaveValue(
+      "Kani tab text should still be here after tab navigation.",
+    );
+    expect(screen.getByPlaceholderText("/absolute/path/to/python")).toHaveValue("/runtimes/kani/bin/python");
+    expect(screen.getByPlaceholderText("Example: en_US")).toHaveValue("en_GB");
+    expect(screen.getByLabelText(/^temperature$/i)).toHaveValue(0.85);
+    expect(screen.getByLabelText(/^top-p$/i)).toHaveValue(0.9);
+    expect(screen.getByLabelText(/^repetition penalty$/i)).toHaveValue(1.3);
+    expect(screen.getByLabelText(/^max tokens$/i)).toHaveValue(3584);
+
+    await act(async () => {
+      returningProbe.resolve(baseProbe);
+      await returningProbe.promise;
+    });
+  });
+
+  it("preserves NeuTTS reference inputs when switching away from the tab and back", async () => {
+    probe.mockResolvedValue({
+      ...baseProbe,
+      message: "NeuTTS runtime is ready.",
+      package: "neutts",
+    });
+
+    render(<LocalRuntimeTabsHarness initialModel="neutts" />);
+
+    expect(await screen.findByText("NeuTTS runtime is ready.")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Enter text to synthesize"), {
+      target: { value: "NeuTTS tab text should still be here after tab navigation." },
+    });
+    fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
+      target: { value: "/runtimes/neutts/bin/python" },
+    });
+    fireEvent.change(screen.getByLabelText(/^model variant$/i), {
+      target: { value: "neuphonic/neutts-nano-spanish" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/paste the exact spoken transcript/i), {
+      target: { value: "This is the exact reference transcript." },
+    });
+
+    const referenceInput = screen.getAllByLabelText(/reference audio/i)[0];
+    const wavFile = new File([validWavBytes], "reference.wav", { type: "audio/wav" });
+    await act(async () => {
+      fireEvent.change(referenceInput, { target: { files: [wavFile] } });
+    });
+
+    expect(await screen.findByText(/loaded reference audio: reference\.wav/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Studio$/i }));
+    expect(screen.getByText("Studio tab content")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^NeuTTS$/i }));
+
+    expect(await screen.findByText(/loaded reference audio: reference\.wav/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Enter text to synthesize")).toHaveValue(
+      "NeuTTS tab text should still be here after tab navigation.",
+    );
+    expect(screen.getByPlaceholderText("/absolute/path/to/python")).toHaveValue("/runtimes/neutts/bin/python");
+    expect(screen.getByLabelText(/^model variant$/i)).toHaveValue("neuphonic/neutts-nano-spanish");
+    expect(screen.getByPlaceholderText(/paste the exact spoken transcript/i)).toHaveValue(
+      "This is the exact reference transcript.",
+    );
+    expect(screen.getByText("reference.wav")).toBeInTheDocument();
+  });
+
+  it("preserves Qwen3 speaker and runtime options when switching away from the tab and back", async () => {
+    probe.mockResolvedValue({
+      ...baseProbe,
+      message: "Qwen3-TTS runtime is ready.",
+      package: "qwen-tts",
+    });
+
+    render(<LocalRuntimeTabsHarness initialModel="qwen3" />);
+
+    expect(await screen.findByText("Qwen3-TTS runtime is ready.")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText("Enter text to synthesize"), {
+      target: { value: "Qwen3 tab text should still be here after tab navigation." },
+    });
+    fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
+      target: { value: "/runtimes/qwen3/bin/python" },
+    });
+    fireEvent.change(screen.getByLabelText(/^speaker$/i), {
+      target: { value: "Aiden" },
+    });
+    fireEvent.change(screen.getByLabelText(/^language$/i), {
+      target: { value: "English" },
+    });
+    fireEvent.change(screen.getByLabelText(/^device map$/i), {
+      target: { value: "cpu" },
+    });
+    fireEvent.change(screen.getByLabelText(/^dtype$/i), {
+      target: { value: "float32" },
+    });
+    fireEvent.change(screen.getByLabelText(/^attention$/i), {
+      target: { value: "eager" },
+    });
+    fireEvent.change(screen.getByLabelText(/instruction/i), {
+      target: { value: "Speak warmly with a calm documentary narration style." },
+    });
+    fireEvent.change(screen.getByLabelText(/^temperature$/i), {
+      target: { value: "0.75" },
+    });
+    fireEvent.change(screen.getByLabelText(/^top-p$/i), {
+      target: { value: "0.88" },
+    });
+    fireEvent.change(screen.getByLabelText(/^max tokens$/i), {
+      target: { value: "2304" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Studio$/i }));
+    expect(screen.getByText("Studio tab content")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Qwen3$/i }));
+
+    expect(await screen.findByText("Runtime settings changed. Re-check the Python runtime before generating again.")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("Enter text to synthesize")).toHaveValue(
+      "Qwen3 tab text should still be here after tab navigation.",
+    );
+    expect(screen.getByPlaceholderText("/absolute/path/to/python")).toHaveValue("/runtimes/qwen3/bin/python");
+    expect(screen.getByLabelText(/^speaker$/i)).toHaveValue("Aiden");
+    expect(screen.getByLabelText(/^language$/i)).toHaveValue("English");
+    expect(screen.getByLabelText(/^device map$/i)).toHaveValue("cpu");
+    expect(screen.getByLabelText(/^dtype$/i)).toHaveValue("float32");
+    expect(screen.getByLabelText(/^attention$/i)).toHaveValue("eager");
+    expect(screen.getByLabelText(/instruction/i)).toHaveValue(
+      "Speak warmly with a calm documentary narration style.",
+    );
+    expect(screen.getByLabelText(/^temperature$/i)).toHaveValue(0.75);
+    expect(screen.getByLabelText(/^top-p$/i)).toHaveValue(0.88);
+    expect(screen.getByLabelText(/^max tokens$/i)).toHaveValue(2304);
   });
 
   it("renders the Electron-only fallback when the desktop bridge is unavailable", () => {

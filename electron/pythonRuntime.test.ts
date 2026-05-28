@@ -3,8 +3,13 @@
 import path from "path";
 import { describe, expect, it } from "vitest";
 import {
+  getBootstrapPythonCommandCandidates,
+  getDefaultPythonRuntimeSetup,
+  getManagedPythonVersionCheckSnippet,
+  getPythonBridgePathEntries,
   getPythonDependencyCheckSnippet,
   getPythonSearchRoots,
+  getUvExecutableCandidates,
   getVirtualEnvPythonCandidates,
   getVirtualEnvPythonPath,
 } from "./pythonRuntime";
@@ -68,4 +73,109 @@ describe("pythonRuntime", () => {
     expect(getPythonDependencyCheckSnippet("qwen3")).toContain("find_spec('qwen_tts')");
     expect(getPythonDependencyCheckSnippet("qwen3")).toContain("find_spec('torch')");
   });
+
+  it("describes default first-run runtime setup for Electron local models", () => {
+    expect(getDefaultPythonRuntimeSetup("qwen3")).toEqual({
+      envName: ".venv-qwen3",
+      pythonVersion: "3.12",
+      installSteps: [["qwen-tts", "torch"]],
+      dependencyLabel: "qwen-tts",
+    });
+    expect(getDefaultPythonRuntimeSetup("kani")).toEqual({
+      envName: ".venv-kani",
+      pythonVersion: "3.12",
+      installSteps: [["kani-tts-2"], ["transformers==4.56.0"]],
+      dependencyLabel: "kani-tts-2",
+    });
+    expect(getDefaultPythonRuntimeSetup("neutts")).toEqual({
+      envName: ".venv-neutts",
+      pythonVersion: "3.12",
+      installSteps: [["neutts"]],
+      dependencyLabel: "neutts",
+    });
+  });
+
+  it("targets Python 3.12 for managed runtime setup", () => {
+    expect(getManagedPythonVersionCheckSnippet("3.12")).toContain("(3, 12) <= sys.version_info < (3, 13)");
+  });
+
+  it("uses py launcher version arguments when bootstrapping managed Python on Windows", () => {
+    expect(getBootstrapPythonCommandCandidates("kani", "3.12", "win32", {
+      TTS_KANI_PYTHON_BIN: "C:\\Python312\\python.exe",
+      TTS_PYTHON_BIN: "C:\\Fallback\\python.exe",
+    })).toEqual([
+      { executable: "C:\\Python312\\python.exe", args: [], resolvedFrom: "TTS_KANI_PYTHON_BIN" },
+      { executable: "C:\\Fallback\\python.exe", args: [], resolvedFrom: "TTS_PYTHON_BIN" },
+      { executable: "py", args: ["-3.12"], resolvedFrom: "system:py -3.12" },
+      { executable: "python3.12", args: [], resolvedFrom: "system:python3.12" },
+      { executable: "python", args: [], resolvedFrom: "system:python" },
+      { executable: "py", args: [], resolvedFrom: "system:py" },
+    ]);
+  });
+
+  it("includes uv executable fallbacks for managed Python downloads", () => {
+    expect(getUvExecutableCandidates("darwin", {
+      TTS_UV_BIN: "/custom/uv",
+      UV_BIN: "/other/uv",
+      HOME: "/Users/tester",
+    })).toEqual([
+      "/custom/uv",
+      "/other/uv",
+      "/Users/tester/.local/bin/uv",
+      "/Users/tester/.cargo/bin/uv",
+      "uv",
+      "/opt/homebrew/bin/uv",
+      "/usr/local/bin/uv",
+    ]);
+    expect(getUvExecutableCandidates("linux", { HOME: "/home/tester" })).toEqual([
+      "/home/tester/.local/bin/uv",
+      "/home/tester/.cargo/bin/uv",
+      "uv",
+      "/usr/local/bin/uv",
+      "/usr/bin/uv",
+    ]);
+    expect(getUvExecutableCandidates("win32", {
+      USERPROFILE: "C:\\Users\\Tester",
+    })).toEqual(["C:\\Users\\Tester\\.local\\bin\\uv.exe", "uv.exe", "uv"]);
+  });
+
+  it("adds desktop-launch-safe system paths to the Python bridge PATH", () => {
+    expect(getPythonBridgePathEntries("darwin", {
+      PATH: "/usr/bin:/bin",
+    })).toEqual([
+      "/usr/bin:/bin",
+      "/opt/homebrew/bin",
+      "/usr/local/bin",
+      "/opt/homebrew/sbin",
+      "/usr/local/sbin",
+      "/opt/homebrew/opt/espeak-ng/bin",
+      "/usr/local/opt/espeak-ng/bin",
+      "/opt/local/bin",
+      "/opt/local/sbin",
+    ]);
+    expect(getPythonBridgePathEntries("linux", {
+      PATH: "/usr/bin:/bin",
+    })).toEqual([
+      "/usr/bin:/bin",
+      "/usr/local/bin",
+      "/usr/bin",
+      "/bin",
+      "/snap/bin",
+      "/usr/local/sbin",
+      "/usr/sbin",
+      "/sbin",
+    ]);
+    expect(getPythonBridgePathEntries("win32", {
+      PATH: "C:\\Windows\\System32",
+      ProgramFiles: "C:\\Program Files",
+      "ProgramFiles(x86)": "C:\\Program Files (x86)",
+      LOCALAPPDATA: "C:\\Users\\Tester\\AppData\\Local",
+    })).toEqual([
+      "C:\\Windows\\System32",
+      "C:\\Program Files\\eSpeak NG",
+      "C:\\Program Files (x86)\\eSpeak NG",
+      "C:\\Users\\Tester\\AppData\\Local\\Programs\\eSpeak NG",
+    ]);
+  });
+
 });

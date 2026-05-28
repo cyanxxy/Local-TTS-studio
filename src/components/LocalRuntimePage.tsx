@@ -44,6 +44,10 @@ function createLocalRequestId(model: LocalTtsModel): string {
   return `${model}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function createProbeRequestId(model: LocalTtsModel): string {
+  return `${model}-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function clampNumber(value: number, fallback: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return fallback;
   return Math.max(min, Math.min(max, value));
@@ -104,7 +108,9 @@ export function LocalRuntimePage({
   const pageVersionRef = useRef(0);
   const runtimeVersionRef = useRef(0);
   const generationVersionRef = useRef(0);
+  const pythonOverrideRef = useRef("");
   const activeRequestIdRef = useRef<string | null>(null);
+  const activeProbeRequestIdRef = useRef<string | null>(null);
   const activeRequestGenerationVersionRef = useRef<number | null>(null);
 
   const electronAvailable = !!window.electron?.localTts;
@@ -200,40 +206,57 @@ export function LocalRuntimePage({
     if (!window.electron?.localTts) return;
     runtimeVersionRef.current += 1;
     const runtimeVersion = runtimeVersionRef.current;
+    const requestId = createProbeRequestId(model);
 
     setRuntimeBusy(true);
     setGenerationProgress(null);
     setStatus({ tone: "info", text: "Checking local runtime..." });
+    activeProbeRequestIdRef.current = requestId;
     try {
       const probe = await window.electron.localTts.probe({
         model,
-        pythonBinary: pythonOverride.trim() || undefined,
+        requestId,
+        pythonBinary: pythonOverrideRef.current.trim() || undefined,
       });
-      if (!isCurrentPageVersion(pageVersion) || runtimeVersionRef.current !== runtimeVersion) return;
+      if (
+        !isCurrentPageVersion(pageVersion)
+        || runtimeVersionRef.current !== runtimeVersion
+        || activeProbeRequestIdRef.current !== requestId
+      ) return;
       setRuntime(probe);
       setStatus({
         tone: probe.ready ? "success" : "error",
         text: probe.message,
       });
     } catch (err) {
-      if (!isCurrentPageVersion(pageVersion) || runtimeVersionRef.current !== runtimeVersion) return;
+      if (
+        !isCurrentPageVersion(pageVersion)
+        || runtimeVersionRef.current !== runtimeVersion
+        || activeProbeRequestIdRef.current !== requestId
+      ) return;
       setRuntime(null);
       setStatus({
         tone: "error",
         text: err instanceof Error ? err.message : String(err),
       });
     } finally {
-      if (isCurrentPageVersion(pageVersion) && runtimeVersionRef.current === runtimeVersion) {
+      if (
+        isCurrentPageVersion(pageVersion)
+        && runtimeVersionRef.current === runtimeVersion
+        && activeProbeRequestIdRef.current === requestId
+      ) {
+        activeProbeRequestIdRef.current = null;
         setRuntimeBusy(false);
       }
     }
-  }, [isCurrentPageVersion, model, pythonOverride]);
+  }, [isCurrentPageVersion, model]);
 
   useEffect(() => {
     pageVersionRef.current += 1;
     runtimeVersionRef.current += 1;
     generationVersionRef.current += 1;
     activeRequestIdRef.current = null;
+    activeProbeRequestIdRef.current = null;
     activeRequestGenerationVersionRef.current = null;
     setRuntime(null);
     setRuntimeBusy(false);
@@ -242,6 +265,7 @@ export function LocalRuntimePage({
     setGenerationProgress(null);
     setStatus(null);
     setGenerateBusy(false);
+    pythonOverrideRef.current = "";
     setPythonOverride("");
     clearGeneratedResult();
   }, [clearGeneratedResult, model]);
@@ -263,6 +287,15 @@ export function LocalRuntimePage({
     return window.electron.localTts.subscribeProgress((event) => {
       if (!mountedRef.current) return;
       if (event.model !== model) return;
+      if (event.requestId === activeProbeRequestIdRef.current) {
+        setStatus({
+          tone: "info",
+          text: event.elapsedSec != null
+            ? `${event.message} (${event.elapsedSec.toFixed(1)}s)`
+            : event.message,
+        });
+        return;
+      }
       if (event.requestId !== activeRequestIdRef.current) return;
       if (activeRequestGenerationVersionRef.current !== generationVersionRef.current) return;
 
@@ -394,7 +427,10 @@ export function LocalRuntimePage({
   }, [invalidateGeneration]);
 
   const handlePythonOverrideChange = useCallback((nextPythonOverride: string) => {
+    pythonOverrideRef.current = nextPythonOverride;
     runtimeVersionRef.current += 1;
+    activeProbeRequestIdRef.current = null;
+    setRuntimeBusy(false);
     invalidateGeneration({ runtimeChanged: true });
     setPythonOverride(nextPythonOverride);
   }, [invalidateGeneration]);

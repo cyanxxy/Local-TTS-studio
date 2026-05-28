@@ -1,6 +1,16 @@
 # Desktop Local Runtimes
 
-Electron exposes optional local Python-runtime integrations for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS. The desktop package includes the Electron app and bridge script, but it does not bundle Python, virtual environments, `neutts`, `kani-tts-2`, `qwen-tts`, `torch`, or `espeak-ng`.
+Electron exposes optional local Python-runtime integrations for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS. The desktop package includes the Electron app and bridge script, but it does not bundle Python or model weights.
+
+On first use, if no usable runtime is found and no Python executable override is set, Electron creates a managed virtual environment and installs the selected runtime package automatically:
+
+- NeuTTS: `.venv-neutts` with `neutts`
+- Kani: `.venv-kani` with `kani-tts-2`, then `transformers==4.56.0`
+- Qwen3: `.venv-qwen3` with `qwen-tts` and `torch`
+
+Managed environments use Python 3.12. If Python 3.12 is not installed but `uv` is available, Electron uses `uv venv --python 3.12` so uv can provide the interpreter. Development builds create these environments in the repo root. Packaged builds create them under the app's user data directory. Set `OPEN_TTS_DISABLE_AUTO_PYTHON_SETUP=1` to disable this behavior.
+
+Current NeuTTS wheels normally bundle the eSpeak NG shared library and data needed by phonemizer. The bridge validates that Python-level eSpeak backend first and only falls back to a system `espeak-ng`/`espeak` command if the bundled backend is unavailable.
 
 ## Python Discovery Order
 
@@ -16,6 +26,7 @@ Electron resolves a usable Python runtime in this order:
 5. System Python:
    - macOS/Linux: `python3.13` -> `python3.12` -> `python3.11` -> `python3.10` -> `python3` -> `python`
    - Windows: `py` -> `python`
+6. Managed first-run setup for the selected runtime, using Python 3.12 or uv, unless disabled
 
 In development, Electron resolves virtualenv names from the repo root. In packaged apps, runtime discovery is stricter: Electron searches only the packaged app path and its resources directory unless an explicit Python executable or environment variable is provided.
 
@@ -27,24 +38,23 @@ Requirements:
 
 - Python 3.10 through 3.13
 - `pip install neutts`
-- `espeak-ng` on `PATH`
+- A usable eSpeak NG backend. Current NeuTTS wheels bundle this; source/custom installs may need system eSpeak NG plus `PHONEMIZER_ESPEAK_LIBRARY`.
 - A reference transcript plus a real mono WAV clip
 
-Development setup:
+Manual development setup:
 
 ```bash
 python3.13 -m venv .venv-neutts
 source .venv-neutts/bin/activate
 pip install --upgrade pip
 pip install neutts
-brew install espeak-ng
 ```
 
 Packaged-app notes:
 
 - `TTS_NEUTTS_PYTHON_BIN` is the most reliable override for packaged builds.
-- Finder / Explorer launches may not inherit a useful `PATH`, so the probe can fail on `espeak-ng` even when terminal runs succeed.
-- On Windows, install eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` and `PHONEMIZER_ESPEAK_PATH` if phonemizer cannot locate it.
+- Finder / Explorer launches may not inherit a useful `PATH`, so the bridge checks NeuTTS' bundled eSpeak library before trying command-line `espeak-ng`.
+- If you use a custom NeuTTS source install without bundled eSpeak files, install eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` plus `ESPEAK_DATA_PATH` if phonemizer cannot locate it.
 
 ## Kani-TTS-2
 
@@ -52,7 +62,7 @@ Requirements:
 
 - Python 3.10+
 - `pip install kani-tts-2`
-- `pip install "transformers>=4.56,<5"`
+- `pip install -U "transformers==4.56.0"`
 - An importable `kani_tts`
 
 On macOS, the bridge defaults Kani to CPU to avoid known MPS issues.
@@ -69,7 +79,7 @@ Requirements:
 - CUDA-capable GPU strongly recommended for practical generation speed
 - FlashAttention 2 optional, but recommended by the Qwen runtime for lower GPU memory usage
 
-Development setup:
+Manual development setup:
 
 ```bash
 python3.12 -m venv .venv-qwen3
@@ -91,7 +101,7 @@ The probe reports:
 - Python version
 - detected package and version
 - NeuTTS compatibility mode, when relevant
-- `espeak-ng` status, when relevant
+- eSpeak NG backend status, when relevant
 - Qwen3 CUDA / FlashAttention warnings, when relevant
 
 A successful probe means the interpreter can launch the bridge and expose the required package. It does not prove that every reference WAV or generation request will succeed.
@@ -106,6 +116,6 @@ A successful probe means the interpreter can launch the bridge and expose the re
 | `Failed to import qwen_tts` | Python launched, but the environment does not expose Qwen's TTS package | Activate that environment and install `qwen-tts` |
 | `Qwen3-TTS requires torch` | Qwen runtime is present, but PyTorch is missing | Install the PyTorch build that matches your CPU/GPU environment |
 | `CUDA was not detected` | Qwen3 can try CPU/MPS, but the 1.7B model is slow and memory-heavy there | Use a CUDA environment when possible, or expect long generation times |
-| `espeak-ng was not found` | NeuTTS is installed, but phonemizer support is missing | Install `espeak-ng`, then relaunch with a usable PATH or use `TTS_NEUTTS_PYTHON_BIN` |
+| `no usable eSpeak NG backend was found` | NeuTTS is installed, but phonemizer could not load bundled or system eSpeak support | Reinstall current `neutts`; for custom/source installs, install eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` plus `ESPEAK_DATA_PATH` |
 | `Reference audio must be a valid WAV file` | Uploaded reference clip is not a readable WAV | Convert the clip to WAV before uploading |
 | `Reference text is required` | NeuTTS needs the exact transcript of the reference clip | Paste the spoken transcript exactly as heard in the WAV |

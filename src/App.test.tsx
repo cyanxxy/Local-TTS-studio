@@ -337,7 +337,12 @@ vi.mock("./components/AdvancedReaderPage", () => ({
 }));
 
 vi.mock("./components/LocalRuntimePage", () => ({
-  LocalRuntimePage: ({ name }: { name: string }) => <div>{name}</div>,
+  LocalRuntimePage: ({ model, name }: { model: string; name: string }) => (
+    <div data-testid={`local-page-${model}`}>
+      <div>{name}</div>
+      <input data-testid={`local-draft-${model}`} defaultValue={`${model} draft`} />
+    </div>
+  ),
 }));
 
 function resetMockState() {
@@ -548,6 +553,62 @@ describe("App", () => {
     rerender(<App />);
 
     expect(screen.getByText("Qwen3-TTS 12Hz CustomVoice")).toBeInTheDocument();
+  });
+
+  it("preserves local runtime tab DOM state when switching tabs", () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "neutts",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "neutts", label: "NeuTTS Nano" },
+        { key: "kani", label: "Kani-TTS-2" },
+        { key: "qwen3", label: "Qwen3-TTS" },
+      ],
+      isReaderPage: false,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+
+    const { rerender } = render(<App />);
+    const neuttsState = screen.getByTestId("local-draft-neutts") as HTMLInputElement;
+    fireEvent.change(neuttsState, { target: { value: "voice reference kept" } });
+    expect(screen.queryByTestId("local-draft-kani")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("link", { name: "Kani-TTS-2" }));
+    mock.routing = {
+      ...mock.routing,
+      activePage: "kani",
+    };
+    rerender(<App />);
+
+    expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
+    const kaniState = screen.getByTestId("local-draft-kani") as HTMLInputElement;
+    fireEvent.change(kaniState, { target: { value: "kani settings kept" } });
+
+    fireEvent.click(screen.getByRole("link", { name: "Studio" }));
+    mock.routing = {
+      ...mock.routing,
+      activePage: "studio",
+      isStudioPage: true,
+    };
+    rerender(<App />);
+
+    expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("local-runtime-panel-kani")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("local-draft-neutts")).toHaveValue("voice reference kept");
+    expect(screen.getByTestId("local-draft-kani")).toHaveValue("kani settings kept");
+
+    mock.routing = {
+      ...mock.routing,
+      activePage: "neutts",
+      isStudioPage: false,
+    };
+    rerender(<App />);
+
+    expect(screen.getByTestId("local-runtime-panel-neutts")).not.toHaveAttribute("hidden");
+    expect(screen.getByTestId("local-runtime-panel-kani")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("local-draft-neutts")).toHaveValue("voice reference kept");
   });
 
   it("renders browser support fallback when local inference is unsupported", () => {

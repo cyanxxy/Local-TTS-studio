@@ -21,6 +21,16 @@ describe("audioOutput", () => {
     expect(Array.from(normalizeRawAudioOutput(raw(new Int16Array([1, -2]), 8000)).audio)).toEqual([1, -2]);
   });
 
+  it("uses RawAudio data when available", () => {
+    const output = {
+      audio: [999],
+      data: new Float32Array([0.125, -0.25]),
+      sampling_rate: 24000,
+    } as unknown as RawAudio;
+
+    expect(Array.from(normalizeRawAudioOutput(output).audio)).toEqual([0.125, -0.25]);
+  });
+
   it("rejects invalid sampling rates and unsupported audio payloads", () => {
     expect(() => normalizeRawAudioOutput(raw([0], 0))).toThrow("invalid sampling rate");
     expect(() => normalizeRawAudioOutput(raw([Number.NaN], 16000))).toThrow("non-finite");

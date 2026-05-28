@@ -34,7 +34,8 @@ export function normalizeRawAudioOutput(output: RawAudio): NormalizedRawAudio {
     throw new Error("Model returned an invalid sampling rate.");
   }
 
-  const audio = toFloat32Array((output as { audio: unknown }).audio);
+  const rawOutput = output as RawAudio & { audio?: unknown; data?: unknown };
+  const audio = toFloat32Array(rawOutput.data ?? rawOutput.audio);
   if (audio.length === 0) {
     throw new Error("Model returned empty audio data.");
   }

@@ -87,7 +87,7 @@ bridge.is_neutts_python_compatible = lambda: True
 bridge.get_installed_package_version = lambda _package: "1.2.0"
 bridge.detect_neutts_compatibility = lambda _version: "current_1_2_x_or_newer"
 bridge.prepare_neutts_runtime = lambda _mode: None
-bridge.check_espeak = lambda: (True, "espeak-ng 1.52", "espeak-ng")
+bridge.check_espeak = lambda: (True, "eSpeak NG library 1.52", "library")
 bridge.array_to_wav_base64 = lambda _audio, _sample_rate: "UklGRg=="
 
 class FakeNeuTTS:
@@ -265,6 +265,174 @@ if FakeQwen3TTSModel.generated_kwargs["top_p"] != 0.9:
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);
   });
 
+  it.runIf(HAS_SYSTEM_PYTHON)("reports a missing NeuTTS distribution before importing neutts", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.is_neutts_python_compatible = lambda: True
+bridge.get_installed_package_version = lambda _package: None
+bridge.is_module_available = lambda _module: False
+
+result = bridge.probe_neutts()
+if result["ready"]:
+    raise AssertionError("NeuTTS probe reported ready without neutts")
+if "NeuTTS is not installed" not in result["message"]:
+    raise AssertionError(result["message"])
+if "Failed to import" in result["message"]:
+    raise AssertionError(result["message"])
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("reports missing eSpeak before importing neutts", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.is_neutts_python_compatible = lambda: True
+bridge.get_installed_package_version = lambda _package: "1.2.0"
+bridge.detect_neutts_compatibility = lambda _version: "current_1_2_x_or_newer"
+bridge.is_module_available = lambda _module: True
+bridge.detect_espeak = lambda: {"ok": False, "message": "eSpeak missing from test"}
+
+module = types.ModuleType("neutts")
+def fail_import(*_args, **_kwargs):
+    raise AssertionError("neutts import should not run before eSpeak is available")
+module.__getattr__ = fail_import
+sys.modules["neutts"] = module
+
+result = bridge.probe_neutts()
+if result["ready"]:
+    raise AssertionError("NeuTTS probe reported ready without eSpeak")
+if "eSpeak missing from test" not in result["message"]:
+    raise AssertionError(result["message"])
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("reports a missing Kani distribution before importing kani_tts", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.detect_kani_package = lambda: (None, None)
+bridge.detect_kani_transformers_version = lambda: None
+
+result = bridge.probe_kani()
+if result["ready"]:
+    raise AssertionError("Kani probe reported ready without kani-tts-2")
+if "Kani-TTS-2 is not installed" not in result["message"]:
+    raise AssertionError(result["message"])
+if "Failed to import" in result["message"]:
+    raise AssertionError(result["message"])
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("reports a missing Qwen distribution before importing qwen_tts", () => {
+    const completed = runBridgeUnitScript(`
+import builtins
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.get_installed_package_version = lambda _package: None
+
+real_import = builtins.__import__
+def guarded_import(name, *args, **kwargs):
+    if name == "torch":
+        raise AssertionError("torch import should not run when qwen-tts is missing")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+try:
+    result = bridge.probe_qwen3()
+finally:
+    builtins.__import__ = real_import
+
+if result["ready"]:
+    raise AssertionError("Qwen3 probe reported ready without qwen-tts")
+if "qwen-tts is not installed" not in result["message"]:
+    raise AssertionError(result["message"])
+if "Failed to import" in result["message"]:
+    raise AssertionError(result["message"])
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("detects eSpeak through PHONEMIZER_ESPEAK_LIBRARY", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import os
+import tempfile
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+with tempfile.NamedTemporaryFile() as library:
+    os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = library.name
+    bridge.load_espeak_library = lambda _path: (True, None)
+    detected = bridge.detect_espeak()
+
+if not detected["ok"]:
+    raise AssertionError(detected)
+if detected["source"] != "PHONEMIZER_ESPEAK_LIBRARY":
+    raise AssertionError(detected)
+if detected["path"] != library.name:
+    raise AssertionError(detected)
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("reports an invalid PHONEMIZER_ESPEAK_LIBRARY as an actionable eSpeak failure", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import os
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+os.environ["PHONEMIZER_ESPEAK_LIBRARY"] = "/definitely/missing/libespeak-ng.dylib"
+detected = bridge.detect_espeak()
+
+if detected["ok"]:
+    raise AssertionError(detected)
+if "PHONEMIZER_ESPEAK_LIBRARY" not in detected["message"]:
+    raise AssertionError(detected)
+if "/definitely/missing/libespeak-ng.dylib" not in detected["message"]:
+    raise AssertionError(detected)
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
   it.runIf(RUN_LOCAL_BRIDGE_TESTS)("reports NeuTTS compatibility metadata during probe", () => {
     const completed = runNeuttsBridge("probe");
 
@@ -276,7 +444,7 @@ if FakeQwen3TTSModel.generated_kwargs["top_p"] != 0.9:
     expect(["legacy_0_1_x", "current_1_2_x_or_newer"]).toContain(payload.result?.compatibilityMode);
   }, 15_000);
 
-  it.runIf(RUN_LOCAL_BRIDGE_TESTS)("surfaces missing espeak-ng clearly when PATH is unavailable", () => {
+  it.runIf(RUN_LOCAL_BRIDGE_TESTS)("detects NeuTTS bundled eSpeak backend when PATH is unavailable", () => {
     const completed = runNeuttsBridge("probe", {}, {
       ...process.env,
       PATH: "",
@@ -285,8 +453,9 @@ if FakeQwen3TTSModel.generated_kwargs["top_p"] != 0.9:
     expect(completed.status).toBe(0);
     const payload = getResultPayload(completed.stdout);
     expect(payload.ok).toBe(true);
-    expect(payload.result?.ready).toBe(false);
-    expect(String(payload.result?.message)).toMatch(/espeak-ng/i);
+    expect(payload.result?.ready).toBe(true);
+    expect(String(payload.result?.message)).toMatch(/ready/i);
+    expect(String(payload.result?.espeakVersion)).toMatch(/eSpeak NG/i);
   });
 
   it.runIf(RUN_LOCAL_BRIDGE_TESTS)("emits progress before returning invalid reference audio errors", () => {

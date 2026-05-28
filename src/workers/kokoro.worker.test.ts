@@ -140,7 +140,7 @@ describe("kokoro.worker", () => {
     });
   });
 
-  it("uses WebGPU when available and falls back to configured static voices", async () => {
+  it("uses WebGPU with fp32 and falls back to configured static voices", async () => {
     const instance = createInstance([createRawAudio()]);
     instance.voices = {};
     instance.list_voices = vi.fn(() => undefined);
@@ -155,7 +155,7 @@ describe("kokoro.worker", () => {
     await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
 
     expect(fromPretrained).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
-      dtype: "fp16",
+      dtype: "fp32",
       device: "webgpu",
     }));
     expect(postedMessages.at(-1)).toEqual({

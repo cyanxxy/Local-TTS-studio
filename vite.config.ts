@@ -9,6 +9,8 @@ const rootDir = __dirname;
 export default defineConfig({
   plugins: [kokoroOnnxWasmAssetPlugin(rootDir), react(), tailwindcss()],
   server: {
+    port: 5173,
+    strictPort: true,
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",
@@ -19,6 +21,9 @@ export default defineConfig({
         "./src/App.tsx",
         "./src/hooks/useModelLoader.ts",
       ],
+    },
+    watch: {
+      ignored: ["**/.venv*/**"],
     },
   },
   worker: {

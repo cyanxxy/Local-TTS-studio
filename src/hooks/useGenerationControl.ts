@@ -46,6 +46,8 @@ export function useGenerationControl({
   voice,
 }: UseGenerationControlOptions): UseGenerationControlReturn {
   const [isRetakingSegment, setIsRetakingSegment] = useState(false);
+  const beginStream = player.beginStream;
+  const endStream = player.endStream;
 
   const retakeWorkerRef = useRef<Worker | null>(null);
   const retakeListenerRef = useRef<((event: MessageEvent<WorkerOutMessage>) => void) | null>(null);
@@ -63,6 +65,12 @@ export function useGenerationControl({
   useEffect(() => {
     return () => clearRetakeListener();
   }, [clearRetakeListener]);
+
+  useEffect(() => {
+    if (!tts.isGenerating) {
+      endStream();
+    }
+  }, [endStream, tts.isGenerating]);
 
   const cancelRetake = useCallback((notifyWorker: boolean) => {
     if (notifyWorker && retakeWorkerRef.current) {
@@ -89,10 +97,12 @@ export function useGenerationControl({
     if (!canGenerate || isGenerationBusy) return;
     cancelRetake(false);
     player.reset();
+    beginStream();
     setShowPlayer(true);
     tts.generate(text, activeModel, voice, generationSettings);
   }, [
     activeModel,
+    beginStream,
     canGenerate,
     cancelRetake,
     generationSettings,
