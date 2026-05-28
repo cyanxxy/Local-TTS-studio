@@ -61,6 +61,7 @@ __pycache__/
 htmlcov/
 .venv/
 .venv*/
+.model-cache/
 
 # TypeScript cache
 *.tsbuildinfo

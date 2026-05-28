@@ -59,7 +59,7 @@ export function Controls() {
       {activeModel === "supertonic" && (
         <div>
           <div className="flex items-baseline justify-between mb-2.5">
-            <label className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+            <label className="text-xs font-semibold uppercase tracking-widest text-text-muted">
               Quality
             </label>
             <span className="font-mono text-sm font-medium text-text-primary tabular-nums">
@@ -75,8 +75,8 @@ export function Controls() {
             onChange={(e) => onQualityChange(parseInt(e.target.value))}
           />
           <div className="flex justify-between mt-1.5">
-            <span className="text-[10px] text-text-muted">Faster</span>
-            <span className="text-[10px] text-text-muted">Higher quality</span>
+            <span className="text-xs text-text-muted">Faster</span>
+            <span className="text-xs text-text-muted">Higher quality</span>
           </div>
         </div>
       )}
@@ -90,15 +90,15 @@ export function Controls() {
           onClick={showRetry ? onRetryLoad : onGenerate}
           disabled={generateDisabled}
           className={`
-            flex-1 py-3 px-5 rounded-xl text-sm font-semibold tracking-wide
+            flex-1 py-3 px-5 rounded-2xl text-sm font-semibold tracking-wide
             flex items-center justify-center gap-2.5 transition-all duration-200
             ${isGenerating
               ? "bg-accent text-white cursor-wait"
               : showRetry
-              ? "bg-danger text-white hover:bg-danger/90 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
+              ? "bg-danger text-white shadow-accent-sm hover:bg-danger/90 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
               : !generateDisabled
-              ? "bg-accent text-white hover:bg-accent-hover hover:-translate-y-0.5 hover:shadow-accent-lg active:translate-y-0 active:scale-[0.98]"
-              : "bg-border text-text-muted cursor-not-allowed"
+              ? "glass-accent text-white"
+              : "bg-border/70 text-text-muted cursor-not-allowed backdrop-blur-sm"
             }
           `}
           style={
@@ -139,7 +139,7 @@ export function Controls() {
             onClick={onStop}
             aria-label="Stop"
             title="Stop generation"
-            className="flex h-11 w-full items-center justify-center rounded-xl bg-danger-light text-danger transition-colors hover:bg-danger hover:text-white active:scale-[0.96] sm:w-11"
+            className="flex h-11 w-full items-center justify-center rounded-2xl border border-danger/20 bg-danger-light text-danger backdrop-blur-md shadow-glass-sm transition-all duration-200 hover:bg-danger hover:text-white active:scale-[0.96] sm:w-11"
           >
             <Square size={14} />
           </button>

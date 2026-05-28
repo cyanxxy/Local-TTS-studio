@@ -246,14 +246,14 @@ export function AdvancedReaderPage({
 
   return (
     <div className={`grid grid-cols-1 lg:grid-cols-5 ${fullScreen ? "gap-3 sm:gap-4" : "mt-6 gap-4 sm:gap-5"} ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : ""}`}>
-      <section className={`${fullScreen ? "lg:col-span-5" : "lg:col-span-3"} flex h-full flex-col gap-4 rounded-2xl border border-border bg-panel p-4 sm:gap-5 sm:p-6`}>
+      <section className={`${fullScreen ? "lg:col-span-5" : "lg:col-span-3"} flex h-full flex-col gap-4 rounded-[22px] glass-panel p-4 sm:gap-5 sm:p-6`}>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <div className="flex items-center gap-2">
               <div className="w-7 h-7 rounded-lg bg-accent-light flex items-center justify-center shrink-0">
                 <BookOpen size={14} className="text-accent" />
               </div>
-              <h2 className="text-lg font-semibold text-text-primary">Reader Mode</h2>
+              <h2 className="text-lg font-display font-semibold text-text-primary">Reader Mode</h2>
             </div>
             <p className="mt-1.5 text-xs text-text-muted pl-9">
               Edit your text with chunk boundaries rendered directly inside the editor.
@@ -261,7 +261,7 @@ export function AdvancedReaderPage({
           </div>
           {hasGeneratedSegments && activeSegmentIndex >= 0 && (
             <div className="shrink-0 animate-fade-up">
-              <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-semibold font-mono bg-accent-light text-accent border border-accent/20 tabular-nums">
+              <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold font-mono bg-accent-light text-accent border border-accent/20 tabular-nums">
                 <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
                 {activeSegmentIndex + 1} / {segments.length}
               </span>
@@ -272,16 +272,16 @@ export function AdvancedReaderPage({
         <div className="space-y-2">
           <label
             htmlFor={readingTextId}
-            className="text-[10px] font-semibold uppercase tracking-widest text-text-muted"
+            className="text-xs font-semibold uppercase tracking-widest text-text-muted"
           >
             Reading Text
           </label>
-          <div className={`relative rounded-xl border border-border bg-surface transition-shadow duration-200 focus-within:shadow-accent-sm ${fullScreen ? "min-h-[40vh] sm:min-h-[45vh]" : "min-h-64"}`}>
+          <div className={`relative rounded-2xl border border-black/10 bg-surface/50 backdrop-blur-md shadow-glass-sm transition-shadow duration-200 focus-within:shadow-accent-sm ${fullScreen ? "min-h-[40vh] sm:min-h-[45vh]" : "min-h-64"}`}>
 
             <div
               ref={overlayRef}
               aria-hidden
-              className="pointer-events-none absolute inset-0 z-20 overflow-auto whitespace-pre-wrap break-words px-4 py-3 text-[14px] leading-6 text-text-primary select-none sm:text-[15px] sm:leading-7"
+              className="pointer-events-none absolute inset-0 z-20 overflow-auto whitespace-pre-wrap break-words px-4 py-3 text-lg leading-6 text-text-primary select-none sm:text-xl sm:leading-7"
             >
               {overlayParts.map((part, index) => {
                 const isGenerated = part.sectionId !== null;
@@ -339,14 +339,14 @@ export function AdvancedReaderPage({
                 if (boundary?.id) onJumpToSegment(boundary.id);
               }}
               placeholder="Paste or write long-form text to read aloud"
-              className={`relative z-10 h-full w-full resize-none rounded-xl bg-transparent px-4 py-3 text-[14px] leading-6 text-transparent caret-text-primary placeholder:text-text-muted focus:outline-none sm:text-[15px] sm:leading-7 ${
+              className={`relative z-10 h-full w-full resize-none rounded-xl bg-transparent px-4 py-3 text-lg leading-6 text-transparent caret-text-primary placeholder:text-text-muted focus:outline-none sm:text-xl sm:leading-7 ${
                 fullScreen ? "min-h-[40vh] sm:min-h-[45vh]" : "min-h-64"
               }`}
               style={{ WebkitTextFillColor: "transparent" }}
             />
           </div>
           {hasGeneratedSegments && (
-            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-panel px-3 py-2 animate-fade-up sm:flex-nowrap">
+            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/55 bg-white/40 backdrop-blur-md shadow-glass-sm px-3 py-2 animate-fade-up sm:flex-nowrap">
               <button
                 type="button"
                 aria-label="Previous segment"
@@ -372,7 +372,7 @@ export function AdvancedReaderPage({
                     }}
                   />
                 </div>
-                <span className="text-[10px] font-mono text-text-muted tabular-nums whitespace-nowrap shrink-0">
+                <span className="text-xs font-mono text-text-muted tabular-nums whitespace-nowrap shrink-0">
                   {activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : "–"} / {segments.length}
                 </span>
               </div>
@@ -401,7 +401,7 @@ export function AdvancedReaderPage({
                   }
                 }}
                 disabled={activeSegmentIndex < 0 || isRetaking}
-                className="order-5 flex w-full items-center justify-center gap-1.5 rounded-lg px-2.5 py-1 text-[10px] font-semibold text-accent transition-colors hover:bg-accent-light disabled:cursor-not-allowed disabled:text-text-muted sm:w-auto sm:justify-start"
+                className="order-5 flex w-full items-center justify-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent-light disabled:cursor-not-allowed disabled:text-text-muted sm:w-auto sm:justify-start"
               >
                 <RotateCcw size={10} />
                 {isRetaking ? "Retaking…" : "Retake"}
@@ -409,7 +409,7 @@ export function AdvancedReaderPage({
             </div>
           )}
 
-          <div className="flex flex-col gap-1 text-[11px] text-text-muted sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-1 text-sm text-text-muted sm:flex-row sm:items-center sm:justify-between">
             <span className="tabular-nums">{text.length.toLocaleString()} chars</span>
             <span className={text.length >= MIN_TEXT_LENGTH ? "text-success" : ""}>
               {previewChunks.length} chunk{previewChunks.length !== 1 ? "s" : ""}
@@ -443,7 +443,7 @@ export function AdvancedReaderPage({
         </div>
       )}
 
-      <aside className={`${fullScreen ? "lg:col-span-5 gap-4 rounded-xl p-4 sm:p-5" : "lg:col-span-2 gap-5 rounded-2xl p-4 sm:gap-6 sm:p-6"} flex h-full flex-col border border-border bg-panel`}>
+      <aside className={`${fullScreen ? "lg:col-span-5 gap-4 rounded-[20px] p-4 sm:p-5" : "lg:col-span-2 gap-5 rounded-[22px] p-4 sm:gap-6 sm:p-6"} flex h-full flex-col glass-panel`}>
         <ModelToggle
           activeModel={activeModel}
           onModelChange={onModelChange}

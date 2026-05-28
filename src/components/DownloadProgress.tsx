@@ -15,7 +15,7 @@ function ProgressBar({ state, name }: { state: ModelState; name: string }) {
         <span className="text-xs font-medium text-text-secondary">{name}</span>
         {state.error
           ? <span className="text-xs text-danger">Failed</span>
-          : <span className="font-mono text-[10px] text-text-muted tabular-nums">
+          : <span className="font-mono text-xs text-text-muted tabular-nums">
               {Math.round(state.downloadProgress)}%
             </span>
         }
@@ -38,12 +38,12 @@ export function DownloadProgress({ kokoroState, supertonicState }: DownloadProgr
   if (!showKokoro && !showSupertonic) return null;
 
   return (
-    <div className="px-5 py-4 rounded-2xl border border-border bg-panel flex flex-col gap-4 animate-fade-up shadow-md">
+    <div className="px-5 py-4 rounded-[22px] glass-panel flex flex-col gap-4 animate-fade-up">
       <div className="flex items-center justify-between">
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
           Preparing Model
         </span>
-        <span className="text-[10px] text-text-muted">first run downloads, later reloads reuse local cache</span>
+        <span className="text-xs text-text-muted">first run downloads, later reloads reuse local cache</span>
       </div>
       {showKokoro && (
         <ProgressBar name={MODELS.kokoro.label} state={kokoroState} />

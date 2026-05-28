@@ -24,8 +24,12 @@ import time
 import traceback
 import wave
 from contextlib import contextmanager
+from glob import glob
 from pathlib import Path
 from typing import Any
+
+if sys.platform == "darwin":
+    os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
 RESULT_PREFIX = "__RESULT__"
 PROGRESS_PREFIX = "__PROGRESS__"
@@ -33,7 +37,18 @@ NEUTTS_MIN_PYTHON = (3, 10)
 NEUTTS_MAX_EXCLUSIVE_PYTHON = (3, 14)
 KANI_MIN_TRANSFORMERS = (4, 56, 0)
 KANI_MAX_TRANSFORMERS_EXCLUSIVE = (5, 0, 0)
-QWEN3_CUSTOM_VOICE_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+KANI_DEFAULT_LANGUAGE_TAG = "en_us"
+KANI_LANGUAGE_TAGS = [
+    "en_us",
+    "en_nyork",
+    "en_oakl",
+    "en_glasg",
+    "en_bost",
+    "en_scou",
+]
+QWEN3_FAST_CUSTOM_VOICE_REPO = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
+QWEN3_QUALITY_CUSTOM_VOICE_REPO = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
+QWEN3_CUSTOM_VOICE_REPO = QWEN3_FAST_CUSTOM_VOICE_REPO
 QWEN3_DEFAULT_SPEAKER = "Ryan"
 QWEN3_DEFAULT_LANGUAGE = "Auto"
 QWEN3_SPEAKERS = [
@@ -62,6 +77,7 @@ QWEN3_LANGUAGES = [
 ]
 PHONEMIZER_ESPEAK_LIBRARY_ENV = "PHONEMIZER_ESPEAK_LIBRARY"
 PHONEMIZER_ESPEAK_LEGACY_PATH_ENV = "PHONEMIZER_ESPEAK_PATH"
+ESPEAK_DATA_PATH_ENV = "ESPEAK_DATA_PATH"
 
 
 @contextmanager
@@ -162,12 +178,23 @@ def load_espeak_library(path: str) -> tuple[bool, str | None]:
     if not Path(library_path).is_file():
         return False, f"eSpeak library does not exist: {library_path}"
 
+    data_path = get_espeak_data_path_for_library(library_path)
+    previous_data_path = os.environ.get(ESPEAK_DATA_PATH_ENV)
     try:
         from phonemizer.backend.espeak.wrapper import EspeakWrapper
 
+        if data_path:
+            os.environ[ESPEAK_DATA_PATH_ENV] = str(data_path)
         EspeakWrapper.set_library(library_path)
+        wrapper = EspeakWrapper()
+        _ = wrapper.version
+        _ = wrapper.data_path
         return True, None
     except Exception as phonemizer_exc:
+        if previous_data_path is None:
+            os.environ.pop(ESPEAK_DATA_PATH_ENV, None)
+        else:
+            os.environ[ESPEAK_DATA_PATH_ENV] = previous_data_path
         try:
             ctypes.CDLL(library_path)
             return True, None
@@ -216,6 +243,52 @@ def get_known_espeak_library_candidates() -> list[str]:
         "/usr/local/lib/libespeak.so",
         "/usr/local/lib/libespeak.so.1",
     ]
+
+
+def get_neutts_package_dir() -> Path | None:
+    import importlib.util
+
+    try:
+        spec = importlib.util.find_spec("neutts")
+    except Exception:
+        return None
+
+    if spec is None:
+        return None
+
+    locations = spec.submodule_search_locations
+    if locations:
+        first_location = next(iter(locations), None)
+        return Path(first_location).resolve() if first_location else None
+
+    if spec.origin:
+        return Path(spec.origin).resolve().parent
+
+    return None
+
+
+def get_neutts_bundled_espeak_library_candidates() -> list[str]:
+    package_dir = get_neutts_package_dir()
+    if package_dir is None:
+        return []
+
+    if sys.platform == "darwin":
+        patterns = ["libespeak-ng*.dylib", "libespeak*.dylib"]
+    elif sys.platform == "win32":
+        patterns = ["*espeak-ng*.dll", "*espeak*.dll"]
+    else:
+        patterns = ["libespeak-ng.so*", "libespeak-ng*.so*", "libespeak.so*", "libespeak*.so*"]
+
+    candidates: list[str] = []
+    for pattern in patterns:
+        candidates.extend(glob(str(package_dir / pattern)))
+    return candidates
+
+
+def get_espeak_data_path_for_library(library_path: str) -> Path | None:
+    library_dir = Path(library_path).expanduser().resolve().parent
+    data_path = library_dir / "espeak-ng-data"
+    return data_path if data_path.is_dir() else None
 
 
 def get_ctypes_espeak_library_candidates() -> list[str]:
@@ -362,6 +435,15 @@ def detect_espeak() -> dict[str, Any]:
 
 
 def check_espeak() -> tuple[bool, str | None, str | None]:
+    for library_path in unique_candidates(get_neutts_bundled_espeak_library_candidates()):
+        if os.path.isabs(library_path) and not Path(library_path).is_file():
+            continue
+        ok, _error = load_espeak_library(library_path)
+        if ok:
+            if os.path.isabs(library_path):
+                os.environ[PHONEMIZER_ESPEAK_LIBRARY_ENV] = library_path
+            return True, f"Bundled eSpeak NG library: {library_path}", "bundled-library"
+
     backend_ok, backend_version, backend_source = check_espeak_backend()
     if backend_ok:
         return backend_ok, backend_version, backend_source
@@ -729,7 +811,8 @@ def probe_qwen3() -> dict[str, Any]:
             "packageVersion": package_version,
             "torchVersion": torch_package_version,
         }
-    cuda_available = bool(getattr(getattr(torch_module, "cuda", None), "is_available", lambda: False)())
+    cuda_available = is_qwen3_cuda_available(torch_module)
+    mps_available = is_qwen3_mps_available(torch_module)
     torch_version = getattr(torch_module, "__version__", None) or torch_package_version
 
     try:
@@ -744,10 +827,17 @@ def probe_qwen3() -> dict[str, Any]:
             "torchVersion": torch_package_version,
         }
 
-    if not cuda_available:
-        warnings.append("CUDA was not detected. Qwen3-TTS can attempt CPU/MPS generation, but the 1.7B model is expected to be slow and memory-heavy.")
-    if not flash_attn_available:
-        warnings.append("FlashAttention 2 was not detected. It is optional, but recommended by Qwen for lower GPU memory usage.")
+    recommended = select_qwen3_runtime_profile(torch_module)
+    if cuda_available:
+        warnings.append("CUDA was detected. Auto mode will use the faster 0.6B CustomVoice model with CUDA acceleration.")
+        if not flash_attn_available:
+            warnings.append("FlashAttention 2 was not detected. Auto mode will use SDPA; install flash-attn in this environment for lower GPU memory usage.")
+    elif mps_available:
+        warnings.append(f"Apple MPS was detected. Auto mode will use the faster 0.6B CustomVoice model with {recommended['dtype']} MPS acceleration.")
+        if recommended["dtype"] == "float32":
+            warnings.append("MPS bfloat16 was not available in this PyTorch build, so Auto avoids float16 and uses float32 for Qwen3-TTS stability.")
+    else:
+        warnings.append("No CUDA or Apple MPS accelerator was detected. Auto mode will use the faster 0.6B CustomVoice model on CPU, which can still be slow.")
     if torch_version:
         warnings.append(f"Detected torch {torch_version}.")
 
@@ -758,6 +848,10 @@ def probe_qwen3() -> dict[str, Any]:
         "package": "qwen-tts",
         "packageVersion": package_version,
         "torchVersion": torch_version or torch_package_version,
+        "recommendedModelRepo": recommended["modelRepo"],
+        "recommendedDeviceMap": recommended["deviceMap"],
+        "recommendedDtype": recommended["dtype"],
+        "recommendedAttention": recommended["attention"],
         "warnings": warnings,
     }
 
@@ -808,6 +902,51 @@ def require_sample_rate(runtime_name: str, *candidates: Any) -> int:
     raise RuntimeError(
         f"{runtime_name} runtime did not expose a valid positive integer sample_rate."
     )
+
+
+def normalize_kani_language_tag(value: Any) -> str:
+    if value is None:
+        return KANI_DEFAULT_LANGUAGE_TAG
+
+    language_tag = str(value).strip().lower()
+    return language_tag or KANI_DEFAULT_LANGUAGE_TAG
+
+
+def normalize_kani_language_tags(value: Any) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+
+    tags: list[str] = []
+    for entry in value:
+        tag = str(entry).strip().lower()
+        if tag and tag not in tags:
+            tags.append(tag)
+    return tags
+
+
+def resolve_kani_language_tag(tts: Any, requested_language_tag: str) -> str | None:
+    status = getattr(tts, "status", None)
+    if status == "no_language_tags":
+        return None
+
+    available_tags = normalize_kani_language_tags(getattr(tts, "language_tags_list", None))
+    if status != "available_language_tags":
+        if requested_language_tag not in KANI_LANGUAGE_TAGS:
+            supported = ", ".join(KANI_LANGUAGE_TAGS)
+            raise RuntimeError(f"Unsupported Kani language tag `{requested_language_tag}`. Supported tags: {supported}.")
+        return requested_language_tag
+
+    if not available_tags:
+        return requested_language_tag
+
+    if requested_language_tag in available_tags:
+        return requested_language_tag
+
+    if requested_language_tag == KANI_DEFAULT_LANGUAGE_TAG:
+        return available_tags[0]
+
+    supported = ", ".join(available_tags)
+    raise RuntimeError(f"Unsupported Kani language tag `{requested_language_tag}`. Supported tags: {supported}.")
 
 
 def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
@@ -902,11 +1041,7 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("Text is required.")
 
     model_repo = str(payload.get("modelRepo") or "nineninesix/kani-tts-2-en")
-    language_tag = payload.get("languageTag")
-    if isinstance(language_tag, str):
-        language_tag = language_tag.strip() or None
-    else:
-        language_tag = None
+    language_tag = normalize_kani_language_tag(payload.get("languageTag"))
 
     temperature = float(payload.get("temperature") or 1.0)
     top_p = float(payload.get("topP") or 0.95)
@@ -929,19 +1064,21 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
             suppress_logs=True,
             show_info=False,
         )
+    language_tag = resolve_kani_language_tag(tts, language_tag)
 
     emit_progress("inference", "Running Kani-TTS-2 inference...", started_at=started)
-    wav, generated_sample_rate = tts.generate(
-        text,
-        language_tag=language_tag,
-        temperature=temperature,
-        top_p=top_p,
-        repetition_penalty=repetition_penalty,
-    )
+    with redirect_stdout_to_stderr():
+        wav, generated_metadata = tts.generate(
+            text,
+            language_tag=language_tag,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+        )
 
     sample_rate = require_sample_rate(
         "Kani-TTS-2",
-        generated_sample_rate,
+        generated_metadata,
         getattr(tts, "sample_rate", None),
     )
 
@@ -955,7 +1092,100 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def parse_qwen3_dtype(dtype_name: str, cuda_available: bool) -> Any:
+def is_qwen3_mps_available(torch_module: Any) -> bool:
+    backends = getattr(torch_module, "backends", None)
+    mps = getattr(backends, "mps", None)
+    is_available = getattr(mps, "is_available", None)
+    if not callable(is_available):
+        return False
+    try:
+        return bool(is_available())
+    except Exception:
+        return False
+
+
+def is_qwen3_mps_bfloat16_available(torch_module: Any) -> bool:
+    if not is_qwen3_mps_available(torch_module):
+        return False
+    bfloat16 = getattr(torch_module, "bfloat16", None)
+    ones = getattr(torch_module, "ones", None)
+    if bfloat16 is None or not callable(ones):
+        return False
+    try:
+        tensor = ones((1,), device="mps", dtype=bfloat16)
+        return getattr(tensor, "dtype", None) == bfloat16
+    except Exception:
+        return False
+
+
+def is_qwen3_cuda_available(torch_module: Any) -> bool:
+    cuda = getattr(torch_module, "cuda", None)
+    is_available = getattr(cuda, "is_available", None)
+    if not callable(is_available):
+        return False
+    try:
+        return bool(is_available())
+    except Exception:
+        return False
+
+
+def select_qwen3_runtime_profile(
+    torch_module: Any,
+    *,
+    requested_model_repo: Any = None,
+    requested_device_map: Any = None,
+    requested_dtype: Any = None,
+    requested_attention: Any = None,
+) -> dict[str, str]:
+    cuda_available = is_qwen3_cuda_available(torch_module)
+    mps_available = is_qwen3_mps_available(torch_module)
+    mps_bfloat16_available = is_qwen3_mps_bfloat16_available(torch_module)
+    flash_attn_available = is_module_available("flash_attn")
+
+    requested_device = str(requested_device_map or "auto").strip().lower()
+    if not requested_device or requested_device == "auto":
+        if cuda_available:
+            device_map = "cuda:0"
+        elif mps_available:
+            device_map = "mps"
+        else:
+            device_map = "cpu"
+    else:
+        device_map = requested_device
+
+    requested_model = str(requested_model_repo or "auto").strip()
+    if not requested_model or requested_model == "auto":
+        model_repo = QWEN3_FAST_CUSTOM_VOICE_REPO
+    else:
+        model_repo = requested_model
+
+    dtype = str(requested_dtype or "auto").strip().lower()
+    if not dtype or dtype == "auto":
+        if device_map.startswith("cuda"):
+            dtype = "bfloat16"
+        elif device_map == "mps":
+            dtype = "bfloat16" if mps_bfloat16_available else "float32"
+        else:
+            dtype = "float32"
+
+    attention = str(requested_attention or "auto").strip()
+    if not attention or attention == "auto":
+        if device_map.startswith("cuda") and flash_attn_available:
+            attention = "flash_attention_2"
+        elif device_map.startswith("cuda") or device_map == "mps":
+            attention = "sdpa"
+        else:
+            attention = "eager"
+
+    return {
+        "modelRepo": model_repo,
+        "deviceMap": device_map,
+        "dtype": dtype,
+        "attention": attention,
+    }
+
+
+def parse_qwen3_dtype(dtype_name: str) -> Any:
     import torch
 
     if dtype_name == "bfloat16":
@@ -965,7 +1195,7 @@ def parse_qwen3_dtype(dtype_name: str, cuda_available: bool) -> Any:
     if dtype_name == "float32":
         return torch.float32
 
-    return torch.bfloat16 if cuda_available else torch.float32
+    return torch.float32
 
 
 def normalize_qwen3_choice(value: Any, choices: list[str], default: str) -> str:
@@ -975,41 +1205,58 @@ def normalize_qwen3_choice(value: Any, choices: list[str], default: str) -> str:
     return stripped if stripped in choices else default
 
 
+def qwen3_mps_float16_stability_message() -> str:
+    return (
+        "Qwen3-TTS is unstable on Apple MPS with float16 in this environment. "
+        "Use dtype Auto, bfloat16, or float32."
+    )
+
+
 def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
     text = str(payload.get("text", "")).strip()
     if not text:
         raise ValueError("Text is required.")
 
-    model_repo = str(payload.get("modelRepo") or QWEN3_CUSTOM_VOICE_REPO)
     speaker = normalize_qwen3_choice(payload.get("speaker"), QWEN3_SPEAKERS, QWEN3_DEFAULT_SPEAKER)
     language = normalize_qwen3_choice(payload.get("language"), QWEN3_LANGUAGES, QWEN3_DEFAULT_LANGUAGE)
     instruct = str(payload.get("instruct") or "").strip()
-    dtype_name = str(payload.get("dtype") or "auto").strip().lower()
-    attn_implementation = str(payload.get("attnImplementation") or "auto").strip()
 
     import torch
     from qwen_tts import Qwen3TTSModel
 
-    cuda_available = bool(torch.cuda.is_available())
-    device_map = str(
-        payload.get("deviceMap")
-        or ("cuda:0" if cuda_available else "cpu")
-    ).strip().lower()
-    if device_map == "auto":
-        device_map = "cuda:0" if cuda_available else "cpu"
+    profile = select_qwen3_runtime_profile(
+        torch,
+        requested_model_repo=payload.get("modelRepo"),
+        requested_device_map=payload.get("deviceMap"),
+        requested_dtype=payload.get("dtype"),
+        requested_attention=payload.get("attnImplementation"),
+    )
+    model_repo = profile["modelRepo"]
+    device_map = profile["deviceMap"]
+    dtype_name = profile["dtype"]
+    attn_implementation = profile["attention"]
 
     started = time.time()
-    emit_progress("model_load", f"Loading {model_repo} with {device_map}...", started_at=started)
+    emit_progress(
+        "model_load",
+        f"Loading {model_repo} with {device_map}, {dtype_name}, {attn_implementation}...",
+        started_at=started,
+    )
 
     load_kwargs: dict[str, Any] = {
         "device_map": device_map,
-        "dtype": parse_qwen3_dtype(dtype_name, cuda_available),
+        "dtype": parse_qwen3_dtype(dtype_name),
     }
-    if attn_implementation and attn_implementation != "auto":
+    if attn_implementation:
         load_kwargs["attn_implementation"] = attn_implementation
 
-    with redirect_stdout_to_stderr():
-        model = Qwen3TTSModel.from_pretrained(model_repo, **load_kwargs)
+    try:
+        with redirect_stdout_to_stderr():
+            model = Qwen3TTSModel.from_pretrained(model_repo, **load_kwargs)
+    except Exception as exc:
+        if device_map == "mps" and dtype_name == "float16":
+            raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
+        raise
 
     generation_kwargs: dict[str, Any] = {}
     if isinstance(payload.get("maxNewTokens"), int):
@@ -1029,7 +1276,12 @@ def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
     if instruct:
         call_kwargs["instruct"] = instruct
 
-    wavs, sample_rate = model.generate_custom_voice(**call_kwargs)
+    try:
+        wavs, sample_rate = model.generate_custom_voice(**call_kwargs)
+    except Exception as exc:
+        if device_map == "mps" and dtype_name == "float16":
+            raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
+        raise
     if not wavs:
         raise RuntimeError("Qwen3-TTS returned no audio.")
     wav = wavs[0]

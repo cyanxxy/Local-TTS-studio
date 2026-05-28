@@ -80,14 +80,15 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
   qwen3: {
     name: "Qwen3-TTS 12Hz CustomVoice",
     releaseDate: "January 29, 2026",
-    params: "~1.9B",
+    params: "0.6B / 1.7B",
     highlights: [
       "CustomVoice model with nine built-in premium speakers and instruction-guided style control.",
       "Supports Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.",
       "Runs through the Electron Python bridge because the released model ships qwen-tts/safetensors assets, not browser ONNX artifacts.",
     ],
     links: [
-      { label: "HF Model", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" },
+      { label: "HF 0.6B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" },
+      { label: "HF 1.7B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" },
       { label: "HF Tokenizer", href: "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz" },
       { label: "GitHub", href: "https://github.com/QwenLM/Qwen3-TTS" },
     ],
@@ -106,6 +107,14 @@ export default function App() {
       && new URLSearchParams(window.location.search).get("profile") === "1",
     [],
   );
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const isMac = typeof navigator !== "undefined"
+      && /Mac/i.test(navigator.platform || navigator.userAgent || "");
+    root.classList.toggle("is-electron", isElectronRuntime);
+    root.classList.toggle("is-mac", isMac);
+  }, [isElectronRuntime]);
   const initialState = useMemo(() => getInitialAppState(), []);
   const initialCreatorState = useMemo(() => getInitialCreatorState(), []);
   const browserSupport = useMemo(
@@ -397,12 +406,12 @@ export default function App() {
     : -1;
   const activeSegmentNumber = activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null;
   const browserSupportPanel = browserSupport.message ? (
-    <div className="rounded-2xl border border-accent/20 bg-accent-light/60 shadow-sm">
+    <div className="rounded-[22px] border border-accent/20 bg-accent-light/50 backdrop-blur-xl shadow-glass-md">
       <div className="p-4 sm:p-6 md:p-8">
-        <div className="inline-flex items-center rounded-full border border-accent/20 bg-panel px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+        <div className="inline-flex items-center rounded-full border border-accent/20 bg-panel/80 backdrop-blur-sm px-3 py-1 text-sm font-semibold uppercase tracking-[0.14em] text-accent shadow-glass-sm">
           iOS rollout
         </div>
-        <h2 className="mt-4 text-[1.5rem] font-display font-bold tracking-tight text-text-primary sm:text-[1.8rem]">
+        <h2 className="mt-4 text-2xl font-display font-bold tracking-tight text-text-primary sm:text-3xl">
           Open TTS runs on iPhone and iPad browsers with a guarded model set
         </h2>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-text-secondary">
@@ -421,12 +430,12 @@ export default function App() {
           <div className={`flex justify-between gap-4 flex-wrap ${isReaderPage ? "items-center" : "items-start"}`}>
             <div>
               <h1
-                className={`${isReaderPage ? "text-[1.75rem] sm:text-[2rem]" : "text-[2.2rem] sm:text-[2.8rem]"} font-display leading-none font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-br from-text-primary to-accent/70`}
+                className={`${isReaderPage ? "text-3xl sm:text-4xl" : "text-5xl sm:text-6xl"} font-display leading-none font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-br from-text-primary to-accent/70`}
               >
                 Open TTS
               </h1>
               {!isReaderPage && (
-                <p className="mt-3 text-[13px] font-medium tracking-wide text-text-secondary sm:text-[14px]">
+                <p className="mt-3 text-base font-medium tracking-wide text-text-secondary sm:text-lg">
                   On-device synthesis — no server, no keys, no data leaves your browser.
                 </p>
               )}
@@ -434,17 +443,17 @@ export default function App() {
 
             {showWasmBadge && (
               <div className="mt-1 flex flex-col items-end gap-1 flex-shrink-0">
-                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-accent-light text-accent text-[13px] font-semibold shadow-sm">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-accent/25 bg-accent-light backdrop-blur-md text-accent text-base font-semibold shadow-glass-sm">
                   <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse" />
                   CPU mode
                 </div>
                 {webgpuModeNote && (
-                  <p className="max-w-full text-left text-[11px] leading-4 text-text-muted sm:max-w-[240px] sm:text-right">
+                  <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[240px] sm:text-right">
                     {webgpuModeNote}
                   </p>
                 )}
                 {showSingleThreadedNote && (
-                  <p className="max-w-full text-left text-[11px] leading-4 text-text-muted sm:max-w-[220px] sm:text-right">
+                  <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[220px] sm:text-right">
                     Cross-origin isolation is missing, so CPU fallback is stuck single-threaded.
                   </p>
                 )}
@@ -453,7 +462,7 @@ export default function App() {
           </div>
 
           {/* Page navigation */}
-          <nav className={`${isReaderPage ? "mt-4" : "mt-6 sm:mt-8"} grid w-full grid-cols-2 gap-1.5 rounded-xl border border-border bg-panel p-1 shadow-sm sm:inline-flex sm:w-auto`}>
+          <nav className={`${isReaderPage ? "mt-4" : "mt-6 sm:mt-8"} grid w-full grid-cols-2 gap-1 rounded-2xl glass p-1 sm:inline-flex sm:w-auto`}>
             {availableTabs.map((tab) => (
               <a
                 key={tab.key}
@@ -462,10 +471,10 @@ export default function App() {
                   event.preventDefault();
                   handlePageNavigation(tab.key);
                 }}
-                className={`relative px-5 py-2 text-[13px] font-semibold transition-all duration-200 rounded-lg ${
+                className={`relative px-5 py-2 text-base font-semibold transition-all duration-200 rounded-xl ${
                   activePage === tab.key
-                    ? "bg-surface text-text-primary shadow-sm border border-border-strong/60"
-                    : "text-text-muted hover:text-text-secondary hover:bg-surface/60"
+                    ? "bg-panel text-text-primary shadow-glass-sm"
+                    : "text-text-muted hover:text-text-secondary hover:bg-white/50"
                 } text-center`}
               >
                 {tab.label}
@@ -479,7 +488,7 @@ export default function App() {
         )}
 
         {localInferenceSupported && (isStudioPage || isReaderPage) && visibleError && (
-          <div className="mb-4 rounded-lg border border-danger/30 bg-danger-light px-3 py-2 text-xs text-danger">
+          <div className="mb-4 rounded-xl border border-danger/30 bg-danger-light backdrop-blur-md px-3.5 py-2.5 text-xs text-danger shadow-glass-sm">
             {visibleError}
           </div>
         )}
@@ -490,11 +499,11 @@ export default function App() {
             <>
             <DownloadProgress kokoroState={kokoroState} supertonicState={supertonicState} />
 
-            <div className="mt-6 bg-panel border border-border/60 rounded-2xl shadow-lg">
+            <div className="mt-6 glass-panel rounded-[24px]">
               <div className="grid grid-cols-1 lg:grid-cols-5">
                 {/* Left: text input */}
                 <div className="flex min-h-[320px] flex-col border-border/40 p-4 sm:min-h-[360px] sm:p-6 lg:col-span-3 lg:border-r">
-                  <span className="text-[10px] font-bold uppercase tracking-widest text-text-muted mb-3 flex-shrink-0">Script</span>
+                  <span className="text-xs font-semibold uppercase tracking-widest text-text-muted mb-3 flex-shrink-0">Script</span>
                   <div className="flex-1 min-h-0">
                     <TextInput text={text} onTextChange={handleTextChange} />
                   </div>
@@ -648,12 +657,12 @@ export default function App() {
                 {(["Kokoro-82M", "Supertonic TTS", "WebGPU · WASM"] as const).map((label) => (
                   <span
                     key={label}
-                    className="px-2 py-0.5 rounded-md border border-border/60 font-mono text-[10px] text-text-muted/60"
+                    className="px-2.5 py-1 rounded-full border border-white/50 bg-white/40 backdrop-blur-sm font-mono text-xs text-text-muted/70"
                   >
                     {label}
                   </span>
                 ))}
-                <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-md border border-success/20 bg-success/[0.04] font-mono text-[10px] text-success/70">
+                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-success/25 bg-success/[0.07] backdrop-blur-sm font-mono text-xs text-success/80">
                   <span
                     className="w-1 h-1 rounded-full bg-success opacity-80 animate-pulse"
                     style={{ boxShadow: "0 0 5px var(--color-success)" }}
@@ -662,7 +671,7 @@ export default function App() {
                 </span>
               </div>
             ) : (
-              <p className="font-mono text-[10px] text-text-muted/60">
+              <p className="font-mono text-xs text-text-muted/60">
                 {isStudioPage
                   ? activeModelSupportMessage
                     ?? browserSupport.message

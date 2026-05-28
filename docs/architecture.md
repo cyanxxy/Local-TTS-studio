@@ -7,7 +7,7 @@ This document keeps maintainer-facing architecture details out of the top-level 
 - React 19 + TypeScript 5.9 in strict mode + Vite 7 + Tailwind CSS 4
 - `@huggingface/transformers` v4 for the Supertonic TTS pipeline
 - `kokoro-js` v1 for Kokoro-82M generation with custom phonemization
-- Electron 41.1.0 for the optional desktop wrapper
+- Electron 42.3.0 for the optional desktop wrapper
 - Vitest 3 + Testing Library + jsdom for tests
 - `lucide-react` for icons
 

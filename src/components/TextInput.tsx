@@ -13,7 +13,7 @@ export function TextInput({ text, onTextChange }: TextInputProps) {
   return (
     <div className="flex flex-col h-full">
       <textarea
-        className="flex-1 w-full resize-none bg-transparent text-text-primary text-[16px] leading-relaxed placeholder:text-text-muted/50 outline-none font-sans selection:bg-accent/40 selection:text-white focus:ring-0"
+        className="flex-1 w-full resize-none bg-transparent text-text-primary text-xl leading-relaxed placeholder:text-text-muted/50 outline-none font-sans selection:bg-accent/40 selection:text-white focus:ring-0"
         aria-label="Text to synthesize"
         placeholder="Type or paste your text here…"
         value={text}
@@ -23,7 +23,7 @@ export function TextInput({ text, onTextChange }: TextInputProps) {
 
       <div className="mt-auto pt-4 border-t border-border/60 flex items-center justify-end gap-3">
         <span
-          className={`font-mono text-[11px] tabular-nums flex-shrink-0 ${
+          className={`font-mono text-sm tabular-nums flex-shrink-0 ${
             !isValid && charCount > 0 ? "text-danger" : "text-text-muted"
           }`}
         >

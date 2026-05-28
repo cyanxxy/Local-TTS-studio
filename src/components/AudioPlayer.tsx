@@ -132,48 +132,48 @@ export function AudioPlayer({
     <div
       className={embedded
         ? ""
-        : `border border-border/60 ${compact ? "rounded-xl" : "rounded-2xl"} bg-panel overflow-hidden shadow-md ring-1 ring-black/5`
+        : `glass-panel ${compact ? "rounded-2xl" : "rounded-[22px]"} overflow-hidden`
       }
     >
 
       {hasStats && (
-        <div className={`${compact ? "px-4 py-2 gap-4" : embedded ? "px-6 py-3 gap-6" : "px-5 py-3 gap-6"} flex items-center border-b border-border flex-wrap`}>
+        <div className={`${compact ? "px-4 py-2 gap-4" : embedded ? "px-6 py-3 gap-6" : "px-5 py-3 gap-6"} flex items-center border-b border-black/5 flex-wrap`}>
           {stats.firstLatency !== null && (
             <div className="flex flex-col">
-              <span className="font-mono text-[13px] font-semibold text-accent tabular-nums leading-none">
+              <span className="font-mono text-base font-semibold text-accent tabular-nums leading-none">
                 {stats.firstLatency.toFixed(2)}s
               </span>
-              <span className="text-[9px] font-semibold uppercase tracking-widest text-text-muted mt-1">
+              <span className="text-2xs font-semibold uppercase tracking-widest text-text-muted mt-1">
                 First chunk
               </span>
             </div>
           )}
           {stats.processingTime > 0 && (
             <div className="flex flex-col">
-              <span className="font-mono text-[13px] font-semibold text-accent tabular-nums leading-none">
+              <span className="font-mono text-base font-semibold text-accent tabular-nums leading-none">
                 {stats.processingTime.toFixed(2)}s
               </span>
-              <span className="text-[9px] font-semibold uppercase tracking-widest text-text-muted mt-1">
+              <span className="text-2xs font-semibold uppercase tracking-widest text-text-muted mt-1">
                 Total time
               </span>
             </div>
           )}
           {stats.charsPerSec > 0 && (
             <div className="flex flex-col">
-              <span className="font-mono text-[13px] font-semibold text-accent tabular-nums leading-none">
+              <span className="font-mono text-base font-semibold text-accent tabular-nums leading-none">
                 {stats.charsPerSec.toFixed(0)}
               </span>
-              <span className="text-[9px] font-semibold uppercase tracking-widest text-text-muted mt-1">
+              <span className="text-2xs font-semibold uppercase tracking-widest text-text-muted mt-1">
                 Chars/sec
               </span>
             </div>
           )}
           {stats.rtf > 0 && (
             <div className="flex flex-col">
-              <span className="font-mono text-[13px] font-semibold text-accent tabular-nums leading-none">
+              <span className="font-mono text-base font-semibold text-accent tabular-nums leading-none">
                 {stats.rtf.toFixed(3)}×
               </span>
-              <span className="text-[9px] font-semibold uppercase tracking-widest text-text-muted mt-1">
+              <span className="text-2xs font-semibold uppercase tracking-widest text-text-muted mt-1">
                 RTF
               </span>
             </div>
@@ -189,7 +189,7 @@ export function AudioPlayer({
             aria-label="Back 10 seconds"
             className={`${compact ? "w-8 h-8" : "w-9 h-9"} rounded-full border flex items-center justify-center transition-all duration-200 ${
               hasAudio
-                ? "border-border-strong text-text-secondary hover:border-accent/60 hover:text-accent hover:bg-surface"
+                ? "border-white/55 bg-white/40 backdrop-blur-md text-text-secondary shadow-glass-sm hover:-translate-y-0.5 hover:text-accent hover:bg-white/60"
                 : "border-border text-text-muted cursor-not-allowed"
             }`}
           >
@@ -205,7 +205,7 @@ export function AudioPlayer({
                 ? "border-border text-text-muted cursor-not-allowed"
                 : isPlaying
                   ? "border-accent bg-accent/10 text-accent hover:bg-accent hover:text-white shadow-accent-sm"
-                  : "border-border-strong text-text-secondary hover:border-accent hover:text-accent hover:shadow-accent-sm hover:bg-surface"
+                  : "border-white/55 bg-white/45 backdrop-blur-md text-text-secondary shadow-glass-sm hover:-translate-y-0.5 hover:text-accent hover:bg-white/65"
             }`}
           >
             {isPlaying
@@ -219,7 +219,7 @@ export function AudioPlayer({
             aria-label="Forward 10 seconds"
             className={`${compact ? "w-8 h-8" : "w-9 h-9"} rounded-full border flex items-center justify-center transition-all duration-200 ${
               hasAudio
-                ? "border-border-strong text-text-secondary hover:border-accent/60 hover:text-accent hover:bg-surface"
+                ? "border-white/55 bg-white/40 backdrop-blur-md text-text-secondary shadow-glass-sm hover:-translate-y-0.5 hover:text-accent hover:bg-white/60"
                 : "border-border text-text-muted cursor-not-allowed"
             }`}
           >
@@ -231,7 +231,7 @@ export function AudioPlayer({
               onClick={onStop}
               aria-label={isGenerating ? "Stop generation" : "Stop playback"}
               title={isGenerating ? "Stop generation" : "Stop playback"}
-              className={`${compact ? "w-8 h-8" : "w-9 h-9"} rounded-full border border-danger/40 text-danger bg-danger-light hover:bg-danger hover:text-white transition-all duration-200`}
+              className={`${compact ? "w-8 h-8" : "w-9 h-9"} rounded-full border border-danger/30 text-danger bg-danger-light backdrop-blur-md shadow-glass-sm hover:bg-danger hover:text-white hover:-translate-y-0.5 transition-all duration-200`}
             >
               <Square size={12} className="mx-auto" />
             </button>
@@ -285,7 +285,7 @@ export function AudioPlayer({
             disabled={!hasAudio}
             aria-label="Download audio"
             title="Download audio"
-            className={`ml-auto rounded-lg p-2 transition-all flex-shrink-0 sm:ml-0 ${
+            className={`ml-auto rounded-xl p-2 transition-all flex-shrink-0 sm:ml-0 ${
               hasAudio
                 ? "text-text-muted hover:text-accent hover:bg-accent-light"
                 : "text-text-muted cursor-not-allowed"
@@ -295,7 +295,7 @@ export function AudioPlayer({
           </button>
         </div>
 
-        <div className={`flex items-center justify-start ${compact ? "text-[10px]" : "text-[11px]"} text-text-muted sm:justify-end`}>
+        <div className={`flex items-center justify-start ${compact ? "text-xs" : "text-sm"} text-text-muted sm:justify-end`}>
           <span>
             {segmentCount > 0
               ? activeSegmentNumber

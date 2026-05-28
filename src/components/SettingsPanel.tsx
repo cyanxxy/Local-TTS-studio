@@ -24,13 +24,13 @@ export function SettingsPanel({
   const modelLabel = activeModel === "kokoro" ? MODELS.kokoro.label : MODELS.supertonic.label;
 
   return (
-    <div className="border border-border rounded-xl overflow-hidden">
+    <div className="glass rounded-[20px] overflow-hidden">
       {/* Toggle header */}
       <button
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-border/30 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/40 transition-colors"
       >
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
           Settings
         </span>
         <ChevronDown
@@ -41,8 +41,8 @@ export function SettingsPanel({
 
       {/* Collapsible content */}
       {open && (
-        <div className="px-4 pb-4 flex flex-col gap-2 border-t border-border animate-fade-up">
-          <p className="text-[11px] text-text-muted pt-3 pb-1">
+        <div className="px-4 pb-4 flex flex-col gap-2 border-t border-black/5 animate-fade-up">
+          <p className="text-sm text-text-muted pt-3 pb-1">
             Model files stay cached locally after the first download, but the app still has to reinitialize them after a refresh.
           </p>
 
@@ -52,7 +52,7 @@ export function SettingsPanel({
             className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
               busy
                 ? "border-border text-text-muted cursor-not-allowed"
-                : "border-border-strong text-text-secondary hover:border-border-strong hover:text-text-primary"
+                : "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
             }`}
           >
             <Trash2 size={12} />
@@ -65,7 +65,7 @@ export function SettingsPanel({
             className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
               busy
                 ? "bg-border text-text-muted cursor-not-allowed"
-                : "bg-border-strong text-text-secondary hover:text-text-primary"
+                : "border border-white/55 bg-white/55 backdrop-blur-sm text-text-secondary hover:bg-white/70 hover:text-text-primary"
             }`}
           >
             <RefreshCw size={12} />
@@ -74,7 +74,7 @@ export function SettingsPanel({
 
           {status && (
             <p
-              className={`text-[11px] mt-1 ${
+              className={`text-sm mt-1 ${
                 status.type === "success"
                   ? "text-success"
                   : status.type === "error"

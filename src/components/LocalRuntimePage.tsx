@@ -11,6 +11,7 @@ import { LocalRuntimeRuntimeSettings } from "./localRuntime/LocalRuntimeRuntimeS
 import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
 import {
   KANI_OPTIONS,
+  DEFAULT_KANI_LANGUAGE_TAG,
   NEUTTS_OPTIONS,
   QWEN3_ATTENTION_OPTIONS,
   QWEN3_DEVICE_OPTIONS,
@@ -82,7 +83,7 @@ export function LocalRuntimePage({
   const [referenceAudioGuidance, setReferenceAudioGuidance] = useState<StatusMessage>(null);
 
   const [kaniModel, setKaniModel] = useState(KANI_OPTIONS[0].value);
-  const [languageTag, setLanguageTag] = useState("");
+  const [languageTag, setLanguageTag] = useState(DEFAULT_KANI_LANGUAGE_TAG);
   const [temperature, setTemperature] = useState(1.0);
   const [topP, setTopP] = useState(0.95);
   const [repetitionPenalty, setRepetitionPenalty] = useState(1.1);
@@ -94,8 +95,8 @@ export function LocalRuntimePage({
   const [qwen3DeviceMap, setQwen3DeviceMap] = useState(QWEN3_DEVICE_OPTIONS[0].value);
   const [qwen3Dtype, setQwen3Dtype] = useState(QWEN3_DTYPE_OPTIONS[0].value);
   const [qwen3Attention, setQwen3Attention] = useState(QWEN3_ATTENTION_OPTIONS[0].value);
-  const [qwen3Temperature, setQwen3Temperature] = useState(0.8);
-  const [qwen3TopP, setQwen3TopP] = useState(0.95);
+  const [qwen3Temperature, setQwen3Temperature] = useState(0.9);
+  const [qwen3TopP, setQwen3TopP] = useState(1.0);
   const [qwen3MaxNewTokens, setQwen3MaxNewTokens] = useState(2048);
 
   const [generateBusy, setGenerateBusy] = useState(false);
@@ -423,7 +424,7 @@ export function LocalRuntimePage({
 
   const handleQwen3MaxNewTokensChange = useCallback((nextMaxNewTokens: number) => {
     invalidateGeneration();
-    setQwen3MaxNewTokens((current) => clampInteger(nextMaxNewTokens, current, 64, 4096));
+    setQwen3MaxNewTokens((current) => clampInteger(nextMaxNewTokens, current, 64, 8192));
   }, [invalidateGeneration]);
 
   const handlePythonOverrideChange = useCallback((nextPythonOverride: string) => {
@@ -623,9 +624,9 @@ export function LocalRuntimePage({
 
   return (
     <div className="mt-6 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-5">
-      <section className="flex flex-col gap-4 rounded-2xl border border-border/60 bg-panel p-4 shadow-md transition-all duration-300 hover:border-border hover:shadow-lg sm:p-6 lg:col-span-3">
+      <section className="flex flex-col gap-4 rounded-[22px] glass-panel p-4 transition-all duration-300 sm:p-6 lg:col-span-3">
         <div>
-          <h2 className="text-xl font-semibold text-text-primary">{name}</h2>
+          <h2 className="text-xl font-display font-semibold text-text-primary">{name}</h2>
           <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-sm text-text-secondary">
             <span>Released: {releaseDate}</span>
             <span className="hidden sm:inline">•</span>
@@ -649,7 +650,7 @@ export function LocalRuntimePage({
           <textarea
             value={text}
             onChange={(event) => handleTextChange(event.target.value)}
-            className="w-full min-h-32 px-3 py-2 rounded-xl border border-border bg-surface text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
+            className="w-full min-h-32 px-3 py-2 rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
             placeholder="Enter text to synthesize"
           />
         </div>
@@ -712,7 +713,7 @@ export function LocalRuntimePage({
         />
 
         {generateBusy && generationProgress && (
-          <div className="flex flex-col gap-2 rounded-lg border border-border bg-surface/60 p-3 text-sm text-text-primary">
+          <div className="flex flex-col gap-2 rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md p-3 text-sm text-text-primary">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
@@ -732,10 +733,10 @@ export function LocalRuntimePage({
             onClick={runGeneration}
             disabled={!electronAvailable || !runtimeReady || !canGenerate || busy}
             className={`
-              w-full rounded-xl px-5 py-2.5 text-[14px] font-bold transition-all duration-300 sm:w-auto
+              w-full rounded-xl px-5 py-2.5 text-lg font-bold transition-all duration-300 sm:w-auto
               ${!electronAvailable || !runtimeReady || !canGenerate || busy
-                ? "bg-border/50 text-text-muted cursor-not-allowed"
-                : "bg-text-primary text-panel hover:bg-accent hover:text-white shadow-accent-sm hover:shadow-accent-lg hover:-translate-y-0.5"
+                ? "bg-border/50 text-text-muted cursor-not-allowed backdrop-blur-sm"
+                : "glass-accent text-white"
               }
             `}
           >
@@ -746,7 +747,7 @@ export function LocalRuntimePage({
             <button
               type="button"
               onClick={() => { void cancelActiveGeneration(); }}
-              className="w-full rounded-xl border border-border-strong px-5 py-2.5 text-[14px] font-semibold text-text-primary transition-colors hover:border-text-primary sm:w-auto"
+              className="w-full rounded-xl border border-white/55 bg-white/40 backdrop-blur-md px-5 py-2.5 text-lg font-semibold text-text-primary shadow-glass-sm transition-all duration-200 hover:bg-white/60 hover:-translate-y-0.5 sm:w-auto"
             >
               Cancel
             </button>
@@ -754,11 +755,11 @@ export function LocalRuntimePage({
         </div>
 
         {audioUrl && (
-          <div className="border border-border rounded-lg p-3 bg-surface/70">
+          <div className="border border-black/10 rounded-xl p-3 bg-surface/55 backdrop-blur-md">
             <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2">Output Audio</p>
             <audio controls src={audioUrl} className="w-full" />
             {result && (
-              <p className="text-[11px] mt-2 text-text-muted">
+              <p className="text-sm mt-2 text-text-muted">
                 {result.modelRepo} • {result.sampleRate} Hz • {result.durationSec.toFixed(2)}s
               </p>
             )}

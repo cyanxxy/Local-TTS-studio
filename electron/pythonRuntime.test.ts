@@ -72,15 +72,41 @@ describe("pythonRuntime", () => {
     expect(getPythonDependencyCheckSnippet("neutts")).toContain("sys.version_info");
     expect(getPythonDependencyCheckSnippet("qwen3")).toContain("find_spec('qwen_tts')");
     expect(getPythonDependencyCheckSnippet("qwen3")).toContain("find_spec('torch')");
+    expect(getPythonDependencyCheckSnippet("qwen3")).toContain("(3, 9) <= sys.version_info < (3, 14)");
+    expect(getPythonDependencyCheckSnippet("qwen3")).not.toContain("import qwen_tts");
+    expect(getPythonDependencyCheckSnippet("qwen3", {
+      platform: "linux",
+      arch: "x64",
+      hasNvidiaGpu: true,
+    })).toContain("torch.cuda.is_available()");
   });
 
   it("describes default first-run runtime setup for Electron local models", () => {
-    expect(getDefaultPythonRuntimeSetup("qwen3")).toEqual({
+    expect(getDefaultPythonRuntimeSetup("qwen3", {
+      platform: "darwin",
+      arch: "arm64",
+    })).toEqual({
       envName: ".venv-qwen3",
       pythonVersion: "3.12",
-      installSteps: [["qwen-tts", "torch"]],
+      installSteps: [["torch"], ["qwen-tts"]],
       dependencyLabel: "qwen-tts",
     });
+    expect(getDefaultPythonRuntimeSetup("qwen3", {
+      platform: "linux",
+      arch: "x64",
+      hasNvidiaGpu: true,
+    }).installSteps).toEqual([
+      ["torch", "--index-url", "https://download.pytorch.org/whl/cu128"],
+      ["qwen-tts"],
+    ]);
+    expect(getDefaultPythonRuntimeSetup("qwen3", {
+      platform: "win32",
+      arch: "x64",
+      hasNvidiaGpu: false,
+    }).installSteps).toEqual([
+      ["torch", "--index-url", "https://download.pytorch.org/whl/cpu"],
+      ["qwen-tts"],
+    ]);
     expect(getDefaultPythonRuntimeSetup("kani")).toEqual({
       envName: ".venv-kani",
       pythonVersion: "3.12",

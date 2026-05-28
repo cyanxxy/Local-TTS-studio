@@ -14,7 +14,20 @@ export const KANI_OPTIONS: LocalRuntimeOption[] = [
   { value: "nineninesix/kani-tts-2-en", label: "English · kani-tts-2-en" },
 ];
 
+export const KANI_LANGUAGE_TAG_OPTIONS: LocalRuntimeOption[] = [
+  { value: "en_us", label: "English · US" },
+  { value: "en_nyork", label: "English · New York" },
+  { value: "en_oakl", label: "English · Oakland" },
+  { value: "en_glasg", label: "English · Glasgow" },
+  { value: "en_bost", label: "English · Boston" },
+  { value: "en_scou", label: "English · Liverpool" },
+];
+
+export const DEFAULT_KANI_LANGUAGE_TAG = KANI_LANGUAGE_TAG_OPTIONS[0].value;
+
 export const QWEN3_OPTIONS: LocalRuntimeOption[] = [
+  { value: "auto", label: "Auto · fastest for this device" },
+  { value: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", label: "CustomVoice · 0.6B · 12Hz" },
   { value: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", label: "CustomVoice · 1.7B · 12Hz" },
 ];
 
@@ -57,11 +70,8 @@ export const QWEN3_SPEAKER_PRIMARY_LANGUAGE: Record<string, string> = {
 };
 
 export function getQwen3LanguageOptionsForSpeaker(speaker: string): LocalRuntimeOption[] {
-  const primaryLanguage = QWEN3_SPEAKER_PRIMARY_LANGUAGE[speaker];
-  if (!primaryLanguage) return QWEN3_LANGUAGE_OPTIONS;
-  return QWEN3_LANGUAGE_OPTIONS.filter((option) => (
-    option.value === "Auto" || option.value === primaryLanguage
-  ));
+  void speaker;
+  return QWEN3_LANGUAGE_OPTIONS;
 }
 
 export const QWEN3_DEVICE_OPTIONS: LocalRuntimeOption[] = [
@@ -74,7 +84,7 @@ export const QWEN3_DEVICE_OPTIONS: LocalRuntimeOption[] = [
 export const QWEN3_DTYPE_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto" },
   { value: "bfloat16", label: "bfloat16" },
-  { value: "float16", label: "float16" },
+  { value: "float16", label: "float16 (advanced)" },
   { value: "float32", label: "float32" },
 ];
 

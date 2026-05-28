@@ -2,14 +2,15 @@
 
 ## Project Overview
 
-Browser-native TTS app with dual model support (Kokoro-82M + Supertonic TTS). 100% local inference via WebGPU, no server or cloud. Ships as both a web app and an Electron desktop app from one codebase.
+Browser-native TTS app with two WebGPU browser models (Kokoro-82M + Supertonic TTS). 100% local inference, no server or cloud. Ships as both a web app and an Electron desktop app from one codebase. The desktop app additionally exposes three optional Python-backed local runtimes — NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS — through an IPC bridge (`python/local_tts_bridge.py`).
 
 ## Tech Stack
 
 - **React 19** + **TypeScript 5.9** + **Vite 7** + **Tailwind CSS 4**
 - **@huggingface/transformers** v4 — Supertonic TTS pipeline
 - **kokoro-js** v1 — Kokoro-82M (custom phonemization, NOT standard pipeline)
-- **Electron 41.1.0** — optional desktop wrapper
+- **Electron 42.3.0** — optional desktop wrapper (Chromium 148, bundles Node 24; dev/build requires Node >=22.12)
+- **Python bridge** — desktop-only local runtimes (NeuTTS Nano, Kani-TTS-2, Qwen3-TTS) via `python/local_tts_bridge.py`
 - **Vitest 3** + **@testing-library/react** — testing
 - **lucide-react** — icons
 
@@ -72,11 +73,22 @@ python/              # Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-T
 
 ## Design Tokens (src/index.css)
 
-Flat, minimal design with subtle ambient background treatment.
-- **Fonts**: Self-hosted via `@fontsource-variable` (Inter, Outfit, JetBrains Mono) — no external CDN.
-  - `font-sans` (Inter) — body text
-  - `font-display` (Outfit) — headings/display
-  - `font-mono` (JetBrains Mono) — stats, code, numeric values
+Liquid Glass design (Apple): translucent, blurred, light-refracting surfaces floating over an ambient color field, with specular edge highlights and soft depth shadows.
+- **Glass utilities** (defined in `src/index.css`, unlayered so they win over Tailwind utilities — only put them on static containers, never alongside competing `bg-*`/`border-*`/`shadow-*` utilities on the same element):
+  - `.glass` / `.glass-panel` — translucent blurred surfaces (panels, cards, nav, popovers via `.glass-pop`).
+  - `.glass-accent` — vivid tinted-glass primary button (the Generate CTA).
+  - `.glass-inset` — recessed field look.
+  - For interactive/stateful buttons use Tailwind utilities instead: `bg-white/40 backdrop-blur-md border border-white/55 shadow-glass-sm` + hover/active variants (predictable cascade).
+- **Glass shadows**: `--shadow-glass-sm/md/lg` (`@theme` → `shadow-glass-*` utilities) bake in the drop shadow + inset top specular highlight.
+- **Electron (macOS)**: window uses native `vibrancy: "under-window"` + transparent background + `titleBarStyle: "hiddenInset"`; the renderer adds `is-electron`/`is-mac` classes on `<html>` to make the body transparent (so the vibrancy shows) and inset/drag the header for traffic lights.
+- **Fonts**: Self-hosted via `@fontsource-variable` (Inter, Outfit, JetBrains Mono) — no external CDN. Global: `font-optical-sizing: auto`, `text-rendering: optimizeLegibility`, `font-feature-settings: kern/liga/calt`.
+  - `font-sans` (Inter) — body + UI text
+  - `font-display` (Outfit) — all headings (h1/h2 content titles). Pair display sizes with this class.
+  - `font-mono` (JetBrains Mono) — stats, code, numeric values (add `tabular-nums` for aligned digits)
+- **Type scale** (one canonical scale in `@theme`, each token carries a tuned line-height; display tokens also carry negative tracking). ALWAYS use these utilities — never ad-hoc `text-[Npx]`/`text-[Nrem]`:
+  - UI: `text-2xs` 9 · `text-xs` 10 · `text-sm` 11 · `text-base` 13 · `text-lg` 14 · `text-xl` 16 (px)
+  - Display: `text-2xl` 1.5 · `text-3xl` 1.75 · `text-4xl` 2 · `text-5xl` 2.2 · `text-6xl` 2.8 (rem)
+  - Small uppercase section labels: `text-xs font-semibold uppercase tracking-widest` (not `font-bold`).
 - **Colors**: `--color-surface` #F5F5F7, `--color-panel` #FFFFFF, `--color-accent` #0071E3, `--color-text-primary` #1D1D1F
 - **Shadows**: `--shadow-xs/sm/md/lg` (neutral), `--shadow-accent-sm/md/lg` (blue-tinted) — use Tailwind classes `shadow-md`, `shadow-accent-sm`, etc.
 - **Icon sizes**: xs=12px (tight buttons), sm=14px (standard controls), md=16px (standalone buttons) — all via lucide-react `size` prop.
@@ -84,10 +96,22 @@ Flat, minimal design with subtle ambient background treatment.
 
 ## Models
 
+### Browser models (web + desktop, WebGPU)
+
 | Model | ID | Library | Sample Rate | Voices |
 |---|---|---|---|---|
 | Kokoro-82M | `onnx-community/Kokoro-82M-v1.0-ONNX` | kokoro-js | 24000 Hz | 24 named voices |
 | Supertonic | `onnx-community/Supertonic-TTS-2-ONNX` | @huggingface/transformers | 44100 Hz | F1–F5, M1–M5 (10 voices) |
+
+### Desktop-only local runtimes (Electron + Python bridge)
+
+Sample rate is read from each model's output at runtime, never hardcoded. Allowed repos/speakers are enforced in `electron/localTtsIpc.ts`.
+
+| Model | ID(s) | Python package | Voices |
+|---|---|---|---|
+| NeuTTS Nano | `neuphonic/neutts-nano` (+ `-german`/`-french`/`-spanish`) | `neutts` (Python 3.10–3.13) | reference-audio voice cloning |
+| Kani-TTS-2 | `nineninesix/kani-tts-2-en` | `kani-tts-2` (transformers 4.56, NVIDIA NeMo) | language-tagged, no named voices |
+| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | `qwen-tts` (pins transformers 4.57.3) | 9 speakers × 11 languages |
 
 ## Maintenance Notes
 

@@ -154,6 +154,56 @@ if result["sampleRate"] != 44100:
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);
   });
 
+  it.runIf(HAS_SYSTEM_PYTHON)("defaults and validates Kani language tags before generation", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.detect_kani_package = lambda: ("kani-tts-2", "2.0.0")
+bridge.detect_kani_transformers_version = lambda: "4.56.1"
+bridge.array_to_wav_base64 = lambda _audio, _sample_rate: "UklGRg=="
+
+class FakeKaniTTS:
+    sample_rate = 22050
+    status = "available_language_tags"
+    language_tags_list = ["en_us", "en_bost"]
+    generated_kwargs = None
+
+    def __init__(self, *_args, **_kwargs):
+        pass
+
+    def generate(self, *_args, **kwargs):
+        FakeKaniTTS.generated_kwargs = kwargs
+        return [0.0, 0.1], "Hello from Kani."
+
+module = types.ModuleType("kani_tts")
+module.KaniTTS = FakeKaniTTS
+sys.modules["kani_tts"] = module
+
+result = bridge.generate_kani({"text": "Hello from Kani."})
+if result["sampleRate"] != 22050:
+    raise AssertionError(f"Expected Kani sampleRate 22050, got {result['sampleRate']}")
+if FakeKaniTTS.generated_kwargs["language_tag"] != "en_us":
+    raise AssertionError(FakeKaniTTS.generated_kwargs)
+
+try:
+    bridge.generate_kani({"text": "Hello from Kani.", "languageTag": "en_bad"})
+except RuntimeError as exc:
+    if "Unsupported Kani language tag" not in str(exc):
+        raise
+else:
+    raise AssertionError("Unsupported Kani language tag was accepted")
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
   it.runIf(HAS_SYSTEM_PYTHON)("rejects NeuTTS reference WAV files with unsupported metadata", () => {
     const completed = runBridgeUnitScript(`
 import importlib.util
@@ -222,11 +272,13 @@ torch_module.float32 = "float32"
 sys.modules["torch"] = torch_module
 
 class FakeQwen3TTSModel:
+    loaded_repo = None
     loaded_kwargs = None
     generated_kwargs = None
 
     @classmethod
-    def from_pretrained(cls, _model_repo, **kwargs):
+    def from_pretrained(cls, model_repo, **kwargs):
+        cls.loaded_repo = model_repo
         cls.loaded_kwargs = kwargs
         return cls()
 
@@ -254,12 +306,133 @@ result = bridge.generate_qwen3({
 })
 if result["sampleRate"] != 24000:
     raise AssertionError(f"Expected Qwen3 sampleRate 24000, got {result['sampleRate']}")
+if result["modelRepo"] != "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
+    raise AssertionError(result["modelRepo"])
+if FakeQwen3TTSModel.loaded_repo != "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
+    raise AssertionError(FakeQwen3TTSModel.loaded_repo)
 if FakeQwen3TTSModel.loaded_kwargs["device_map"] != "cuda:0":
     raise AssertionError("Qwen3 device_map was not forwarded")
 if FakeQwen3TTSModel.generated_kwargs["speaker"] != "Aiden":
     raise AssertionError("Qwen3 speaker was not forwarded")
 if FakeQwen3TTSModel.generated_kwargs["top_p"] != 0.9:
     raise AssertionError("Qwen3 top_p was not forwarded")
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("auto-selects Qwen3 0.6B with MPS settings on Apple acceleration", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.array_to_wav_base64 = lambda _audio, _sample_rate: "UklGRg=="
+bridge.is_module_available = lambda module_name: False if module_name == "flash_attn" else True
+
+class FakeCuda:
+    @staticmethod
+    def is_available():
+        return False
+
+class FakeMps:
+    @staticmethod
+    def is_available():
+        return True
+
+torch_module = types.ModuleType("torch")
+torch_module.cuda = FakeCuda()
+torch_module.backends = types.SimpleNamespace(mps=FakeMps())
+torch_module.bfloat16 = "bfloat16"
+torch_module.float16 = "float16"
+torch_module.float32 = "float32"
+torch_module.ones = lambda _shape, device=None, dtype=None: types.SimpleNamespace(dtype=dtype)
+sys.modules["torch"] = torch_module
+
+class FakeQwen3TTSModel:
+    loaded_repo = None
+    loaded_kwargs = None
+
+    @classmethod
+    def from_pretrained(cls, model_repo, **kwargs):
+        cls.loaded_repo = model_repo
+        cls.loaded_kwargs = kwargs
+        return cls()
+
+    def generate_custom_voice(self, **_kwargs):
+        return [[0.0, 0.1]], 24000
+
+module = types.ModuleType("qwen_tts")
+module.Qwen3TTSModel = FakeQwen3TTSModel
+sys.modules["qwen_tts"] = module
+
+result = bridge.generate_qwen3({
+    "text": "Hello from Qwen.",
+    "modelRepo": "auto",
+    "deviceMap": "auto",
+    "dtype": "auto",
+    "attnImplementation": "auto",
+})
+if result["modelRepo"] != "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
+    raise AssertionError(result["modelRepo"])
+if FakeQwen3TTSModel.loaded_repo != "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
+    raise AssertionError(FakeQwen3TTSModel.loaded_repo)
+if FakeQwen3TTSModel.loaded_kwargs["device_map"] != "mps":
+    raise AssertionError(FakeQwen3TTSModel.loaded_kwargs)
+if FakeQwen3TTSModel.loaded_kwargs["dtype"] != "bfloat16":
+    raise AssertionError(FakeQwen3TTSModel.loaded_kwargs)
+if FakeQwen3TTSModel.loaded_kwargs["attn_implementation"] != "sdpa":
+    raise AssertionError(FakeQwen3TTSModel.loaded_kwargs)
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("falls back to float32 when Qwen3 MPS bfloat16 is unavailable", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.is_module_available = lambda module_name: False if module_name == "flash_attn" else True
+
+class FakeCuda:
+    @staticmethod
+    def is_available():
+        return False
+
+class FakeMps:
+    @staticmethod
+    def is_available():
+        return True
+
+def unavailable_ones(*_args, **_kwargs):
+    raise RuntimeError("bfloat16 unsupported")
+
+torch_module = types.ModuleType("torch")
+torch_module.cuda = FakeCuda()
+torch_module.backends = types.SimpleNamespace(mps=FakeMps())
+torch_module.bfloat16 = "bfloat16"
+torch_module.float16 = "float16"
+torch_module.float32 = "float32"
+torch_module.ones = unavailable_ones
+
+profile = bridge.select_qwen3_runtime_profile(torch_module)
+if profile["deviceMap"] != "mps":
+    raise AssertionError(profile)
+if profile["dtype"] != "float32":
+    raise AssertionError(profile)
+if profile["attention"] != "sdpa":
+    raise AssertionError(profile)
 `);
 
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);
@@ -382,6 +555,57 @@ if "Failed to import" in result["message"]:
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);
   });
 
+  it.runIf(HAS_SYSTEM_PYTHON)("recommends the fastest Qwen3 profile on CUDA", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.get_installed_package_version = lambda package: "1.0.0" if package == "qwen-tts" else "2.12.0"
+
+class FakeCuda:
+    @staticmethod
+    def is_available():
+        return True
+
+class FakeMps:
+    @staticmethod
+    def is_available():
+        return False
+
+torch_module = types.ModuleType("torch")
+torch_module.__version__ = "2.12.0"
+torch_module.cuda = FakeCuda()
+torch_module.backends = types.SimpleNamespace(mps=FakeMps())
+torch_module.bfloat16 = "bfloat16"
+torch_module.float16 = "float16"
+torch_module.float32 = "float32"
+sys.modules["torch"] = torch_module
+sys.modules["qwen_tts"] = types.ModuleType("qwen_tts")
+
+result = bridge.probe_qwen3()
+if not result["ready"]:
+    raise AssertionError(result["message"])
+if result["recommendedModelRepo"] != "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice":
+    raise AssertionError(result["recommendedModelRepo"])
+if result["recommendedDeviceMap"] != "cuda:0":
+    raise AssertionError(result["recommendedDeviceMap"])
+if result["recommendedDtype"] != "bfloat16":
+    raise AssertionError(result["recommendedDtype"])
+if result["recommendedAttention"] != "sdpa":
+    raise AssertionError(result["recommendedAttention"])
+if "CUDA was detected. Auto mode will use the faster 0.6B CustomVoice model with CUDA acceleration." not in result["warnings"]:
+    raise AssertionError(result["warnings"])
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
   it.runIf(HAS_SYSTEM_PYTHON)("detects eSpeak through PHONEMIZER_ESPEAK_LIBRARY", () => {
     const completed = runBridgeUnitScript(`
 import importlib.util
@@ -404,6 +628,59 @@ if detected["source"] != "PHONEMIZER_ESPEAK_LIBRARY":
     raise AssertionError(detected)
 if detected["path"] != library.name:
     raise AssertionError(detected)
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("prefers the eSpeak library bundled with installed NeuTTS", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import os
+from pathlib import Path
+import sys
+import tempfile
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+with tempfile.TemporaryDirectory() as temp_dir:
+    package_dir = Path(temp_dir) / "neutts"
+    package_dir.mkdir()
+    if sys.platform == "win32":
+        library = package_dir / "espeak-ng.dll"
+    elif sys.platform == "darwin":
+        library = package_dir / "libespeak-ng.dylib"
+    else:
+        library = package_dir / "libespeak-ng.so"
+    library.write_bytes(b"placeholder")
+    data_path = package_dir / "espeak-ng-data"
+    data_path.mkdir()
+
+    attempted = []
+    bridge.get_neutts_package_dir = lambda: package_dir
+    bridge.load_espeak_library = lambda path: attempted.append(path) or (True, None)
+    bridge.check_espeak_backend = lambda: (_ for _ in ()).throw(
+        AssertionError("system eSpeak lookup should not run before bundled lookup")
+    )
+
+    if bridge.get_espeak_data_path_for_library(str(library)) != data_path.resolve():
+        raise AssertionError("Bundled eSpeak data path was not detected")
+
+    ok, version, source = bridge.check_espeak()
+
+    if not ok:
+        raise AssertionError("Bundled eSpeak was not accepted")
+    if source != "bundled-library":
+        raise AssertionError(source)
+    if str(library) not in attempted:
+        raise AssertionError(attempted)
+    if os.environ.get("PHONEMIZER_ESPEAK_LIBRARY") != str(library):
+        raise AssertionError("Bundled eSpeak library was not exported to phonemizer")
+    if "Bundled eSpeak NG library" not in version:
+        raise AssertionError(version)
 `);
 
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);

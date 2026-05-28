@@ -117,16 +117,21 @@ describe("localTtsIpc request sanitizers", () => {
     })).toEqual({
       text: "Hello from Kani.",
       modelRepo: "nineninesix/kani-tts-2-en",
-      languageTag: "en_US",
+      languageTag: "en_us",
       temperature: 0.9,
       topP: 0.95,
       repetitionPenalty: 1.1,
       maxNewTokens: 512,
     });
+    expect(sanitizeGeneratePayload("kani", { text: "Hello" })).toMatchObject({
+      text: "Hello",
+      languageTag: "en_us",
+    });
 
     expect(() => sanitizeGeneratePayload("kani", null)).toThrow("Kani payload");
     expect(() => sanitizeGeneratePayload("kani", { text: "Hello", modelRepo: "bad/repo" })).toThrow("Unsupported Kani");
     expect(() => sanitizeGeneratePayload("kani", { text: "Hello", languageTag: "en!" })).toThrow("invalid format");
+    expect(() => sanitizeGeneratePayload("kani", { text: "Hello", languageTag: "fr_fr" })).toThrow("Unsupported Kani language tag");
   });
 
   it("sanitizes NeuTTS generate payloads", () => {
@@ -181,7 +186,7 @@ describe("localTtsIpc request sanitizers", () => {
       attnImplementation: "flash_attention_2",
       temperature: 0.8,
       topP: 0.95,
-      maxNewTokens: 2048,
+      maxNewTokens: 8192,
     })).toEqual({
       text: "Hello from Qwen3.",
       modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
@@ -193,7 +198,19 @@ describe("localTtsIpc request sanitizers", () => {
       attnImplementation: "flash_attention_2",
       temperature: 0.8,
       topP: 0.95,
-      maxNewTokens: 2048,
+      maxNewTokens: 8192,
+    });
+    expect(sanitizeGeneratePayload("qwen3", {
+      text: "Hello from Qwen3.",
+      modelRepo: "auto",
+    })).toMatchObject({
+      modelRepo: "auto",
+    });
+    expect(sanitizeGeneratePayload("qwen3", {
+      text: "Hello from Qwen3.",
+      modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+    })).toMatchObject({
+      modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     });
 
     expect(() => sanitizeGeneratePayload("qwen3", null)).toThrow("Qwen3 payload");
@@ -203,6 +220,7 @@ describe("localTtsIpc request sanitizers", () => {
     expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", deviceMap: "../bad" })).toThrow("invalid format");
     expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", dtype: "int8" })).toThrow("Unsupported Qwen3-TTS dtype");
     expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", attnImplementation: "bad" })).toThrow("Unsupported Qwen3-TTS attention");
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", maxNewTokens: 8193 })).toThrow("between 64 and 8192");
   });
 
   it("sanitizes cache and cancel requests", () => {

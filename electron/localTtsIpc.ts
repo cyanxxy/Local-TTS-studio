@@ -21,9 +21,21 @@ const ALLOWED_KANI_MODELS = new Set([
   "nineninesix/kani-tts-2-en",
 ]);
 
+const DEFAULT_KANI_LANGUAGE_TAG = "en_us";
+const ALLOWED_KANI_LANGUAGE_TAGS = new Set([
+  "en_us",
+  "en_nyork",
+  "en_oakl",
+  "en_glasg",
+  "en_bost",
+  "en_scou",
+]);
+
 const ALLOWED_QWEN3_MODELS = new Set([
+  "auto",
   // This page is intentionally scoped to the CustomVoice release because its
   // speaker and language controls map to that repository's built-in voices.
+  "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
   "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
 ]);
 
@@ -115,6 +127,14 @@ export interface BridgeProbeResult {
   compatibilityMode?: "legacy_0_1_x" | "current_1_2_x_or_newer" | null;
   warnings?: string[];
   espeakVersion?: string | null;
+  espeakSource?: string | null;
+  espeakPath?: string | null;
+  transformersVersion?: string | null;
+  torchVersion?: string | null;
+  recommendedModelRepo?: string | null;
+  recommendedDeviceMap?: string | null;
+  recommendedDtype?: string | null;
+  recommendedAttention?: string | null;
 }
 
 export interface BridgeGenerateResult {
@@ -289,7 +309,10 @@ export function sanitizeKaniPayload(payload: unknown): Record<string, unknown> {
   const languageTag = parseOptionalString(payload.languageTag, "languageTag", {
     maxLength: 32,
     pattern: /^[a-zA-Z0-9_-]+$/,
-  });
+  })?.toLowerCase() ?? DEFAULT_KANI_LANGUAGE_TAG;
+  if (!ALLOWED_KANI_LANGUAGE_TAGS.has(languageTag)) {
+    throw new Error("Unsupported Kani language tag.");
+  }
 
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
   const topP = parseOptionalNumber(payload.topP, "topP", { min: 0.5, max: 1.0 });
@@ -345,7 +368,7 @@ export function sanitizeQwen3Payload(payload: unknown): Record<string, unknown> 
 
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
   const topP = parseOptionalNumber(payload.topP, "topP", { min: 0.5, max: 1.0 });
-  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 4096 });
+  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 8192 });
 
   return {
     text,
@@ -425,6 +448,44 @@ export function parseBridgeProbeResult(
   if (result.espeakVersion != null) {
     if (typeof result.espeakVersion !== "string") throw new Error("Probe response has invalid `espeakVersion`.");
     parsed.espeakVersion = result.espeakVersion;
+  }
+  if (result.espeakSource != null) {
+    if (typeof result.espeakSource !== "string") throw new Error("Probe response has invalid `espeakSource`.");
+    parsed.espeakSource = result.espeakSource;
+  }
+  if (result.espeakPath != null) {
+    if (typeof result.espeakPath !== "string") throw new Error("Probe response has invalid `espeakPath`.");
+    parsed.espeakPath = result.espeakPath;
+  }
+  if (result.transformersVersion != null) {
+    if (typeof result.transformersVersion !== "string") throw new Error("Probe response has invalid `transformersVersion`.");
+    parsed.transformersVersion = result.transformersVersion;
+  }
+  if (result.torchVersion != null) {
+    if (typeof result.torchVersion !== "string") throw new Error("Probe response has invalid `torchVersion`.");
+    parsed.torchVersion = result.torchVersion;
+  }
+  if (result.recommendedModelRepo != null) {
+    if (typeof result.recommendedModelRepo !== "string") {
+      throw new Error("Probe response has invalid `recommendedModelRepo`.");
+    }
+    parsed.recommendedModelRepo = result.recommendedModelRepo;
+  }
+  if (result.recommendedDeviceMap != null) {
+    if (typeof result.recommendedDeviceMap !== "string") {
+      throw new Error("Probe response has invalid `recommendedDeviceMap`.");
+    }
+    parsed.recommendedDeviceMap = result.recommendedDeviceMap;
+  }
+  if (result.recommendedDtype != null) {
+    if (typeof result.recommendedDtype !== "string") throw new Error("Probe response has invalid `recommendedDtype`.");
+    parsed.recommendedDtype = result.recommendedDtype;
+  }
+  if (result.recommendedAttention != null) {
+    if (typeof result.recommendedAttention !== "string") {
+      throw new Error("Probe response has invalid `recommendedAttention`.");
+    }
+    parsed.recommendedAttention = result.recommendedAttention;
   }
 
   return parsed;

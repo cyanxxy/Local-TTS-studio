@@ -13,7 +13,7 @@ Electron also exposes optional local Python-runtime integrations for NeuTTS Nano
 - Tailwind CSS 4
 - `@huggingface/transformers` (Supertonic pipeline)
 - `kokoro-js` (Kokoro generation)
-- Electron 41.1.0 (desktop wrapper)
+- Electron 42.3.0 (desktop wrapper)
 - Python local bridge (`python/local_tts_bridge.py`) for Electron local-runtime models
 - Vitest + Testing Library + jsdom
 
@@ -92,6 +92,13 @@ If you add fields/events, update both workers and all hook/component consumers.
 - WAV export is IEEE Float 32-bit PCM (`AudioFormat = 3`) via `src/lib/audio.ts`.
 - Sampling rate must come from model output; never hardcode it.
 
+### Local runtime product policy
+- Treat Electron local runtimes as product features for arbitrary user machines, not dev-machine fixes.
+- Detect the user's OS, accelerator, Python compatibility, and installed packages before choosing setup steps or defaults.
+- Managed setup should install the runtime build that matches the detected device class (CUDA, Apple MPS, or CPU) and should repair incompatible managed envs instead of surfacing raw package errors.
+- Model defaults should prioritize fastest practical generation for the detected device; larger/slower models should remain explicit quality choices.
+- Probe warnings must describe the detected runtime profile and the app's selected fallback, not assume CUDA-only hardware.
+
 ### Model specifics
 - Kokoro:
   - Worker splits text with the local `split()` helper and calls `KokoroTTS.generate(string, ...)` per sentence. `tts.stream()` is not used.
@@ -117,7 +124,9 @@ If you add fields/events, update both workers and all hook/component consumers.
 
 ## UI/Styling Constraints
 - Design tokens live in `src/index.css` (`@theme` variables).
-- Current design direction is flat/minimal; do not introduce heavy visual effects unless requested.
+- Design direction is **Liquid Glass** (Apple): translucent blurred surfaces with specular edges over an ambient color field. Reuse the `.glass*` utility classes and `shadow-glass-*` tokens in `src/index.css` rather than inventing new effects.
+- The `.glass*` classes are unlayered (win over Tailwind utilities) — use them only on static containers; build stateful/interactive controls from Tailwind utilities (`backdrop-blur-md`, translucent `bg-white/40`, `shadow-glass-sm`).
+- Electron (macOS) relies on native `vibrancy` + transparent window + `hiddenInset` title bar; keep the `is-electron`/`is-mac` `<html>` classes and their CSS scoping intact.
 
 ## Agent Workflow Expectations
 - Before large refactors, inspect `src/types.ts`, `src/hooks/*`, and both worker files to preserve protocol compatibility.

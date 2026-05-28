@@ -30,10 +30,10 @@ export function LocalRuntimeSidebar({
   status,
 }: LocalRuntimeSidebarProps) {
   return (
-    <aside className="flex flex-col gap-4 rounded-2xl border border-border/60 bg-panel p-4 shadow-md transition-all duration-300 hover:border-border hover:shadow-lg sm:p-6 lg:col-span-2">
+    <aside className="flex flex-col gap-4 rounded-[22px] glass-panel p-4 transition-all duration-300 sm:p-6 lg:col-span-2">
       <div>
         <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Runtime Status</h3>
-        <p className="text-[11px] text-text-muted mt-2">
+        <p className="text-sm text-text-muted mt-2">
           {runtimeBusy
             ? "Checking local runtime..."
             : runtimeReady
@@ -41,7 +41,7 @@ export function LocalRuntimeSidebar({
               : "Local runtime is not ready yet."}
         </p>
         {runtime && (
-          <div className="mt-3 space-y-1 text-[11px] text-text-secondary break-words">
+          <div className="mt-3 space-y-1 text-sm text-text-secondary break-words">
             <p className="break-all">Interpreter: {runtime.pythonBinary}</p>
             <p>Resolved from: {runtime.resolvedFrom}</p>
             <p>Python: {runtime.pythonVersion}</p>
@@ -56,13 +56,13 @@ export function LocalRuntimeSidebar({
         )}
       </div>
 
-      <div className="border border-border rounded-lg p-4 bg-surface/70">
+      <div className="border border-black/10 rounded-xl p-4 bg-surface/55 backdrop-blur-md">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Cache</h3>
-        <p className="text-[11px] text-text-muted mt-1">
+        <p className="text-sm text-text-muted mt-1">
           First download is cached under app local data. Re-runs use local cache unless cleared.
         </p>
 
-        <div className="mt-3 space-y-1 text-[11px] text-text-secondary">
+        <div className="mt-3 space-y-1 text-sm text-text-secondary">
           <p className="break-all">Path: {cacheInfo?.path ?? "-"}</p>
           <p>Size: {cacheInfo ? formatBytes(cacheInfo.sizeBytes) : "-"}</p>
         </div>
@@ -75,7 +75,7 @@ export function LocalRuntimeSidebar({
               px-3 py-2 rounded-md text-xs font-semibold border transition-colors
               ${!electronAvailable || busy
                 ? "border-border text-text-muted cursor-not-allowed"
-                : "border-border-strong text-text-primary bg-panel hover:border-text-primary"
+                : "border-white/55 bg-white/45 backdrop-blur-md text-text-primary hover:bg-white/65"
               }
             `}
           >
@@ -89,7 +89,7 @@ export function LocalRuntimeSidebar({
               px-3 py-2 rounded-md text-xs font-semibold transition-colors
               ${!electronAvailable || busy || !runtimeReady
                 ? "bg-border text-text-muted cursor-not-allowed"
-                : "bg-text-primary text-panel hover:bg-accent"
+                : "glass-accent text-white"
               }
             `}
           >
@@ -107,7 +107,7 @@ export function LocalRuntimeSidebar({
               href={link.href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs px-2 py-1 rounded-md border border-border hover:border-border-strong text-text-secondary hover:text-text-primary transition-colors"
+              className="text-xs px-2.5 py-1 rounded-full border border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary transition-colors"
             >
               {link.label}
             </a>

@@ -12,6 +12,14 @@ export interface LocalTtsProbeResult {
   compatibilityMode?: "legacy_0_1_x" | "current_1_2_x_or_newer" | null;
   warnings?: string[];
   espeakVersion?: string | null;
+  espeakSource?: string | null;
+  espeakPath?: string | null;
+  transformersVersion?: string | null;
+  torchVersion?: string | null;
+  recommendedModelRepo?: string | null;
+  recommendedDeviceMap?: string | null;
+  recommendedDtype?: string | null;
+  recommendedAttention?: string | null;
 }
 
 export interface LocalTtsGenerateResult {

@@ -2,6 +2,7 @@ import { Fragment } from "react";
 import type { LocalTtsModel } from "../../electron";
 import {
   KANI_OPTIONS,
+  KANI_LANGUAGE_TAG_OPTIONS,
   NEUTTS_OPTIONS,
   QWEN3_ATTENTION_OPTIONS,
   QWEN3_DEVICE_OPTIONS,
@@ -110,7 +111,7 @@ export function LocalRuntimeModelInputs({
             <select
               value={neuttsModel}
               onChange={(event) => onNeuttsModelChange(event.target.value)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
               {NEUTTS_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -124,16 +125,16 @@ export function LocalRuntimeModelInputs({
               type="file"
               accept=".wav,audio/wav,audio/x-wav"
               onChange={(event) => onReferenceAudioChange(event.target.files?.[0] ?? null)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
-            <span className="text-[11px] font-normal normal-case text-text-muted">
+            <span className="text-sm font-normal normal-case text-text-muted">
               {referenceAudioName || "Upload a clean 3-15s WAV reference clip"}
             </span>
-            <span className="text-[11px] font-normal normal-case text-text-muted">
+            <span className="text-sm font-normal normal-case text-text-muted">
               Best results use mono WAV audio with minimal background noise.
             </span>
             {referenceAudioGuidance && (
-              <span className={`text-[11px] font-normal normal-case ${statusClass(referenceAudioGuidance.tone)}`}>
+              <span className={`text-sm font-normal normal-case ${statusClass(referenceAudioGuidance.tone)}`}>
                 {referenceAudioGuidance.text}
               </span>
             )}
@@ -145,10 +146,10 @@ export function LocalRuntimeModelInputs({
           <textarea
             value={referenceText}
             onChange={(event) => onReferenceTextChange(event.target.value)}
-            className="w-full min-h-20 px-3 py-2 rounded-md border border-border bg-surface text-sm normal-case text-text-primary"
+            className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             placeholder="Paste the exact spoken transcript of the uploaded WAV clip"
           />
-          <span className="text-[11px] font-normal normal-case text-text-muted">
+          <span className="text-sm font-normal normal-case text-text-muted">
             This must match the uploaded reference audio exactly. Same-language references work best.
           </span>
         </label>
@@ -165,7 +166,7 @@ export function LocalRuntimeModelInputs({
             <select
               value={qwen3Model}
               onChange={(event) => onQwen3ModelChange(event.target.value)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
               {QWEN3_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -178,7 +179,7 @@ export function LocalRuntimeModelInputs({
             <select
               value={qwen3Speaker}
               onChange={(event) => onQwen3SpeakerChange(event.target.value)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
               {QWEN3_SPEAKER_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -193,7 +194,7 @@ export function LocalRuntimeModelInputs({
             <select
               value={qwen3Language}
               onChange={(event) => onQwen3LanguageChange(event.target.value)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
               {qwen3LanguageOptions.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -206,7 +207,7 @@ export function LocalRuntimeModelInputs({
             <select
               value={qwen3DeviceMap}
               onChange={(event) => onQwen3DeviceMapChange(event.target.value)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
               {QWEN3_DEVICE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -220,7 +221,7 @@ export function LocalRuntimeModelInputs({
           <textarea
             value={qwen3Instruct}
             onChange={(event) => onQwen3InstructChange(event.target.value)}
-            className="w-full min-h-20 px-3 py-2 rounded-md border border-border bg-surface text-sm normal-case text-text-primary"
+            className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             placeholder="Example: Speak warmly with a calm documentary narration style."
           />
         </label>
@@ -231,7 +232,7 @@ export function LocalRuntimeModelInputs({
             <select
               value={qwen3Dtype}
               onChange={(event) => onQwen3DtypeChange(event.target.value)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
               {QWEN3_DTYPE_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -244,7 +245,7 @@ export function LocalRuntimeModelInputs({
             <select
               value={qwen3Attention}
               onChange={(event) => onQwen3AttentionChange(event.target.value)}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
               {QWEN3_ATTENTION_OPTIONS.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
@@ -258,10 +259,10 @@ export function LocalRuntimeModelInputs({
               type="number"
               value={qwen3MaxNewTokens}
               min={64}
-              max={4096}
+              max={8192}
               step={64}
               onChange={(event) => onQwen3MaxNewTokensChange(Number(event.target.value))}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
           </label>
         </div>
@@ -276,7 +277,7 @@ export function LocalRuntimeModelInputs({
               max={2}
               step={0.05}
               onChange={(event) => onQwen3TemperatureChange(Number(event.target.value))}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
           </label>
           <label className="flex flex-col gap-1">
@@ -288,7 +289,7 @@ export function LocalRuntimeModelInputs({
               max={1}
               step={0.01}
               onChange={(event) => onQwen3TopPChange(Number(event.target.value))}
-              className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
           </label>
         </div>
@@ -304,7 +305,7 @@ export function LocalRuntimeModelInputs({
           <select
             value={kaniModel}
             onChange={(event) => onKaniModelChange(event.target.value)}
-            className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
           >
             {KANI_OPTIONS.map((option) => (
               <option key={option.value} value={option.value}>{option.label}</option>
@@ -313,14 +314,16 @@ export function LocalRuntimeModelInputs({
         </label>
 
         <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
-          Language Tag (optional)
-          <input
-            type="text"
+          Accent / Voice Tag
+          <select
             value={languageTag}
             onChange={(event) => onLanguageTagChange(event.target.value)}
-            placeholder="Example: en_US"
-            className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
-          />
+            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
+          >
+            {KANI_LANGUAGE_TAG_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>{option.label}</option>
+            ))}
+          </select>
         </label>
       </div>
 
@@ -334,7 +337,7 @@ export function LocalRuntimeModelInputs({
             max={2}
             step={0.05}
             onChange={(event) => onTemperatureChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
           />
         </label>
         <label className="flex flex-col gap-1">
@@ -346,7 +349,7 @@ export function LocalRuntimeModelInputs({
             max={1}
             step={0.01}
             onChange={(event) => onTopPChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
           />
         </label>
         <label className="flex flex-col gap-1">
@@ -358,7 +361,7 @@ export function LocalRuntimeModelInputs({
             max={2}
             step={0.05}
             onChange={(event) => onRepetitionPenaltyChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
           />
         </label>
         <label className="flex flex-col gap-1">
@@ -370,7 +373,7 @@ export function LocalRuntimeModelInputs({
             max={4096}
             step={64}
             onChange={(event) => onMaxNewTokensChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-md border border-border bg-panel text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
           />
         </label>
       </div>

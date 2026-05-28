@@ -16,6 +16,7 @@ import {
   getVirtualEnvPythonPath,
   type PythonCommandCandidate,
   type PythonSearchContext,
+  type RuntimeSetupProfile,
 } from "./pythonRuntime";
 import {
   buildContentSecurityPolicy,
@@ -85,15 +86,27 @@ const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
 const autoPythonBinaryCache = new Map<LocalModel, PythonResolution>();
 const defaultPythonRuntimeSetupPromises = new Map<LocalModel, Promise<PythonResolution>>();
 const dynamicPythonBridgePathEntries = new Set<string>();
+let nvidiaGpuProbePromise: Promise<boolean> | null = null;
 
 type RuntimeSetupProgress = (phase: string, message: string, startedAt?: number) => void;
 
 function createMainWindow() {
+  const isMac = process.platform === "darwin";
   const win = new BrowserWindow({
     width: 1100,
     height: 750,
     minWidth: 800,
     minHeight: 600,
+    // Transparent on macOS so the native vibrancy material shows through and
+    // the translucent UI panels read as real Liquid Glass over the desktop.
+    backgroundColor: isMac ? "#00000000" : "#f5f5f7",
+    ...(isMac
+      ? {
+          vibrancy: "under-window" as const,
+          visualEffectState: "active" as const,
+          titleBarStyle: "hiddenInset" as const,
+        }
+      : {}),
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       sandbox: true,
@@ -256,11 +269,24 @@ function getAutoPythonCandidates(model: LocalModel): AutoPythonCandidate[] {
   return candidates;
 }
 
+function getSafePythonWorkingDirectory(): string {
+  try {
+    if (app.isReady()) {
+      return app.getPath("userData");
+    }
+  } catch {
+    // Fall back below if Electron paths are not available yet.
+  }
+
+  return path.dirname(process.execPath);
+}
+
 async function assertPythonExecutable(binary: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const child = spawn(binary, ["--version"], {
       stdio: ["ignore", "pipe", "pipe"],
       env: buildPythonBridgeEnv(),
+      cwd: getSafePythonWorkingDirectory(),
     });
 
     let output = "";
@@ -294,20 +320,31 @@ async function assertPythonExecutable(binary: string): Promise<void> {
   });
 }
 
+async function getRuntimeSetupProfile(model: LocalModel): Promise<RuntimeSetupProfile> {
+  return {
+    platform: process.platform,
+    arch: process.arch,
+    hasNvidiaGpu: model === "qwen3" ? await hasNvidiaGpu() : false,
+  };
+}
+
 async function assertPythonModelDependency(binary: string, model: LocalModel): Promise<void> {
-  const snippet = getPythonDependencyCheckSnippet(model);
+  const profile = await getRuntimeSetupProfile(model);
+  const snippet = getPythonDependencyCheckSnippet(model, profile);
+  const timeoutMs = model === "qwen3" ? 90_000 : 12_000;
 
   await new Promise<void>((resolve, reject) => {
     const child = spawn(binary, ["-c", snippet], {
       stdio: ["ignore", "pipe", "pipe"],
       env: buildPythonBridgeEnv(),
+      cwd: getSafePythonWorkingDirectory(),
     });
 
     let stderr = "";
     const timeoutHandle = setTimeout(() => {
       child.kill();
-      reject(new Error("Timed out while validating Python packages."));
-    }, 12_000);
+      reject(new Error(`Timed out while validating ${model} Python packages after ${timeoutMs / 1000}s.`));
+    }, timeoutMs);
 
     const cleanup = () => clearTimeout(timeoutHandle);
 
@@ -349,6 +386,7 @@ async function assertBootstrapPythonCommandVersion(
     const child = spawn(command.executable, [...command.args, "-c", snippet], {
       stdio: ["ignore", "pipe", "pipe"],
       env: buildPythonBridgeEnv(),
+      cwd: getSafePythonWorkingDirectory(),
     });
 
     const timeoutHandle = setTimeout(() => {
@@ -377,6 +415,7 @@ async function runPythonSetupCommand(binary: string, args: string[], description
     const child = spawn(binary, args, {
       stdio: ["ignore", "pipe", "pipe"],
       env: buildPythonBridgeEnv(),
+      cwd: getSafePythonWorkingDirectory(),
     });
 
     let output = "";
@@ -448,6 +487,7 @@ async function assertUvExecutable(binary: string): Promise<string> {
     const child = spawn(binary, ["--version"], {
       stdio: ["ignore", "pipe", "pipe"],
       env: buildPythonBridgeEnv(),
+      cwd: getSafePythonWorkingDirectory(),
     });
 
     let output = "";
@@ -493,12 +533,62 @@ async function findUvExecutable(): Promise<string | null> {
 }
 
 function getSystemDependenciesForModel(model: LocalModel): SystemDependencySetup[] {
-  if (model !== "neutts") return [];
-  return [{
-    label: "espeak-ng",
-    commands: ["espeak-ng", "espeak"],
-    macHomebrewPackage: "espeak-ng",
-  }];
+  void model;
+  // NeuTTS wheels bundle eSpeak; the Python bridge validates bundled and
+  // system fallback backends after the selected interpreter is resolved.
+  return [];
+}
+
+async function hasNvidiaGpu(): Promise<boolean> {
+  if (process.platform === "darwin") return false;
+  if (nvidiaGpuProbePromise) return nvidiaGpuProbePromise;
+
+  nvidiaGpuProbePromise = new Promise<boolean>((resolve) => {
+    const child = spawn("nvidia-smi", ["-L"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: buildPythonBridgeEnv(),
+      cwd: getSafePythonWorkingDirectory(),
+    });
+
+    let output = "";
+    const timeoutHandle = setTimeout(() => {
+      child.kill();
+      resolve(false);
+    }, 5_000);
+    const finish = (value: boolean) => {
+      clearTimeout(timeoutHandle);
+      resolve(value);
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf-8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf-8");
+    });
+    child.on("error", () => finish(false));
+    child.on("close", (code) => {
+      finish(code === 0 && /gpu/i.test(output));
+    });
+  });
+
+  return nvidiaGpuProbePromise;
+}
+
+function getPipInstallProgressLabel(packages: string[]): string {
+  const packageSet = new Set(packages);
+  if (packages[0] === "torch" && packageSet.has("https://download.pytorch.org/whl/cu128")) {
+    return "Installing CUDA-enabled PyTorch...";
+  }
+  if (packages[0] === "torch" && packageSet.has("https://download.pytorch.org/whl/cpu")) {
+    return "Installing CPU PyTorch...";
+  }
+  if (packages[0] === "torch") {
+    return process.platform === "darwin"
+      ? "Installing PyTorch with Apple MPS support..."
+      : "Installing PyTorch...";
+  }
+  return `Installing ${packages.join(" and ")}...`;
 }
 
 function getHomebrewExecutableCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -694,7 +784,8 @@ async function ensureDefaultPythonRuntime(
   if (existing) return existing;
 
   const setupPromise = (async () => {
-    const setup = getDefaultPythonRuntimeSetup(model);
+    const setupProfile = await getRuntimeSetupProfile(model);
+    const setup = getDefaultPythonRuntimeSetup(model, setupProfile);
     const rootDir = getDefaultRuntimeRoot();
     const envDir = path.join(rootDir, setup.envName);
     const pythonBinary = getVirtualEnvPythonPath(rootDir, setup.envName, process.platform);
@@ -746,7 +837,7 @@ async function ensureDefaultPythonRuntime(
     );
 
     for (const packages of setup.installSteps) {
-      onProgress?.("runtime_setup", `Installing ${packages.join(" and ")}...`, startedAt);
+      onProgress?.("runtime_setup", getPipInstallProgressLabel(packages), startedAt);
       await runPythonSetupCommand(
         pythonBinary,
         ["-m", "pip", "install", ...packages],
@@ -1008,6 +1099,7 @@ async function runPythonBridge(
         {
           stdio: ["pipe", "pipe", "pipe"],
           env: buildPythonBridgeEnv(),
+          cwd: cacheDir,
         },
       );
 
@@ -1209,8 +1301,13 @@ async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
   return { cancelled: true };
 }
 
-// Keep WebGPU available in the desktop shell for browser-native model inference.
+// WebGPU powers all browser-native inference. Chromium still gates it behind this
+// switch on Linux and on some blocklisted GPUs; Linux additionally needs Vulkan,
+// which Electron does not enable on its own.
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("enable-features", "Vulkan");
+}
 
 app.whenReady().then(() => {
   if (!isDev) {

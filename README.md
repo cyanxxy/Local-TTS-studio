@@ -10,7 +10,7 @@ Browser-native inference through WebGPU where available, with no server, account
 [![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite 7](https://img.shields.io/badge/Vite-7-646CFF?style=flat-square&logo=vite&logoColor=white)](https://vite.dev)
 [![Tailwind 4](https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
-[![Electron 41](https://img.shields.io/badge/Electron-41-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
+[![Electron 42](https://img.shields.io/badge/Electron-42-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
 [![WebGPU](https://img.shields.io/badge/WebGPU-Preferred-FF6F00?style=flat-square)](https://www.w3.org/TR/webgpu/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-1D1D1F?style=flat-square)](./LICENSE)
 
@@ -32,7 +32,7 @@ Open TTS moves text-to-speech generation onto the user's machine. Browser models
 | Supertonic TTS | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` | Yes | Yes | 44.1 kHz browser model with 10 voices |
 | NeuTTS Nano | Neuphonic via local Python bridge | `/neutts` | No | Yes | Reference-audio generation; Python runtime is external |
 | Kani-TTS-2 | `nineninesix/kani-tts-2-en` via local Python bridge | `/kani` | No | Yes | Local desktop generation; Python runtime is external |
-| Qwen3-TTS CustomVoice | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` via local Python bridge | `/qwen3` | No | Yes | Speaker and style controls; Python runtime is external |
+| Qwen3-TTS CustomVoice | Qwen 0.6B/1.7B via local Python bridge | `/qwen3` | No | Yes | Auto-selects model/runtime for CUDA, Apple MPS, or CPU |
 
 The deployed web app exposes Studio and Reader. Desktop-only routes are available inside Electron and normalize back to `/studio` in the browser.
 

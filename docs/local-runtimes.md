@@ -6,7 +6,7 @@ On first use, if no usable runtime is found and no Python executable override is
 
 - NeuTTS: `.venv-neutts` with `neutts`
 - Kani: `.venv-kani` with `kani-tts-2`, then `transformers==4.56.0`
-- Qwen3: `.venv-qwen3` with `qwen-tts` and `torch`
+- Qwen3: `.venv-qwen3` with device-profiled `torch`, then `qwen-tts`
 
 Managed environments use Python 3.12. If Python 3.12 is not installed but `uv` is available, Electron uses `uv venv --python 3.12` so uv can provide the interpreter. Development builds create these environments in the repo root. Packaged builds create them under the app's user data directory. Set `OPEN_TTS_DISABLE_AUTO_PYTHON_SETUP=1` to disable this behavior.
 
@@ -67,30 +67,46 @@ Requirements:
 
 On macOS, the bridge defaults Kani to CPU to avoid known MPS issues.
 
+The `nineninesix/kani-tts-2-en` model exposes language/accent tags. Open TTS defaults to `en_us` and exposes the known English tags in the app (`en_us`, `en_nyork`, `en_oakl`, `en_glasg`, `en_bost`, `en_scou`) because generating without a tag can produce unstable or odd-sounding speech.
+
 ## Qwen3-TTS CustomVoice
 
-Open TTS supports `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` as an Electron-only local runtime. It is not wired into the browser WebGPU worker path because the released model ships Qwen-specific `qwen-tts` / safetensors assets rather than ONNX / Transformers.js browser artifacts.
+Open TTS supports Qwen3-TTS CustomVoice as an Electron-only local runtime. Auto mode chooses `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` for fastest default generation, then selects the best available device profile for the machine: CUDA, Apple MPS, or CPU. The 1.7B CustomVoice model remains available as a manual quality option. Qwen3 is not wired into the browser WebGPU worker path because the released model ships Qwen-specific `qwen-tts` / safetensors assets rather than ONNX / Transformers.js browser artifacts.
 
 Requirements:
 
-- Python 3.10+
+- Python 3.12 for the managed runtime
+- Python 3.9 through 3.13 for explicit user-provided Qwen environments
 - An importable `qwen_tts`
 - An importable `torch`
-- CUDA-capable GPU strongly recommended for practical generation speed
-- FlashAttention 2 optional, but recommended by the Qwen runtime for lower GPU memory usage
+- CUDA-capable GPU preferred for the 1.7B quality option
+- Apple MPS supported through PyTorch on Apple Silicon; Auto uses bfloat16 when the installed PyTorch MPS backend supports it, otherwise float32 for stability
+- FlashAttention 2 optional on CUDA; Auto uses SDPA when FlashAttention is unavailable
 
-Manual development setup:
+Manual development setup on Apple Silicon:
 
 ```bash
 python3.12 -m venv .venv-qwen3
 source .venv-qwen3/bin/activate
 pip install --upgrade pip
-pip install qwen-tts torch
+pip install torch
+pip install qwen-tts
 ```
 
-If you have a CUDA environment, install the PyTorch build and optional FlashAttention package that match your driver/toolkit before launching Electron. You can also point Open TTS at a pre-existing environment with `TTS_QWEN3_PYTHON_BIN=/absolute/path/to/python`.
+Manual CUDA setup:
 
-The Qwen3 page exposes speaker-scoped language selection, optional instruction prompt, device map, dtype, attention implementation, temperature, top-p, and max token controls.
+```bash
+python3.12 -m venv .venv-qwen3
+source .venv-qwen3/bin/activate
+pip install --upgrade pip
+pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install qwen-tts
+pip install -U flash-attn --no-build-isolation
+```
+
+Electron uses the same policy for managed setup: CUDA systems get the CUDA PyTorch wheel index, CPU-only Linux/Windows get the CPU PyTorch wheel index, and macOS gets the normal PyPI PyTorch wheel with MPS support. Auto chooses bfloat16 on CUDA, bfloat16 or float32 on Apple MPS, and float32 on CPU. You can also point Open TTS at a pre-existing environment with `TTS_QWEN3_PYTHON_BIN=/absolute/path/to/python`.
+
+The Qwen3 page exposes speaker, supported language, optional instruction prompt, device map, dtype, attention implementation, temperature, top-p, and max token controls. Upstream defaults are temperature `0.9`, top-p `1.0`, and max new tokens up to `8192`; Open TTS keeps the default max token value at `2048` for faster interactive generation.
 
 ## Runtime Probe
 
@@ -102,7 +118,7 @@ The probe reports:
 - detected package and version
 - NeuTTS compatibility mode, when relevant
 - eSpeak NG backend status, when relevant
-- Qwen3 CUDA / FlashAttention warnings, when relevant
+- Qwen3 device/profile recommendation and CUDA/MPS/CPU warnings, when relevant
 
 A successful probe means the interpreter can launch the bridge and expose the required package. It does not prove that every reference WAV or generation request will succeed.
 
@@ -115,7 +131,8 @@ A successful probe means the interpreter can launch the bridge and expose the re
 | `Failed to import neutts` | Python launched, but the environment does not expose `neutts` | Activate that environment and run `pip install neutts` |
 | `Failed to import qwen_tts` | Python launched, but the environment does not expose Qwen's TTS package | Activate that environment and install `qwen-tts` |
 | `Qwen3-TTS requires torch` | Qwen runtime is present, but PyTorch is missing | Install the PyTorch build that matches your CPU/GPU environment |
-| `CUDA was not detected` | Qwen3 can try CPU/MPS, but the 1.7B model is slow and memory-heavy there | Use a CUDA environment when possible, or expect long generation times |
+| `No CUDA or Apple MPS accelerator was detected` | Qwen3 Auto mode will use the 0.6B model on CPU | Expect slower generation, or use a CUDA/Apple Silicon machine |
+| `Qwen3-TTS is unstable on Apple MPS with float16` | Manual dtype `float16` failed on Apple MPS | Use dtype Auto, bfloat16, or float32 |
 | `no usable eSpeak NG backend was found` | NeuTTS is installed, but phonemizer could not load bundled or system eSpeak support | Reinstall current `neutts`; for custom/source installs, install eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` plus `ESPEAK_DATA_PATH` |
 | `Reference audio must be a valid WAV file` | Uploaded reference clip is not a readable WAV | Convert the clip to WAV before uploading |
 | `Reference text is required` | NeuTTS needs the exact transcript of the reference clip | Paste the spoken transcript exactly as heard in the WAV |

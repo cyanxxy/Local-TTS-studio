@@ -62,7 +62,7 @@ export function VoiceSelector({
   if (voices.length === 0) {
     return (
       <div className="flex flex-col gap-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">Voice</span>
+        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">Voice</span>
         <span className="text-xs text-text-muted">Loading voices…</span>
       </div>
     );
@@ -71,16 +71,16 @@ export function VoiceSelector({
   if (activeModel === "supertonic") {
     return (
       <div className="flex flex-col gap-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">Voice</span>
+        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">Voice</span>
         <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
           {voices.map((v) => (
             <button
               key={v}
               onClick={() => onVoiceChange(v)}
-              className={`flex-1 py-2 px-3 text-sm rounded-xl border transition-all ${
+              className={`flex-1 py-2 px-3 text-sm rounded-xl border backdrop-blur-md transition-all duration-200 ${
                 voice === v
-                  ? "border-accent/40 bg-accent-light text-text-primary font-medium"
-                  : "border-border text-text-muted hover:border-border-strong hover:text-text-secondary"
+                  ? "border-accent/40 bg-accent-light text-text-primary font-medium shadow-accent-sm"
+                  : "border-white/50 bg-white/35 text-text-muted shadow-glass-sm hover:-translate-y-0.5 hover:bg-white/55 hover:text-text-primary"
               }`}
             >
               {v}
@@ -100,13 +100,13 @@ export function VoiceSelector({
 
   return (
     <div className="flex flex-col gap-1.5">
-      <span className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">Voice</span>
+      <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">Voice</span>
 
       <div ref={containerRef} className="relative">
         {/* Trigger */}
         <button
           onClick={() => setOpen((o) => !o)}
-          className="w-full flex items-center gap-2 px-3 py-2.5 text-sm bg-transparent border border-border rounded-xl text-text-primary hover:border-border-strong transition-all duration-200 active:scale-[0.98]"
+          className="w-full flex items-center gap-2 px-3 py-2.5 text-sm rounded-xl border border-white/50 bg-white/40 backdrop-blur-md text-text-primary shadow-glass-sm transition-all duration-200 hover:bg-white/60 hover:-translate-y-px active:translate-y-0 active:scale-[0.98]"
         >
           <span className="flex-1 text-left">{formatVoiceName(voice)}</span>
           <ChevronDown
@@ -118,14 +118,13 @@ export function VoiceSelector({
         {/* Dropdown */}
         {open && (
           <div
-            className="absolute z-50 top-full mt-1.5 left-0 right-0 bg-panel border border-border rounded-xl overflow-hidden animate-scale-in"
-            style={{ boxShadow: "var(--shadow-lg)" }}
+            className="absolute z-50 top-full mt-1.5 left-0 right-0 glass-pop rounded-2xl overflow-hidden animate-scale-in"
           >
             <div className="max-h-64 overflow-y-auto">
               {Object.entries(groups).map(([groupLabel, groupVoices], i) => (
                 <div key={groupLabel}>
-                  {i > 0 && <div className="border-t border-border mx-3" />}
-                  <div className="px-3 pt-2.5 pb-1 text-[9px] font-semibold uppercase tracking-widest text-text-muted">
+                  {i > 0 && <div className="border-t border-black/5 mx-3" />}
+                  <div className="px-3 pt-2.5 pb-1 text-2xs font-semibold uppercase tracking-widest text-text-muted">
                     {groupLabel}
                   </div>
                   {groupVoices.map((v) => (
@@ -135,7 +134,7 @@ export function VoiceSelector({
                       className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-all duration-150 active:scale-[0.97] ${
                         v === voice
                           ? "text-text-primary bg-accent-light font-medium"
-                          : "text-text-secondary hover:bg-border/40 hover:text-text-primary"
+                          : "text-text-secondary hover:bg-white/50 hover:text-text-primary"
                       }`}
                     >
                       {formatVoiceName(v)}

@@ -9,6 +9,12 @@ export interface DefaultPythonRuntimeSetup {
   dependencyLabel: string;
 }
 
+export interface RuntimeSetupProfile {
+  platform: NodeJS.Platform;
+  arch: NodeJS.Architecture;
+  hasNvidiaGpu?: boolean;
+}
+
 export interface PythonCommandCandidate {
   executable: string;
   args: string[];
@@ -25,16 +31,21 @@ const DEFAULT_PYTHON_RUNTIME_SETUPS: Record<LocalModelId, DefaultPythonRuntimeSe
   kani: {
     envName: ".venv-kani",
     pythonVersion: "3.12",
+    // kani-tts-2 pulls nemo-toolkit, whose metadata caps transformers at <=4.52,
+    // but kani-tts-2's own quickstart requires ==4.56.0 — so pin it as a second step.
     installSteps: [["kani-tts-2"], ["transformers==4.56.0"]],
     dependencyLabel: "kani-tts-2",
   },
   qwen3: {
     envName: ".venv-qwen3",
     pythonVersion: "3.12",
-    installSteps: [["qwen-tts", "torch"]],
+    installSteps: [],
     dependencyLabel: "qwen-tts",
   },
 };
+
+const PYTORCH_CUDA_INDEX_URL = "https://download.pytorch.org/whl/cu128";
+const PYTORCH_CPU_INDEX_URL = "https://download.pytorch.org/whl/cpu";
 
 export interface PythonSearchContext {
   appPath: string;
@@ -87,12 +98,37 @@ export function getVirtualEnvPythonCandidates(envName: string, context: PythonSe
   return getPythonSearchRoots(context).map((rootDir) => getVirtualEnvPythonPath(rootDir, envName, context.platform));
 }
 
-export function getDefaultPythonRuntimeSetup(model: LocalModelId): DefaultPythonRuntimeSetup {
+function getDefaultQwen3InstallSteps(profile: RuntimeSetupProfile): string[][] {
+  if (profile.platform === "darwin") {
+    return [["torch"], ["qwen-tts"]];
+  }
+
+  if (profile.hasNvidiaGpu) {
+    return [["torch", "--index-url", PYTORCH_CUDA_INDEX_URL], ["qwen-tts"]];
+  }
+
+  if (profile.platform === "linux" || profile.platform === "win32") {
+    return [["torch", "--index-url", PYTORCH_CPU_INDEX_URL], ["qwen-tts"]];
+  }
+
+  return [["torch"], ["qwen-tts"]];
+}
+
+export function getDefaultPythonRuntimeSetup(
+  model: LocalModelId,
+  profile: RuntimeSetupProfile = {
+    platform: process.platform,
+    arch: process.arch,
+  },
+): DefaultPythonRuntimeSetup {
   const setup = DEFAULT_PYTHON_RUNTIME_SETUPS[model];
+  const installSteps = model === "qwen3"
+    ? getDefaultQwen3InstallSteps(profile)
+    : setup.installSteps;
   return {
     envName: setup.envName,
     pythonVersion: setup.pythonVersion,
-    installSteps: setup.installSteps.map((step) => [...step]),
+    installSteps: installSteps.map((step) => [...step]),
     dependencyLabel: setup.dependencyLabel,
   };
 }
@@ -224,7 +260,13 @@ function joinWindowsPath(base: string, suffix: string): string {
   return `${base.replace(/[\\/]+$/, "")}\\${suffix}`;
 }
 
-export function getPythonDependencyCheckSnippet(model: LocalModelId): string {
+export function getPythonDependencyCheckSnippet(
+  model: LocalModelId,
+  profile: RuntimeSetupProfile = {
+    platform: process.platform,
+    arch: process.arch,
+  },
+): string {
   if (model === "neutts") {
     return [
       "import importlib.util, sys",
@@ -234,11 +276,16 @@ export function getPythonDependencyCheckSnippet(model: LocalModelId): string {
   }
 
   if (model === "qwen3") {
-    return [
-      "import importlib.util",
-      "assert importlib.util.find_spec('qwen_tts') is not None",
+    const checks = [
+      "import importlib.util, sys",
+      "assert (3, 9) <= sys.version_info < (3, 14)",
       "assert importlib.util.find_spec('torch') is not None",
-    ].join("; ");
+      "assert importlib.util.find_spec('qwen_tts') is not None",
+    ];
+    if (profile.hasNvidiaGpu) {
+      checks.push("import torch; assert torch.cuda.is_available()");
+    }
+    return checks.join("; ");
   }
 
   return [

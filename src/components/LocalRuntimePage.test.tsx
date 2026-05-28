@@ -414,11 +414,11 @@ describe("LocalRuntimePage", () => {
       requestId: request.requestId,
       model: "qwen3",
       phase: "runtime_setup",
-      message: "Installing qwen-tts and torch...",
+      message: "Installing PyTorch with Apple MPS support...",
       elapsedSec: 1.2,
     });
 
-    expect(await screen.findByText("Installing qwen-tts and torch... (1.2s)")).toBeInTheDocument();
+    expect(await screen.findByText("Installing PyTorch with Apple MPS support... (1.2s)")).toBeInTheDocument();
 
     await emitProgress(progressListener, {
       requestId: "stale-probe",
@@ -697,8 +697,8 @@ describe("LocalRuntimePage", () => {
     fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
       target: { value: "/runtimes/kani/bin/python" },
     });
-    fireEvent.change(screen.getByPlaceholderText("Example: en_US"), {
-      target: { value: "en_GB" },
+    fireEvent.change(screen.getByLabelText(/accent \/ voice tag/i), {
+      target: { value: "en_scou" },
     });
     fireEvent.change(screen.getByLabelText(/^temperature$/i), {
       target: { value: "0.85" },
@@ -723,7 +723,7 @@ describe("LocalRuntimePage", () => {
       "Kani tab text should still be here after tab navigation.",
     );
     expect(screen.getByPlaceholderText("/absolute/path/to/python")).toHaveValue("/runtimes/kani/bin/python");
-    expect(screen.getByPlaceholderText("Example: en_US")).toHaveValue("en_GB");
+    expect(screen.getByLabelText(/accent \/ voice tag/i)).toHaveValue("en_scou");
     expect(screen.getByLabelText(/^temperature$/i)).toHaveValue(0.85);
     expect(screen.getByLabelText(/^top-p$/i)).toHaveValue(0.9);
     expect(screen.getByLabelText(/^repetition penalty$/i)).toHaveValue(1.3);
@@ -869,8 +869,8 @@ describe("LocalRuntimePage", () => {
       expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
     });
 
-    fireEvent.change(screen.getByPlaceholderText("Example: en_US"), {
-      target: { value: "en_US" },
+    fireEvent.change(screen.getByLabelText(/accent \/ voice tag/i), {
+      target: { value: "en_bost" },
     });
     fireEvent.change(screen.getByLabelText(/temperature/i), {
       target: { value: "0.85" },
@@ -893,7 +893,7 @@ describe("LocalRuntimePage", () => {
       model: "kani",
       pythonBinary: undefined,
       payload: {
-        languageTag: "en_US",
+        languageTag: "en_bost",
         temperature: 0.85,
         topP: 0.9,
         repetitionPenalty: 1.25,
@@ -924,7 +924,12 @@ describe("LocalRuntimePage", () => {
       resolvedFrom: "appPath:.venv-qwen3",
       package: "qwen-tts",
       packageVersion: "1.0.0",
-      warnings: ["CUDA was not detected."],
+      torchVersion: "2.12.0",
+      recommendedModelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+      recommendedDeviceMap: "mps",
+      recommendedDtype: "bfloat16",
+      recommendedAttention: "sdpa",
+      warnings: ["Apple MPS was detected. Auto mode will use the faster 0.6B CustomVoice model with bfloat16 MPS acceleration."],
     } satisfies LocalTtsProbeResult);
     getCacheInfo.mockResolvedValue({
       path: "/cache/qwen3",
@@ -950,7 +955,8 @@ describe("LocalRuntimePage", () => {
 
     expect(screen.getByPlaceholderText("/absolute/path/to/python")).toBeInTheDocument();
     expect(screen.getByText("Qwen3-TTS runtime is ready.")).toBeInTheDocument();
-    expect(screen.getAllByText("CUDA was not detected.")).toHaveLength(2);
+    expect(screen.getAllByText("Apple MPS was detected. Auto mode will use the faster 0.6B CustomVoice model with bfloat16 MPS acceleration.")).toHaveLength(2);
+    expect(screen.getByText("Recommended device: mps")).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText(/^speaker$/i), {
       target: { value: "Aiden" },
@@ -991,7 +997,7 @@ describe("LocalRuntimePage", () => {
       model: "qwen3",
       pythonBinary: undefined,
       payload: {
-        modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        modelRepo: "auto",
         speaker: "Aiden",
         language: "English",
         instruct: "Speak warmly with a calm documentary narration style.",

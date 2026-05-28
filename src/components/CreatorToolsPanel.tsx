@@ -57,7 +57,7 @@ const BITRATE_OPTIONS = [128, 192, 256, 320] as const;
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-[9px] font-semibold uppercase tracking-[0.15em] text-text-muted mb-2">
+    <div className="text-2xs font-semibold uppercase tracking-[0.15em] text-text-muted mb-2">
       {children}
     </div>
   );
@@ -88,12 +88,12 @@ export function CreatorToolsPanel({
   const [open, setOpen] = useState(false);
 
   return (
-    <div className="border border-border/60 rounded-xl overflow-hidden">
+    <div className="glass rounded-[20px] overflow-hidden">
       <button
         onClick={() => setOpen((value) => !value)}
-        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-border/30 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/40 transition-colors"
       >
-        <span className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
           Creator Toolkit
         </span>
         <ChevronDown
@@ -103,14 +103,14 @@ export function CreatorToolsPanel({
       </button>
 
       {open && (
-        <div className="flex flex-col gap-4 border-t border-border px-4 pb-4 animate-fade-up sm:gap-5">
+        <div className="flex flex-col gap-4 border-t border-black/5 px-4 pb-4 animate-fade-up sm:gap-5">
           {/* Preset */}
           <div className="pt-3">
-            <label className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+            <label className="text-xs font-semibold uppercase tracking-widest text-text-muted">
               Platform Preset
             </label>
             <select
-              className="mt-2 w-full rounded-lg border border-border bg-panel px-2.5 py-2 text-xs text-text-primary"
+              className="mt-2 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
               value={preset}
               onChange={(event) => onPresetChange(event.target.value as CreatorPresetId)}
             >
@@ -121,7 +121,7 @@ export function CreatorToolsPanel({
                 </option>
               ))}
             </select>
-            <p className="mt-1 text-[10px] text-text-muted">
+            <p className="mt-1 text-xs text-text-muted">
               {preset === "custom" ? "Manual creator settings." : CREATOR_PRESETS[preset].description}
             </p>
           </div>
@@ -132,10 +132,10 @@ export function CreatorToolsPanel({
 
             <div>
               <div className="flex items-baseline justify-between mb-1">
-                <label className="text-[10px] font-medium text-text-secondary">
+                <label className="text-xs font-medium text-text-secondary">
                   Base Speed
                 </label>
-                <span className="font-mono text-[11px] text-text-primary">{speed.toFixed(2)}x</span>
+                <span className="font-mono text-sm text-text-primary">{speed.toFixed(2)}x</span>
               </div>
               <input
                 type="range"
@@ -150,8 +150,8 @@ export function CreatorToolsPanel({
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div>
                 <div className="flex items-baseline justify-between mb-1">
-                  <label className="text-[10px] font-medium text-text-secondary">Comma</label>
-                  <span className="font-mono text-[10px] text-text-muted">{pauseCommaSec.toFixed(2)}s</span>
+                  <label className="text-xs font-medium text-text-secondary">Comma</label>
+                  <span className="font-mono text-xs text-text-muted">{pauseCommaSec.toFixed(2)}s</span>
                 </div>
                 <input
                   type="range"
@@ -164,8 +164,8 @@ export function CreatorToolsPanel({
               </div>
               <div>
                 <div className="flex items-baseline justify-between mb-1">
-                  <label className="text-[10px] font-medium text-text-secondary">Sentence</label>
-                  <span className="font-mono text-[10px] text-text-muted">{pauseSentenceSec.toFixed(2)}s</span>
+                  <label className="text-xs font-medium text-text-secondary">Sentence</label>
+                  <span className="font-mono text-xs text-text-muted">{pauseSentenceSec.toFixed(2)}s</span>
                 </div>
                 <input
                   type="range"
@@ -178,8 +178,8 @@ export function CreatorToolsPanel({
               </div>
               <div>
                 <div className="flex items-baseline justify-between mb-1">
-                  <label className="text-[10px] font-medium text-text-secondary">Paragraph</label>
-                  <span className="font-mono text-[10px] text-text-muted">{pauseParagraphSec.toFixed(2)}s</span>
+                  <label className="text-xs font-medium text-text-secondary">Paragraph</label>
+                  <span className="font-mono text-xs text-text-muted">{pauseParagraphSec.toFixed(2)}s</span>
                 </div>
                 <input
                   type="range"
@@ -197,25 +197,25 @@ export function CreatorToolsPanel({
           <div>
             <SectionLabel>Pronunciation</SectionLabel>
             <textarea
-              className="w-full min-h-16 rounded-lg border border-border bg-panel px-2.5 py-2 text-[11px] text-text-primary resize-y placeholder:text-text-muted/50"
+              className="w-full min-h-16 rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-sm text-text-primary resize-y placeholder:text-text-muted/50"
               placeholder={`route=r-ow-t\nGIF=jiff\nSQL=sequel`}
               value={pronunciationLexicon}
               onChange={(event) => onPronunciationLexiconChange(event.target.value)}
             />
-            <p className="mt-1 text-[10px] text-text-muted">
+            <p className="mt-1 text-xs text-text-muted">
               One rule per line: word=replacement
             </p>
           </div>
 
           {/* Export */}
-          <div className="border-t border-border pt-4 space-y-3">
+          <div className="border-t border-black/5 pt-4 space-y-3">
             <SectionLabel>Export</SectionLabel>
 
             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
               <div>
-                <label className="text-[10px] font-medium text-text-secondary">Format</label>
+                <label className="text-xs font-medium text-text-secondary">Format</label>
                 <select
-                  className="mt-1 w-full rounded-lg border border-border bg-panel px-2.5 py-2 text-xs text-text-primary"
+                  className="mt-1 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
                   value={exportOptions.format}
                   onChange={(event) => onExportFormatChange(event.target.value as ExportAudioFormat)}
                 >
@@ -228,9 +228,9 @@ export function CreatorToolsPanel({
               </div>
 
               <div>
-                <label className="text-[10px] font-medium text-text-secondary">Sample Rate</label>
+                <label className="text-xs font-medium text-text-secondary">Sample Rate</label>
                 <select
-                  className="mt-1 w-full rounded-lg border border-border bg-panel px-2.5 py-2 text-xs text-text-primary"
+                  className="mt-1 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
                   value={String(exportOptions.sampleRate)}
                   onChange={(event) => {
                     const raw = event.target.value;
@@ -249,9 +249,9 @@ export function CreatorToolsPanel({
 
             {exportOptions.format === "mp3" && (
               <div className="max-w-full sm:max-w-[50%]">
-                <label className="text-[10px] font-medium text-text-secondary">Bitrate</label>
+                <label className="text-xs font-medium text-text-secondary">Bitrate</label>
                 <select
-                  className="mt-1 w-full rounded-lg border border-border bg-panel px-2.5 py-2 text-xs text-text-primary"
+                  className="mt-1 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
                   value={exportOptions.bitrateKbps}
                   onChange={(event) => onExportBitrateKbpsChange(parseInt(event.target.value, 10))}
                 >
@@ -264,7 +264,7 @@ export function CreatorToolsPanel({
               </div>
             )}
 
-            <label className="flex cursor-pointer items-start gap-2 text-[11px] text-text-secondary select-none">
+            <label className="flex cursor-pointer items-start gap-2 text-sm text-text-secondary select-none">
               <input
                 type="checkbox"
                 checked={exportOptions.mastering.enabled}
@@ -281,7 +281,7 @@ export function CreatorToolsPanel({
                 disabled={!hasAudio}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors ${
                   hasAudio
-                    ? "bg-accent text-white hover:bg-accent-hover"
+                    ? "glass-accent text-white"
                     : "bg-border text-text-muted cursor-not-allowed"
                 }`}
               >
@@ -294,7 +294,7 @@ export function CreatorToolsPanel({
                 disabled={!hasAudio}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
                   hasAudio
-                    ? "border-border-strong text-text-secondary hover:text-text-primary"
+                    ? "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
                     : "border-border text-text-muted cursor-not-allowed"
                 }`}
               >
@@ -307,7 +307,7 @@ export function CreatorToolsPanel({
                 disabled={!hasAudio}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
                   hasAudio
-                    ? "border-border-strong text-text-secondary hover:text-text-primary"
+                    ? "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
                     : "border-border text-text-muted cursor-not-allowed"
                 }`}
               >
@@ -320,7 +320,7 @@ export function CreatorToolsPanel({
                 disabled={!hasAudio}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
                   hasAudio
-                    ? "border-border-strong text-text-secondary hover:text-text-primary"
+                    ? "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
                     : "border-border text-text-muted cursor-not-allowed"
                 }`}
               >
