@@ -35,7 +35,7 @@ describe("webgpu", () => {
     expect(status).toEqual({
       available: false,
       reason: "fallback-adapter",
-      message: "A software WebGPU adapter was detected, so the app will use WASM instead.",
+      message: "A software WebGPU adapter was detected, so the app will run on CPU instead.",
     });
     expect(requestDevice).not.toHaveBeenCalled();
     await expect(module.canInitializeWebGPU()).resolves.toBe(false);

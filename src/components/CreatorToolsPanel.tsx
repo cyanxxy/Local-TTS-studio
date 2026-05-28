@@ -43,7 +43,7 @@ interface CreatorToolsPanelProps {
 const EXPORT_FORMAT_OPTIONS: Array<{ value: ExportAudioFormat; label: string }> = [
   { value: "wav-pcm24", label: "WAV 24-bit" },
   { value: "wav-pcm16", label: "WAV 16-bit" },
-  { value: "wav-f32", label: "WAV Float 32" },
+  { value: "wav-f32", label: "WAV 32-bit float" },
   { value: "mp3", label: "MP3" },
 ];
 
@@ -135,7 +135,7 @@ export function CreatorToolsPanel({
                 <label className="text-xs font-medium text-text-secondary">
                   Base Speed
                 </label>
-                <span className="font-mono text-sm text-text-primary">{speed.toFixed(2)}x</span>
+                <span className="font-mono text-sm text-text-primary">{speed.toFixed(2)}×</span>
               </div>
               <input
                 type="range"
@@ -198,7 +198,7 @@ export function CreatorToolsPanel({
             <SectionLabel>Pronunciation</SectionLabel>
             <textarea
               className="w-full min-h-16 rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-sm text-text-primary resize-y placeholder:text-text-muted/50"
-              placeholder={`route=r-ow-t\nGIF=jiff\nSQL=sequel`}
+              placeholder={`route=root\nGIF=jiff\nSQL=sequel`}
               value={pronunciationLexicon}
               onChange={(event) => onPronunciationLexiconChange(event.target.value)}
             />

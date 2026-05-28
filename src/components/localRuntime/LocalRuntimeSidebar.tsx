@@ -35,7 +35,7 @@ export function LocalRuntimeSidebar({
         <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Runtime Status</h3>
         <p className="text-sm text-text-muted mt-2">
           {runtimeBusy
-            ? "Checking local runtime..."
+            ? "Checking local runtime…"
             : runtimeReady
               ? "Local runtime is ready."
               : "Local runtime is not ready yet."}
@@ -59,7 +59,7 @@ export function LocalRuntimeSidebar({
       <div className="border border-black/10 rounded-xl p-4 bg-surface/55 backdrop-blur-md">
         <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Cache</h3>
         <p className="text-sm text-text-muted mt-1">
-          First download is cached under app local data. Re-runs use local cache unless cleared.
+          Downloaded once to your app data, then reused from cache unless you clear it.
         </p>
 
         <div className="mt-3 space-y-1 text-sm text-text-secondary">

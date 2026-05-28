@@ -87,7 +87,7 @@ export async function getWebGPUStatus(): Promise<WebGPUStatus> {
         return {
           available: false,
           reason: "fallback-adapter",
-          message: "A software WebGPU adapter was detected, so the app will use WASM instead.",
+          message: "A software WebGPU adapter was detected, so the app will run on CPU instead.",
         } satisfies WebGPUStatus;
       }
 

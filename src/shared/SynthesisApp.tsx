@@ -56,7 +56,7 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
   neutts: {
     name: "NeuTTS Nano (Neuphonic)",
     releaseDate: "February 12, 2026",
-    params: "~120M active params (~229M incl. embeddings)",
+    params: "~120M active (~229M with embeddings)",
     highlights: [
       "On-device, CPU-focused speech generation and instant voice cloning from short references.",
       "Multilingual Nano variants published for English, German, French, and Spanish.",
@@ -424,7 +424,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
           iOS rollout
         </div>
         <h2 className="mt-4 text-2xl font-display font-bold tracking-tight text-text-primary sm:text-3xl">
-          Open TTS runs on iPhone and iPad browsers with a guarded model set
+          Open TTS runs on iPhone and iPad browsers with a limited set of models
         </h2>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-text-secondary">
           {browserSupport.message}
@@ -448,7 +448,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               </h1>
               {!isReaderPage && (
                 <p className="mt-3 text-base font-medium tracking-wide text-text-secondary sm:text-lg">
-                  On-device synthesis — no server, no keys, no data leaves your browser.
+                  On-device synthesis — no server, no keys, no data leaves your device.
                 </p>
               )}
             </div>
@@ -466,7 +466,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                 )}
                 {showSingleThreadedNote && (
                   <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[220px] sm:text-right">
-                    Cross-origin isolation is missing, so CPU fallback is stuck single-threaded.
+                    Cross-origin isolation is off, so CPU mode runs single-threaded.
                   </p>
                 )}
               </div>
@@ -666,7 +666,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
           <footer className="mt-16 border-t border-border/40 pt-5">
             {isStudioPage && localInferenceSupported && !browserSupport.message ? (
               <div className="flex items-center flex-wrap gap-1.5">
-                {(["Kokoro-82M", "Supertonic TTS", "WebGPU · WASM"] as const).map((label) => (
+                {(["Kokoro", "Supertonic", "WebGPU · CPU"] as const).map((label) => (
                   <span
                     key={label}
                     className="px-2.5 py-1 rounded-full border border-white/50 bg-white/40 backdrop-blur-sm font-mono text-xs text-text-muted/70"

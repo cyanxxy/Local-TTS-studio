@@ -78,7 +78,7 @@ export function ModelToggle({
                 )}
               </span>
               <div className="flex shrink-0 items-center gap-1.5">
-                <span className="font-mono text-xs text-text-muted">{MODEL_PARAMS[key]}</span>
+                <span className="font-mono text-xs text-text-muted" title="Parameters">{MODEL_PARAMS[key]}</span>
                 <StatusDot state={state} unavailable={isUnavailable} />
               </div>
             </button>

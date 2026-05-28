@@ -1,5 +1,5 @@
 import { MIN_TEXT_LENGTH } from "../constants";
-import { hasMinimumSynthesisText } from "../lib/textValidation";
+import { getMeaningfulTextLength, hasMinimumSynthesisText } from "../lib/textValidation";
 
 interface TextInputProps {
   text: string;
@@ -7,7 +7,8 @@ interface TextInputProps {
 }
 
 export function TextInput({ text, onTextChange }: TextInputProps) {
-  const charCount = text.length;
+  // Count meaningful (trimmed) characters so the counter matches the generate gate.
+  const charCount = getMeaningfulTextLength(text);
   const isValid = hasMinimumSynthesisText(text, MIN_TEXT_LENGTH);
 
   return (

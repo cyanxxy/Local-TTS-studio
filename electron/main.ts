@@ -93,6 +93,7 @@ type RuntimeSetupProgress = (phase: string, message: string, startedAt?: number)
 function createMainWindow() {
   const isMac = process.platform === "darwin";
   const win = new BrowserWindow({
+    title: "Open TTS",
     width: 1100,
     height: 750,
     minWidth: 800,
@@ -578,17 +579,17 @@ async function hasNvidiaGpu(): Promise<boolean> {
 function getPipInstallProgressLabel(packages: string[]): string {
   const packageSet = new Set(packages);
   if (packages[0] === "torch" && packageSet.has("https://download.pytorch.org/whl/cu128")) {
-    return "Installing CUDA-enabled PyTorch...";
+    return "Installing CUDA-enabled PyTorch…";
   }
   if (packages[0] === "torch" && packageSet.has("https://download.pytorch.org/whl/cpu")) {
-    return "Installing CPU PyTorch...";
+    return "Installing CPU PyTorch…";
   }
   if (packages[0] === "torch") {
     return process.platform === "darwin"
-      ? "Installing PyTorch with Apple MPS support..."
-      : "Installing PyTorch...";
+      ? "Installing PyTorch with Apple MPS support…"
+      : "Installing PyTorch…";
   }
-  return `Installing ${packages.join(" and ")}...`;
+  return `Installing ${packages.join(" and ")}…`;
 }
 
 function getHomebrewExecutableCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
@@ -803,7 +804,7 @@ async function ensureDefaultPythonRuntime(
       // Create or repair the managed runtime below.
     }
 
-    onProgress?.("runtime_setup", `Preparing ${setup.dependencyLabel} runtime in ${setup.envName}...`, startedAt);
+    onProgress?.("runtime_setup", `Preparing ${setup.dependencyLabel} runtime in ${setup.envName}…`, startedAt);
     await fs.mkdir(rootDir, { recursive: true });
 
     let shouldCreateEnv = false;

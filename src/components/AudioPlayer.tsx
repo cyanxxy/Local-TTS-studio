@@ -144,7 +144,7 @@ export function AudioPlayer({
                 {stats.firstLatency.toFixed(2)}s
               </span>
               <span className="text-2xs font-semibold uppercase tracking-widest text-text-muted mt-1">
-                First chunk
+                First audio
               </span>
             </div>
           )}
@@ -173,7 +173,10 @@ export function AudioPlayer({
               <span className="font-mono text-base font-semibold text-accent tabular-nums leading-none">
                 {stats.rtf.toFixed(3)}×
               </span>
-              <span className="text-2xs font-semibold uppercase tracking-widest text-text-muted mt-1">
+              <span
+                className="text-2xs font-semibold uppercase tracking-widest text-text-muted mt-1"
+                title="Real-time factor — generation time ÷ audio duration (lower is faster)"
+              >
                 RTF
               </span>
             </div>

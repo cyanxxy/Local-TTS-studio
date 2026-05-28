@@ -282,7 +282,7 @@ describe("LocalRuntimePage", () => {
     expect(runtimeSettingsSection).not.toBeNull();
     const runtimeSettings = within(runtimeSettingsSection!);
 
-    expect(await runtimeSettings.findByText("Resolved interpreter: /custom/venv/bin/python")).toBeInTheDocument();
+    expect(await runtimeSettings.findByText("Interpreter: /custom/venv/bin/python")).toBeInTheDocument();
     expect(runtimeSettings.getByText("Resolved from: request")).toBeInTheDocument();
     expect(runtimeSettings.getByText("Package version: 1.2.0")).toBeInTheDocument();
     expect(runtimeSettings.getByText("Compatibility mode: Current 1.2.x+")).toBeInTheDocument();
@@ -584,7 +584,7 @@ describe("LocalRuntimePage", () => {
 
     expect(await screen.findByText("Loading local model...")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("Enter text to synthesize"), {
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
       target: { value: "Updated script for the next take." },
     });
 
@@ -691,7 +691,7 @@ describe("LocalRuntimePage", () => {
 
     expect(await screen.findByText("Kani runtime is ready.")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("Enter text to synthesize"), {
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
       target: { value: "Kani tab text should still be here after tab navigation." },
     });
     fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
@@ -719,7 +719,7 @@ describe("LocalRuntimePage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Kani$/i }));
 
     expect(await screen.findByText("Runtime settings changed. Re-check the Python runtime before generating again.")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Enter text to synthesize")).toHaveValue(
+    expect(screen.getByPlaceholderText("Type or paste text to synthesize…")).toHaveValue(
       "Kani tab text should still be here after tab navigation.",
     );
     expect(screen.getByPlaceholderText("/absolute/path/to/python")).toHaveValue("/runtimes/kani/bin/python");
@@ -746,7 +746,7 @@ describe("LocalRuntimePage", () => {
 
     expect(await screen.findByText("NeuTTS runtime is ready.")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("Enter text to synthesize"), {
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
       target: { value: "NeuTTS tab text should still be here after tab navigation." },
     });
     fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
@@ -773,7 +773,7 @@ describe("LocalRuntimePage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^NeuTTS$/i }));
 
     expect(await screen.findByText(/loaded reference audio: reference\.wav/i)).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Enter text to synthesize")).toHaveValue(
+    expect(screen.getByPlaceholderText("Type or paste text to synthesize…")).toHaveValue(
       "NeuTTS tab text should still be here after tab navigation.",
     );
     expect(screen.getByPlaceholderText("/absolute/path/to/python")).toHaveValue("/runtimes/neutts/bin/python");
@@ -795,7 +795,7 @@ describe("LocalRuntimePage", () => {
 
     expect(await screen.findByText("Qwen3-TTS runtime is ready.")).toBeInTheDocument();
 
-    fireEvent.change(screen.getByPlaceholderText("Enter text to synthesize"), {
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
       target: { value: "Qwen3 tab text should still be here after tab navigation." },
     });
     fireEvent.change(screen.getByPlaceholderText("/absolute/path/to/python"), {
@@ -835,7 +835,7 @@ describe("LocalRuntimePage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Qwen3$/i }));
 
     expect(await screen.findByText("Runtime settings changed. Re-check the Python runtime before generating again.")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Enter text to synthesize")).toHaveValue(
+    expect(screen.getByPlaceholderText("Type or paste text to synthesize…")).toHaveValue(
       "Qwen3 tab text should still be here after tab navigation.",
     );
     expect(screen.getByPlaceholderText("/absolute/path/to/python")).toHaveValue("/runtimes/qwen3/bin/python");

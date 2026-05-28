@@ -137,7 +137,7 @@ export function Controls() {
         {isGenerating && (
           <button
             onClick={onStop}
-            aria-label="Stop"
+            aria-label="Stop generation"
             title="Stop generation"
             className="flex h-11 w-full items-center justify-center rounded-2xl border border-danger/20 bg-danger-light text-danger backdrop-blur-md shadow-glass-sm transition-all duration-200 hover:bg-danger hover:text-white active:scale-[0.96] sm:w-11"
           >

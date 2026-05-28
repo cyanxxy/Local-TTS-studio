@@ -1,7 +1,6 @@
 import type { LocalTtsProbeResult } from "../../electron";
 
 interface LocalRuntimeRuntimeSettingsProps {
-  modelName: string;
   onRecheckRuntime: () => void;
   onPythonOverrideChange: (value: string) => void;
   pythonOverride: string;
@@ -18,7 +17,6 @@ function getCompatibilityLabel(mode: LocalTtsProbeResult["compatibilityMode"]): 
 }
 
 export function LocalRuntimeRuntimeSettings({
-  modelName,
   onRecheckRuntime,
   onPythonOverrideChange,
   pythonOverride,
@@ -30,8 +28,8 @@ export function LocalRuntimeRuntimeSettings({
   return (
     <section className="rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md p-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
-        <label className="flex-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
-          {modelName} Python Executable (optional)
+        <label className="flex-1 text-xs font-medium text-text-secondary">
+          Python Executable (optional)
           <input
             type="text"
             value={pythonOverride}
@@ -53,12 +51,12 @@ export function LocalRuntimeRuntimeSettings({
             }
           `}
         >
-          {runtimeBusy ? "Checking..." : "Re-check Runtime"}
+          {runtimeBusy ? "Checking…" : "Re-check Runtime"}
         </button>
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-2 text-sm text-text-secondary md:grid-cols-2">
-        <p className="break-all">Resolved interpreter: {runtime?.pythonBinary ?? "-"}</p>
+        <p className="break-all">Interpreter: {runtime?.pythonBinary ?? "-"}</p>
         <p>Resolved from: {runtime?.resolvedFrom ?? "-"}</p>
         <p>Python version: {runtime?.pythonVersion ?? "-"}</p>
         <p>Package version: {runtime?.packageVersion ?? "-"}</p>

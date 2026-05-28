@@ -43,7 +43,7 @@ export function DownloadProgress({ kokoroState, supertonicState }: DownloadProgr
         <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
           Preparing Model
         </span>
-        <span className="text-xs text-text-muted">first run downloads, later reloads reuse local cache</span>
+        <span className="text-xs text-text-muted">Downloads once, then loads from local cache</span>
       </div>
       {showKokoro && (
         <ProgressBar name={MODELS.kokoro.label} state={kokoroState} />

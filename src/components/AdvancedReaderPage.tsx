@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef } from "react";
 import { BookOpen, ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
 import { MIN_TEXT_LENGTH } from "../constants";
+import { getMeaningfulTextLength } from "../lib/textValidation";
 import type { ModelState, ModelType, GenerationStats } from "../types";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
@@ -227,6 +228,8 @@ export function AdvancedReaderPage({
   );
 
   const hasGeneratedSegments = segments.length > 0;
+  const meaningfulLength = getMeaningfulTextLength(text);
+  const charsRemaining = MIN_TEXT_LENGTH - meaningfulLength;
 
   const syncOverlayScroll = (target: HTMLTextAreaElement) => {
     if (!overlayRef.current) return;
@@ -256,7 +259,7 @@ export function AdvancedReaderPage({
               <h2 className="text-lg font-display font-semibold text-text-primary">Reader Mode</h2>
             </div>
             <p className="mt-1.5 text-xs text-text-muted pl-9">
-              Edit your text with chunk boundaries rendered directly inside the editor.
+              Edit your text with section boundaries shown directly in the editor.
             </p>
           </div>
           {hasGeneratedSegments && activeSegmentIndex >= 0 && (
@@ -338,7 +341,7 @@ export function AdvancedReaderPage({
                 );
                 if (boundary?.id) onJumpToSegment(boundary.id);
               }}
-              placeholder="Paste or write long-form text to read aloud"
+              placeholder="Type or paste long-form text to read aloud…"
               className={`relative z-10 h-full w-full resize-none rounded-xl bg-transparent px-4 py-3 text-lg leading-6 text-transparent caret-text-primary placeholder:text-text-muted focus:outline-none sm:text-xl sm:leading-7 ${
                 fullScreen ? "min-h-[40vh] sm:min-h-[45vh]" : "min-h-64"
               }`}
@@ -349,7 +352,7 @@ export function AdvancedReaderPage({
             <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/55 bg-white/40 backdrop-blur-md shadow-glass-sm px-3 py-2 animate-fade-up sm:flex-nowrap">
               <button
                 type="button"
-                aria-label="Previous segment"
+                aria-label="Previous section"
                 onClick={() => {
                   if (activeSegmentIndex > 0) {
                     onJumpToSegment(segments[activeSegmentIndex - 1].id);
@@ -379,7 +382,7 @@ export function AdvancedReaderPage({
 
               <button
                 type="button"
-                aria-label="Next segment"
+                aria-label="Next section"
                 onClick={() => {
                   if (activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1) {
                     onJumpToSegment(segments[activeSegmentIndex + 1].id);
@@ -410,11 +413,11 @@ export function AdvancedReaderPage({
           )}
 
           <div className="flex flex-col gap-1 text-sm text-text-muted sm:flex-row sm:items-center sm:justify-between">
-            <span className="tabular-nums">{text.length.toLocaleString()} chars</span>
-            <span className={text.length >= MIN_TEXT_LENGTH ? "text-success" : ""}>
-              {previewChunks.length} chunk{previewChunks.length !== 1 ? "s" : ""}
-              {text.length < MIN_TEXT_LENGTH
-                ? ` · Need ${(MIN_TEXT_LENGTH - text.length).toLocaleString()} more`
+            <span className="tabular-nums">{meaningfulLength.toLocaleString()} chars</span>
+            <span className={meaningfulLength >= MIN_TEXT_LENGTH ? "text-success" : ""}>
+              {previewChunks.length} section{previewChunks.length !== 1 ? "s" : ""}
+              {charsRemaining > 0
+                ? ` · Need ${charsRemaining.toLocaleString()} more character${charsRemaining !== 1 ? "s" : ""}`
                 : " · Ready"}
             </span>
           </div>

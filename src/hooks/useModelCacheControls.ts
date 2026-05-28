@@ -35,7 +35,7 @@ export function useModelCacheControls({
 
   const clearCache = useCallback(async () => {
     setCacheBusy(true);
-    setCacheStatus({ type: "info", message: "Clearing cached model files..." });
+    setCacheStatus({ type: "info", message: "Clearing cached model files…" });
     try {
       const before = await getModelCacheKeys();
       const result = await clearModelCache();
@@ -63,7 +63,7 @@ export function useModelCacheControls({
   const redownloadActiveModel = useCallback(async () => {
     setCacheBusy(true);
     const modelLabel = activeModel === "kokoro" ? MODELS.kokoro.label : MODELS.supertonic.label;
-    setCacheStatus({ type: "info", message: `Re-downloading ${modelLabel}...` });
+    setCacheStatus({ type: "info", message: `Re-downloading ${modelLabel}…` });
     try {
       const result = await clearModelCacheForModel(activeModel);
       cancelActiveGeneration(true);

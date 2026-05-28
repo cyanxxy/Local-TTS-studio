@@ -104,7 +104,7 @@ describe("AdvancedReaderPage", () => {
 
     expect(screen.getByLabelText("Reading Text")).toHaveAttribute(
       "placeholder",
-      "Paste or write long-form text to read aloud",
+      "Type or paste long-form text to read aloud…",
     );
   });
 
@@ -127,7 +127,7 @@ describe("AdvancedReaderPage", () => {
       activeSegmentId: "segment-1",
     });
 
-    expect(screen.getByRole("button", { name: "Previous segment" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Next segment" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Previous section" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Next section" })).toBeEnabled();
   });
 });

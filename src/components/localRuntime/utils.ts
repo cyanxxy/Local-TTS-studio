@@ -79,7 +79,7 @@ export async function inspectAudioFile(buffer: ArrayBuffer): Promise<DecodedAudi
 }
 
 export function getNeuttsReferenceGuidance(info: DecodedAudioFileInfo): { tone: StatusTone; text: string } {
-  const summary = `${info.durationSec.toFixed(1)}s, ${info.channelCount === 1 ? "mono" : `${info.channelCount} channels`}, ${(info.sampleRate / 1000).toFixed(1)} kHz.`;
+  const summary = `${info.durationSec.toFixed(1)}s, ${info.channelCount === 1 ? "mono" : `${info.channelCount} channels`}, ${(info.sampleRate / 1000).toFixed(1)} kHz`;
   const bestPracticeIssues: string[] = [];
 
   if (info.channelCount !== 1) {
@@ -95,13 +95,13 @@ export function getNeuttsReferenceGuidance(info: DecodedAudioFileInfo): { tone: 
   if (bestPracticeIssues.length === 0) {
     return {
       tone: "success",
-      text: `Reference WAV looks good (${summary}) Enter the exact transcript of this clip before generating.`,
+      text: `Reference WAV looks good (${summary}). Enter the exact transcript of this clip before generating.`,
     };
   }
 
   return {
     tone: "info",
-    text: `Reference WAV loaded (${summary}) Best results use mono audio, 16-44 kHz, and a 3-15 second clip. Enter the exact transcript of this clip before generating.`,
+    text: `Reference WAV loaded (${summary}). Best results use mono audio, 16-44 kHz, and a 3-15 second clip. Enter the exact transcript of this clip before generating.`,
   };
 }
 

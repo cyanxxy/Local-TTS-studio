@@ -106,7 +106,7 @@ export function LocalRuntimeModelInputs({
     return (
       <Fragment key="neutts">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Model Variant
             <select
               value={neuttsModel}
@@ -119,7 +119,7 @@ export function LocalRuntimeModelInputs({
             </select>
           </label>
 
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Reference Audio
             <input
               type="file"
@@ -130,9 +130,6 @@ export function LocalRuntimeModelInputs({
             <span className="text-sm font-normal normal-case text-text-muted">
               {referenceAudioName || "Upload a clean 3-15s WAV reference clip"}
             </span>
-            <span className="text-sm font-normal normal-case text-text-muted">
-              Best results use mono WAV audio with minimal background noise.
-            </span>
             {referenceAudioGuidance && (
               <span className={`text-sm font-normal normal-case ${statusClass(referenceAudioGuidance.tone)}`}>
                 {referenceAudioGuidance.text}
@@ -141,7 +138,7 @@ export function LocalRuntimeModelInputs({
           </label>
         </div>
 
-        <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+        <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
           Reference Transcript (exact)
           <textarea
             value={referenceText}
@@ -161,7 +158,7 @@ export function LocalRuntimeModelInputs({
     return (
       <Fragment key="qwen3">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Model Variant
             <select
               value={qwen3Model}
@@ -174,7 +171,7 @@ export function LocalRuntimeModelInputs({
             </select>
           </label>
 
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Speaker
             <select
               value={qwen3Speaker}
@@ -189,7 +186,7 @@ export function LocalRuntimeModelInputs({
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Language
             <select
               value={qwen3Language}
@@ -202,7 +199,7 @@ export function LocalRuntimeModelInputs({
             </select>
           </label>
 
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Device Map
             <select
               value={qwen3DeviceMap}
@@ -216,7 +213,7 @@ export function LocalRuntimeModelInputs({
           </label>
         </div>
 
-        <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+        <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
           Instruction (optional)
           <textarea
             value={qwen3Instruct}
@@ -227,7 +224,7 @@ export function LocalRuntimeModelInputs({
         </label>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Dtype
             <select
               value={qwen3Dtype}
@@ -240,7 +237,7 @@ export function LocalRuntimeModelInputs({
             </select>
           </label>
 
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Attention
             <select
               value={qwen3Attention}
@@ -253,7 +250,7 @@ export function LocalRuntimeModelInputs({
             </select>
           </label>
 
-          <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
             Max Tokens
             <input
               type="number"
@@ -267,7 +264,7 @@ export function LocalRuntimeModelInputs({
           </label>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs font-medium text-text-secondary">
           <label className="flex flex-col gap-1">
             Temperature
             <input
@@ -300,7 +297,7 @@ export function LocalRuntimeModelInputs({
   return (
     <Fragment key="kani">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+        <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
           Model Variant
           <select
             value={kaniModel}
@@ -313,7 +310,7 @@ export function LocalRuntimeModelInputs({
           </select>
         </label>
 
-        <label className="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+        <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
           Accent / Voice Tag
           <select
             value={languageTag}
@@ -327,7 +324,7 @@ export function LocalRuntimeModelInputs({
         </label>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs font-semibold uppercase tracking-wider text-text-secondary">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs font-medium text-text-secondary">
         <label className="flex flex-col gap-1">
           Temperature
           <input

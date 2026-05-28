@@ -174,7 +174,7 @@ export function LocalRuntimePage({
     }
   }, [clearGeneratedResult, generateBusy, model]);
 
-  const cancelActiveGeneration = useCallback(async (nextStatusText: string = "Cancelling generation...") => {
+  const cancelActiveGeneration = useCallback(async (nextStatusText: string = "Cancelling generation…") => {
     const requestId = activeRequestIdRef.current;
     if (!requestId || !window.electron?.localTts) return false;
 
@@ -211,7 +211,7 @@ export function LocalRuntimePage({
 
     setRuntimeBusy(true);
     setGenerationProgress(null);
-    setStatus({ tone: "info", text: "Checking local runtime..." });
+    setStatus({ tone: "info", text: "Checking local runtime…" });
     activeProbeRequestIdRef.current = requestId;
     try {
       const probe = await window.electron.localTts.probe({
@@ -481,10 +481,10 @@ export function LocalRuntimePage({
       requestId,
       model,
       phase: "queued",
-      message: "Starting local generation...",
+      message: "Starting local generation…",
       elapsedSec: 0,
     });
-    setStatus({ tone: "info", text: "Starting local generation..." });
+    setStatus({ tone: "info", text: "Starting local generation…" });
     activeRequestIdRef.current = requestId;
     activeRequestGenerationVersionRef.current = generationVersion;
 
@@ -585,7 +585,7 @@ export function LocalRuntimePage({
     if (!window.electron?.localTts) return false;
     const pageVersion = pageVersionRef.current;
     setCacheBusy(true);
-    setStatus({ tone: "info", text: "Clearing local model cache..." });
+    setStatus({ tone: "info", text: "Clearing local model cache…" });
 
     try {
       await window.electron.localTts.clearCache({ model });
@@ -630,7 +630,7 @@ export function LocalRuntimePage({
           <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-sm text-text-secondary">
             <span>Released: {releaseDate}</span>
             <span className="hidden sm:inline">•</span>
-            <span>Size: {params}</span>
+            <span>Parameters: {params}</span>
           </div>
         </div>
 
@@ -651,13 +651,12 @@ export function LocalRuntimePage({
             value={text}
             onChange={(event) => handleTextChange(event.target.value)}
             className="w-full min-h-32 px-3 py-2 rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
-            placeholder="Enter text to synthesize"
+            placeholder="Type or paste text to synthesize…"
           />
         </div>
 
         {(model === "neutts" || model === "kani" || model === "qwen3") && (
           <LocalRuntimeRuntimeSettings
-            modelName={name}
             onRecheckRuntime={() => { void runProbe(); }}
             onPythonOverrideChange={handlePythonOverrideChange}
             pythonOverride={pythonOverride}
@@ -740,7 +739,7 @@ export function LocalRuntimePage({
               }
             `}
           >
-            {generateBusy ? "Generating..." : "Generate Locally"}
+            {generateBusy ? "Generating…" : "Generate Locally"}
           </button>
 
           {generateBusy && (

@@ -55,7 +55,7 @@ describe("CreatorToolsPanel", () => {
     fireEvent.change(sliders[1], { target: { value: "0.2" } });
     fireEvent.change(sliders[2], { target: { value: "0.3" } });
     fireEvent.change(sliders[3], { target: { value: "0.4" } });
-    fireEvent.change(screen.getByPlaceholderText(/route=r-ow-t/i), { target: { value: "GIF=jif" } });
+    fireEvent.change(screen.getByPlaceholderText(/route=root/i), { target: { value: "GIF=jif" } });
     fireEvent.change(selects[1], { target: { value: "wav-pcm16" } });
     fireEvent.change(selects[2], { target: { value: "44100" } });
     fireEvent.change(selects[3], { target: { value: "320" } });
