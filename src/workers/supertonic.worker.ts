@@ -48,8 +48,14 @@ const PERF_DEBUG = import.meta.env.DEV;
 interface ProgressInfo {
   status: string;
   file?: string;
+  progress?: number;
   loaded?: number;
   total?: number;
+}
+
+interface PipelineProgressState {
+  files: Map<string, number>;
+  usesAggregateEvents: boolean;
 }
 
 let tts: TextToAudioPipeline | null = null;
@@ -143,7 +149,27 @@ function toPercentFromMap(progressMap: Map<string, number>): number {
   return clampPercent((total / progressMap.size) * 100);
 }
 
-function updateProgress(progressMap: Map<string, number>, info: ProgressInfo): void {
+function createPipelineProgressState(): PipelineProgressState {
+  return {
+    files: new Map<string, number>(),
+    usesAggregateEvents: false,
+  };
+}
+
+function resetPipelineProgress(progressState: PipelineProgressState): void {
+  progressState.files.clear();
+  progressState.usesAggregateEvents = false;
+  postLoadProgress(0);
+}
+
+function updateProgress(progressState: PipelineProgressState, info: ProgressInfo): void {
+  if (info.status === "progress_total" && typeof info.progress === "number") {
+    progressState.usesAggregateEvents = true;
+    postLoadProgress((clampPercent(info.progress) / 100) * PIPELINE_PROGRESS_MAX);
+    return;
+  }
+
+  if (progressState.usesAggregateEvents) return;
   if (!info.file) return;
 
   if (
@@ -152,14 +178,14 @@ function updateProgress(progressMap: Map<string, number>, info: ProgressInfo): v
     && typeof info.total === "number"
     && info.total > 0
   ) {
-    progressMap.set(info.file, clampPercent((info.loaded / info.total) * 100) / 100);
-    postLoadProgress((toPercentFromMap(progressMap) / 100) * PIPELINE_PROGRESS_MAX);
+    progressState.files.set(info.file, clampPercent((info.loaded / info.total) * 100) / 100);
+    postLoadProgress((toPercentFromMap(progressState.files) / 100) * PIPELINE_PROGRESS_MAX);
     return;
   }
 
   if (info.status === "done") {
-    progressMap.set(info.file, 1);
-    postLoadProgress((toPercentFromMap(progressMap) / 100) * PIPELINE_PROGRESS_MAX);
+    progressState.files.set(info.file, 1);
+    postLoadProgress((toPercentFromMap(progressState.files) / 100) * PIPELINE_PROGRESS_MAX);
   }
 }
 
@@ -286,7 +312,7 @@ async function disposeSupertonicPipeline(instance: TextToAudioPipeline | null): 
 }
 
 async function createPipelineWithFallback(
-  progressMap: Map<string, number>,
+  progressState: PipelineProgressState,
   debugProfiling: boolean,
   backends: readonly InferenceBackend[] = BACKENDS,
 ): Promise<{ pipeline: TextToAudioPipeline; backend: InferenceBackend }> {
@@ -307,15 +333,14 @@ async function createPipelineWithFallback(
         device: backend,
         // Model repo only ships fp32 weights — no fp16/q8 variants available.
         revision: MODEL_REVISION,
-        progress_callback: (info: ProgressInfo) => updateProgress(progressMap, info),
+        progress_callback: (info: ProgressInfo) => updateProgress(progressState, info),
         session_options: debugProfiling ? { enableProfiling: true } : {},
       })) as TextToAudioPipeline;
       return { pipeline: instance, backend };
     } catch (err) {
       lastError = err;
       if (backend === "webgpu") {
-        progressMap.clear();
-        postLoadProgress(0);
+        resetPipelineProgress(progressState);
       }
     }
   }
@@ -433,8 +458,8 @@ async function loadModel(
     }
 
     postLoadProgress(0);
-    const progressMap = new Map<string, number>();
-    let loaded = await createPipelineWithFallback(progressMap, debugProfiling);
+    const progressState = createPipelineProgressState();
+    let loaded = await createPipelineWithFallback(progressState, debugProfiling);
     nextTts = loaded.pipeline;
     let nextBackend = loaded.backend;
     perf.mark("pipelineReady");
@@ -455,10 +480,9 @@ async function loadModel(
       await disposeSupertonicPipeline(nextTts);
       nextTts = null;
       supertonicStyleDim = null;
-      progressMap.clear();
-      postLoadProgress(0);
+      resetPipelineProgress(progressState);
 
-      loaded = await createPipelineWithFallback(progressMap, debugProfiling, ["wasm"]);
+      loaded = await createPipelineWithFallback(progressState, debugProfiling, ["wasm"]);
       nextTts = loaded.pipeline;
       nextBackend = loaded.backend;
       perf.mark("pipelineReady");

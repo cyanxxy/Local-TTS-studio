@@ -21,6 +21,7 @@ interface LoadWorkerModuleOptions {
   canInitializeWebGPU?: boolean;
   chunkTexts?: string[];
   fetchMode?: "valid" | "invalid";
+  pipelineProgressEvents?: unknown[];
   pipelineInstances?: MockPipelineInstance[];
   rechunkTexts?: string[];
 }
@@ -70,6 +71,11 @@ async function loadWorkerModule({
   canInitializeWebGPU = false,
   chunkTexts = ["First sentence.", "Second sentence.", "Third sentence."],
   fetchMode = "valid",
+  pipelineProgressEvents = [
+    {},
+    { file: "model.onnx", status: "progress", loaded: 5, total: 10 },
+    { file: "model.onnx", status: "done" },
+  ],
   pipelineInstances,
   rechunkTexts = [],
 }: LoadWorkerModuleOptions = {}) {
@@ -126,9 +132,9 @@ async function loadWorkerModule({
       },
     },
     pipeline: vi.fn(async (_task: string, _modelId: string, options?: { progress_callback?: (info: unknown) => void }) => {
-      options?.progress_callback?.({});
-      options?.progress_callback?.({ file: "model.onnx", status: "progress", loaded: 5, total: 10 });
-      options?.progress_callback?.({ file: "model.onnx", status: "done" });
+      for (const event of pipelineProgressEvents) {
+        options?.progress_callback?.(event);
+      }
       const next = pipelineQueue.shift();
       if (!next) {
         throw new Error("No pipeline instance queued for test.");
@@ -197,6 +203,27 @@ describe("supertonic.worker", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it("uses Transformers.js v4 aggregate progress events for byte-weighted load progress", async () => {
+    const instance = createPipelineInstance([createRawAudio()], []);
+    const { dispatch, postedMessages } = await loadWorkerModule({
+      pipelineProgressEvents: [
+        { status: "progress_total", progress: 25, loaded: 25, total: 100, files: {} },
+        { status: "progress_total", progress: 75, loaded: 75, total: 100, files: {} },
+      ],
+      pipelineInstances: [instance],
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => {
+      expect(postedMessages.some((message) => message.type === "READY")).toBe(true);
+    });
+
+    expect(postedMessages).toEqual(expect.arrayContaining([
+      { type: "LOAD_PROGRESS", percent: 21 },
+      { type: "LOAD_PROGRESS", percent: 63 },
+    ]));
   });
 
   it("suppresses stale generation output after cancel", async () => {

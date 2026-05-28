@@ -23,7 +23,7 @@
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
     "@fontsource-variable/outfit": "^5.2.8",
-    "@huggingface/transformers": "^4.2.0",
+    "@huggingface/transformers": "4.2.0",
     "@tailwindcss/vite": "^4.1.17",
     "kokoro-js": "1.2.1",
     "lucide-react": "^1.7.0",
