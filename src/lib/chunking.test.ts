@@ -1,10 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildKokoroInferenceUnits,
   chunkTextForModel,
   chunkTextForModelDetailed,
   chunkWithConstraints,
   chunkWithConstraintsDetailed,
   getAdaptiveChunkLimits,
+  getKokoroMaxInferenceChars,
   rechunkChunkForRetry,
   type TextChunk,
 } from "./chunking";
@@ -102,8 +104,11 @@ describe("chunkWithConstraintsDetailed", () => {
     expect(supertonic.some((chunk) => chunk.text.includes("- First item"))).toBe(true);
 
     const kokoro = chunkTextForModelDetailed(text, "kokoro");
-    expect(kokoro.length).toBeGreaterThan(1);
+    expect(kokoro.length).toBeGreaterThanOrEqual(1);
     expect(kokoro.at(-1)?.pauseAfterSec).toBe(0);
+    for (const chunk of kokoro) {
+      expect(chunk.text).toBe(text.slice(chunk.start, chunk.end));
+    }
     expect(chunkTextForModel("   ", "kokoro")).toEqual([]);
   });
 
@@ -137,6 +142,42 @@ describe("adaptive limits", () => {
     const mediumQuality = getAdaptiveChunkLimits({ backend: "webgpu", quality: 10 });
     const defaultWebgpu = getAdaptiveChunkLimits({ backend: "webgpu", quality: 5 });
     expect(mediumQuality.maxCharacters).toBeLessThan(defaultWebgpu.maxCharacters);
+  });
+});
+
+describe("kokoro inference units", () => {
+  it("exposes the per-backend inference budget used by the worker and preview", () => {
+    expect(getKokoroMaxInferenceChars("webgpu")).toBeGreaterThan(getKokoroMaxInferenceChars("wasm"));
+    expect(getKokoroMaxInferenceChars(null)).toBe(getKokoroMaxInferenceChars("wasm"));
+    expect(getKokoroMaxInferenceChars(undefined)).toBe(getKokoroMaxInferenceChars("wasm"));
+  });
+
+  it("merges short adjacent sentences into one unit with offsets mapping to the source", () => {
+    const text = "First sentence. Second sentence.";
+    const units = buildKokoroInferenceUnits(text, 520);
+
+    expect(units).toHaveLength(1);
+    expect(units[0]).toMatchObject({ text, start: 0, end: text.length });
+  });
+
+  it("splits sentences across units once the budget is exceeded", () => {
+    const text = "First sentence. Second sentence. Third sentence.";
+    const units = buildKokoroInferenceUnits(text, 20);
+
+    expect(units.length).toBeGreaterThan(1);
+    for (const unit of units) {
+      expect(unit.text).toBe(text.slice(unit.start, unit.end));
+    }
+  });
+
+  it("matches the reader preview boundaries to the generated merge budget", () => {
+    const text = "Alpha sentence. Beta sentence. Gamma sentence.";
+
+    const webgpuPreview = chunkTextForModelDetailed(text, "kokoro", { runtime: { backend: "webgpu" } });
+    const wasmPreview = chunkTextForModelDetailed(text, "kokoro", { runtime: { backend: "wasm" } });
+
+    expect(webgpuPreview).toHaveLength(buildKokoroInferenceUnits(text, getKokoroMaxInferenceChars("webgpu")).length);
+    expect(wasmPreview).toHaveLength(buildKokoroInferenceUnits(text, getKokoroMaxInferenceChars("wasm")).length);
   });
 });
 

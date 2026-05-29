@@ -428,4 +428,26 @@ describe("localTtsIpc Python process error extraction", () => {
 
     expect(extractUserFacingPythonProcessError("  \n", null)).toBe("Python process exited with code unknown.");
   });
+
+  it("skips SoX/dependency setup noise in favor of the real error", () => {
+    expect(extractUserFacingPythonProcessError([
+      "/bin/sh: sox: command not found",
+      "SoX could not be found!",
+      "",
+      "    If you do not have SoX, proceed here:",
+      "     - - - http://sox.sourceforge.net/ - - -",
+      "    If you do (or think that you should) have SoX, double-check your",
+      "    path variables.",
+      "********",
+      "Warning: flash-attn is not installed.",
+      "********",
+      "RuntimeError: MPS backend out of memory",
+    ].join("\n"), 1)).toBe("RuntimeError: MPS backend out of memory");
+
+    // When only noise is present, fall back rather than returning an empty string.
+    expect(extractUserFacingPythonProcessError([
+      "/bin/sh: sox: command not found",
+      "SoX could not be found!",
+    ].join("\n"), 134)).toBe("SoX could not be found!");
+  });
 });

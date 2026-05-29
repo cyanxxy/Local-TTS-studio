@@ -11,9 +11,9 @@ import type { InferenceBackend, PronunciationRule, WorkerInMessage, WorkerOutMes
 import { KOKORO_FALLBACK_VOICES } from "../constants";
 import { concatFloat32Arrays, createSilence } from "../lib/audio";
 import { normalizeRawAudioOutput } from "../lib/audioOutput";
+import { buildKokoroInferenceUnits, getKokoroMaxInferenceChars } from "../lib/chunking";
 import { KOKORO_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { configureKokoroOnnxRuntime } from "../lib/onnxRuntime";
-import { split } from "../lib/splitter";
 import { resolvePauseSeconds, resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
 import { resolveKokoroVoice } from "../lib/voices";
 import { canInitializeWebGPU } from "../lib/webgpu";
@@ -28,8 +28,6 @@ const BACKEND_CONFIG: ReadonlyArray<{ backend: InferenceBackend; dtype: KokoroDt
 const KOKORO_LOAD_TIMEOUT_MS = 120_000;
 const SPEED_MIN_SAFE = 0.85;
 const SPEED_MAX_SAFE = 1.15;
-const KOKORO_WEBGPU_MAX_INFERENCE_CHARS = 520;
-const KOKORO_WASM_MAX_INFERENCE_CHARS = 280;
 
 type KokoroModule = typeof import("kokoro-js");
 
@@ -46,12 +44,6 @@ interface KokoroChunkUnit {
   pauseAfterSec: number;
   pauseKind: "none" | "sentence" | "comma";
   depth: number;
-}
-
-interface KokoroSentenceUnit {
-  text: string;
-  start?: number;
-  end?: number;
 }
 
 function beginGeneration(): number {
@@ -112,98 +104,15 @@ function listVoices(instance: KokoroTTSInstance): string[] {
   return [...KOKORO_FALLBACK_VOICES];
 }
 
-function getMaxInferenceChars(): number {
-  return activeBackend === "webgpu"
-    ? KOKORO_WEBGPU_MAX_INFERENCE_CHARS
-    : KOKORO_WASM_MAX_INFERENCE_CHARS;
-}
-
-function getTextBetween(text: string, start: number | undefined, end: number | undefined, fallback: string): string {
-  if (start === undefined || end === undefined || start < 0 || end <= start) {
-    return fallback;
-  }
-  return text.slice(start, end);
-}
-
-function buildSentenceUnits(text: string): KokoroSentenceUnit[] {
-  const sentences = split(text).map((value) => value.trim()).filter(Boolean);
-  const baseUnits = (sentences.length > 0 ? sentences : [text.trim()]).filter(Boolean);
-  const units: KokoroSentenceUnit[] = [];
-  let searchCursor = 0;
-
-  for (const unitText of baseUnits) {
-    let start = text.indexOf(unitText, searchCursor);
-    if (start < 0) {
-      start = text.indexOf(unitText);
-    }
-    const end = start >= 0 ? start + unitText.length : undefined;
-    if (end !== undefined) {
-      searchCursor = end;
-    }
-
-    units.push({
-      text: unitText,
-      start: start >= 0 ? start : undefined,
-      end,
-    });
-  }
-
-  return units;
-}
-
 function buildInferenceUnits(text: string): KokoroChunkUnit[] {
-  const sentenceUnits = buildSentenceUnits(text);
-  if (sentenceUnits.length === 0) return [];
+  const units = buildKokoroInferenceUnits(text, getKokoroMaxInferenceChars(activeBackend));
 
-  const maxInferenceChars = getMaxInferenceChars();
-  const mergedUnits: KokoroSentenceUnit[] = [];
-  let current: KokoroSentenceUnit | null = null;
-
-  const flushCurrent = () => {
-    if (!current) return;
-    mergedUnits.push(current);
-    current = null;
-  };
-
-  for (const unit of sentenceUnits) {
-    if (!current) {
-      current = { ...unit };
-      continue;
-    }
-
-    const canMergeByRange: boolean = current.start !== undefined
-      && unit.end !== undefined
-      && unit.end > current.start
-      && unit.end - current.start <= maxInferenceChars;
-    const fallbackText = `${current.text} ${unit.text}`;
-    const candidateText: string = canMergeByRange
-      ? getTextBetween(text, current.start, unit.end, fallbackText)
-      : fallbackText;
-    const canMergeByText = current.start === undefined
-      && unit.start === undefined
-      && candidateText.length <= maxInferenceChars;
-
-    if (canMergeByRange || canMergeByText) {
-      current = {
-        text: candidateText,
-        start: current.start,
-        end: unit.end,
-      };
-      continue;
-    }
-
-    flushCurrent();
-    current = { ...unit };
-  }
-
-  flushCurrent();
-
-  return mergedUnits.map((unit, index) => ({
+  return units.map((unit, index) => ({
     text: unit.text,
     start: unit.start,
     end: unit.end,
-    pauseAfterSec: index < mergedUnits.length - 1 ? 0.2 : 0,
-    pauseKind: index < mergedUnits.length - 1 ? "sentence" : "none",
+    pauseAfterSec: index < units.length - 1 ? 0.2 : 0,
+    pauseKind: index < units.length - 1 ? "sentence" : "none",
     depth: 0,
   }));
 }

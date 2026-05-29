@@ -424,43 +424,6 @@ input[type="range"]::-moz-range-thumb {
   background: rgba(90, 197, 245, 0.45);
 }
 
-/* ── Reader section badge ─────────────────────────────────── */
-.reader-section-badge {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--font-mono);
-  font-size: 8px;
-  font-weight: 700;
-  line-height: 1;
-  min-width: 14px;
-  height: 14px;
-  padding: 0 2px;
-  border-radius: 3px;
-  vertical-align: text-top;
-  margin-right: 2px;
-  user-select: none;
-}
-
-.reader-section-badge-preview {
-  background-color: rgba(0, 0, 0, 0.04);
-  color: var(--color-text-muted);
-  border: 1px dashed var(--color-border);
-}
-
-.reader-section-badge-generated {
-  background-color: var(--color-accent-light);
-  color: var(--color-accent);
-  border: 1px solid color-mix(in srgb, var(--color-accent) 25%, transparent);
-  transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.reader-section-badge-generated:hover {
-  background-color: var(--color-accent);
-  color: var(--color-panel);
-  box-shadow: var(--shadow-accent-sm);
-}
-
 /* ── Respect reduced-motion ───────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *,

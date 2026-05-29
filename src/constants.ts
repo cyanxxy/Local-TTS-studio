@@ -38,6 +38,12 @@ export const QUALITY_DEFAULT = 5;
 export const MIN_TEXT_LENGTH = 10;
 export const SUPERTONIC_MIN_CHUNK_LENGTH = 100;
 export const MAX_CHUNK_LENGTH = 1000;
+
+// Kokoro merges adjacent sentences into a single inference unit up to these
+// per-backend character budgets. Shared by the worker and the reader preview so
+// the section boundaries shown in the editor match what generation produces.
+export const KOKORO_WEBGPU_MAX_INFERENCE_CHARS = 520;
+export const KOKORO_WASM_MAX_INFERENCE_CHARS = 280;
 export const SUPERTONIC_INTER_CHUNK_SILENCE_SEC = 0.5;
 export const AUDIO_PLAYER_MAX_BUFFER_SECONDS = 15 * 60;
 

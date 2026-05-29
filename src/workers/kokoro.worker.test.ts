@@ -84,6 +84,10 @@ async function loadWorkerModule({
   }));
   vi.doMock("../constants", () => ({
     KOKORO_FALLBACK_VOICES: fallbackVoices,
+    KOKORO_WEBGPU_MAX_INFERENCE_CHARS: 520,
+    KOKORO_WASM_MAX_INFERENCE_CHARS: 280,
+    MAX_CHUNK_LENGTH: 1000,
+    SUPERTONIC_MIN_CHUNK_LENGTH: 100,
     MODELS: {
       kokoro: {
         defaultVoice: "af_heart",

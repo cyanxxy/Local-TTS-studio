@@ -106,7 +106,15 @@ pip install -U flash-attn --no-build-isolation
 
 Electron uses the same policy for managed setup: CUDA systems get the CUDA PyTorch wheel index, CPU-only Linux/Windows get the CPU PyTorch wheel index, and macOS gets the normal PyPI PyTorch wheel with MPS support. Auto chooses bfloat16 on CUDA, bfloat16 or float32 on Apple MPS, and float32 on CPU. You can also point Open TTS at a pre-existing environment with `TTS_QWEN3_PYTHON_BIN=/absolute/path/to/python`.
 
-The Qwen3 page exposes speaker, supported language, optional instruction prompt, device map, dtype, attention implementation, temperature, top-p, and max token controls. Upstream defaults are temperature `0.9`, top-p `1.0`, and max new tokens up to `8192`; Open TTS keeps the default max token value at `2048` for faster interactive generation.
+The Qwen3 page exposes speaker, supported language, optional instruction prompt, device map, dtype, attention implementation, temperature, top-p, and max token controls. Upstream defaults are temperature `0.9`, top-p `1.0`, and max new tokens up to `8192`; Open TTS keeps the default max token value at `2048` for faster interactive generation. Style instruction prompts (`instruct`) are supported by both CustomVoice sizes — the official 0.6B and 1.7B model cards both demonstrate natural-language style control — so the instruction field is enabled for every Qwen3 option, including the Auto default. The device-map control hides options the OS cannot provide (CUDA off macOS, Apple MPS on non-macOS).
+
+Long first-run generations are expected: the model downloads on first use, and inference can take minutes on CPU or for the larger model. The bridge emits a steady heartbeat while it works, and the desktop app treats the generation timeout as an inactivity watchdog — it only stops a run that goes fully silent, never one that is slow but still progressing.
+
+### Resident worker (warm reuse)
+
+Qwen3 generation runs on a persistent bridge worker (`local_tts_bridge.py --action serve`) rather than a fresh subprocess per request. The worker imports torch and loads the model once, then serves many requests over stdin, so only the first generation pays the Python/torch import, model load, and first-inference accelerator warmup. Repeat generations with the same model/device/dtype reuse the resident model and are roughly 2–3× faster (on Apple MPS, a warm 0.6B request is inference-only). Switching the model repo, device, dtype, or attention implementation transparently reloads. The worker is killed after a few minutes idle to release the model's memory, and the next request respawns it; cancelling a generation also kills the worker (the next request reloads). Requests are serialized — one Qwen3 generation runs at a time.
+
+When the model is already cached, the worker loads it with Hugging Face offline mode forced on, so a cached generation never makes a network request (transformers' tokenizer setup otherwise calls `model_info()` against huggingface.co on every load). The first-run download path is unaffected, and an incomplete cache falls back to an online load.
 
 ## Runtime Probe
 

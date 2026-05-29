@@ -31,6 +31,20 @@ export const QWEN3_OPTIONS: LocalRuntimeOption[] = [
   { value: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", label: "CustomVoice · 1.7B · 12Hz" },
 ];
 
+// Both CustomVoice sizes honor natural-language style instructions — the
+// official model cards demonstrate `instruct` on the 0.6B and 1.7B alike — and
+// the "auto" alias resolves to the 0.6B CustomVoice. Every Qwen3 option this
+// page exposes is therefore instruct-capable.
+export const QWEN3_INSTRUCT_CAPABLE_MODELS = new Set<string>([
+  "auto",
+  "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+]);
+
+export function qwen3SupportsInstruct(model: string): boolean {
+  return QWEN3_INSTRUCT_CAPABLE_MODELS.has(model);
+}
+
 export const QWEN3_SPEAKER_OPTIONS: LocalRuntimeOption[] = [
   { value: "Ryan", label: "Ryan · English · dynamic male" },
   { value: "Aiden", label: "Aiden · English · sunny American male" },
@@ -80,6 +94,17 @@ export const QWEN3_DEVICE_OPTIONS: LocalRuntimeOption[] = [
   { value: "cpu", label: "CPU" },
   { value: "mps", label: "Apple MPS" },
 ];
+
+// CUDA never exists on macOS and Apple MPS never exists off macOS, so hide the
+// options that would only produce a confusing "Torch not compiled with ..." error.
+export function getQwen3DeviceOptions(platform: string | undefined): LocalRuntimeOption[] {
+  const isMac = platform === "darwin";
+  return QWEN3_DEVICE_OPTIONS.filter((option) => {
+    if (option.value === "cuda:0") return !isMac;
+    if (option.value === "mps") return isMac;
+    return true;
+  });
+}
 
 export const QWEN3_DTYPE_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto" },

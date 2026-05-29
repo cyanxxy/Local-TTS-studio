@@ -20,6 +20,7 @@ import {
   QWEN3_OPTIONS,
   QWEN3_SPEAKER_OPTIONS,
   getQwen3LanguageOptionsForSpeaker,
+  qwen3SupportsInstruct,
 } from "./localRuntime/modelOptions";
 import {
   arrayBufferToBase64,
@@ -499,7 +500,14 @@ export function LocalRuntimePage({
         payload.modelRepo = qwen3Model;
         payload.speaker = qwen3Speaker;
         payload.language = qwen3Language;
-        payload.instruct = qwen3Instruct.trim() || undefined;
+        // Only send the style instruction when the selected model actually
+        // supports it, so the request always matches the UI contract (the field
+        // is disabled for unsupported models). This prevents stale text — e.g.
+        // typed for one model, left behind after switching — from leaking into a
+        // request where the input was greyed out.
+        payload.instruct = qwen3SupportsInstruct(qwen3Model)
+          ? qwen3Instruct.trim() || undefined
+          : undefined;
         payload.deviceMap = qwen3DeviceMap;
         payload.dtype = qwen3Dtype;
         payload.attnImplementation = qwen3Attention;
