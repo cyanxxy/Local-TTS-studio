@@ -54,8 +54,6 @@ interface OverlayPart {
   text: string;
   sectionIndex: number;
   isActive: boolean;
-  isSectionStart: boolean;
-  sectionId: string | null;
 }
 
 interface SectionBoundary {
@@ -68,6 +66,12 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+/**
+ * Splits the source text into contiguous spans aligned to section boundaries and
+ * the active range. Spans carry only background styling (tint + highlight), never
+ * inline content, so the overlay stays glyph-for-glyph identical to the textarea
+ * beneath it — keeping the caret, highlights, and scrolling in sync.
+ */
 function buildOverlayParts(
   text: string,
   boundaries: SectionBoundary[],
@@ -75,13 +79,13 @@ function buildOverlayParts(
 ): OverlayPart[] {
   if (!text) return [];
   if (boundaries.length === 0 && !activeRange) {
-    return [{ text, sectionIndex: -1, isActive: false, isSectionStart: false, sectionId: null }];
+    return [{ text, sectionIndex: -1, isActive: false }];
   }
 
   const offsets = new Set<number>([0, text.length]);
-  for (const b of boundaries) {
-    offsets.add(clamp(b.start, 0, text.length));
-    offsets.add(clamp(b.end, 0, text.length));
+  for (const boundary of boundaries) {
+    offsets.add(clamp(boundary.start, 0, text.length));
+    offsets.add(clamp(boundary.end, 0, text.length));
   }
   if (activeRange) {
     offsets.add(clamp(activeRange.start, 0, text.length));
@@ -96,29 +100,18 @@ function buildOverlayParts(
     const partEnd = sorted[i + 1];
     if (partEnd <= partStart) continue;
 
-    let sectionIndex = -1;
-    let sectionId: string | null = null;
-    for (let s = 0; s < boundaries.length; s++) {
-      if (partStart >= boundaries[s].start && partStart < boundaries[s].end) {
-        sectionIndex = s;
-        sectionId = boundaries[s].id;
-        break;
-      }
-    }
+    const sectionIndex = boundaries.findIndex(
+      (boundary) => partStart >= boundary.start && partStart < boundary.end,
+    );
 
     const isActive = activeRange
       ? partStart >= activeRange.start && partEnd <= activeRange.end
       : false;
 
-    const isSectionStart = sectionIndex >= 0
-      && clamp(boundaries[sectionIndex].start, 0, text.length) === partStart;
-
     parts.push({
       text: text.slice(partStart, partEnd),
       sectionIndex,
       isActive,
-      isSectionStart,
-      sectionId,
     });
   }
 
@@ -209,11 +202,16 @@ export function AdvancedReaderPage({
 
   const sectionBoundaries = useMemo((): SectionBoundary[] => {
     if (segments.length > 0) {
-      return segments.map((seg) => ({
-        start: seg.textStart ?? 0,
-        end: seg.textEnd ?? text.length,
-        id: seg.id,
-      }));
+      return segments.map((seg, index) => {
+        // Fall back to the matching preview chunk range when a segment lacks
+        // offsets, so a missing boundary never expands to span the whole text.
+        const fallback = previewChunks[index];
+        return {
+          start: seg.textStart ?? fallback?.start ?? 0,
+          end: seg.textEnd ?? fallback?.end ?? text.length,
+          id: seg.id,
+        };
+      });
     }
     return previewChunks.map((chunk) => ({
       start: chunk.start,
@@ -249,27 +247,17 @@ export function AdvancedReaderPage({
 
   return (
     <div className={`grid grid-cols-1 lg:grid-cols-5 ${fullScreen ? "gap-3 sm:gap-4" : "mt-6 gap-4 sm:gap-5"} ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : ""}`}>
-      <section className={`${fullScreen ? "lg:col-span-5" : "lg:col-span-3"} flex h-full flex-col gap-4 rounded-[22px] glass-panel p-4 sm:gap-5 sm:p-6`}>
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+      <section className="lg:col-span-3 flex h-full flex-col gap-4 rounded-[22px] glass-panel p-4 sm:gap-5 sm:p-6">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded-lg bg-accent-light flex items-center justify-center shrink-0">
+            <BookOpen size={14} className="text-accent" />
+          </div>
           <div>
-            <div className="flex items-center gap-2">
-              <div className="w-7 h-7 rounded-lg bg-accent-light flex items-center justify-center shrink-0">
-                <BookOpen size={14} className="text-accent" />
-              </div>
-              <h2 className="text-lg font-display font-semibold text-text-primary">Reader Mode</h2>
-            </div>
-            <p className="mt-1.5 text-xs text-text-muted pl-9">
+            <h2 className="text-lg font-display font-semibold text-text-primary">Reader Mode</h2>
+            <p className="text-xs text-text-muted">
               Edit your text with section boundaries shown directly in the editor.
             </p>
           </div>
-          {hasGeneratedSegments && activeSegmentIndex >= 0 && (
-            <div className="shrink-0 animate-fade-up">
-              <span className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold font-mono bg-accent-light text-accent border border-accent/20 tabular-nums">
-                <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
-                {activeSegmentIndex + 1} / {segments.length}
-              </span>
-            </div>
-          )}
         </div>
 
         <div className="space-y-2">
@@ -287,7 +275,6 @@ export function AdvancedReaderPage({
               className="pointer-events-none absolute inset-0 z-20 overflow-auto whitespace-pre-wrap break-words px-4 py-3 text-lg leading-6 text-text-primary select-none sm:text-xl sm:leading-7"
             >
               {overlayParts.map((part, index) => {
-                const isGenerated = part.sectionId !== null;
                 const activeClass = part.isActive
                   ? "reader-chunk-highlight reader-chunk-highlight-active"
                   : "";
@@ -296,32 +283,15 @@ export function AdvancedReaderPage({
                     ? "reader-section-even"
                     : "reader-section-odd"
                   : "";
+                const className = `${tintClass} ${activeClass}`.trim();
 
                 return (
-                  <span key={`part-${index}`} className={`${tintClass} ${activeClass}`.trim() || undefined}>
-                    {part.isSectionStart && part.sectionIndex >= 0 && (
-                      <span
-                        className={`reader-section-badge ${
-                          isGenerated
-                            ? "reader-section-badge-generated pointer-events-auto cursor-pointer"
-                            : "reader-section-badge-preview"
-                        }`}
-                        onClick={
-                          isGenerated && part.sectionId
-                            ? (e) => {
-                                e.stopPropagation();
-                                onJumpToSegment(part.sectionId!);
-                              }
-                            : undefined
-                        }
-                      >
-                        {part.sectionIndex + 1}
-                      </span>
-                    )}
+                  <span key={`part-${index}`} className={className || undefined}>
                     {part.text}
                   </span>
                 );
               })}
+              {/* Mirror a trailing blank line so the textarea's final newline keeps overlay height in sync. */}
               {text.endsWith("\n") && <span>{"\n"}</span>}
             </div>
 
@@ -425,28 +395,7 @@ export function AdvancedReaderPage({
 
       </section>
 
-      {(totalDuration > 0 || isGenerating) && (
-        <div className={fullScreen ? "lg:col-span-5" : "lg:col-span-3"}>
-          <AudioPlayer
-            compact={fullScreen}
-            isPlaying={isPlaying}
-            currentTime={currentTime}
-            totalDuration={totalDuration}
-            segmentCount={segments.length}
-            activeSegmentNumber={activeSegmentNumber}
-            stats={stats}
-            isGenerating={isGenerating}
-            onTogglePlay={onTogglePlay}
-            onSeek={onSeek}
-            onSkipBackward={onSkipBackward}
-            onSkipForward={onSkipForward}
-            onDownload={onDownload}
-            onStop={onStop}
-          />
-        </div>
-      )}
-
-      <aside className={`${fullScreen ? "lg:col-span-5 gap-4 rounded-[20px] p-4 sm:p-5" : "lg:col-span-2 gap-5 rounded-[22px] p-4 sm:gap-6 sm:p-6"} flex h-full flex-col glass-panel`}>
+      <aside className="lg:col-span-2 flex h-full flex-col gap-5 rounded-[22px] glass-panel p-4 sm:gap-6 sm:p-6">
         <ModelToggle
           activeModel={activeModel}
           onModelChange={onModelChange}
@@ -482,6 +431,27 @@ export function AdvancedReaderPage({
         </ControlsProvider>
 
       </aside>
+
+      {(totalDuration > 0 || isGenerating) && (
+        <div className="lg:col-span-5">
+          <AudioPlayer
+            compact={fullScreen}
+            isPlaying={isPlaying}
+            currentTime={currentTime}
+            totalDuration={totalDuration}
+            segmentCount={segments.length}
+            activeSegmentNumber={activeSegmentNumber}
+            stats={stats}
+            isGenerating={isGenerating}
+            onTogglePlay={onTogglePlay}
+            onSeek={onSeek}
+            onSkipBackward={onSkipBackward}
+            onSkipForward={onSkipForward}
+            onDownload={onDownload}
+            onStop={onStop}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -84,8 +84,10 @@ src/
     LocalRuntimePage.tsx
 
 python/
-  local_tts_bridge.py # Electron local-runtime probe/generate bridge
+  local_tts_bridge.py # Electron local-runtime probe/generate/serve bridge
 ```
+
+Desktop host helpers live in `electron/` (e.g. `persistentBridgeWorker.ts` for the resident Qwen3 worker pool, `generateRateLimiter.ts`).
 
 ## Runtime Contracts (Do Not Break)
 
@@ -95,6 +97,13 @@ Defined in `src/types.ts`:
 - Worker -> main thread: `LOAD_PROGRESS`, `READY`, `AUDIO_CHUNK`, `GENERATION_COMPLETE`, `ERROR`
 
 If you add fields/events, update both workers and all hook/component consumers.
+
+### Local bridge protocol
+`python/local_tts_bridge.py` speaks to the Electron main process over stdout lines prefixed `__PROGRESS__` and `__RESULT__` (JSON after the prefix), keeping bridge messages separable from library noise. `emit`/`emit_progress` always target the real stdout (`_REAL_STDOUT`), captured before any `redirect_stdout_to_stderr()` swap.
+- Actions: `probe`, `generate` (one-shot: one process per request, payload on stdin), and `serve` (persistent worker).
+- `serve` is a resident worker used for Qwen3 generation: it loads the model once and reads newline-delimited JSON requests `{"requestId", "payload"}` (or `{"command":"shutdown"}`) on stdin, emitting `__RESULT__`/`__PROGRESS__` lines tagged with `requestId`. `Qwen3ModelHost` keeps one model resident keyed by (repo, device, dtype, attention) and reloads only when that changes. A failing request reports `ok:false` but keeps the worker alive.
+- Host side: `electron/persistentBridgeWorker.ts` owns the worker pool (process lifecycle, request framing, progress routing, per-request stall watchdog, output caps, cancellation, idle eviction). It is injected with `spawn` and unit-tested without Electron. Generation is serialized per model by `generateRateLimiter`, so a resident model is never entered concurrently. NeuTTS and Kani keep the one-shot path.
+- Cached loads force Hugging Face offline mode (`qwen3_snapshot_present` → `huggingface_offline`) so a cached generation makes no network request; first-run downloads and incomplete caches fall back to online.
 
 ### Audio path
 - Playback is Web Audio API based (`AudioContext` + `AudioBufferSourceNode`), not `<audio>`.
@@ -111,7 +120,8 @@ If you add fields/events, update both workers and all hook/component consumers.
 
 ### Model specifics
 - Kokoro:
-  - Worker splits text with the local `split()` helper and calls `KokoroTTS.generate(string, ...)` per sentence. `tts.stream()` is not used.
+  - Worker builds inference units via the shared `buildKokoroInferenceUnits()` helper in `lib/chunking.ts` (sentences merged up to a per-backend character budget) and calls `KokoroTTS.generate(string, ...)` per unit. `tts.stream()` is not used.
+  - The reader preview (`chunkTextForModelDetailed`) reuses the same builder so the editor's section boundaries match the segments generation emits; keep them in sync if you change the merge logic.
   - `list_voices()` may not always return an array; fallback voices are required.
 - Supertonic:
   - Uses transformers text-to-speech pipeline in worker.

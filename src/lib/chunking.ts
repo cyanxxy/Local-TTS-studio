@@ -1,4 +1,9 @@
-import { MAX_CHUNK_LENGTH, SUPERTONIC_MIN_CHUNK_LENGTH } from "../constants";
+import {
+  KOKORO_WASM_MAX_INFERENCE_CHARS,
+  KOKORO_WEBGPU_MAX_INFERENCE_CHARS,
+  MAX_CHUNK_LENGTH,
+  SUPERTONIC_MIN_CHUNK_LENGTH,
+} from "../constants";
 import type { ChunkPauseKind, InferenceBackend, ModelType } from "../types";
 import { split } from "./splitter";
 
@@ -53,6 +58,13 @@ const PAUSE_SECONDS: Record<ChunkPauseKind, number> = {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function getTextBetween(text: string, start: number | undefined, end: number | undefined, fallback: string): string {
+  if (start === undefined || end === undefined || start < 0 || end <= start) {
+    return fallback;
+  }
+  return text.slice(start, end);
 }
 
 function trimRangeToContent(text: string, start: number, end: number): { start: number; end: number } | null {
@@ -437,6 +449,103 @@ export function chunkWithConstraints(
   return chunkWithConstraintsDetailed(text, options).map((chunk) => chunk.text);
 }
 
+export interface KokoroInferenceUnit {
+  text: string;
+  start?: number;
+  end?: number;
+}
+
+/** Per-backend character budget for merging adjacent sentences into one Kokoro inference unit. */
+export function getKokoroMaxInferenceChars(backend?: InferenceBackend | null): number {
+  return backend === "webgpu"
+    ? KOKORO_WEBGPU_MAX_INFERENCE_CHARS
+    : KOKORO_WASM_MAX_INFERENCE_CHARS;
+}
+
+function buildKokoroSentenceRanges(text: string): KokoroInferenceUnit[] {
+  const sentences = split(text).map((value) => value.trim()).filter(Boolean);
+  const baseUnits = (sentences.length > 0 ? sentences : [text.trim()]).filter(Boolean);
+  const units: KokoroInferenceUnit[] = [];
+  let searchCursor = 0;
+
+  for (const unitText of baseUnits) {
+    let start = text.indexOf(unitText, searchCursor);
+    if (start < 0) start = text.indexOf(unitText);
+    const end = start >= 0 ? start + unitText.length : undefined;
+    if (end !== undefined) searchCursor = end;
+    units.push({ text: unitText, start: start >= 0 ? start : undefined, end });
+  }
+
+  return units;
+}
+
+/**
+ * Builds the inference units Kokoro actually generates: sentences are merged
+ * greedily until the per-backend character budget is reached. Shared by the
+ * worker (to drive generation) and the reader preview (to draw matching section
+ * boundaries), so the editor never shows more sections than are produced.
+ */
+export function buildKokoroInferenceUnits(text: string, maxInferenceChars: number): KokoroInferenceUnit[] {
+  const sentenceUnits = buildKokoroSentenceRanges(text);
+  if (sentenceUnits.length === 0) return [];
+
+  const mergedUnits: KokoroInferenceUnit[] = [];
+  let current: KokoroInferenceUnit | null = null;
+
+  const flushCurrent = () => {
+    if (current) mergedUnits.push(current);
+    current = null;
+  };
+
+  for (const unit of sentenceUnits) {
+    if (!current) {
+      current = { ...unit };
+      continue;
+    }
+
+    const canMergeByRange: boolean = current.start !== undefined
+      && unit.end !== undefined
+      && unit.end > current.start
+      && unit.end - current.start <= maxInferenceChars;
+    const fallbackText = `${current.text} ${unit.text}`;
+    const candidateText: string = canMergeByRange
+      ? getTextBetween(text, current.start, unit.end, fallbackText)
+      : fallbackText;
+    const canMergeByText = current.start === undefined
+      && unit.start === undefined
+      && candidateText.length <= maxInferenceChars;
+
+    if (canMergeByRange || canMergeByText) {
+      current = { text: candidateText, start: current.start, end: unit.end };
+      continue;
+    }
+
+    flushCurrent();
+    current = { ...unit };
+  }
+
+  flushCurrent();
+  return mergedUnits;
+}
+
+function chunkForKokoroDetailed(text: string, runtime?: ChunkingRuntimeProfile): TextChunk[] {
+  const maxInferenceChars = getKokoroMaxInferenceChars(runtime?.backend);
+  const units = buildKokoroInferenceUnits(text, maxInferenceChars);
+
+  return units.map((unit, index, all) => {
+    const start = unit.start ?? 0;
+    const end = unit.end ?? text.length;
+    const hasFollowing = index < all.length - 1;
+    return {
+      text: unit.start !== undefined && unit.end !== undefined ? text.slice(start, end) : unit.text,
+      start,
+      end,
+      pauseAfterSec: hasFollowing ? PAUSE_SECONDS.sentence : 0,
+      pauseKind: hasFollowing ? "sentence" : "none",
+    };
+  });
+}
+
 export function chunkTextForModelDetailed(
   text: string,
   model: ModelType,
@@ -449,14 +558,9 @@ export function chunkTextForModelDetailed(
     return chunkWithConstraintsDetailed(text, options);
   }
 
-  // Kokoro already does sentence streaming internally; keep preview sentence-level.
-  return extractSemanticUnits(text, MAX_CHUNK_LENGTH).map((unit, index, all) => ({
-    text: text.slice(unit.start, unit.end),
-    start: unit.start,
-    end: unit.end,
-    pauseAfterSec: index < all.length - 1 ? PAUSE_SECONDS.sentence : 0,
-    pauseKind: index < all.length - 1 ? "sentence" : "none",
-  }));
+  // Kokoro merges adjacent sentences per backend budget; mirror that here so the
+  // reader preview boundaries match the segments generation will emit.
+  return chunkForKokoroDetailed(text, options.runtime);
 }
 
 export function chunkTextForModel(

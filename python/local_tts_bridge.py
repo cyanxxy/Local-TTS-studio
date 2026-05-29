@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 import wave
@@ -33,6 +34,17 @@ if sys.platform == "darwin":
 
 RESULT_PREFIX = "__RESULT__"
 PROGRESS_PREFIX = "__PROGRESS__"
+# The original stdout, captured before any redirect_stdout_to_stderr() swap. The
+# heartbeat thread runs concurrently with library calls that redirect sys.stdout
+# to stderr, so emit()/emit_progress() must always target this real stream to
+# keep __RESULT__/__PROGRESS__ lines on stdout where the parent process reads them.
+_REAL_STDOUT = sys.stdout
+# Set per request while a persistent `serve` worker handles it, so every
+# __RESULT__/__PROGRESS__ line carries the originating requestId. It stays None
+# for the one-shot probe/generate actions, where the parent owns one process per
+# request and needs no correlation id.
+_CURRENT_REQUEST_ID: str | None = None
+HEARTBEAT_INTERVAL_SEC = 10.0
 NEUTTS_MIN_PYTHON = (3, 10)
 NEUTTS_MAX_EXCLUSIVE_PYTHON = (3, 14)
 KANI_MIN_TRANSFORMERS = (4, 56, 0)
@@ -91,7 +103,9 @@ def redirect_stdout_to_stderr() -> Any:
 
 
 def emit(payload: dict[str, Any]) -> None:
-    print(f"{RESULT_PREFIX}{json.dumps(payload, ensure_ascii=False)}", flush=True)
+    if _CURRENT_REQUEST_ID is not None and "requestId" not in payload:
+        payload = {**payload, "requestId": _CURRENT_REQUEST_ID}
+    print(f"{RESULT_PREFIX}{json.dumps(payload, ensure_ascii=False)}", flush=True, file=_REAL_STDOUT)
 
 
 def emit_progress(phase: str, message: str, *, started_at: float | None = None) -> None:
@@ -101,7 +115,34 @@ def emit_progress(phase: str, message: str, *, started_at: float | None = None) 
     }
     if started_at is not None:
         payload["elapsedSec"] = round(max(0.0, time.time() - started_at), 3)
-    print(f"{PROGRESS_PREFIX}{json.dumps(payload, ensure_ascii=False)}", flush=True)
+    if _CURRENT_REQUEST_ID is not None:
+        payload["requestId"] = _CURRENT_REQUEST_ID
+    print(f"{PROGRESS_PREFIX}{json.dumps(payload, ensure_ascii=False)}", flush=True, file=_REAL_STDOUT)
+
+
+@contextmanager
+def heartbeat(phase: str, message: str, *, started_at: float, interval: float = HEARTBEAT_INTERVAL_SEC) -> Any:
+    """Emit periodic progress while a long, blocking call runs.
+
+    First-run model downloads and inference can each take minutes with no output
+    of their own. Without a steady signal the parent process cannot tell "slow but
+    working" from "hung", so it would either kill healthy runs or wait forever.
+    This keeps a heartbeat flowing on stdout so the parent's idle watchdog only
+    fires when the process truly stops making progress.
+    """
+    stop = threading.Event()
+
+    def beat() -> None:
+        while not stop.wait(interval):
+            emit_progress(phase, message, started_at=started_at)
+
+    thread = threading.Thread(target=beat, daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
 
 
 def fail(message: str, *, details: str | None = None) -> None:
@@ -988,18 +1029,24 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
             temp_audio.write(reference_audio_bytes)
             temp_path = temp_audio.name
 
-        with redirect_stdout_to_stderr():
-            tts = NeuTTS(
-                backbone_repo=backbone_repo,
-                backbone_device=backbone_device,
-                codec_repo=codec_repo,
-                codec_device=codec_device,
-            )
+        with heartbeat(
+            "model_load",
+            f"Loading {backbone_repo} and {codec_repo} (first run downloads the models)...",
+            started_at=started,
+        ):
+            with redirect_stdout_to_stderr():
+                tts = NeuTTS(
+                    backbone_repo=backbone_repo,
+                    backbone_device=backbone_device,
+                    codec_repo=codec_repo,
+                    codec_device=codec_device,
+                )
 
         emit_progress("reference_encoding", "Encoding reference audio...", started_at=started)
         ref_codes = tts.encode_reference(temp_path)
         emit_progress("inference", "Running NeuTTS inference...", started_at=started)
-        wav = tts.infer(text, ref_codes, ref_text)
+        with heartbeat("inference", "Running NeuTTS inference...", started_at=started):
+            wav = tts.infer(text, ref_codes, ref_text)
         sample_rate = require_sample_rate("NeuTTS", getattr(tts, "sample_rate", None))
         emit_progress("output_encoding", "Encoding generated WAV output...", started_at=started)
 
@@ -1056,18 +1103,23 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
 
     started = time.time()
     emit_progress("model_load", f"Loading {model_repo}...", started_at=started)
-    with redirect_stdout_to_stderr():
-        tts = KaniTTS(
-            model_repo,
-            device_map=device_map,
-            max_new_tokens=max_new_tokens,
-            suppress_logs=True,
-            show_info=False,
-        )
+    with heartbeat(
+        "model_load",
+        f"Loading {model_repo} (first run downloads the model)...",
+        started_at=started,
+    ):
+        with redirect_stdout_to_stderr():
+            tts = KaniTTS(
+                model_repo,
+                device_map=device_map,
+                max_new_tokens=max_new_tokens,
+                suppress_logs=True,
+                show_info=False,
+            )
     language_tag = resolve_kani_language_tag(tts, language_tag)
 
     emit_progress("inference", "Running Kani-TTS-2 inference...", started_at=started)
-    with redirect_stdout_to_stderr():
+    with heartbeat("inference", "Running Kani-TTS-2 inference...", started_at=started), redirect_stdout_to_stderr():
         wav, generated_metadata = tts.generate(
             text,
             language_tag=language_tag,
@@ -1212,7 +1264,131 @@ def qwen3_mps_float16_stability_message() -> str:
     )
 
 
-def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
+def qwen3_snapshot_present(model_repo: str) -> bool:
+    """Return True when the model's config is already in the local HF cache.
+
+    Lets the loader prefer an offline load: transformers' `fix_mistral_regex`
+    path calls `model_info()` — a live request to huggingface.co — on every
+    load, even when the snapshot is fully cached. Setting HF_HUB_OFFLINE when the
+    model is present keeps cached generations fully local (the app's core
+    promise) and removes a per-load network round-trip and its stall risk.
+    """
+    try:
+        from huggingface_hub import try_to_load_from_cache
+    except Exception:
+        return False
+    try:
+        cached = try_to_load_from_cache(model_repo, "config.json")
+    except Exception:
+        return False
+    return isinstance(cached, str)
+
+
+@contextmanager
+def huggingface_offline(enabled: bool) -> Any:
+    if not enabled:
+        yield
+        return
+    keys = ("HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
+    previous = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ[key] = "1"
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def load_qwen3_model(profile: dict[str, str], *, started_at: float) -> Any:
+    import torch  # noqa: F401  (surface a clear ImportError before the library uses torch)
+    from qwen_tts import Qwen3TTSModel
+
+    model_repo = profile["modelRepo"]
+    device_map = profile["deviceMap"]
+    dtype_name = profile["dtype"]
+    attn_implementation = profile["attention"]
+
+    load_kwargs: dict[str, Any] = {
+        "device_map": device_map,
+        "dtype": parse_qwen3_dtype(dtype_name),
+    }
+    if attn_implementation:
+        load_kwargs["attn_implementation"] = attn_implementation
+
+    cached = qwen3_snapshot_present(model_repo)
+    emit_progress(
+        "model_load",
+        f"Loading {model_repo} with {device_map}, {dtype_name}, {attn_implementation}...",
+        started_at=started_at,
+    )
+
+    def _from_pretrained(offline: bool) -> Any:
+        with huggingface_offline(offline):
+            with redirect_stdout_to_stderr():
+                return Qwen3TTSModel.from_pretrained(model_repo, **load_kwargs)
+
+    try:
+        with heartbeat(
+            "model_load",
+            f"Loading {model_repo} (first run downloads the model, this can take several minutes)...",
+            started_at=started_at,
+        ):
+            if cached:
+                try:
+                    return _from_pretrained(offline=True)
+                except Exception:
+                    # A cached config does not prove a complete snapshot, so fall
+                    # back to an online load that can fetch any missing files.
+                    return _from_pretrained(offline=False)
+            return _from_pretrained(offline=False)
+    except Exception as exc:
+        if device_map == "mps" and dtype_name == "float16":
+            raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
+        raise
+
+
+class Qwen3ModelHost:
+    """Keeps one Qwen3 model resident across requests in a persistent worker.
+
+    Loading the model and the first MPS/CUDA inference warmup dominate wall time,
+    so the `serve` loop reuses a single instance whenever the requested (repo,
+    device, dtype, attention) profile is unchanged, and only reloads — releasing
+    the previous model first to bound memory — when that profile changes.
+    """
+
+    def __init__(self) -> None:
+        self._model: Any = None
+        self._key: tuple[str, str, str, str] | None = None
+
+    def acquire(self, profile: dict[str, str], *, started_at: float) -> Any:
+        key = (
+            profile["modelRepo"],
+            profile["deviceMap"],
+            profile["dtype"],
+            profile["attention"],
+        )
+        if self._model is not None and self._key == key:
+            emit_progress(
+                "model_load",
+                f"Reusing loaded {profile['modelRepo']} ({profile['deviceMap']}, {profile['dtype']}).",
+                started_at=started_at,
+            )
+            return self._model
+
+        # Release any previously loaded model before allocating the replacement.
+        self._model = None
+        self._key = None
+        model = load_qwen3_model(profile, started_at=started_at)
+        self._model = model
+        self._key = key
+        return model
+
+
+def generate_qwen3(payload: dict[str, Any], *, host: "Qwen3ModelHost | None" = None) -> dict[str, Any]:
     text = str(payload.get("text", "")).strip()
     if not text:
         raise ValueError("Text is required.")
@@ -1222,7 +1398,6 @@ def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
     instruct = str(payload.get("instruct") or "").strip()
 
     import torch
-    from qwen_tts import Qwen3TTSModel
 
     profile = select_qwen3_runtime_profile(
         torch,
@@ -1234,29 +1409,12 @@ def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
     model_repo = profile["modelRepo"]
     device_map = profile["deviceMap"]
     dtype_name = profile["dtype"]
-    attn_implementation = profile["attention"]
 
     started = time.time()
-    emit_progress(
-        "model_load",
-        f"Loading {model_repo} with {device_map}, {dtype_name}, {attn_implementation}...",
-        started_at=started,
-    )
-
-    load_kwargs: dict[str, Any] = {
-        "device_map": device_map,
-        "dtype": parse_qwen3_dtype(dtype_name),
-    }
-    if attn_implementation:
-        load_kwargs["attn_implementation"] = attn_implementation
-
-    try:
-        with redirect_stdout_to_stderr():
-            model = Qwen3TTSModel.from_pretrained(model_repo, **load_kwargs)
-    except Exception as exc:
-        if device_map == "mps" and dtype_name == "float16":
-            raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
-        raise
+    if host is not None:
+        model = host.acquire(profile, started_at=started)
+    else:
+        model = load_qwen3_model(profile, started_at=started)
 
     generation_kwargs: dict[str, Any] = {}
     if isinstance(payload.get("maxNewTokens"), int):
@@ -1277,7 +1435,8 @@ def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
         call_kwargs["instruct"] = instruct
 
     try:
-        wavs, sample_rate = model.generate_custom_voice(**call_kwargs)
+        with heartbeat("inference", f"Generating {language} speech with {speaker}...", started_at=started):
+            wavs, sample_rate = model.generate_custom_voice(**call_kwargs)
     except Exception as exc:
         if device_map == "mps" and dtype_name == "float16":
             raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
@@ -1290,7 +1449,12 @@ def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
     try:
         maybe_speakers = model.get_supported_speakers()
         if isinstance(maybe_speakers, list):
-            supported_speakers = [str(item) for item in maybe_speakers]
+            # The library lowercases speaker names; map them back to the canonical
+            # casing the UI uses (e.g. "ryan" -> "Ryan", "uncle_fu" -> "Uncle_Fu").
+            canonical_by_lower = {name.lower(): name for name in QWEN3_SPEAKERS}
+            supported_speakers = [
+                canonical_by_lower.get(str(item).lower(), str(item)) for item in maybe_speakers
+            ]
     except Exception:
         supported_speakers = QWEN3_SPEAKERS
 
@@ -1308,12 +1472,74 @@ def generate_qwen3(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def serve(model: str, cache_dir: str) -> None:
+    """Persistent worker: load the model once, serve many generate requests.
+
+    Each stdin line is a JSON object {"requestId": str, "payload": {...}} or
+    {"command": "shutdown"}. Results and progress are emitted as the usual
+    __RESULT__/__PROGRESS__ lines tagged with requestId so the parent can
+    correlate them on a long-lived process. A failing request reports ok:false
+    but keeps the worker alive; only EOF or an explicit shutdown ends the loop.
+
+    Reusing one process across requests skips the per-call Python/torch import
+    and (for Qwen3, via Qwen3ModelHost) the model load and first-inference
+    warmup, which together dominate wall time. Requests are processed strictly
+    serially — the parent serializes one generation per model — so a single
+    resident model is never entered concurrently.
+    """
+    global _CURRENT_REQUEST_ID
+
+    configure_cache_dir(cache_dir)
+    host = Qwen3ModelHost() if model == "qwen3" else None
+
+    while True:
+        raw_line = sys.stdin.readline()
+        if raw_line == "":  # EOF: parent closed stdin / process should exit.
+            break
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(request, dict):
+            continue
+        if request.get("command") == "shutdown":
+            break
+
+        request_id = request.get("requestId")
+        _CURRENT_REQUEST_ID = request_id if isinstance(request_id, str) else None
+        payload = request.get("payload")
+        if not isinstance(payload, dict):
+            payload = {}
+
+        try:
+            if model == "neutts":
+                if not is_neutts_python_compatible():
+                    raise RuntimeError("NeuTTS requires Python <3.14 and >=3.10.")
+                result = generate_neutts(payload)
+            elif model == "qwen3":
+                result = generate_qwen3(payload, host=host)
+            else:
+                result = generate_kani(payload)
+            emit({"ok": True, "result": result})
+        except Exception as exc:
+            emit({"ok": False, "error": str(exc), "details": traceback.format_exc()})
+        finally:
+            _CURRENT_REQUEST_ID = None
+
+
 def run() -> None:
     parser = argparse.ArgumentParser(description="Run local NeuTTS/Kani inference tasks.")
-    parser.add_argument("--action", required=True, choices=["probe", "generate"])
+    parser.add_argument("--action", required=True, choices=["probe", "generate", "serve"])
     parser.add_argument("--model", required=True, choices=["neutts", "kani", "qwen3"])
     parser.add_argument("--cache-dir", required=True)
     args = parser.parse_args()
+
+    if args.action == "serve":
+        serve(args.model, args.cache_dir)
+        return
 
     if args.model == "neutts" and args.action == "generate" and not is_neutts_python_compatible():
         raise RuntimeError("NeuTTS requires Python <3.14 and >=3.10.")

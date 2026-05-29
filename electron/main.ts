@@ -6,6 +6,10 @@ import { pathToFileURL } from "url";
 import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import {
+  createPersistentBridgeWorkerPool,
+  type PersistentBridgeWorkerPool,
+} from "./persistentBridgeWorker";
+import {
   getBootstrapPythonCommandCandidates,
   getDefaultPythonRuntimeSetup,
   getManagedPythonVersionCheckSnippet,
@@ -48,6 +52,11 @@ import {
 const isDev = !app.isPackaged;
 const PYTHON_BINARY_NAME_RE = /^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/i;
 const PYTHON_BRIDGE_TIMEOUT_MS = 5 * 60 * 1000;
+// Generation (model download + inference) can legitimately run for many minutes,
+// so it uses an inactivity watchdog instead of an absolute deadline: the bridge
+// emits a heartbeat while it works, and any output re-arms this timer. It only
+// fires when the process goes fully silent (i.e. is genuinely stuck).
+const PYTHON_BRIDGE_GENERATE_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const PYTHON_BOOTSTRAP_TIMEOUT_MS = 20 * 60 * 1000;
 const PYTHON_EXECUTABLE_TIMEOUT_MS = 20_000;
 const PYTHON_BRIDGE_MAX_STDOUT_BYTES = 125_000_000;
@@ -55,6 +64,15 @@ const PYTHON_BRIDGE_MAX_STDERR_BYTES = 1_000_000;
 const PYTHON_BOOTSTRAP_MAX_OUTPUT_BYTES = 4_000_000;
 const PYTHON_CANCEL_KILL_AFTER_MS = 2_000;
 const GENERATE_RATE_WINDOW_MS = 500;
+// Qwen3 generation reuses a resident worker (load once, serve many) so repeat
+// generations skip the per-call Python/torch import, model load, and first-
+// inference warmup. The worker is killed after this much idle time to release
+// the model's memory; the next request transparently respawns it.
+const PYTHON_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
+// Local models served by a persistent worker instead of a one-shot subprocess.
+// Scoped to Qwen3, whose load + warmup dominate its wall time; NeuTTS and Kani
+// keep the one-shot path.
+const PERSISTENT_WORKER_MODELS: ReadonlySet<LocalModel> = new Set<LocalModel>(["qwen3"]);
 protocol.registerSchemesAsPrivileged([
   {
     scheme: ELECTRON_APP_SCHEME,
@@ -83,6 +101,23 @@ const cancelledBridgeRequests = new Set<string>();
 const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
   rateWindowMs: GENERATE_RATE_WINDOW_MS,
 });
+let persistentBridgeWorkers: PersistentBridgeWorkerPool<LocalModel> | null = null;
+
+function getPersistentBridgeWorkers(): PersistentBridgeWorkerPool<LocalModel> {
+  if (!persistentBridgeWorkers) {
+    persistentBridgeWorkers = createPersistentBridgeWorkerPool<LocalModel>({
+      idleEvictMs: PYTHON_BRIDGE_WORKER_IDLE_EVICT_MS,
+      killGraceMs: PYTHON_CANCEL_KILL_AFTER_MS,
+      spawn: (model, { pythonBinary, scriptPath, cacheDir, env }) =>
+        spawn(
+          pythonBinary,
+          [scriptPath, "--action", "serve", "--model", model, "--cache-dir", cacheDir],
+          { stdio: ["pipe", "pipe", "pipe"], env, cwd: cacheDir },
+        ),
+    });
+  }
+  return persistentBridgeWorkers;
+}
 const autoPythonBinaryCache = new Map<LocalModel, PythonResolution>();
 const defaultPythonRuntimeSetupPromises = new Map<LocalModel, Promise<PythonResolution>>();
 const dynamicPythonBridgePathEntries = new Set<string>();
@@ -1077,6 +1112,41 @@ async function runPythonBridge(
   const scriptPath = getBridgeScriptPath();
   const shouldRateLimit = action === "generate";
   const requestId = sanitized.requestId;
+  // Qwen3 generation runs on a resident worker (load once, serve many). Probe
+  // and the other models keep the one-shot subprocess path below.
+  const usePersistentWorker = action === "generate" && PERSISTENT_WORKER_MODELS.has(model);
+
+  const runPersistentGenerate = async (): Promise<unknown> => {
+    await fs.access(scriptPath);
+    await fs.mkdir(cacheDir, { recursive: true });
+    const generateRequestId = requestId!; // generate always carries a requestId.
+
+    const onProgressLine = (line: string) => {
+      if (!event) return;
+      try {
+        const progress = parseBridgeProgressResult(
+          JSON.parse(line.slice(BRIDGE_PROGRESS_PREFIX.length)),
+        );
+        event.sender.send("local-tts:progress", { requestId: generateRequestId, model, ...progress });
+      } catch (err) {
+        console.warn(
+          `[local-tts:generate] Failed parsing bridge progress: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
+
+    const { stdout, stderr } = await getPersistentBridgeWorkers().run(model, {
+      requestId: generateRequestId,
+      payload: sanitized.payload,
+      spawnConfig: { pythonBinary, scriptPath, cacheDir, env: buildPythonBridgeEnv() },
+      idleTimeoutMs: PYTHON_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
+      maxStdoutBytes: PYTHON_BRIDGE_MAX_STDOUT_BYTES,
+      maxStderrBytes: PYTHON_BRIDGE_MAX_STDERR_BYTES,
+      onProgressLine,
+    });
+    return parseBridgeResult(stdout, stderr, "generate", sanitized.pythonResolution);
+  };
+
   const runBridge = async () => {
     await fs.access(scriptPath);
     await fs.mkdir(cacheDir, { recursive: true });
@@ -1115,7 +1185,11 @@ async function runPythonBridge(
       let stderrBytes = 0;
       let settled = false;
 
-      const timeoutHandle = setTimeout(() => {
+      const isGenerate = action === "generate";
+      const timeoutMs = isGenerate
+        ? PYTHON_BRIDGE_GENERATE_IDLE_TIMEOUT_MS
+        : PYTHON_BRIDGE_TIMEOUT_MS;
+      const onTimeout = () => {
         if (settled) return;
         settled = true;
         child.kill();
@@ -1123,8 +1197,21 @@ async function runPythonBridge(
           activeBridgeProcesses.delete(requestId);
           cancelledBridgeRequests.delete(requestId);
         }
-        reject(new Error(`Python bridge timed out after ${PYTHON_BRIDGE_TIMEOUT_MS / 1000}s.`));
-      }, PYTHON_BRIDGE_TIMEOUT_MS);
+        reject(new Error(isGenerate
+          ? `Python bridge produced no output for ${timeoutMs / 1000}s and was stopped (the process may be stuck).`
+          : `Python bridge timed out after ${timeoutMs / 1000}s.`));
+      };
+      let timeoutHandle = setTimeout(onTimeout, timeoutMs);
+
+      // For generation, re-arm the watchdog on any output so long-but-progressing
+      // downloads/inference (which heartbeat steadily) are never killed mid-run.
+      const bumpTimeout = isGenerate
+        ? () => {
+          if (settled) return;
+          clearTimeout(timeoutHandle);
+          timeoutHandle = setTimeout(onTimeout, timeoutMs);
+        }
+        : () => {};
 
       const cleanup = () => {
         clearTimeout(timeoutHandle);
@@ -1146,6 +1233,7 @@ async function runPythonBridge(
       };
 
       child.stdout.on("data", (chunk: Buffer) => {
+        bumpTimeout();
         stdoutBytes += chunk.byteLength;
         if (stdoutBytes > PYTHON_BRIDGE_MAX_STDOUT_BYTES) {
           rejectForOutputLimit("stdout", PYTHON_BRIDGE_MAX_STDOUT_BYTES);
@@ -1178,6 +1266,7 @@ async function runPythonBridge(
       });
 
       child.stderr.on("data", (chunk: Buffer) => {
+        bumpTimeout();
         stderrBytes += chunk.byteLength;
         if (stderrBytes > PYTHON_BRIDGE_MAX_STDERR_BYTES) {
           rejectForOutputLimit("stderr", PYTHON_BRIDGE_MAX_STDERR_BYTES);
@@ -1228,9 +1317,10 @@ async function runPythonBridge(
     });
   };
 
+  const task = usePersistentWorker ? runPersistentGenerate : runBridge;
   return shouldRateLimit
-    ? generateRateLimiter.run(model, runBridge)
-    : runBridge();
+    ? generateRateLimiter.run(model, task)
+    : task();
 }
 
 async function getDirectorySizeBytes(dirPath: string): Promise<number> {
@@ -1276,6 +1366,13 @@ async function handleClearCache(request: unknown): Promise<{ path: string; clear
 
 async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
   const { requestId } = sanitizeCancelRequest(request);
+
+  // Persistent-worker generations (Qwen3) are cancelled by killing their worker;
+  // its exit rejects the in-flight request as cancelled and the next request respawns.
+  if (persistentBridgeWorkers?.cancel(requestId)) {
+    return { cancelled: true };
+  }
+
   const child = activeBridgeProcesses.get(requestId);
   if (!child) {
     cancelledBridgeRequests.delete(requestId);
@@ -1356,6 +1453,7 @@ app.on("before-quit", () => {
   }
   activeBridgeProcesses.clear();
   cancelledBridgeRequests.clear();
+  persistentBridgeWorkers?.shutdownAll();
 });
 
 app.on("window-all-closed", () => {

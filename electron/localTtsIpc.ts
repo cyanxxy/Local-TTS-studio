@@ -600,15 +600,33 @@ export function parseBridgeResult(
     : parseBridgeGenerateResult(parsed.result);
 }
 
+// Some Python dependencies print unconditional setup noise to stderr at import
+// time (e.g. the `sox` package warns when the SoX CLI is absent, even though it
+// is unused). On a hard crash that noise must not be mistaken for the real error.
+const PYTHON_STDERR_NOISE_PATTERNS: RegExp[] = [
+  /sox: command not found/i,
+  /SoX could not be found/i,
+  /sox\.sourceforge\.net/i,
+  /have SoX/i,
+  /double-check your/i,
+  /^path variables\.?$/i,
+  /flash[-_]attn/i,
+];
+
+function isNoisyPythonStderrLine(line: string): boolean {
+  if (line.startsWith("Traceback")) return true;
+  if (line.startsWith("File ")) return true;
+  if (line.startsWith("During handling of the above exception")) return true;
+  // Decoration-only lines such as "********" or "- - -" carry no information.
+  if (/^[^A-Za-z0-9]+$/.test(line)) return true;
+  return PYTHON_STDERR_NOISE_PATTERNS.some((pattern) => pattern.test(line));
+}
+
 export function extractUserFacingPythonProcessError(stderr: string, code: number | null): string {
   const lines = stderr
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
-  const message = lines.find((line) => (
-    !line.startsWith("Traceback") &&
-    !line.startsWith("File ") &&
-    !line.startsWith("During handling of the above exception")
-  )) ?? lines.at(-1);
+  const message = lines.find((line) => !isNoisyPythonStderrLine(line)) ?? lines.at(-1);
   return message ?? `Python process exited with code ${code ?? "unknown"}.`;
 }

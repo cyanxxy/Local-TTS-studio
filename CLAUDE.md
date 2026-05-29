@@ -60,7 +60,7 @@ python/              # Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-T
 - **Audio playback**: Uses Web Audio API (`AudioContext` + `createBufferSource`), NOT `<audio>` element. Chunks scheduled with `source.start(nextPlayTime)`.
 - **WAV encoding**: IEEE Float 32-bit PCM (AudioFormat = 3). Sample rate comes from model output, never hardcoded.
 - **Kokoro voices**: `list_voices()` may return void in some kokoro-js versions — always use fallback array.
-- **Kokoro generation**: Worker splits text via local `split()` and calls `tts.generate(string, ...)` per sentence (no `tts.stream()`). Voice param is a strict literal union — cast with `as any`.
+- **Kokoro generation**: Worker builds inference units via shared `buildKokoroInferenceUnits()` (`lib/chunking.ts`) — sentences merged greedily up to a per-backend budget (`KOKORO_WEBGPU/WASM_MAX_INFERENCE_CHARS`), then `tts.generate(string, ...)` per unit (no `tts.stream()`). The reader preview (`chunkTextForModelDetailed`) uses the same builder so editor section boundaries match generated segments. Voice param is a strict literal union — cast with `as any`.
 - **Supertonic chunking**: min 100 / max 1000 chars per chunk. 0.5s silence padding between chunks.
 - **Supertonic progress**: Aggregates per-file download progress dynamically (not hardcoded file counts).
 
@@ -118,6 +118,8 @@ Sample rate is read from each model's output at runtime, never hardcoded. Allowe
 | NeuTTS Nano | `neuphonic/neutts-nano` (+ `-german`/`-french`/`-spanish`) | `neutts` (Python 3.10–3.13) | reference-audio voice cloning |
 | Kani-TTS-2 | `nineninesix/kani-tts-2-en` | `kani-tts-2` (transformers 4.56, NVIDIA NeMo) | language-tagged, no named voices |
 | Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` (Auto default) + `…-1.7B-CustomVoice` | `qwen-tts` + device-profiled `torch` | 9 speakers, 11 language options |
+
+**Qwen3 runs on a resident bridge worker** (`local_tts_bridge.py --action serve`, pooled by `electron/persistentBridgeWorker.ts`): the model loads once and serves many requests, so repeat generations skip the per-call import + model load + first-inference warmup (~2–3× faster warm). `Qwen3ModelHost` reuses the model keyed by (repo, device, dtype, attention) and reloads on change; the worker is idle-evicted after ~5 min and respawns on demand; cancel kills it. Cached loads force HF offline mode so a cached generation makes no network call. NeuTTS/Kani keep the one-shot subprocess path. See AGENTS.md → "Local bridge protocol".
 
 ## Maintenance Notes
 

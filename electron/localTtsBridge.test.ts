@@ -758,4 +758,164 @@ if "/definitely/missing/libespeak-ng.dylib" not in detected["message"]:
     expect(payload.ok).toBe(false);
     expect(payload.error).toContain("Reference audio is not valid base64-encoded WAV data.");
   });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("serve loop tags results with requestId and survives a failing request", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import io
+import json
+import sys
+import tempfile
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+def fake_generate(payload, *, host=None):
+    assert host is not None, "serve must pass a resident host for qwen3"
+    if payload.get("bad"):
+        raise RuntimeError("boom")
+    return {"wavBase64": "AAA", "sampleRate": 24000, "modelRepo": "x", "durationSec": 1.0, "elapsedSec": 0.5}
+
+bridge.generate_qwen3 = fake_generate
+
+captured = io.StringIO()
+bridge._REAL_STDOUT = captured
+sys.stdin = io.StringIO(
+    '{"requestId":"a","payload":{"text":"hi"}}\\n'
+    '{"requestId":"b","payload":{"bad":true}}\\n'
+    '{"command":"shutdown"}\\n'
+)
+
+bridge.serve("qwen3", tempfile.mkdtemp())
+
+results = [
+    json.loads(line[len(bridge.RESULT_PREFIX):])
+    for line in captured.getvalue().splitlines()
+    if line.startswith(bridge.RESULT_PREFIX)
+]
+assert len(results) == 2, results
+assert results[0]["ok"] is True and results[0]["requestId"] == "a", results[0]
+assert results[1]["ok"] is False and results[1]["requestId"] == "b", results[1]
+assert "boom" in results[1]["error"], results[1]
+assert bridge._CURRENT_REQUEST_ID is None, "request id context must reset after each request"
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("Qwen3ModelHost loads once per profile and reloads when it changes", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+calls = {"n": 0}
+def fake_load(profile, *, started_at):
+    calls["n"] += 1
+    return ("MODEL", calls["n"])
+bridge.load_qwen3_model = fake_load
+
+host = bridge.Qwen3ModelHost()
+profile = {"modelRepo": "R", "deviceMap": "cpu", "dtype": "float32", "attention": "eager"}
+first = host.acquire(dict(profile), started_at=0.0)
+second = host.acquire(dict(profile), started_at=0.0)
+assert calls["n"] == 1, calls
+assert first is second, "same profile must reuse the resident model"
+
+third = host.acquire({**profile, "dtype": "bfloat16"}, started_at=0.0)
+assert calls["n"] == 2, calls
+assert third is not second
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("generate_qwen3 reuses a host-provided model across calls", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+sys.modules["torch"] = types.ModuleType("torch")
+bridge.select_qwen3_runtime_profile = lambda *a, **k: {
+    "modelRepo": "R", "deviceMap": "cpu", "dtype": "float32", "attention": "eager",
+}
+bridge.array_to_wav_base64 = lambda _audio, _sr: "AAA"
+
+calls = {"n": 0}
+class FakeModel:
+    def generate_custom_voice(self, **_kwargs):
+        return ([[0.0, 0.1, 0.2]], 24000)
+    def get_supported_speakers(self):
+        return ["ryan"]
+def fake_load(profile, *, started_at):
+    calls["n"] += 1
+    return FakeModel()
+bridge.load_qwen3_model = fake_load
+
+host = bridge.Qwen3ModelHost()
+first = bridge.generate_qwen3({"text": "hi", "speaker": "Ryan", "language": "English"}, host=host)
+second = bridge.generate_qwen3({"text": "again", "speaker": "Ryan", "language": "English"}, host=host)
+assert calls["n"] == 1, calls
+assert first["sampleRate"] == 24000 and second["sampleRate"] == 24000
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("prefers an offline load when the model snapshot is already cached", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import os
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+sys.modules["torch"] = types.ModuleType("torch")
+bridge.parse_qwen3_dtype = lambda name: name
+bridge.qwen3_snapshot_present = lambda _repo: True
+
+seen = {}
+class FakeModel:
+    @staticmethod
+    def from_pretrained(repo, **kwargs):
+        seen["offline"] = os.environ.get("HF_HUB_OFFLINE")
+        seen["repo"] = repo
+        return "MODEL"
+qwen_module = types.ModuleType("qwen_tts")
+qwen_module.Qwen3TTSModel = FakeModel
+sys.modules["qwen_tts"] = qwen_module
+
+os.environ.pop("HF_HUB_OFFLINE", None)
+profile = {"modelRepo": "R", "deviceMap": "cpu", "dtype": "float32", "attention": "eager"}
+model = bridge.load_qwen3_model(profile, started_at=0.0)
+assert model == "MODEL"
+assert seen["offline"] == "1", seen
+assert os.environ.get("HF_HUB_OFFLINE") is None, "offline env must be restored after loading"
+
+# Verify the context manager round-trips a pre-existing value too.
+os.environ["HF_HUB_OFFLINE"] = "0"
+with bridge.huggingface_offline(True):
+    assert os.environ["HF_HUB_OFFLINE"] == "1"
+assert os.environ["HF_HUB_OFFLINE"] == "0"
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
 });

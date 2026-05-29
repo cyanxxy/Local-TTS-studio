@@ -5,10 +5,11 @@ import {
   KANI_LANGUAGE_TAG_OPTIONS,
   NEUTTS_OPTIONS,
   QWEN3_ATTENTION_OPTIONS,
-  QWEN3_DEVICE_OPTIONS,
   QWEN3_DTYPE_OPTIONS,
   QWEN3_OPTIONS,
   QWEN3_SPEAKER_OPTIONS,
+  getQwen3DeviceOptions,
+  qwen3SupportsInstruct,
   type LocalRuntimeOption,
 } from "./modelOptions";
 import { statusClass, type StatusTone } from "./utils";
@@ -155,6 +156,8 @@ export function LocalRuntimeModelInputs({
   }
 
   if (model === "qwen3") {
+    const qwen3DeviceOptions = getQwen3DeviceOptions(window.electron?.platform);
+    const qwen3InstructSupported = qwen3SupportsInstruct(qwen3Model);
     return (
       <Fragment key="qwen3">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -206,7 +209,7 @@ export function LocalRuntimeModelInputs({
               onChange={(event) => onQwen3DeviceMapChange(event.target.value)}
               className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             >
-              {QWEN3_DEVICE_OPTIONS.map((option) => (
+              {qwen3DeviceOptions.map((option) => (
                 <option key={option.value} value={option.value}>{option.label}</option>
               ))}
             </select>
@@ -218,9 +221,15 @@ export function LocalRuntimeModelInputs({
           <textarea
             value={qwen3Instruct}
             onChange={(event) => onQwen3InstructChange(event.target.value)}
-            className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 backdrop-blur-sm text-sm normal-case text-text-primary"
+            disabled={!qwen3InstructSupported}
+            className={`w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 backdrop-blur-sm text-sm normal-case text-text-primary ${qwen3InstructSupported ? "" : "opacity-50 cursor-not-allowed"}`}
             placeholder="Example: Speak warmly with a calm documentary narration style."
           />
+          {!qwen3InstructSupported && (
+            <span className="text-sm font-normal normal-case text-text-muted">
+              Style instructions are not supported by the selected model.
+            </span>
+          )}
         </label>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
