@@ -331,39 +331,89 @@ describe("localTtsIpc bridge result parsers", () => {
 
   it("parses and validates generate results", () => {
     expect(parseBridgeGenerateResult({
-      wavBase64: "UklGRg==",
+      audioTransport: "websocket-binary",
+      audioChunkCount: 2,
       sampleRate: 24000,
       modelRepo: "model/repo",
       durationSec: 1.2,
       elapsedSec: 0.4,
+      phaseTimingsSec: {
+        modelLoadSec: 0.01,
+        inferenceSec: 0.37,
+        outputEncodingSec: 0.02,
+      },
       speakerStatus: "loaded",
       speakers: ["alice"],
     })).toEqual({
-      wavBase64: "UklGRg==",
+      audioTransport: "websocket-binary",
+      audioChunkCount: 2,
       sampleRate: 24000,
       modelRepo: "model/repo",
       durationSec: 1.2,
       elapsedSec: 0.4,
+      phaseTimingsSec: {
+        modelLoadSec: 0.01,
+        inferenceSec: 0.37,
+        outputEncodingSec: 0.02,
+      },
       speakerStatus: "loaded",
       speakers: ["alice"],
     });
 
+    // NeuTTS/Kani stream their whole-text waveform as a single binary chunk and
+    // omit wavBase64/speaker metadata — the WebSocket-only generate shape.
+    const singleChunkBinary = parseBridgeGenerateResult({
+      audioTransport: "websocket-binary",
+      audioChunkCount: 1,
+      sampleRate: 22050,
+      modelRepo: "neuphonic/neutts-nano",
+      durationSec: 0.8,
+      elapsedSec: 0.3,
+      phaseTimingsSec: {
+        modelLoadSec: 0,
+        inferenceSec: 0.28,
+        outputEncodingSec: 0.01,
+      },
+    });
+    expect(singleChunkBinary).toEqual({
+      audioTransport: "websocket-binary",
+      audioChunkCount: 1,
+      sampleRate: 22050,
+      modelRepo: "neuphonic/neutts-nano",
+      durationSec: 0.8,
+      elapsedSec: 0.3,
+      phaseTimingsSec: {
+        modelLoadSec: 0,
+        inferenceSec: 0.28,
+        outputEncodingSec: 0.01,
+      },
+    });
+    expect(singleChunkBinary).not.toHaveProperty("wavBase64");
+
     const valid = {
-      wavBase64: "UklGRg==",
+      audioTransport: "websocket-binary",
+      audioChunkCount: 1,
       sampleRate: 24000,
       modelRepo: "model/repo",
       durationSec: 1.2,
       elapsedSec: 0.4,
+      phaseTimingsSec: { inferenceSec: 0.3 },
     };
     expect(() => parseBridgeGenerateResult(null)).toThrow("Invalid generation");
-    expect(() => parseBridgeGenerateResult({ ...valid, wavBase64: "" })).toThrow("wavBase64");
-    expect(() => parseBridgeGenerateResult({ ...valid, wavBase64: "x".repeat(100_000_001) })).toThrow("exceeds");
+    expect(() => parseBridgeGenerateResult({ ...valid, wavBase64: "UklGRg==" })).toThrow("wavBase64");
     expect(() => parseBridgeGenerateResult({ ...valid, sampleRate: 0 })).toThrow("sampleRate");
     expect(() => parseBridgeGenerateResult({ ...valid, modelRepo: "" })).toThrow("modelRepo");
     expect(() => parseBridgeGenerateResult({ ...valid, durationSec: -1 })).toThrow("durationSec");
     expect(() => parseBridgeGenerateResult({ ...valid, elapsedSec: Number.POSITIVE_INFINITY })).toThrow("elapsedSec");
     expect(() => parseBridgeGenerateResult({ ...valid, speakerStatus: 1 })).toThrow("speakerStatus");
     expect(() => parseBridgeGenerateResult({ ...valid, speakers: [1] })).toThrow("speakers");
+    expect(() => parseBridgeGenerateResult({ ...valid, audioTransport: "x" })).toThrow("audioTransport");
+    expect(() => parseBridgeGenerateResult({ ...valid, audioChunkCount: 0 })).toThrow("audioChunkCount");
+    expect(() => parseBridgeGenerateResult({ ...valid, phaseTimingsSec: undefined })).toThrow("phaseTimingsSec");
+    expect(() => parseBridgeGenerateResult({
+      ...valid,
+      phaseTimingsSec: { inferenceSec: Number.NaN },
+    })).toThrow("phaseTimingsSec");
   });
 
   it("parses bridge stdout result envelopes", () => {
@@ -380,7 +430,7 @@ describe("localTtsIpc bridge result parsers", () => {
       pythonBinary: "/venv/bin/python",
     });
 
-    const generateEnvelope = `${BRIDGE_RESULT_PREFIX}${JSON.stringify({
+    const legacyGenerateEnvelope = `${BRIDGE_RESULT_PREFIX}${JSON.stringify({
       ok: true,
       result: {
         wavBase64: "UklGRg==",
@@ -390,10 +440,8 @@ describe("localTtsIpc bridge result parsers", () => {
         elapsedSec: 0.5,
       },
     })}`;
-    expect(parseBridgeResult(generateEnvelope, "", "generate", pythonResolution)).toMatchObject({
-      wavBase64: "UklGRg==",
-      sampleRate: 22050,
-    });
+    expect(() => parseBridgeResult(legacyGenerateEnvelope, "", "generate", pythonResolution))
+      .toThrow("One-shot generate bridge results are not supported");
   });
 
   it("reports bridge envelope failures clearly", () => {

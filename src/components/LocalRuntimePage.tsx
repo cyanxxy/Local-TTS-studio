@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   LocalTtsCacheInfo,
+  LocalTtsAudioChunkEvent,
   LocalTtsGenerateResult,
   LocalTtsModel,
   LocalTtsProgressEvent,
@@ -12,6 +13,7 @@ import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
 import {
   KANI_OPTIONS,
   DEFAULT_KANI_LANGUAGE_TAG,
+  DEFAULT_KANI_MAX_NEW_TOKENS,
   NEUTTS_OPTIONS,
   QWEN3_ATTENTION_OPTIONS,
   QWEN3_DEVICE_OPTIONS,
@@ -24,10 +26,10 @@ import {
 } from "./localRuntime/modelOptions";
 import {
   arrayBufferToBase64,
+  float32ChunksToWavUrl,
   getNeuttsReferenceGuidance,
   inspectAudioFile,
   isLikelyWavBuffer,
-  wavBase64ToUrl,
   type StatusTone,
 } from "./localRuntime/utils";
 
@@ -41,6 +43,12 @@ interface LocalRuntimePageProps {
 }
 
 type StatusMessage = { tone: StatusTone; text: string } | null;
+
+interface ReceivedAudioChunk {
+  audio: ArrayBuffer;
+  sampleCount: number;
+  silenceAfterSamples: number;
+}
 
 function createLocalRequestId(model: LocalTtsModel): string {
   return `${model}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -57,6 +65,24 @@ function clampNumber(value: number, fallback: number, min: number, max: number):
 
 function clampInteger(value: number, fallback: number, min: number, max: number): number {
   return Math.round(clampNumber(value, fallback, min, max));
+}
+
+const GENERATION_TIMING_LABELS: Array<[string, string]> = [
+  ["modelLoadSec", "load"],
+  ["referenceEncodingSec", "reference"],
+  ["inferenceSec", "inference"],
+  ["outputEncodingSec", "encode"],
+];
+
+function formatGenerationStatus(generated: LocalTtsGenerateResult): string {
+  const timings = GENERATION_TIMING_LABELS
+    .map(([key, label]) => {
+      const value = generated.phaseTimingsSec[key];
+      return typeof value === "number" ? `${label} ${value.toFixed(2)}s` : null;
+    })
+    .filter((entry): entry is string => entry !== null);
+  const suffix = timings.length > 0 ? ` (${timings.join(", ")})` : "";
+  return `Generated ${generated.durationSec.toFixed(2)}s audio in ${generated.elapsedSec.toFixed(2)}s${suffix}.`;
 }
 
 export function LocalRuntimePage({
@@ -88,7 +114,7 @@ export function LocalRuntimePage({
   const [temperature, setTemperature] = useState(1.0);
   const [topP, setTopP] = useState(0.95);
   const [repetitionPenalty, setRepetitionPenalty] = useState(1.1);
-  const [maxNewTokens, setMaxNewTokens] = useState(3000);
+  const [maxNewTokens, setMaxNewTokens] = useState(DEFAULT_KANI_MAX_NEW_TOKENS);
   const [qwen3Model, setQwen3Model] = useState(QWEN3_OPTIONS[0].value);
   const [qwen3Speaker, setQwen3Speaker] = useState(QWEN3_SPEAKER_OPTIONS[0].value);
   const [qwen3Language, setQwen3Language] = useState(QWEN3_LANGUAGE_OPTIONS[0].value);
@@ -114,6 +140,8 @@ export function LocalRuntimePage({
   const activeRequestIdRef = useRef<string | null>(null);
   const activeProbeRequestIdRef = useRef<string | null>(null);
   const activeRequestGenerationVersionRef = useRef<number | null>(null);
+  const streamedAudioChunksRef = useRef<ReceivedAudioChunk[]>([]);
+  const streamedAudioSampleRateRef = useRef<number | null>(null);
 
   const electronAvailable = !!window.electron?.localTts;
   const qwen3LanguageOptions = useMemo(
@@ -148,6 +176,8 @@ export function LocalRuntimePage({
       URL.revokeObjectURL(audioUrlRef.current);
       audioUrlRef.current = null;
     }
+    streamedAudioChunksRef.current = [];
+    streamedAudioSampleRateRef.current = null;
     setAudioUrl(null);
     setResult(null);
   }, []);
@@ -204,7 +234,10 @@ export function LocalRuntimePage({
     setCacheInfo(info);
   }, [isCurrentPageVersion, model]);
 
-  const runProbe = useCallback(async (pageVersion: number = pageVersionRef.current) => {
+  const runProbe = useCallback(async (
+    pageVersion: number = pageVersionRef.current,
+    { allowRuntimeSetup = false }: { allowRuntimeSetup?: boolean } = {},
+  ) => {
     if (!window.electron?.localTts) return;
     runtimeVersionRef.current += 1;
     const runtimeVersion = runtimeVersionRef.current;
@@ -219,6 +252,7 @@ export function LocalRuntimePage({
         model,
         requestId,
         pythonBinary: pythonOverrideRef.current.trim() || undefined,
+        allowRuntimeSetup,
       });
       if (
         !isCurrentPageVersion(pageVersion)
@@ -310,6 +344,41 @@ export function LocalRuntimePage({
       });
     });
   }, [electronAvailable, model]);
+
+  useEffect(() => {
+    if (!electronAvailable || !window.electron?.localTts) return;
+
+    return window.electron.localTts.subscribeAudioChunk((event: LocalTtsAudioChunkEvent) => {
+      if (!mountedRef.current) return;
+      if (event.model !== model) return;
+      if (event.requestId !== activeRequestIdRef.current) return;
+      if (activeRequestGenerationVersionRef.current !== generationVersionRef.current) return;
+      if (event.sampleCount <= 0 || event.audio.byteLength !== event.sampleCount * Float32Array.BYTES_PER_ELEMENT) return;
+
+      if (event.index === 0 || streamedAudioSampleRateRef.current !== event.sampleRate) {
+        streamedAudioChunksRef.current = [];
+        streamedAudioSampleRateRef.current = event.sampleRate;
+      }
+
+      streamedAudioChunksRef.current[event.index] = {
+        audio: event.audio,
+        sampleCount: event.sampleCount,
+        silenceAfterSamples: event.silenceAfterSamples,
+      };
+      const contiguousChunks = streamedAudioChunksRef.current
+        .slice(0, event.index + 1)
+        .filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
+      if (contiguousChunks.length !== event.index + 1) return;
+
+      if (event.index === 0 || event.index + 1 === event.total) {
+        setNewAudioUrl(float32ChunksToWavUrl(contiguousChunks, event.sampleRate));
+      }
+      setStatus({
+        tone: "info",
+        text: `Received audio chunk ${event.index + 1}/${event.total}.`,
+      });
+    });
+  }, [electronAvailable, model, setNewAudioUrl]);
 
   useEffect(() => () => {
     if (!window.electron?.localTts) return;
@@ -534,11 +603,18 @@ export function LocalRuntimePage({
       if (activeRequestIdRef.current !== requestId) return;
       if (generationVersionRef.current !== generationVersion) return;
       setResult(generated);
-      setNewAudioUrl(wavBase64ToUrl(generated.wavBase64));
+      const expectedChunks = generated.audioChunkCount;
+      const sampleRate = streamedAudioSampleRateRef.current;
+      const chunks = streamedAudioChunksRef.current.slice(0, expectedChunks);
+      const completeChunks = chunks.filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
+      if (sampleRate == null || expectedChunks <= 0 || completeChunks.length !== expectedChunks) {
+        throw new Error("Generation returned incomplete streamed audio.");
+      }
+      setNewAudioUrl(float32ChunksToWavUrl(completeChunks, sampleRate));
       setGenerationProgress(null);
       setStatus({
         tone: "success",
-        text: `Generated ${generated.durationSec.toFixed(2)}s audio in ${generated.elapsedSec.toFixed(2)}s.`,
+        text: formatGenerationStatus(generated),
       });
       void refreshCacheInfo(pageVersion).catch((err: unknown) => {
         console.warn("Failed to refresh local cache info:", err);
@@ -665,7 +741,7 @@ export function LocalRuntimePage({
 
         {(model === "neutts" || model === "kani" || model === "qwen3") && (
           <LocalRuntimeRuntimeSettings
-            onRecheckRuntime={() => { void runProbe(); }}
+            onRecheckRuntime={() => { void runProbe(pageVersionRef.current, { allowRuntimeSetup: true }); }}
             onPythonOverrideChange={handlePythonOverrideChange}
             pythonOverride={pythonOverride}
             runtime={runtime}

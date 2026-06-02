@@ -24,6 +24,7 @@ export const KANI_LANGUAGE_TAG_OPTIONS: LocalRuntimeOption[] = [
 ];
 
 export const DEFAULT_KANI_LANGUAGE_TAG = KANI_LANGUAGE_TAG_OPTIONS[0].value;
+export const DEFAULT_KANI_MAX_NEW_TOKENS = 1024;
 
 export const QWEN3_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto · fastest for this device" },

@@ -41,7 +41,7 @@ Workers are created at startup and load models lazily on selection.
 
 ## Browser Audio Path
 
-This contract applies to the Studio and Reader browser-model path. Electron local-runtime pages generate complete files through the Python bridge and render their result separately.
+This contract applies to the Studio and Reader browser-model path. Electron local-runtime pages (NeuTTS, Kani, Qwen3) generate through the resident Python WebSocket bridge worker (`electron/webSocketBridgeWorker.ts` driving `python/local_tts_bridge.py --action serve-ws`), which streams binary Float32 audio chunks the renderer reassembles separately. See [Desktop local runtimes](./local-runtimes.md) for the bridge protocol.
 
 - Playback uses the Web Audio API: `AudioContext` + `AudioBufferSourceNode`.
 - Audio chunks are `Float32Array`.

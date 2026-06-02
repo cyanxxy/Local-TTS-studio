@@ -16,7 +16,6 @@ const NEUTTS_PYTHON = path.join(
   process.platform === "win32" ? "python.exe" : "python",
 );
 const RESULT_PREFIX = "__RESULT__";
-const PROGRESS_PREFIX = "__PROGRESS__";
 const SYSTEM_PYTHON = process.env.PYTHON ?? "python3";
 const HAS_SYSTEM_PYTHON = spawnSync(SYSTEM_PYTHON, [
   "-c",
@@ -26,7 +25,7 @@ const RUN_LOCAL_BRIDGE_TESTS = process.env.OPEN_TTS_RUN_LOCAL_BRIDGE_TESTS === "
   && fs.existsSync(NEUTTS_PYTHON);
 
 function runNeuttsBridge(
-  action: "probe" | "generate",
+  action: "probe",
   payload: Record<string, unknown> = {},
   env: NodeJS.ProcessEnv = process.env,
 ) {
@@ -735,37 +734,436 @@ if "/definitely/missing/libespeak-ng.dylib" not in detected["message"]:
     expect(String(payload.result?.espeakVersion)).toMatch(/eSpeak NG/i);
   });
 
-  it.runIf(RUN_LOCAL_BRIDGE_TESTS)("emits progress before returning invalid reference audio errors", () => {
-    const completed = runNeuttsBridge("generate", {
-      text: "Generate this sample locally.",
-      referenceText: "Reference transcript",
-      referenceAudioBase64: "%%%not-base64%%%",
-    });
+  it.runIf(RUN_LOCAL_BRIDGE_TESTS)("emits progress before returning invalid reference audio errors over serve-ws", () => {
+    // Generation is WebSocket-only; --action generate no longer exists. Drive a
+    // real serve-ws worker and assert the same progress + ok:false behavior the
+    // legacy one-shot generate path used to surface for invalid reference audio.
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "open-tts-bridge-"));
+    try {
+      const completed = runBridgeUnitScript(`
+import json
+import socket
+import subprocess
+import threading
+import time
 
-    expect(completed.status).toBe(0);
-    const progressLines = completed.stdout
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith(PROGRESS_PREFIX))
-      .map((line) => JSON.parse(line.slice(PROGRESS_PREFIX.length)) as { phase: string; message: string });
+def send_text(sock, payload):
+    data = json.dumps(payload).encode("utf-8")
+    if len(data) < 126:
+        header = bytes([0x81, len(data)])
+    elif len(data) <= 0xFFFF:
+        header = bytes([0x81, 126]) + len(data).to_bytes(2, "big")
+    else:
+        header = bytes([0x81, 127]) + len(data).to_bytes(8, "big")
+    sock.sendall(header + data)
 
-    expect(progressLines).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ phase: "runtime_check" }),
-      ]),
-    );
+def recv_exact(sock, size):
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise AssertionError("socket closed while reading frame")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
 
-    const payload = getResultPayload(completed.stdout);
-    expect(payload.ok).toBe(false);
-    expect(payload.error).toContain("Reference audio is not valid base64-encoded WAV data.");
+def recv_frame(sock):
+    first = recv_exact(sock, 1)[0]
+    second = recv_exact(sock, 1)[0]
+    length = second & 0x7F
+    if length == 126:
+        length = int.from_bytes(recv_exact(sock, 2), "big")
+    elif length == 127:
+        length = int.from_bytes(recv_exact(sock, 8), "big")
+    payload = recv_exact(sock, length)
+    return first & 0x0F, payload
+
+def recv_json(sock):
+    opcode, payload = recv_frame(sock)
+    assert opcode == 1, opcode
+    return json.loads(payload.decode("utf-8"))
+
+probe = socket.socket()
+probe.bind(("127.0.0.1", 0))
+port = probe.getsockname()[1]
+probe.close()
+
+worker = subprocess.Popen([
+    ${JSON.stringify(NEUTTS_PYTHON)},
+    ${JSON.stringify(BRIDGE_PATH)},
+    "--action", "serve-ws",
+    "--model", "neutts",
+    "--cache-dir", ${JSON.stringify(cacheDir)},
+    "--host", "127.0.0.1",
+    "--port", str(port),
+])
+try:
+    deadline = time.time() + 5
+    while True:
+        client = socket.socket()
+        try:
+            client.connect(("127.0.0.1", port))
+            break
+        except OSError:
+            client.close()
+            if time.time() > deadline:
+                raise
+            time.sleep(0.02)
+
+    client.sendall(
+        b"GET / HTTP/1.1\\r\\n"
+        b"Host: 127.0.0.1\\r\\n"
+        b"Upgrade: websocket\\r\\n"
+        b"Connection: Upgrade\\r\\n"
+        b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n"
+        b"Sec-WebSocket-Version: 13\\r\\n\\r\\n"
+    )
+    handshake = b""
+    while b"\\r\\n\\r\\n" not in handshake:
+        handshake += client.recv(4096)
+    assert b"101 Switching Protocols" in handshake, handshake
+
+    send_text(client, {"requestId": "ws-bad", "payload": {
+        "text": "Generate this sample locally.",
+        "referenceText": "Reference transcript",
+        "referenceAudioBase64": "%%%not-base64%%%",
+    }})
+
+    saw_runtime_check = False
+    while True:
+        message = recv_json(client)
+        if message["type"] == "progress":
+            if message.get("phase") == "runtime_check":
+                saw_runtime_check = True
+            continue
+        if message["type"] == "result":
+            assert message["ok"] is False, message
+            assert "Reference audio is not valid base64-encoded WAV data." in message["error"], message
+            break
+        raise AssertionError(message)
+    assert saw_runtime_check, "expected a runtime_check progress frame"
+
+    send_text(client, {"command": "shutdown"})
+    client.close()
+    worker.wait(timeout=5)
+finally:
+    if worker.poll() is None:
+        worker.kill()
+        worker.wait(timeout=5)
+`);
+
+      expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+    } finally {
+      fs.rmSync(cacheDir, { recursive: true, force: true });
+    }
   });
 
-  it.runIf(HAS_SYSTEM_PYTHON)("serve loop tags results with requestId and survives a failing request", () => {
+  it.runIf(HAS_SYSTEM_PYTHON)("serve_websocket sends Qwen3 progress and results without stdout result fallback", () => {
     const completed = runBridgeUnitScript(`
 import importlib.util
 import io
 import json
-import sys
+import socket
 import tempfile
+import threading
+import time
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+def send_text(sock, payload):
+    data = json.dumps(payload).encode("utf-8")
+    if len(data) < 126:
+        header = bytes([0x81, len(data)])
+    elif len(data) <= 0xFFFF:
+        header = bytes([0x81, 126]) + len(data).to_bytes(2, "big")
+    else:
+        header = bytes([0x81, 127]) + len(data).to_bytes(8, "big")
+    sock.sendall(header + data)
+
+def recv_exact(sock, size):
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise AssertionError("socket closed while reading frame")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+def recv_frame(sock):
+    first = recv_exact(sock, 1)[0]
+    second = recv_exact(sock, 1)[0]
+    length = second & 0x7F
+    if length == 126:
+        length = int.from_bytes(recv_exact(sock, 2), "big")
+    elif length == 127:
+        length = int.from_bytes(recv_exact(sock, 8), "big")
+    payload = recv_exact(sock, length)
+    return first & 0x0F, payload
+
+def recv_json(sock):
+    opcode, payload = recv_frame(sock)
+    assert opcode == 1, opcode
+    return json.loads(payload.decode("utf-8"))
+
+def fake_generate_ws(payload, *, host=None, audio_chunk_sink=None, encode_wav=True):
+    assert host is not None, "WebSocket serve must pass a resident host for qwen3"
+    assert encode_wav is False, "WebSocket Qwen3 should not base64-encode a final WAV"
+    bridge.emit_progress("inference", "working", started_at=None)
+    assert audio_chunk_sink is not None, "WebSocket Qwen3 should stream binary audio chunks"
+    audio_chunk_sink({
+        "index": 0,
+        "total": 1,
+        "sampleRate": 24000,
+        "sampleCount": 2,
+        "silenceAfterSamples": 0,
+    }, b"\\x00\\x00\\x00\\x00\\x00\\x00\\x80?")
+    return {
+        "audioTransport": "websocket-binary",
+        "audioChunkCount": 1,
+        "sampleRate": 24000,
+        "modelRepo": "x",
+        "durationSec": 1.0,
+        "elapsedSec": 0.5,
+        "phaseTimingsSec": {"modelLoadSec": 0.0, "inferenceSec": 0.48, "outputEncodingSec": 0.02},
+    }
+
+bridge.generate_qwen3 = fake_generate_ws
+captured = io.StringIO()
+bridge._REAL_STDOUT = captured
+
+probe = socket.socket()
+probe.bind(("127.0.0.1", 0))
+port = probe.getsockname()[1]
+probe.close()
+
+thread = threading.Thread(
+    target=lambda: bridge.serve_websocket("qwen3", tempfile.mkdtemp(), "127.0.0.1", port),
+    daemon=True,
+)
+thread.start()
+
+deadline = time.time() + 2
+while True:
+    client = socket.socket()
+    try:
+        client.connect(("127.0.0.1", port))
+        break
+    except OSError:
+        client.close()
+        if time.time() > deadline:
+            raise
+        time.sleep(0.02)
+
+client.sendall(
+    b"GET / HTTP/1.1\\r\\n"
+    b"Host: 127.0.0.1\\r\\n"
+    b"Upgrade: websocket\\r\\n"
+    b"Connection: Upgrade\\r\\n"
+    b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n"
+    b"Sec-WebSocket-Version: 13\\r\\n\\r\\n"
+)
+handshake = b""
+while b"\\r\\n\\r\\n" not in handshake:
+    handshake += client.recv(4096)
+assert b"101 Switching Protocols" in handshake, handshake
+
+send_text(client, {"requestId": "ws-a", "payload": {"text": "hi"}})
+progress = recv_json(client)
+chunk_meta = recv_json(client)
+opcode, audio_payload = recv_frame(client)
+result = recv_json(client)
+assert progress["type"] == "progress" and progress["requestId"] == "ws-a", progress
+assert chunk_meta["type"] == "audio_chunk" and chunk_meta["requestId"] == "ws-a", chunk_meta
+assert opcode == 2 and audio_payload == b"\\x00\\x00\\x00\\x00\\x00\\x00\\x80?", (opcode, audio_payload)
+assert result["type"] == "result" and result["ok"] is True and result["requestId"] == "ws-a", result
+assert "wavBase64" not in result["result"], result
+assert result["result"]["audioTransport"] == "websocket-binary", result
+assert bridge.RESULT_PREFIX not in captured.getvalue(), captured.getvalue()
+
+send_text(client, {"command": "shutdown"})
+client.close()
+thread.join(timeout=2)
+assert not thread.is_alive(), "WebSocket bridge did not shut down"
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON).each([
+    {
+      label: "NeuTTS",
+      model: "neutts",
+      generateFn: "generate_neutts",
+      sampleRate: 24000,
+    },
+    {
+      label: "Kani",
+      model: "kani",
+      generateFn: "generate_kani",
+      sampleRate: 22050,
+    },
+  ])(
+    "serve_websocket streams a single $label binary chunk without stdout result fallback",
+    ({ model, generateFn, sampleRate }) => {
+      const completed = runBridgeUnitScript(`
+import importlib.util
+import io
+import json
+import socket
+import tempfile
+import threading
+import time
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+def send_text(sock, payload):
+    data = json.dumps(payload).encode("utf-8")
+    if len(data) < 126:
+        header = bytes([0x81, len(data)])
+    elif len(data) <= 0xFFFF:
+        header = bytes([0x81, 126]) + len(data).to_bytes(2, "big")
+    else:
+        header = bytes([0x81, 127]) + len(data).to_bytes(8, "big")
+    sock.sendall(header + data)
+
+def recv_exact(sock, size):
+    chunks = []
+    remaining = size
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise AssertionError("socket closed while reading frame")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+def recv_frame(sock):
+    first = recv_exact(sock, 1)[0]
+    second = recv_exact(sock, 1)[0]
+    length = second & 0x7F
+    if length == 126:
+        length = int.from_bytes(recv_exact(sock, 2), "big")
+    elif length == 127:
+        length = int.from_bytes(recv_exact(sock, 8), "big")
+    payload = recv_exact(sock, length)
+    return first & 0x0F, payload
+
+def recv_json(sock):
+    opcode, payload = recv_frame(sock)
+    assert opcode == 1, opcode
+    return json.loads(payload.decode("utf-8"))
+
+def fake_generate_ws(payload, *, host=None, audio_chunk_sink=None, encode_wav=True):
+    assert host is not None, "WebSocket serve must pass a resident host"
+    assert encode_wav is False, "WebSocket generation should not base64-encode a final WAV"
+    assert audio_chunk_sink is not None, "WebSocket generation should stream binary audio chunks"
+    bridge.emit_progress("inference", "working", started_at=None)
+    audio_chunk_sink({
+        "index": 0,
+        "total": 1,
+        "sampleRate": ${sampleRate},
+        "sampleCount": 2,
+        "silenceAfterSamples": 0,
+    }, b"\\x00\\x00\\x00\\x00\\x00\\x00\\x80?")
+    return {
+        "audioTransport": "websocket-binary",
+        "audioChunkCount": 1,
+        "sampleRate": ${sampleRate},
+        "modelRepo": "x",
+        "durationSec": 1.0,
+        "elapsedSec": 0.5,
+        "phaseTimingsSec": {"modelLoadSec": 0.0, "inferenceSec": 0.48, "outputEncodingSec": 0.02},
+    }
+
+bridge.${generateFn} = fake_generate_ws
+captured = io.StringIO()
+bridge._REAL_STDOUT = captured
+
+probe = socket.socket()
+probe.bind(("127.0.0.1", 0))
+port = probe.getsockname()[1]
+probe.close()
+
+thread = threading.Thread(
+    target=lambda: bridge.serve_websocket(${JSON.stringify(model)}, tempfile.mkdtemp(), "127.0.0.1", port),
+    daemon=True,
+)
+thread.start()
+
+deadline = time.time() + 2
+while True:
+    client = socket.socket()
+    try:
+        client.connect(("127.0.0.1", port))
+        break
+    except OSError:
+        client.close()
+        if time.time() > deadline:
+            raise
+        time.sleep(0.02)
+
+client.sendall(
+    b"GET / HTTP/1.1\\r\\n"
+    b"Host: 127.0.0.1\\r\\n"
+    b"Upgrade: websocket\\r\\n"
+    b"Connection: Upgrade\\r\\n"
+    b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\\r\\n"
+    b"Sec-WebSocket-Version: 13\\r\\n\\r\\n"
+)
+handshake = b""
+while b"\\r\\n\\r\\n" not in handshake:
+    handshake += client.recv(4096)
+assert b"101 Switching Protocols" in handshake, handshake
+
+send_text(client, {"requestId": "ws-a", "payload": {"text": "hi"}})
+progress = recv_json(client)
+chunk_meta = recv_json(client)
+opcode, audio_payload = recv_frame(client)
+result = recv_json(client)
+assert progress["type"] == "progress" and progress["requestId"] == "ws-a", progress
+assert chunk_meta["type"] == "audio_chunk" and chunk_meta["requestId"] == "ws-a", chunk_meta
+assert chunk_meta["index"] == 0 and chunk_meta["total"] == 1, chunk_meta
+assert chunk_meta["silenceAfterSamples"] == 0, chunk_meta
+assert opcode == 2 and audio_payload == b"\\x00\\x00\\x00\\x00\\x00\\x00\\x80?", (opcode, audio_payload)
+assert result["type"] == "result" and result["ok"] is True and result["requestId"] == "ws-a", result
+assert "wavBase64" not in result["result"], result
+assert result["result"]["audioTransport"] == "websocket-binary", result
+assert result["result"]["audioChunkCount"] == 1, result
+assert bridge.RESULT_PREFIX not in captured.getvalue(), captured.getvalue()
+
+# A failing request must report ok:false but keep the worker alive.
+def fake_generate_fail(payload, *, host=None, audio_chunk_sink=None, encode_wav=True):
+    raise RuntimeError("boom")
+bridge.${generateFn} = fake_generate_fail
+send_text(client, {"requestId": "ws-bad", "payload": {"text": "hi"}})
+failure = recv_json(client)
+assert failure["type"] == "result" and failure["ok"] is False, failure
+assert "boom" in failure["error"], failure
+assert thread.is_alive(), "worker must survive a failing request"
+
+send_text(client, {"command": "shutdown"})
+client.close()
+thread.join(timeout=2)
+assert not thread.is_alive(), "WebSocket bridge did not shut down"
+`);
+
+      expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+    },
+  );
+
+  it.runIf(HAS_SYSTEM_PYTHON)("NeuttsModelHost loads once per profile and re-encodes the reference each request", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
 import types
 
 spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
@@ -773,34 +1171,124 @@ bridge = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 spec.loader.exec_module(bridge)
 
-def fake_generate(payload, *, host=None):
-    assert host is not None, "serve must pass a resident host for qwen3"
-    if payload.get("bad"):
-        raise RuntimeError("boom")
-    return {"wavBase64": "AAA", "sampleRate": 24000, "modelRepo": "x", "durationSec": 1.0, "elapsedSec": 0.5}
+bridge.decode_reference_audio = lambda _value: b"reference wav bytes"
+bridge.validate_reference_wav = lambda _value: None
+bridge.is_neutts_python_compatible = lambda: True
+bridge.get_installed_package_version = lambda _package: "1.2.0"
+bridge.detect_neutts_compatibility = lambda _version: "current_1_2_x_or_newer"
+bridge.prepare_neutts_runtime = lambda _mode: None
+bridge.check_espeak = lambda: (True, "eSpeak NG library 1.52", "library")
+bridge.array_to_wav_base64 = lambda _audio, _sample_rate: "UklGRg=="
 
-bridge.generate_qwen3 = fake_generate
+constructions = {"n": 0}
+class FakeNeuTTS:
+    sample_rate = 24000
 
-captured = io.StringIO()
-bridge._REAL_STDOUT = captured
-sys.stdin = io.StringIO(
-    '{"requestId":"a","payload":{"text":"hi"}}\\n'
-    '{"requestId":"b","payload":{"bad":true}}\\n'
-    '{"command":"shutdown"}\\n'
-)
+    def __init__(self, **_kwargs):
+        constructions["n"] += 1
+        self.encode_calls = 0
 
-bridge.serve("qwen3", tempfile.mkdtemp())
+    def encode_reference(self, _path):
+        self.encode_calls += 1
+        return "reference-codes"
 
-results = [
-    json.loads(line[len(bridge.RESULT_PREFIX):])
-    for line in captured.getvalue().splitlines()
-    if line.startswith(bridge.RESULT_PREFIX)
-]
-assert len(results) == 2, results
-assert results[0]["ok"] is True and results[0]["requestId"] == "a", results[0]
-assert results[1]["ok"] is False and results[1]["requestId"] == "b", results[1]
-assert "boom" in results[1]["error"], results[1]
-assert bridge._CURRENT_REQUEST_ID is None, "request id context must reset after each request"
+    def infer(self, _text, _ref_codes, _ref_text):
+        return [0.0, 0.1]
+
+module = types.ModuleType("neutts")
+module.NeuTTS = FakeNeuTTS
+sys.modules["neutts"] = module
+
+releases = {"n": 0}
+bridge.release_accelerator_memory = lambda *, started_at=None: releases.__setitem__("n", releases["n"] + 1)
+
+host = bridge.NeuttsModelHost()
+key = ("neuphonic/neutts-nano", "neuphonic/neucodec", "cpu", "cpu")
+first = host.acquire(*key, started_at=0.0)
+second = host.acquire(*key, started_at=0.0)
+assert constructions["n"] == 1, constructions
+assert releases["n"] == 0, releases
+assert first is second, "same profile must reuse the resident NeuTTS instance"
+
+third = host.acquire("neuphonic/neutts-nano", "neuphonic/neucodec", "mps", "cpu", started_at=0.0)
+assert constructions["n"] == 2, constructions
+assert releases["n"] == 1, releases
+assert third is not second
+
+# A full generate_neutts call must re-encode the reference each request (no
+# per-request reference state cached on the host).
+payload = {
+    "text": "Hello from NeuTTS.",
+    "referenceText": "Reference transcript.",
+    "referenceAudioBase64": "UklGRg==",
+}
+host2 = bridge.NeuttsModelHost()
+bridge.generate_neutts(payload, host=host2)
+bridge.generate_neutts(payload, host=host2)
+resident = host2._model
+assert constructions["n"] == 3, "second host loads exactly one NeuTTS instance"
+assert resident.encode_calls == 2, "reference must be re-encoded every request"
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("KaniModelHost reloads when max_new_tokens changes but reuses across .generate() args", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+bridge.detect_kani_package = lambda: ("kani-tts-2", "2.0.0")
+bridge.detect_kani_transformers_version = lambda: "4.56.1"
+bridge.array_to_wav_base64 = lambda _audio, _sample_rate: "UklGRg=="
+
+constructions = {"n": 0, "max_new_tokens": []}
+class FakeKaniTTS:
+    sample_rate = 22050
+    status = "no_language_tags"
+
+    def __init__(self, *_args, max_new_tokens=None, **_kwargs):
+        constructions["n"] += 1
+        constructions["max_new_tokens"].append(max_new_tokens)
+
+    def generate(self, *_args, **_kwargs):
+        return [0.0, 0.1], 22050
+
+module = types.ModuleType("kani_tts")
+module.KaniTTS = FakeKaniTTS
+sys.modules["kani_tts"] = module
+
+releases = {"n": 0}
+bridge.release_accelerator_memory = lambda *, started_at=None: releases.__setitem__("n", releases["n"] + 1)
+
+host = bridge.KaniModelHost()
+first = host.acquire("nineninesix/kani-tts-2-en", "cpu", 1024, started_at=0.0)
+second = host.acquire("nineninesix/kani-tts-2-en", "cpu", 1024, started_at=0.0)
+assert constructions["n"] == 1, constructions
+assert releases["n"] == 0, releases
+assert first is second, "same key must reuse the resident KaniTTS instance"
+
+third = host.acquire("nineninesix/kani-tts-2-en", "cpu", 4000, started_at=0.0)
+assert constructions["n"] == 2, constructions
+assert releases["n"] == 1, releases
+assert third is not second
+
+# Per-request .generate() args (temperature/top_p/...) must not force a reload.
+host2 = bridge.KaniModelHost()
+base = {"text": "Hello from Kani.", "deviceMap": "cpu"}
+bridge.generate_kani({**base, "temperature": 0.7})
+bridge.generate_kani({**base, "temperature": 1.3, "topP": 0.8})
+# generate_kani builds its own resident host only when passed one; pass host2.
+bridge.generate_kani({**base, "temperature": 0.7}, host=host2)
+bridge.generate_kani({**base, "temperature": 1.3, "topP": 0.8}, host=host2)
+# host2 saw two requests with identical constructor key -> exactly one load.
+assert host2._key == ("nineninesix/kani-tts-2-en", "cpu", 1024), host2._key
 `);
 
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);
@@ -821,16 +1309,20 @@ def fake_load(profile, *, started_at):
     calls["n"] += 1
     return ("MODEL", calls["n"])
 bridge.load_qwen3_model = fake_load
+releases = {"n": 0}
+bridge.release_accelerator_memory = lambda *, started_at=None: releases.__setitem__("n", releases["n"] + 1)
 
 host = bridge.Qwen3ModelHost()
 profile = {"modelRepo": "R", "deviceMap": "cpu", "dtype": "float32", "attention": "eager"}
 first = host.acquire(dict(profile), started_at=0.0)
 second = host.acquire(dict(profile), started_at=0.0)
 assert calls["n"] == 1, calls
+assert releases["n"] == 0, releases
 assert first is second, "same profile must reuse the resident model"
 
 third = host.acquire({**profile, "dtype": "bfloat16"}, started_at=0.0)
 assert calls["n"] == 2, calls
+assert releases["n"] == 1, releases
 assert third is not second
 `);
 
@@ -875,6 +1367,25 @@ assert first["sampleRate"] == 24000 and second["sampleRate"] == 24000
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);
   });
 
+  it.runIf(HAS_SYSTEM_PYTHON)("splits long Qwen3 text into bounded inference chunks", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+text = "First sentence. " + ("This clause is intentionally long, " * 20) + "final words."
+chunks = bridge.split_qwen3_text(text, max_chars=120)
+assert len(chunks) > 1, chunks
+assert all(len(chunk) <= 120 for chunk in chunks), chunks
+assert chunks[0] == "First sentence.", chunks
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
   it.runIf(HAS_SYSTEM_PYTHON)("prefers an offline load when the model snapshot is already cached", () => {
     const completed = runBridgeUnitScript(`
 import importlib.util
@@ -914,6 +1425,44 @@ os.environ["HF_HUB_OFFLINE"] = "0"
 with bridge.huggingface_offline(True):
     assert os.environ["HF_HUB_OFFLINE"] == "1"
 assert os.environ["HF_HUB_OFFLINE"] == "0"
+`);
+
+    expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  });
+
+  it.runIf(HAS_SYSTEM_PYTHON)("leaves Qwen3 eager by default and compiles only when explicitly enabled", () => {
+    const completed = runBridgeUnitScript(`
+import importlib.util
+import os
+import sys
+import types
+
+spec = importlib.util.spec_from_file_location("local_tts_bridge", ${JSON.stringify(BRIDGE_PATH)})
+bridge = importlib.util.module_from_spec(spec)
+assert spec.loader is not None
+spec.loader.exec_module(bridge)
+
+calls = []
+torch = types.ModuleType("torch")
+def fake_compile(model, *, mode):
+    calls.append((model, mode))
+    return ("compiled", model, mode)
+torch.compile = fake_compile
+sys.modules["torch"] = torch
+
+class FakeQwen:
+    def __init__(self):
+        self.model = "inner"
+
+os.environ.pop("OPEN_TTS_ENABLE_QWEN3_TORCH_COMPILE", None)
+model = bridge.maybe_compile_qwen3_model(FakeQwen(), started_at=0.0)
+assert calls == [], calls
+assert model.model == "inner", model.model
+
+os.environ["OPEN_TTS_ENABLE_QWEN3_TORCH_COMPILE"] = "1"
+model = bridge.maybe_compile_qwen3_model(FakeQwen(), started_at=0.0)
+assert calls == [("inner", "reduce-overhead")], calls
+assert model.model == ("compiled", "inner", "reduce-overhead"), model.model
 `);
 
     expect(completed.status, completed.stderr || completed.stdout).toBe(0);

@@ -39,9 +39,9 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 |---|---|---|:---:|:---:|---|
 | **Kokoro-82M** | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 24 kHz browser model, 24 named voices |
 | **Supertonic TTS** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 44.1 kHz browser model, 10 voices |
-| **NeuTTS Nano** | Neuphonic, via local Python bridge | `/desktop/neutts` | No | Yes | Reference-audio voice cloning; Python runtime is external |
-| **Kani-TTS-2** | `nineninesix/kani-tts-2-en`, via local Python bridge | `/desktop/kani` | No | Yes | Language/accent tags, no named voices |
-| **Qwen3-TTS CustomVoice** | Qwen 0.6B / 1.7B, via local Python bridge | `/desktop/qwen3` | No | Yes | Auto-selects model + device profile for CUDA, Apple MPS, or CPU |
+| **NeuTTS Nano** | Neuphonic, via local Python bridge | `/desktop/neutts` | No | Yes | Reference-audio voice cloning; managed Python setup available |
+| **Kani-TTS-2** | `nineninesix/kani-tts-2-en`, via local Python bridge | `/desktop/kani` | No | Yes | Language/accent tags, no named voices; managed Python setup available |
+| **Qwen3-TTS CustomVoice** | Qwen 0.6B / 1.7B, via local Python bridge | `/desktop/qwen3` | No | Yes | Auto-selects 0.6B + device profile for CUDA, Apple MPS, or CPU; 1.7B is manual |
 
 > The deployed web app exposes Studio and Reader. Desktop-only routes live under `/desktop/*` and are opened by Electron.
 
@@ -59,7 +59,7 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 | **Creator presets** | One-click TikTok Voiceover, YouTube Shorts, and YouTube Long-form profiles. |
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
 | **Offline-ready** | Model weights cache in-browser (IndexedDB + Cache API) for repeat, network-free use. |
-| **Desktop runtimes** | Electron adds optional NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS through a local Python bridge. |
+| **Desktop runtimes** | Electron adds optional NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS through a resident local Python WebSocket bridge. |
 
 ---
 
@@ -82,12 +82,14 @@ The web app is served at [`http://localhost:5173/studio`](http://localhost:5173/
 | `npm run dev:desktop` · `npm run dev:electron` | Vite + Electron desktop app |
 | `npm run build` · `npm run build:web` | Type check + production web build |
 | `npm run build:desktop` · `npm run build:electron` | Web build + compile Electron main process |
+| `npm run build:electron:main` | Compile Electron main/preload code only |
 | `npm run dist` | Package the desktop app into `release/` |
+| `npm run preview` | Preview the production web build locally |
 | `npm run lint` | ESLint |
 | `npm run test` · `npm run test:watch` · `npm run test:coverage` | Vitest |
 | `npm run eval:inference` | Reproducible inference-speed benchmark (see [docs](./docs/performance.md)) |
 
-Packaged desktop builds bundle the Electron shell and the Python bridge script. They do **not** ship Python or model-specific Python dependencies — see [local runtime setup](./docs/local-runtimes.md).
+Packaged desktop builds bundle the Electron shell and the Python bridge script. They do **not** ship Python, model weights, or model-specific Python dependencies. On first use, Electron can create managed per-runtime virtualenvs when Python 3.12 or `uv` is available; see [local runtime setup](./docs/local-runtimes.md).
 
 ---
 
@@ -97,6 +99,7 @@ Packaged desktop builds bundle the Electron shell and the Python bridge script. 
 - WebGPU is preferred where available; the WASM fallback is expected behavior.
 - iPhone and iPad browsers expose Supertonic only — Kokoro is intentionally disabled on iOS pending further validation.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.
+- Electron local runtimes generate through `local_tts_bridge.py --action serve-ws`, with metadata over loopback WebSocket JSON and audio as binary Float32 chunks.
 - `vercel.json` provides SPA rewrites plus COOP/COEP headers, which keep the WASM fallback cross-origin isolated (and multi-threaded) for the browser build.
 
 ---

@@ -5,7 +5,6 @@ export const BRIDGE_RESULT_PREFIX = "__RESULT__";
 export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
 export const LOCAL_MODELS = ["neutts", "kani", "qwen3"] as const;
 
-const MAX_GENERATED_AUDIO_BASE64_LENGTH = 100_000_000;
 const MAX_TEXT_LENGTH = 6000;
 const MAX_REFERENCE_TEXT_LENGTH = 2000;
 const MAX_REFERENCE_AUDIO_BASE64_LENGTH = 25_000_000;
@@ -138,13 +137,15 @@ export interface BridgeProbeResult {
 }
 
 export interface BridgeGenerateResult {
-  wavBase64: string;
   sampleRate: number;
   modelRepo: string;
   durationSec: number;
   elapsedSec: number;
   speakerStatus?: string;
   speakers?: string[];
+  audioTransport: "websocket-binary";
+  audioChunkCount: number;
+  phaseTimingsSec: Record<string, number>;
 }
 
 export interface BridgeProgressResult {
@@ -208,6 +209,12 @@ export function parseOptionalNumber(
   if (value < min || value > max) {
     throw new Error(`\`${field}\` must be between ${min} and ${max}.`);
   }
+  return value;
+}
+
+export function parseOptionalBoolean(value: unknown, field: string): boolean | undefined {
+  if (value == null) return undefined;
+  if (typeof value !== "boolean") throw new Error(`\`${field}\` must be a boolean.`);
   return value;
 }
 
@@ -517,11 +524,8 @@ export function parseBridgeProgressResult(value: unknown): BridgeProgressResult 
 
 export function parseBridgeGenerateResult(result: unknown): BridgeGenerateResult {
   if (!isRecord(result)) throw new Error("Invalid generation response from Python bridge.");
-  if (typeof result.wavBase64 !== "string" || result.wavBase64.length === 0) {
-    throw new Error("Generation response missing `wavBase64`.");
-  }
-  if (result.wavBase64.length > MAX_GENERATED_AUDIO_BASE64_LENGTH) {
-    throw new Error("Generation response audio exceeds maximum allowed size.");
+  if ("wavBase64" in result) {
+    throw new Error("Generation response must not include `wavBase64`; local generation is WebSocket-binary only.");
   }
   if (typeof result.sampleRate !== "number" || !Number.isFinite(result.sampleRate) || result.sampleRate <= 0) {
     throw new Error("Generation response has invalid `sampleRate`.");
@@ -535,13 +539,36 @@ export function parseBridgeGenerateResult(result: unknown): BridgeGenerateResult
   if (typeof result.elapsedSec !== "number" || !Number.isFinite(result.elapsedSec) || result.elapsedSec < 0) {
     throw new Error("Generation response has invalid `elapsedSec`.");
   }
+  if (result.audioTransport !== "websocket-binary") {
+    throw new Error("Generation response has invalid `audioTransport`.");
+  }
+  if (
+    typeof result.audioChunkCount !== "number"
+    || !Number.isInteger(result.audioChunkCount)
+    || result.audioChunkCount <= 0
+  ) {
+    throw new Error("Generation response has invalid `audioChunkCount`.");
+  }
+  if (!isRecord(result.phaseTimingsSec)) {
+    throw new Error("Generation response missing `phaseTimingsSec`.");
+  }
+
+  const phaseTimingsSec: Record<string, number> = {};
+  for (const [key, value] of Object.entries(result.phaseTimingsSec)) {
+    if (!key || typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+      throw new Error("Generation response has invalid `phaseTimingsSec`.");
+    }
+    phaseTimingsSec[key] = value;
+  }
 
   const parsed: BridgeGenerateResult = {
-    wavBase64: result.wavBase64,
     sampleRate: result.sampleRate,
     modelRepo: result.modelRepo,
     durationSec: result.durationSec,
     elapsedSec: result.elapsedSec,
+    audioTransport: result.audioTransport,
+    audioChunkCount: result.audioChunkCount,
+    phaseTimingsSec,
   };
 
   if (result.speakerStatus != null) {
@@ -587,6 +614,35 @@ export function parseBridgeResult(
   } catch (err) {
     throw new Error(`Failed parsing bridge result: ${err instanceof Error ? err.message : String(err)}`);
   }
+
+  if (!parsed.ok) {
+    if (parsed.details) {
+      console.error(`[local-tts:${action}] Python bridge details\n${parsed.details}`);
+    }
+    throw new Error(parsed.error ?? "Python bridge failed.");
+  }
+
+  if (action !== "probe") {
+    throw new Error("One-shot generate bridge results are not supported; generation is WebSocket-binary only.");
+  }
+
+  return parseBridgeProbeResult(parsed.result, pythonResolution);
+}
+
+export function parseBridgeEnvelopeResult(
+  decoded: unknown,
+  action: BridgeAction,
+  pythonResolution: PythonResolution,
+): BridgeProbeResult | BridgeGenerateResult {
+  if (!isRecord(decoded) || typeof decoded.ok !== "boolean") {
+    throw new Error("Missing required `ok` field.");
+  }
+  const parsed = {
+    ok: decoded.ok,
+    result: decoded.result,
+    error: typeof decoded.error === "string" ? decoded.error : undefined,
+    details: typeof decoded.details === "string" ? decoded.details : undefined,
+  };
 
   if (!parsed.ok) {
     if (parsed.details) {

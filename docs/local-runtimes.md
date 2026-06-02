@@ -2,6 +2,8 @@
 
 Electron exposes optional local Python-runtime integrations for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS. The desktop package includes the Electron app and bridge script, but it does not bundle Python or model weights.
 
+All three runtimes generate over the same resident WebSocket bridge worker — see [Resident worker (warm reuse)](#resident-worker-warm-reuse). The one-shot `probe` action is the only place the bridge runs as a fresh subprocess.
+
 On first use, if no usable runtime is found and no Python executable override is set, Electron creates a managed virtual environment and installs the selected runtime package automatically:
 
 - NeuTTS: `.venv-neutts` with `neutts`
@@ -65,7 +67,7 @@ Requirements:
 - `pip install -U "transformers==4.56.0"`
 - An importable `kani_tts`
 
-On macOS, the bridge defaults Kani to CPU to avoid known MPS issues.
+On macOS, the bridge defaults Kani to CPU to avoid known MPS issues. The app uses a 1024-token Kani decode cap by default for practical CPU latency; increase Max Tokens only when you need longer output.
 
 The `nineninesix/kani-tts-2-en` model exposes language/accent tags. Open TTS defaults to `en_us` and exposes the known English tags in the app (`en_us`, `en_nyork`, `en_oakl`, `en_glasg`, `en_bost`, `en_scou`) because generating without a tag can produce unstable or odd-sounding speech.
 
@@ -110,9 +112,19 @@ The Qwen3 page exposes speaker, supported language, optional instruction prompt,
 
 Long first-run generations are expected: the model downloads on first use, and inference can take minutes on CPU or for the larger model. The bridge emits a steady heartbeat while it works, and the desktop app treats the generation timeout as an inactivity watchdog — it only stops a run that goes fully silent, never one that is slow but still progressing.
 
-### Resident worker (warm reuse)
+## Resident worker (warm reuse)
 
-Qwen3 generation runs on a persistent bridge worker (`local_tts_bridge.py --action serve`) rather than a fresh subprocess per request. The worker imports torch and loads the model once, then serves many requests over stdin, so only the first generation pays the Python/torch import, model load, and first-inference accelerator warmup. Repeat generations with the same model/device/dtype reuse the resident model and are roughly 2–3× faster (on Apple MPS, a warm 0.6B request is inference-only). Switching the model repo, device, dtype, or attention implementation transparently reloads. The worker is killed after a few minutes idle to release the model's memory, and the next request respawns it; cancelling a generation also kills the worker (the next request reloads). Requests are serialized — one Qwen3 generation runs at a time.
+All three local runtimes — NeuTTS, Kani, and Qwen3 — generate over a resident WebSocket bridge worker (`local_tts_bridge.py --action serve-ws`, pooled by `electron/webSocketBridgeWorker.ts`) rather than a fresh subprocess per request. Generation is WebSocket-only: the worker opens a loopback TCP server, accepts one RFC6455 WebSocket connection, and exchanges request/progress/result metadata as JSON frames while audio streams as binary Float32 PCM (no base64). Successful results include `audioTransport:"websocket-binary"`, `audioChunkCount`, and `phaseTimingsSec`; `wavBase64` is rejected. The legacy stdin `serve` action and the one-shot `generate` action are gone; `probe` is the only one-shot subprocess action.
+
+The worker imports the runtime and loads the model once, then serves many requests, so only the first generation pays the Python/torch import, model load, and first-inference accelerator warmup. Repeat generations with the same profile reuse the resident model and are roughly 2–3× faster (on Apple MPS, a warm Qwen3 0.6B request is inference-only). A `make_model_host(model)` factory builds the right resident host:
+
+- **Qwen3** — keyed by (repo, device, dtype, attention); reloads when any of those change. Text is chunked and streamed one binary frame per chunk.
+- **NeuTTS** — keyed by (backbone repo, codec repo, backbone device, codec device). Reference audio, reference text, and target text vary per request, so the reference is re-encoded every request and reference codes are not cached. Whole-text inference is unchanged (no sentence chunking) and streams as a single binary chunk.
+- **Kani** — keyed by (model repo, device map, max new tokens); `max_new_tokens` is a `KaniTTS` constructor argument, so changing it forces a reload. `language_tag`, `temperature`, `top_p`, and `repetition_penalty` vary per request. Whole-text inference is unchanged and streams as a single binary chunk.
+
+The worker is killed after a few minutes idle to release the model's memory, and the next request respawns it; cancelling a generation also kills the worker (the next request reloads). Requests are serialized per model — one generation runs at a time.
+
+Latency tuning: the worker sets `TCP_NODELAY` on the accepted loopback socket (best-effort) to disable Nagle, uses the literal `127.0.0.1` to skip DNS/IPv6 fallback, and keeps the model resident so warm requests are inference-only. The transport is pure Python stdlib sockets plus the Node global `WebSocket` (no `ws` dependency), so it works on macOS, Windows, and Linux.
 
 When the model is already cached, the worker loads it with Hugging Face offline mode forced on, so a cached generation never makes a network request (transformers' tokenizer setup otherwise calls `model_info()` against huggingface.co on every load). The first-run download path is unaffected, and an incomplete cache falls back to an online load.
 

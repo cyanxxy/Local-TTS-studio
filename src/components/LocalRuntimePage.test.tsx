@@ -3,6 +3,7 @@ import { useState, type ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LocalRuntimePage } from "./LocalRuntimePage";
 import type {
+  LocalTtsAudioChunkEvent,
   LocalTtsCacheInfo,
   LocalTtsGenerateResult,
   LocalTtsModel,
@@ -45,11 +46,17 @@ const baseCacheInfo: LocalTtsCacheInfo = {
 };
 
 const baseGenerateResult: LocalTtsGenerateResult = {
-  wavBase64: "UklGRldBVkU=",
+  audioTransport: "websocket-binary",
+  audioChunkCount: 1,
   sampleRate: 22_050,
   modelRepo: "nineninesix/kani-tts-2-en",
   durationSec: 1.25,
   elapsedSec: 0.42,
+  phaseTimingsSec: {
+    modelLoadSec: 0.01,
+    inferenceSec: 0.39,
+    outputEncodingSec: 0.02,
+  },
 };
 
 const validWavBytes = new Uint8Array([
@@ -150,6 +157,36 @@ async function emitProgress(listener: ((event: LocalTtsProgressEvent) => void) |
   });
 }
 
+async function emitAudioChunk(
+  listener: ((event: LocalTtsAudioChunkEvent) => void) | null,
+  event: LocalTtsAudioChunkEvent,
+) {
+  await act(async () => {
+    listener?.(event);
+    await Promise.resolve();
+  });
+}
+
+async function emitGeneratedAudioChunk(
+  listener: ((event: LocalTtsAudioChunkEvent) => void) | null,
+  requestId: string,
+  model: LocalTtsModel,
+  sampleRate = 22_050,
+) {
+  const audioBuffer = new ArrayBuffer(2 * Float32Array.BYTES_PER_ELEMENT);
+  new Float32Array(audioBuffer).set([0.25, -0.25]);
+  await emitAudioChunk(listener, {
+    requestId,
+    model,
+    index: 0,
+    total: 1,
+    sampleRate,
+    sampleCount: 2,
+    silenceAfterSamples: 0,
+    audio: audioBuffer,
+  });
+}
+
 describe("LocalRuntimePage", () => {
   const probe = vi.fn();
   const generate = vi.fn();
@@ -157,7 +194,9 @@ describe("LocalRuntimePage", () => {
   const getCacheInfo = vi.fn();
   const clearCache = vi.fn();
   const subscribeProgress = vi.fn();
+  const subscribeAudioChunk = vi.fn();
   let progressListener: ((event: LocalTtsProgressEvent) => void) | null = null;
+  let audioChunkListener: ((event: LocalTtsAudioChunkEvent) => void) | null = null;
 
   beforeEach(() => {
     probe.mockReset();
@@ -166,7 +205,9 @@ describe("LocalRuntimePage", () => {
     getCacheInfo.mockReset();
     clearCache.mockReset();
     subscribeProgress.mockReset();
+    subscribeAudioChunk.mockReset();
     progressListener = null;
+    audioChunkListener = null;
 
     probe.mockResolvedValue(baseProbe);
     generate.mockResolvedValue(baseGenerateResult);
@@ -178,6 +219,14 @@ describe("LocalRuntimePage", () => {
       return () => {
         if (progressListener === listener) {
           progressListener = null;
+        }
+      };
+    });
+    subscribeAudioChunk.mockImplementation((listener: (event: LocalTtsAudioChunkEvent) => void) => {
+      audioChunkListener = listener;
+      return () => {
+        if (audioChunkListener === listener) {
+          audioChunkListener = null;
         }
       };
     });
@@ -219,6 +268,7 @@ describe("LocalRuntimePage", () => {
         getCacheInfo,
         clearCache,
         subscribeProgress,
+        subscribeAudioChunk,
       },
     };
   });
@@ -252,6 +302,7 @@ describe("LocalRuntimePage", () => {
       expect(probe).toHaveBeenCalledWith(expect.objectContaining({
         model: "neutts",
         pythonBinary: undefined,
+        allowRuntimeSetup: false,
       }));
     });
 
@@ -275,6 +326,7 @@ describe("LocalRuntimePage", () => {
       expect(probe).toHaveBeenLastCalledWith(expect.objectContaining({
         model: "neutts",
         pythonBinary: "/custom/venv/bin/python",
+        allowRuntimeSetup: true,
       }));
     });
 
@@ -393,9 +445,16 @@ describe("LocalRuntimePage", () => {
     expect(screen.queryByText(baseProbe.message)).not.toBeInTheDocument();
   });
 
-  it("renders progress for first-run runtime setup during probe", async () => {
-    const pendingProbe = createDeferred<LocalTtsProbeResult>();
-    probe.mockReturnValue(pendingProbe.promise);
+  it("renders progress for first-run runtime setup during explicit probe", async () => {
+    const setupProbe = createDeferred<LocalTtsProbeResult>();
+    probe
+      .mockResolvedValueOnce({
+        ...baseProbe,
+        ready: false,
+        message: "Qwen3-TTS runtime is not installed.",
+        package: "qwen-tts",
+      })
+      .mockReturnValueOnce(setupProbe.promise);
 
     renderPage({
       model: "qwen3",
@@ -406,9 +465,21 @@ describe("LocalRuntimePage", () => {
     await waitFor(() => {
       expect(probe).toHaveBeenCalledTimes(1);
     });
+    expect(probe.mock.calls[0][0]).toMatchObject({
+      model: "qwen3",
+      allowRuntimeSetup: false,
+    });
 
-    const request = probe.mock.calls[0][0] as { requestId: string };
+    await screen.findByText("Qwen3-TTS runtime is not installed.");
+    fireEvent.click(screen.getByRole("button", { name: /re-check runtime/i }));
+
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalledTimes(2);
+    });
+
+    const request = probe.mock.calls[1][0] as { requestId: string; allowRuntimeSetup?: boolean };
     expect(request.requestId).toMatch(/^qwen3-probe-/);
+    expect(request.allowRuntimeSetup).toBe(true);
 
     await emitProgress(progressListener, {
       requestId: request.requestId,
@@ -431,20 +502,26 @@ describe("LocalRuntimePage", () => {
     expect(screen.queryByText(/Stale setup progress/)).not.toBeInTheDocument();
 
     await act(async () => {
-      pendingProbe.resolve({
+      setupProbe.resolve({
         ...baseProbe,
         message: "Qwen3-TTS runtime is ready.",
         package: "qwen-tts",
       });
-      await pendingProbe.promise;
+      await setupProbe.promise;
     });
 
     expect(await screen.findByText("Qwen3-TTS runtime is ready.")).toBeInTheDocument();
   });
 
-  it("clears runtime busy after probe setup fails and ignores late setup progress", async () => {
-    const pendingProbe = createDeferred<LocalTtsProbeResult>();
-    probe.mockReturnValue(pendingProbe.promise);
+  it("clears runtime busy after explicit probe setup fails and ignores late setup progress", async () => {
+    const setupProbe = createDeferred<LocalTtsProbeResult>();
+    probe
+      .mockResolvedValueOnce({
+        ...baseProbe,
+        ready: false,
+        message: "Kani runtime is not installed.",
+      })
+      .mockReturnValueOnce(setupProbe.promise);
 
     renderPage();
 
@@ -452,7 +529,15 @@ describe("LocalRuntimePage", () => {
       expect(probe).toHaveBeenCalledTimes(1);
     });
 
-    const request = probe.mock.calls[0][0] as { requestId: string };
+    await screen.findByText("Kani runtime is not installed.");
+    fireEvent.click(screen.getByRole("button", { name: /re-check runtime/i }));
+
+    await waitFor(() => {
+      expect(probe).toHaveBeenCalledTimes(2);
+    });
+
+    const request = probe.mock.calls[1][0] as { requestId: string; allowRuntimeSetup?: boolean };
+    expect(request.allowRuntimeSetup).toBe(true);
 
     await emitProgress(progressListener, {
       requestId: request.requestId,
@@ -465,8 +550,8 @@ describe("LocalRuntimePage", () => {
     expect(await screen.findByText("Installing Kani runtime... (3.1s)")).toBeInTheDocument();
 
     await act(async () => {
-      pendingProbe.reject(new Error("Kani setup failed."));
-      await pendingProbe.promise.catch(() => undefined);
+      setupProbe.reject(new Error("Kani setup failed."));
+      await setupProbe.promise.catch(() => undefined);
     });
 
     expect(await screen.findByText("Kani setup failed.")).toBeInTheDocument();
@@ -514,8 +599,10 @@ describe("LocalRuntimePage", () => {
     const explicitRequest = probe.mock.calls[1][0] as {
       requestId: string;
       pythonBinary?: string;
+      allowRuntimeSetup?: boolean;
     };
     expect(explicitRequest.pythonBinary).toBe("/custom/bin/python");
+    expect(explicitRequest.allowRuntimeSetup).toBe(true);
 
     await emitProgress(progressListener, {
       requestId: initialRequest.requestId,
@@ -863,6 +950,9 @@ describe("LocalRuntimePage", () => {
   });
 
   it("generates Kani audio, refreshes cache, and clears or re-downloads the cache", async () => {
+    const generateDeferred = createDeferred<LocalTtsGenerateResult>();
+    generate.mockReturnValueOnce(generateDeferred.promise);
+
     renderPage();
 
     await waitFor(() => {
@@ -886,6 +976,17 @@ describe("LocalRuntimePage", () => {
 
     await waitFor(() => {
       expect(generate).toHaveBeenCalledTimes(1);
+    });
+
+    const requestId = generate.mock.calls[0][0].requestId as string;
+    await emitGeneratedAudioChunk(audioChunkListener, requestId, "kani");
+
+    await act(async () => {
+      generateDeferred.resolve(baseGenerateResult);
+      await generateDeferred.promise;
+    });
+
+    await waitFor(() => {
       expect(screen.getByText("Output Audio")).toBeInTheDocument();
     });
 
@@ -936,12 +1037,8 @@ describe("LocalRuntimePage", () => {
       exists: true,
       sizeBytes: 4096,
     } satisfies LocalTtsCacheInfo);
-    generate.mockResolvedValue({
-      ...baseGenerateResult,
-      modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-      speakerStatus: "Aiden · English",
-      speakers: ["Ryan", "Aiden"],
-    } satisfies LocalTtsGenerateResult);
+    const generateDeferred = createDeferred<LocalTtsGenerateResult>();
+    generate.mockReturnValue(generateDeferred.promise);
 
     renderPage({
       model: "qwen3",
@@ -990,7 +1087,45 @@ describe("LocalRuntimePage", () => {
 
     await waitFor(() => {
       expect(generate).toHaveBeenCalledTimes(1);
-      expect(screen.getByText("Output Audio")).toBeInTheDocument();
+    });
+
+    const requestId = generate.mock.calls[0][0].requestId as string;
+    const audioBuffer = new ArrayBuffer(2 * Float32Array.BYTES_PER_ELEMENT);
+    new Float32Array(audioBuffer).set([0.25, -0.25]);
+    await emitAudioChunk(audioChunkListener, {
+      requestId,
+      model: "qwen3",
+      index: 0,
+      total: 1,
+      sampleRate: 24000,
+      sampleCount: 2,
+      silenceAfterSamples: 0,
+      audio: audioBuffer,
+    });
+
+    expect(screen.getByText("Output Audio")).toBeInTheDocument();
+
+    await act(async () => {
+      generateDeferred.resolve({
+        sampleRate: 24000,
+        audioTransport: "websocket-binary",
+        audioChunkCount: 1,
+        modelRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+        durationSec: 1.25,
+        elapsedSec: 0.42,
+        phaseTimingsSec: {
+          modelLoadSec: 0.01,
+          inferenceSec: 0.39,
+          outputEncodingSec: 0.02,
+        },
+        speakerStatus: "Aiden · English",
+        speakers: ["Ryan", "Aiden"],
+      });
+      await generateDeferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByText(/Qwen\/Qwen3-TTS-12Hz-1\.7B-CustomVoice/)).toBeInTheDocument();
     });
 
     expect(generate.mock.calls[0][0]).toMatchObject({
@@ -1009,8 +1144,95 @@ describe("LocalRuntimePage", () => {
         maxNewTokens: 2304,
       },
     });
-    expect(screen.getByText(/Qwen\/Qwen3-TTS-12Hz-1\.7B-CustomVoice/)).toBeInTheDocument();
   });
+
+  it.each(["neutts", "kani"] as const)(
+    "drives the streamed-binary path for %s without wavBase64",
+    async (model) => {
+      probe.mockResolvedValue({
+        ...baseProbe,
+        message: `${model} runtime is ready.`,
+        package: model === "neutts" ? "neutts" : "kani-tts-2",
+      });
+      const generateDeferred = createDeferred<LocalTtsGenerateResult>();
+      generate.mockReturnValue(generateDeferred.promise);
+
+      renderPage(getRuntimePageProps(model));
+
+      // NeuTTS gates generation on a reference clip + transcript, so supply both
+      // before the Generate button enables.
+      if (model === "neutts") {
+        await screen.findByRole("button", { name: /re-check runtime/i });
+        const referenceInput = screen.getAllByLabelText(/reference audio/i)[0];
+        const wavFile = new File([validWavBytes], "reference.wav", { type: "audio/wav" });
+        await act(async () => {
+          fireEvent.change(referenceInput, { target: { files: [wavFile] } });
+        });
+        await screen.findByText(/loaded reference audio: reference\.wav/i);
+        fireEvent.change(screen.getByPlaceholderText(/paste the exact spoken transcript/i), {
+          target: { value: "This is the exact transcript." },
+        });
+      }
+
+      await waitFor(() => {
+        expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+
+      await waitFor(() => {
+        expect(generate).toHaveBeenCalledTimes(1);
+      });
+
+      const requestId = generate.mock.calls[0][0].requestId as string;
+      const modelRepo = model === "neutts"
+        ? "neuphonic/neutts-nano"
+        : "nineninesix/kani-tts-2-en";
+      const audioBuffer = new ArrayBuffer(2 * Float32Array.BYTES_PER_ELEMENT);
+      new Float32Array(audioBuffer).set([0.25, -0.25]);
+      await emitAudioChunk(audioChunkListener, {
+        requestId,
+        model,
+        index: 0,
+        total: 1,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+        audio: audioBuffer,
+      });
+
+      // The single binary chunk reassembles into a playable audio URL before the
+      // generate promise even settles.
+      expect(screen.getByText("Output Audio")).toBeInTheDocument();
+      expect(screen.getByText("Output Audio").parentElement?.querySelector("audio")?.getAttribute("src"))
+        .toBe("blob:mock-url");
+
+      await act(async () => {
+        generateDeferred.resolve({
+          sampleRate: 24000,
+          audioTransport: "websocket-binary",
+          audioChunkCount: 1,
+          modelRepo,
+          durationSec: 1.0,
+          elapsedSec: 0.5,
+          phaseTimingsSec: {
+            modelLoadSec: 0.01,
+            inferenceSec: 0.47,
+            outputEncodingSec: 0.02,
+          },
+        });
+        await generateDeferred.promise;
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText(new RegExp(modelRepo.replace(/[/]/g, "\\/")))).toBeInTheDocument();
+      });
+
+      // No wavBase64 was returned, so the URL must have come from the streamed
+      // Float32 chunks, not the base64 branch.
+      expect(URL.createObjectURL).toHaveBeenCalled();
+    },
+  );
 
   it("handles runtime startup errors", async () => {
     probe.mockRejectedValueOnce(new Error("runtime missing"));

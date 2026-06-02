@@ -13,9 +13,12 @@ import base64
 import binascii
 import ctypes
 import ctypes.util
+import gc
+import hashlib
 import io
 import json
 import os
+import socket
 import shutil
 import subprocess
 import sys
@@ -27,7 +30,7 @@ import wave
 from contextlib import contextmanager
 from glob import glob
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 if sys.platform == "darwin":
     os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
@@ -44,12 +47,14 @@ _REAL_STDOUT = sys.stdout
 # for the one-shot probe/generate actions, where the parent owns one process per
 # request and needs no correlation id.
 _CURRENT_REQUEST_ID: str | None = None
+_PROGRESS_SINK: Callable[[dict[str, Any]], None] | None = None
 HEARTBEAT_INTERVAL_SEC = 10.0
 NEUTTS_MIN_PYTHON = (3, 10)
 NEUTTS_MAX_EXCLUSIVE_PYTHON = (3, 14)
 KANI_MIN_TRANSFORMERS = (4, 56, 0)
 KANI_MAX_TRANSFORMERS_EXCLUSIVE = (5, 0, 0)
 KANI_DEFAULT_LANGUAGE_TAG = "en_us"
+KANI_DEFAULT_MAX_NEW_TOKENS = 1024
 KANI_LANGUAGE_TAGS = [
     "en_us",
     "en_nyork",
@@ -87,9 +92,12 @@ QWEN3_LANGUAGES = [
     "Spanish",
     "Italian",
 ]
+QWEN3_MAX_CHUNK_CHARS = 320
+QWEN3_INTER_CHUNK_SILENCE_SEC = 0.2
 PHONEMIZER_ESPEAK_LIBRARY_ENV = "PHONEMIZER_ESPEAK_LIBRARY"
 PHONEMIZER_ESPEAK_LEGACY_PATH_ENV = "PHONEMIZER_ESPEAK_PATH"
 ESPEAK_DATA_PATH_ENV = "ESPEAK_DATA_PATH"
+WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
 @contextmanager
@@ -117,6 +125,9 @@ def emit_progress(phase: str, message: str, *, started_at: float | None = None) 
         payload["elapsedSec"] = round(max(0.0, time.time() - started_at), 3)
     if _CURRENT_REQUEST_ID is not None:
         payload["requestId"] = _CURRENT_REQUEST_ID
+    if _PROGRESS_SINK is not None:
+        _PROGRESS_SINK(payload)
+        return
     print(f"{PROGRESS_PREFIX}{json.dumps(payload, ensure_ascii=False)}", flush=True, file=_REAL_STDOUT)
 
 
@@ -147,6 +158,10 @@ def heartbeat(phase: str, message: str, *, started_at: float, interval: float = 
 
 def fail(message: str, *, details: str | None = None) -> None:
     emit({"ok": False, "error": message, "details": details})
+
+
+def record_timing(timings: dict[str, float], key: str, started_at: float) -> None:
+    timings[key] = round(max(0.0, time.time() - started_at), 3)
 
 
 def parse_stdin_payload() -> dict[str, Any]:
@@ -920,6 +935,16 @@ def array_to_wav_base64(audio: Any, sample_rate: int) -> str:
         return base64.b64encode(wav_buffer.getvalue()).decode("ascii")
 
 
+def audio_to_float32_bytes(audio: Any) -> tuple[bytes, int]:
+    import numpy as np
+
+    array = np.asarray(audio, dtype="<f4").reshape(-1)
+    if array.size == 0:
+        raise ValueError("Model returned empty audio.")
+    array = np.nan_to_num(array, nan=0.0, posinf=0.0, neginf=0.0).astype("<f4", copy=False)
+    return array.tobytes(), int(array.size)
+
+
 def parse_sample_rate(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -990,7 +1015,13 @@ def resolve_kani_language_tag(tts: Any, requested_language_tag: str) -> str | No
     raise RuntimeError(f"Unsupported Kani language tag `{requested_language_tag}`. Supported tags: {supported}.")
 
 
-def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
+def generate_neutts(
+    payload: dict[str, Any],
+    *,
+    host: "NeuttsModelHost | None" = None,
+    audio_chunk_sink: Callable[[dict[str, Any], Any], None] | None = None,
+    encode_wav: bool = True,
+) -> dict[str, Any]:
     if not is_neutts_python_compatible():
         raise RuntimeError("NeuTTS requires Python <3.14. Choose a Python 3.10-3.13 executable.")
 
@@ -1019,9 +1050,8 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
     if not espeak_ok:
         raise RuntimeError(f"NeuTTS requires a usable eSpeak NG backend before generation can start. {get_espeak_install_hint()}")
 
-    from neutts import NeuTTS
-
     started = time.time()
+    phase_timings: dict[str, float] = {}
     emit_progress("model_load", f"Loading {backbone_repo} and {codec_repo}...", started_at=started)
     temp_path: str | None = None
     try:
@@ -1029,33 +1059,78 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
             temp_audio.write(reference_audio_bytes)
             temp_path = temp_audio.name
 
-        with heartbeat(
-            "model_load",
-            f"Loading {backbone_repo} and {codec_repo} (first run downloads the models)...",
-            started_at=started,
-        ):
-            with redirect_stdout_to_stderr():
-                tts = NeuTTS(
-                    backbone_repo=backbone_repo,
-                    backbone_device=backbone_device,
-                    codec_repo=codec_repo,
-                    codec_device=codec_device,
-                )
+        phase_started = time.time()
+        if host is not None:
+            tts = host.acquire(
+                backbone_repo,
+                codec_repo,
+                backbone_device,
+                codec_device,
+                started_at=started,
+            )
+        else:
+            from neutts import NeuTTS
+
+            with heartbeat(
+                "model_load",
+                f"Loading {backbone_repo} and {codec_repo} (first run downloads the models)...",
+                started_at=started,
+            ):
+                with redirect_stdout_to_stderr():
+                    tts = NeuTTS(
+                        backbone_repo=backbone_repo,
+                        backbone_device=backbone_device,
+                        codec_repo=codec_repo,
+                        codec_device=codec_device,
+                    )
+        record_timing(phase_timings, "modelLoadSec", phase_started)
 
         emit_progress("reference_encoding", "Encoding reference audio...", started_at=started)
+        phase_started = time.time()
         ref_codes = tts.encode_reference(temp_path)
+        record_timing(phase_timings, "referenceEncodingSec", phase_started)
         emit_progress("inference", "Running NeuTTS inference...", started_at=started)
+        phase_started = time.time()
         with heartbeat("inference", "Running NeuTTS inference...", started_at=started):
             wav = tts.infer(text, ref_codes, ref_text)
+        record_timing(phase_timings, "inferenceSec", phase_started)
         sample_rate = require_sample_rate("NeuTTS", getattr(tts, "sample_rate", None))
         emit_progress("output_encoding", "Encoding generated WAV output...", started_at=started)
 
+        # Serialize the full waveform once; reuse the sample count for duration so
+        # the reported length matches the bytes actually streamed (single chunk).
+        phase_started = time.time()
+        chunk_bytes, chunk_samples = audio_to_float32_bytes(wav)
+        if audio_chunk_sink is not None:
+            audio_chunk_sink(
+                {
+                    "index": 0,
+                    "total": 1,
+                    "sampleRate": sample_rate,
+                    "sampleCount": chunk_samples,
+                    "silenceAfterSamples": 0,
+                },
+                chunk_bytes,
+            )
+        record_timing(phase_timings, "outputEncodingSec", phase_started)
+
+        if encode_wav:
+            return {
+                "wavBase64": array_to_wav_base64(wav, sample_rate),
+                "sampleRate": sample_rate,
+                "modelRepo": backbone_repo,
+                "durationSec": chunk_samples / sample_rate,
+                "elapsedSec": time.time() - started,
+                "phaseTimingsSec": phase_timings,
+            }
         return {
-            "wavBase64": array_to_wav_base64(wav, sample_rate),
             "sampleRate": sample_rate,
             "modelRepo": backbone_repo,
-            "durationSec": len(wav) / sample_rate,
+            "durationSec": chunk_samples / sample_rate,
             "elapsedSec": time.time() - started,
+            "audioTransport": "websocket-binary",
+            "audioChunkCount": 1,
+            "phaseTimingsSec": phase_timings,
         }
     finally:
         if temp_path:
@@ -1065,7 +1140,13 @@ def generate_neutts(payload: dict[str, Any]) -> dict[str, Any]:
                 pass
 
 
-def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
+def generate_kani(
+    payload: dict[str, Any],
+    *,
+    host: "KaniModelHost | None" = None,
+    audio_chunk_sink: Callable[[dict[str, Any], Any], None] | None = None,
+    encode_wav: bool = True,
+) -> dict[str, Any]:
     emit_progress("runtime_check", "Checking Kani-TTS-2 runtime...", started_at=None)
     package_name, package_version = detect_kani_package()
     if package_name != "kani-tts-2":
@@ -1093,32 +1174,39 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
     temperature = float(payload.get("temperature") or 1.0)
     top_p = float(payload.get("topP") or 0.95)
     repetition_penalty = float(payload.get("repetitionPenalty") or 1.1)
-    max_new_tokens = int(payload.get("maxNewTokens") or 3000)
+    max_new_tokens = int(payload.get("maxNewTokens") or KANI_DEFAULT_MAX_NEW_TOKENS)
     # Kani-TTS currently has an MPS/CPU placement mismatch on macOS when device_map="auto".
     # Force CPU on macOS to keep generation stable for end users.
     default_device_map = "cpu" if sys.platform == "darwin" else "auto"
     device_map = str(payload.get("deviceMap") or default_device_map)
 
-    from kani_tts import KaniTTS
-
     started = time.time()
+    phase_timings: dict[str, float] = {}
     emit_progress("model_load", f"Loading {model_repo}...", started_at=started)
-    with heartbeat(
-        "model_load",
-        f"Loading {model_repo} (first run downloads the model)...",
-        started_at=started,
-    ):
-        with redirect_stdout_to_stderr():
-            tts = KaniTTS(
-                model_repo,
-                device_map=device_map,
-                max_new_tokens=max_new_tokens,
-                suppress_logs=True,
-                show_info=False,
-            )
+    phase_started = time.time()
+    if host is not None:
+        tts = host.acquire(model_repo, device_map, max_new_tokens, started_at=started)
+    else:
+        from kani_tts import KaniTTS
+
+        with heartbeat(
+            "model_load",
+            f"Loading {model_repo} (first run downloads the model)...",
+            started_at=started,
+        ):
+            with redirect_stdout_to_stderr():
+                tts = KaniTTS(
+                    model_repo,
+                    device_map=device_map,
+                    max_new_tokens=max_new_tokens,
+                    suppress_logs=True,
+                    show_info=False,
+                )
+    record_timing(phase_timings, "modelLoadSec", phase_started)
     language_tag = resolve_kani_language_tag(tts, language_tag)
 
     emit_progress("inference", "Running Kani-TTS-2 inference...", started_at=started)
+    phase_started = time.time()
     with heartbeat("inference", "Running Kani-TTS-2 inference...", started_at=started), redirect_stdout_to_stderr():
         wav, generated_metadata = tts.generate(
             text,
@@ -1127,6 +1215,7 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
             top_p=top_p,
             repetition_penalty=repetition_penalty,
         )
+    record_timing(phase_timings, "inferenceSec", phase_started)
 
     sample_rate = require_sample_rate(
         "Kani-TTS-2",
@@ -1135,12 +1224,41 @@ def generate_kani(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     emit_progress("output_encoding", "Encoding generated WAV output...", started_at=started)
+
+    # Serialize the full waveform once; reuse the sample count for duration so
+    # the reported length matches the bytes actually streamed (single chunk).
+    phase_started = time.time()
+    chunk_bytes, chunk_samples = audio_to_float32_bytes(wav)
+    if audio_chunk_sink is not None:
+        audio_chunk_sink(
+            {
+                "index": 0,
+                "total": 1,
+                "sampleRate": sample_rate,
+                "sampleCount": chunk_samples,
+                "silenceAfterSamples": 0,
+            },
+            chunk_bytes,
+        )
+    record_timing(phase_timings, "outputEncodingSec", phase_started)
+
+    if encode_wav:
+        return {
+            "wavBase64": array_to_wav_base64(wav, sample_rate),
+            "sampleRate": sample_rate,
+            "modelRepo": model_repo,
+            "durationSec": chunk_samples / sample_rate,
+            "elapsedSec": time.time() - started,
+            "phaseTimingsSec": phase_timings,
+        }
     return {
-        "wavBase64": array_to_wav_base64(wav, sample_rate),
         "sampleRate": sample_rate,
         "modelRepo": model_repo,
-        "durationSec": len(wav) / sample_rate,
+        "durationSec": chunk_samples / sample_rate,
         "elapsedSec": time.time() - started,
+        "audioTransport": "websocket-binary",
+        "audioChunkCount": 1,
+        "phaseTimingsSec": phase_timings,
     }
 
 
@@ -1339,16 +1457,65 @@ def load_qwen3_model(profile: dict[str, str], *, started_at: float) -> Any:
         ):
             if cached:
                 try:
-                    return _from_pretrained(offline=True)
+                    model = _from_pretrained(offline=True)
+                    return maybe_compile_qwen3_model(model, started_at=started_at)
                 except Exception:
                     # A cached config does not prove a complete snapshot, so fall
                     # back to an online load that can fetch any missing files.
-                    return _from_pretrained(offline=False)
-            return _from_pretrained(offline=False)
+                    model = _from_pretrained(offline=False)
+                    return maybe_compile_qwen3_model(model, started_at=started_at)
+            model = _from_pretrained(offline=False)
+            return maybe_compile_qwen3_model(model, started_at=started_at)
     except Exception as exc:
         if device_map == "mps" and dtype_name == "float16":
             raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
         raise
+
+
+def maybe_compile_qwen3_model(model: Any, *, started_at: float | None = None) -> Any:
+    # torch.compile can add a large first-load delay on CPU and Apple MPS, and
+    # short interactive TTS requests often do not amortize that cost. Keep it as
+    # an explicit power-user opt-in instead of slowing every resident load.
+    if (
+        os.environ.get("OPEN_TTS_ENABLE_QWEN3_TORCH_COMPILE") != "1"
+        or os.environ.get("OPEN_TTS_DISABLE_QWEN3_TORCH_COMPILE") == "1"
+    ):
+        return model
+
+    try:
+        import torch
+
+        compile_fn = getattr(torch, "compile", None)
+        inner_model = getattr(model, "model", None)
+        if not callable(compile_fn) or inner_model is None:
+            return model
+
+        emit_progress("model_compile", "Compiling Qwen3-TTS inference graph...", started_at=started_at)
+        model.model = compile_fn(inner_model, mode="reduce-overhead")
+    except Exception as exc:
+        emit_progress("model_compile", f"Torch compile unavailable; using eager mode ({exc}).", started_at=started_at)
+    return model
+
+
+def release_accelerator_memory(*, started_at: float | None = None) -> None:
+    """Force Python and torch allocators to release a discarded resident model.
+
+    Generic gc + best-effort torch cache flush; shared by all resident model
+    hosts (Qwen3/NeuTTS/Kani) when they reload on a profile change.
+    """
+    emit_progress("model_release", "Releasing previous model memory...", started_at=started_at)
+    gc.collect()
+    try:
+        import torch
+
+        if is_qwen3_cuda_available(torch):
+            torch.cuda.empty_cache()
+        elif is_qwen3_mps_available(torch) and hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+    except Exception:
+        # Cache flushing is a best-effort memory-pressure optimization; failing
+        # to flush must not prevent the replacement model from loading.
+        pass
 
 
 class Qwen3ModelHost:
@@ -1380,15 +1547,280 @@ class Qwen3ModelHost:
             return self._model
 
         # Release any previously loaded model before allocating the replacement.
+        had_model = self._model is not None
         self._model = None
         self._key = None
+        if had_model:
+            release_accelerator_memory(started_at=started_at)
         model = load_qwen3_model(profile, started_at=started_at)
         self._model = model
         self._key = key
         return model
 
 
-def generate_qwen3(payload: dict[str, Any], *, host: "Qwen3ModelHost | None" = None) -> dict[str, Any]:
+class NeuttsModelHost:
+    """Keeps one NeuTTS instance resident across requests in a persistent worker.
+
+    Loading the backbone/codec models dominates wall time, so the WebSocket
+    worker reuses a single instance whenever the requested (backbone_repo,
+    codec_repo, backbone_device, codec_device) profile is unchanged, and only
+    reloads — releasing the previous model first to bound memory — when that
+    profile changes. Reference audio/text and the prompt vary per request, so
+    encode_reference + infer always run fresh in generate_neutts; no reference
+    codes are cached on the host.
+    """
+
+    def __init__(self) -> None:
+        self._model: Any = None
+        self._key: tuple[str, str, str, str] | None = None
+
+    def acquire(
+        self,
+        backbone_repo: str,
+        codec_repo: str,
+        backbone_device: str,
+        codec_device: str,
+        *,
+        started_at: float,
+    ) -> Any:
+        key = (backbone_repo, codec_repo, backbone_device, codec_device)
+        if self._model is not None and self._key == key:
+            emit_progress(
+                "model_load",
+                f"Reusing loaded {backbone_repo} and {codec_repo}...",
+                started_at=started_at,
+            )
+            return self._model
+
+        # Release any previously loaded model before allocating the replacement.
+        had_model = self._model is not None
+        self._model = None
+        self._key = None
+        if had_model:
+            release_accelerator_memory(started_at=started_at)
+        from neutts import NeuTTS
+
+        with heartbeat(
+            "model_load",
+            f"Loading {backbone_repo} and {codec_repo} (first run downloads the models)...",
+            started_at=started_at,
+        ):
+            with redirect_stdout_to_stderr():
+                model = NeuTTS(
+                    backbone_repo=backbone_repo,
+                    backbone_device=backbone_device,
+                    codec_repo=codec_repo,
+                    codec_device=codec_device,
+                )
+        self._model = model
+        self._key = key
+        return model
+
+
+class KaniModelHost:
+    """Keeps one KaniTTS instance resident across requests in a persistent worker.
+
+    `max_new_tokens` is a KaniTTS constructor argument, so it is part of the key
+    alongside (model_repo, device_map): changing it forces a reload. The
+    per-request `.generate()` arguments (language_tag, temperature, top_p,
+    repetition_penalty) vary freely and never trigger a reload.
+    """
+
+    def __init__(self) -> None:
+        self._model: Any = None
+        self._key: tuple[str, str, int] | None = None
+
+    def acquire(
+        self,
+        model_repo: str,
+        device_map: str,
+        max_new_tokens: int,
+        *,
+        started_at: float,
+    ) -> Any:
+        key = (model_repo, device_map, max_new_tokens)
+        if self._model is not None and self._key == key:
+            emit_progress(
+                "model_load",
+                f"Reusing loaded {model_repo} ({device_map})...",
+                started_at=started_at,
+            )
+            return self._model
+
+        # Release any previously loaded model before allocating the replacement.
+        had_model = self._model is not None
+        self._model = None
+        self._key = None
+        if had_model:
+            release_accelerator_memory(started_at=started_at)
+        from kani_tts import KaniTTS
+
+        with heartbeat(
+            "model_load",
+            f"Loading {model_repo} (first run downloads the model)...",
+            started_at=started_at,
+        ):
+            with redirect_stdout_to_stderr():
+                model = KaniTTS(
+                    model_repo,
+                    device_map=device_map,
+                    max_new_tokens=max_new_tokens,
+                    suppress_logs=True,
+                    show_info=False,
+                )
+        self._model = model
+        self._key = key
+        return model
+
+
+def make_model_host(model: str) -> Any:
+    """Build the resident model host for the worker's --model selection."""
+    if model == "qwen3":
+        return Qwen3ModelHost()
+    if model == "neutts":
+        return NeuttsModelHost()
+    if model == "kani":
+        return KaniModelHost()
+    raise RuntimeError(f"Unsupported model for WebSocket serving: {model!r}.")
+
+
+def _generate_for_model(
+    model: str,
+    payload: dict[str, Any],
+    *,
+    host: Any,
+    audio_chunk_sink: Callable[[dict[str, Any], Any], None],
+) -> dict[str, Any]:
+    """Dispatch a WebSocket generation request to the right runtime."""
+    kwargs = {"host": host, "audio_chunk_sink": audio_chunk_sink, "encode_wav": False}
+    if model == "neutts":
+        return generate_neutts(payload, **kwargs)
+    if model == "kani":
+        return generate_kani(payload, **kwargs)
+    if model == "qwen3":
+        return generate_qwen3(payload, **kwargs)
+    raise RuntimeError(f"Unsupported model: {model!r}.")
+
+
+def split_qwen3_text(text: str, *, max_chars: int = QWEN3_MAX_CHUNK_CHARS) -> list[str]:
+    normalized = " ".join(text.split())
+    if not normalized:
+        return []
+
+    import re
+
+    sentence_parts = [
+        part.strip()
+        for part in re.split(r"(?<=[.!?。！？；;])\s+", normalized)
+        if part.strip()
+    ]
+    if not sentence_parts:
+        sentence_parts = [normalized]
+
+    chunks: list[str] = []
+    current = ""
+
+    def flush_current() -> None:
+        nonlocal current
+        if current:
+            chunks.append(current)
+            current = ""
+
+    def append_piece(piece: str) -> None:
+        nonlocal current
+        if not piece:
+            return
+        if len(piece) > max_chars:
+            flush_current()
+            chunks.extend(split_long_qwen3_piece(piece, max_chars=max_chars))
+            return
+        candidate = f"{current} {piece}".strip() if current else piece
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            flush_current()
+            current = piece
+
+    for sentence in sentence_parts:
+        append_piece(sentence)
+    flush_current()
+    return chunks or [normalized]
+
+
+def split_long_qwen3_piece(piece: str, *, max_chars: int) -> list[str]:
+    separators = [", ", "; ", ": ", " - ", " "]
+    parts = [piece]
+    for separator in separators:
+        if all(len(part) <= max_chars for part in parts):
+            break
+        next_parts: list[str] = []
+        for part in parts:
+            if len(part) <= max_chars:
+                next_parts.append(part)
+            else:
+                next_parts.extend(chunk_by_separator(part, separator, max_chars=max_chars))
+        parts = next_parts
+    if all(len(part) <= max_chars for part in parts):
+        return [part.strip() for part in parts if part.strip()]
+    return [
+        piece[index:index + max_chars].strip()
+        for index in range(0, len(piece), max_chars)
+        if piece[index:index + max_chars].strip()
+    ]
+
+
+def chunk_by_separator(piece: str, separator: str, *, max_chars: int) -> list[str]:
+    if separator not in piece:
+        return [piece]
+    chunks: list[str] = []
+    current = ""
+    for raw_part in piece.split(separator):
+        part = raw_part.strip()
+        if not part:
+            continue
+        next_piece = part if not current else f"{current}{separator}{part}"
+        if len(next_piece) <= max_chars:
+            current = next_piece
+        else:
+            if current:
+                chunks.append(current)
+            current = part
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def concatenate_audio_chunks(chunks: list[Any], *, sample_rate: int, silence_sec: float) -> Any:
+    if not chunks:
+        raise RuntimeError("Qwen3-TTS returned no audio.")
+    if len(chunks) == 1 or silence_sec <= 0:
+        return chunks[0]
+
+    import numpy as np
+
+    arrays = [np.asarray(chunk, dtype=np.float32).reshape(-1) for chunk in chunks]
+    arrays = [array for array in arrays if array.size > 0]
+    if not arrays:
+        raise RuntimeError("Qwen3-TTS returned no audio.")
+    if len(arrays) == 1 or silence_sec <= 0:
+        return arrays[0]
+
+    silence = np.zeros(max(0, int(round(sample_rate * silence_sec))), dtype=np.float32)
+    interleaved: list[Any] = []
+    for index, array in enumerate(arrays):
+        if index > 0 and silence.size > 0:
+            interleaved.append(silence)
+        interleaved.append(array)
+    return np.concatenate(interleaved)
+
+
+def generate_qwen3(
+    payload: dict[str, Any],
+    *,
+    host: "Qwen3ModelHost | None" = None,
+    audio_chunk_sink: Callable[[dict[str, Any], Any], None] | None = None,
+    encode_wav: bool = True,
+) -> dict[str, Any]:
     text = str(payload.get("text", "")).strip()
     if not text:
         raise ValueError("Text is required.")
@@ -1411,10 +1843,13 @@ def generate_qwen3(payload: dict[str, Any], *, host: "Qwen3ModelHost | None" = N
     dtype_name = profile["dtype"]
 
     started = time.time()
+    phase_timings: dict[str, float] = {}
+    phase_started = time.time()
     if host is not None:
         model = host.acquire(profile, started_at=started)
     else:
         model = load_qwen3_model(profile, started_at=started)
+    record_timing(phase_timings, "modelLoadSec", phase_started)
 
     generation_kwargs: dict[str, Any] = {}
     if isinstance(payload.get("maxNewTokens"), int):
@@ -1424,26 +1859,80 @@ def generate_qwen3(payload: dict[str, Any], *, host: "Qwen3ModelHost | None" = N
     if isinstance(payload.get("topP"), (int, float)):
         generation_kwargs["top_p"] = float(payload["topP"])
 
-    emit_progress("inference", f"Generating {language} speech with {speaker}...", started_at=started)
-    call_kwargs: dict[str, Any] = {
-        "text": text,
-        "language": language,
-        "speaker": speaker,
-        **generation_kwargs,
-    }
-    if instruct:
-        call_kwargs["instruct"] = instruct
+    text_chunks = split_qwen3_text(text)
+    generated_chunks: list[Any] = []
+    sample_rate: int | None = None
+    total_samples = 0
+    inference_sec = 0.0
+    output_encoding_sec = 0.0
+    for index, text_chunk in enumerate(text_chunks, start=1):
+        chunk_suffix = f" ({index}/{len(text_chunks)})" if len(text_chunks) > 1 else ""
+        emit_progress("inference", f"Generating {language} speech with {speaker}{chunk_suffix}...", started_at=started)
+        call_kwargs: dict[str, Any] = {
+            "text": text_chunk,
+            "language": language,
+            "speaker": speaker,
+            **generation_kwargs,
+        }
+        if instruct:
+            call_kwargs["instruct"] = instruct
 
-    try:
-        with heartbeat("inference", f"Generating {language} speech with {speaker}...", started_at=started):
-            wavs, sample_rate = model.generate_custom_voice(**call_kwargs)
-    except Exception as exc:
-        if device_map == "mps" and dtype_name == "float16":
-            raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
-        raise
-    if not wavs:
+        try:
+            phase_started = time.time()
+            with heartbeat("inference", f"Generating {language} speech with {speaker}{chunk_suffix}...", started_at=started):
+                chunk_wavs, chunk_sample_rate = model.generate_custom_voice(**call_kwargs)
+            inference_sec += max(0.0, time.time() - phase_started)
+        except Exception as exc:
+            if device_map == "mps" and dtype_name == "float16":
+                raise RuntimeError(qwen3_mps_float16_stability_message()) from exc
+            raise
+        if not chunk_wavs:
+            raise RuntimeError("Qwen3-TTS returned no audio.")
+        parsed_sample_rate = require_sample_rate("Qwen3-TTS", chunk_sample_rate)
+        if sample_rate is None:
+            sample_rate = parsed_sample_rate
+        elif parsed_sample_rate != sample_rate:
+            raise RuntimeError("Qwen3-TTS returned inconsistent sample rates across text chunks.")
+        chunk_audio = chunk_wavs[0]
+        phase_started = time.time()
+        chunk_bytes, chunk_samples = audio_to_float32_bytes(chunk_audio)
+        silence_after_samples = (
+            max(0, int(round(sample_rate * QWEN3_INTER_CHUNK_SILENCE_SEC)))
+            if index < len(text_chunks)
+            else 0
+        )
+        total_samples += chunk_samples + silence_after_samples
+        if audio_chunk_sink is not None:
+            audio_chunk_sink(
+                {
+                    "index": index - 1,
+                    "total": len(text_chunks),
+                    "sampleRate": sample_rate,
+                    "sampleCount": chunk_samples,
+                    "silenceAfterSamples": silence_after_samples,
+                },
+                chunk_bytes,
+            )
+        if encode_wav:
+            generated_chunks.append(chunk_audio)
+        output_encoding_sec += max(0.0, time.time() - phase_started)
+
+    if sample_rate is None or (not generated_chunks and encode_wav):
         raise RuntimeError("Qwen3-TTS returned no audio.")
-    wav = wavs[0]
+
+    phase_timings["inferenceSec"] = round(inference_sec, 3)
+    phase_timings["outputEncodingSec"] = round(output_encoding_sec, 3)
+
+    wav: Any | None = None
+    if encode_wav:
+        phase_started = time.time()
+        wav = concatenate_audio_chunks(
+            generated_chunks,
+            sample_rate=sample_rate,
+            silence_sec=QWEN3_INTER_CHUNK_SILENCE_SEC if len(generated_chunks) > 1 else 0.0,
+        )
+        output_encoding_sec += max(0.0, time.time() - phase_started)
+        phase_timings["outputEncodingSec"] = round(output_encoding_sec, 3)
 
     supported_speakers: list[str] = []
     try:
@@ -1458,55 +1947,268 @@ def generate_qwen3(payload: dict[str, Any], *, host: "Qwen3ModelHost | None" = N
     except Exception:
         supported_speakers = QWEN3_SPEAKERS
 
-    sample_rate = require_sample_rate("Qwen3-TTS", sample_rate)
     emit_progress("output_encoding", "Encoding generated WAV output...", started_at=started)
 
-    return {
-        "wavBase64": array_to_wav_base64(wav, sample_rate),
+    result: dict[str, Any] = {
         "sampleRate": sample_rate,
         "modelRepo": model_repo,
-        "durationSec": len(wav) / sample_rate,
+        "durationSec": total_samples / sample_rate,
         "elapsedSec": time.time() - started,
+        "phaseTimingsSec": phase_timings,
         "speakerStatus": f"{speaker} · {language}",
         "speakers": supported_speakers or QWEN3_SPEAKERS,
     }
+    if encode_wav:
+        result["wavBase64"] = array_to_wav_base64(wav, sample_rate)
+    else:
+        result["audioTransport"] = "websocket-binary"
+        result["audioChunkCount"] = len(text_chunks)
+    return result
 
 
-def serve(model: str, cache_dir: str) -> None:
-    """Persistent worker: load the model once, serve many generate requests.
+class WebSocketProtocolError(RuntimeError):
+    pass
 
-    Each stdin line is a JSON object {"requestId": str, "payload": {...}} or
-    {"command": "shutdown"}. Results and progress are emitted as the usual
-    __RESULT__/__PROGRESS__ lines tagged with requestId so the parent can
-    correlate them on a long-lived process. A failing request reports ok:false
-    but keeps the worker alive; only EOF or an explicit shutdown ends the loop.
 
-    Reusing one process across requests skips the per-call Python/torch import
-    and (for Qwen3, via Qwen3ModelHost) the model load and first-inference
-    warmup, which together dominate wall time. Requests are processed strictly
-    serially — the parent serializes one generation per model — so a single
-    resident model is never entered concurrently.
+class WebSocketConnection:
+    """Minimal server-side WebSocket connection for the local Electron bridge."""
+
+    def __init__(self, connection: socket.socket) -> None:
+        self._connection = connection
+        self._send_lock = threading.Lock()
+
+    def handshake(self) -> None:
+        request = b""
+        while b"\r\n\r\n" not in request:
+            chunk = self._connection.recv(4096)
+            if not chunk:
+                raise WebSocketProtocolError("WebSocket client disconnected during handshake.")
+            request += chunk
+            if len(request) > 64_000:
+                raise WebSocketProtocolError("WebSocket handshake exceeded the maximum header size.")
+
+        try:
+            header_text = request.decode("latin1")
+        except UnicodeDecodeError as exc:
+            raise WebSocketProtocolError("WebSocket handshake was not valid HTTP.") from exc
+
+        lines = header_text.split("\r\n")
+        if not lines or not lines[0].startswith("GET "):
+            raise WebSocketProtocolError("WebSocket handshake was not an HTTP GET request.")
+
+        headers: dict[str, str] = {}
+        for line in lines[1:]:
+            if not line or ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            headers[key.strip().lower()] = value.strip()
+
+        if headers.get("upgrade", "").lower() != "websocket":
+            raise WebSocketProtocolError("WebSocket handshake missing Upgrade: websocket.")
+        if "upgrade" not in headers.get("connection", "").lower():
+            raise WebSocketProtocolError("WebSocket handshake missing Connection: Upgrade.")
+
+        websocket_key = headers.get("sec-websocket-key")
+        if not websocket_key:
+            raise WebSocketProtocolError("WebSocket handshake missing Sec-WebSocket-Key.")
+
+        accept = base64.b64encode(
+            hashlib.sha1(f"{websocket_key}{WEBSOCKET_GUID}".encode("ascii")).digest(),
+        ).decode("ascii")
+        response = (
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Accept: {accept}\r\n"
+            "\r\n"
+        )
+        self._connection.sendall(response.encode("ascii"))
+
+    def close(self) -> None:
+        try:
+            self._send_frame(0x8, b"")
+        except Exception:
+            pass
+        try:
+            self._connection.close()
+        except OSError:
+            pass
+
+    def recv_text(self) -> str | None:
+        fragments: list[bytes] = []
+        fragment_opcode: int | None = None
+
+        while True:
+            first = self._recv_exact(1)
+            if first is None:
+                return None
+            second = self._recv_exact(1)
+            if second is None:
+                return None
+
+            first_byte = first[0]
+            second_byte = second[0]
+            fin = (first_byte & 0x80) != 0
+            opcode = first_byte & 0x0F
+            masked = (second_byte & 0x80) != 0
+            length = second_byte & 0x7F
+
+            if length == 126:
+                extended = self._recv_exact(2)
+                if extended is None:
+                    return None
+                length = int.from_bytes(extended, "big")
+            elif length == 127:
+                extended = self._recv_exact(8)
+                if extended is None:
+                    return None
+                length = int.from_bytes(extended, "big")
+
+            mask_key = self._recv_exact(4) if masked else b""
+            if masked and mask_key is None:
+                return None
+            payload = self._recv_exact(length)
+            if payload is None:
+                return None
+            if masked:
+                payload = bytes(byte ^ mask_key[index % 4] for index, byte in enumerate(payload))
+
+            if opcode == 0x8:
+                return None
+            if opcode == 0x9:
+                self._send_frame(0xA, payload)
+                continue
+            if opcode == 0xA:
+                continue
+            if opcode in (0x1, 0x2):
+                if fin:
+                    if opcode != 0x1:
+                        raise WebSocketProtocolError("Binary WebSocket requests are not supported.")
+                    return payload.decode("utf-8")
+                fragment_opcode = opcode
+                fragments = [payload]
+                continue
+            if opcode == 0x0:
+                if fragment_opcode is None:
+                    raise WebSocketProtocolError("Unexpected WebSocket continuation frame.")
+                fragments.append(payload)
+                if not fin:
+                    continue
+                if fragment_opcode != 0x1:
+                    raise WebSocketProtocolError("Binary WebSocket requests are not supported.")
+                return b"".join(fragments).decode("utf-8")
+
+            raise WebSocketProtocolError(f"Unsupported WebSocket opcode: {opcode}")
+
+    def send_json(self, payload: dict[str, Any]) -> None:
+        self.send_text(json.dumps(payload, ensure_ascii=False))
+
+    def send_text(self, payload: str) -> None:
+        self._send_frame(0x1, payload.encode("utf-8"))
+
+    def send_binary(self, payload: bytes) -> None:
+        self._send_frame(0x2, payload)
+
+    def _send_frame(self, opcode: int, payload: bytes) -> None:
+        header = bytearray([0x80 | opcode])
+        length = len(payload)
+        if length < 126:
+            header.append(length)
+        elif length <= 0xFFFF:
+            header.append(126)
+            header.extend(length.to_bytes(2, "big"))
+        else:
+            header.append(127)
+            header.extend(length.to_bytes(8, "big"))
+        with self._send_lock:
+            self._connection.sendall(bytes(header) + payload)
+
+    def _recv_exact(self, size: int) -> bytes | None:
+        chunks: list[bytes] = []
+        remaining = size
+        while remaining > 0:
+            chunk = self._connection.recv(remaining)
+            if not chunk:
+                return None
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+
+def _send_websocket_error(websocket: WebSocketConnection, message: str, *, details: str | None = None) -> None:
+    websocket.send_json({"type": "error", "ok": False, "error": message, "details": details})
+
+
+def serve_websocket(model: str, cache_dir: str, host: str, port: int) -> None:
+    """Serve persistent local-runtime requests over a local WebSocket.
+
+    This is the resident transport used by Electron for all three local
+    runtimes (NeuTTS, Kani, Qwen3). It intentionally does not emit bridge
+    results on stdout; progress and completion travel only over WebSocket
+    messages so transport failures surface instead of falling back to the
+    legacy line-framed process protocol.
     """
-    global _CURRENT_REQUEST_ID
+    global _CURRENT_REQUEST_ID, _PROGRESS_SINK
 
     configure_cache_dir(cache_dir)
-    host = Qwen3ModelHost() if model == "qwen3" else None
+    model_host = make_model_host(model)
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind((host, port))
+    server.listen(1)
+
+    try:
+        while True:
+            connection, _address = server.accept()
+            # Disable Nagle on the accepted data socket: requests are small JSON
+            # frames followed by binary audio, so coalescing only adds latency.
+            try:
+                connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except (OSError, AttributeError):
+                pass
+            websocket = WebSocketConnection(connection)
+            try:
+                websocket.handshake()
+                should_shutdown = _serve_websocket_connection(websocket, model, model_host)
+            except Exception:
+                try:
+                    _send_websocket_error(websocket, "WebSocket bridge failed.", details=traceback.format_exc())
+                except Exception:
+                    pass
+                should_shutdown = False
+            finally:
+                _CURRENT_REQUEST_ID = None
+                _PROGRESS_SINK = None
+                websocket.close()
+
+            if should_shutdown:
+                break
+    finally:
+        try:
+            server.close()
+        except OSError:
+            pass
+
+
+def _serve_websocket_connection(websocket: WebSocketConnection, model: str, model_host: Any) -> bool:
+    global _CURRENT_REQUEST_ID, _PROGRESS_SINK
 
     while True:
-        raw_line = sys.stdin.readline()
-        if raw_line == "":  # EOF: parent closed stdin / process should exit.
-            break
-        line = raw_line.strip()
-        if not line:
-            continue
+        raw_message = websocket.recv_text()
+        if raw_message is None:
+            return False
+
         try:
-            request = json.loads(line)
+            request = json.loads(raw_message)
         except json.JSONDecodeError:
+            _send_websocket_error(websocket, "Invalid WebSocket request JSON.")
             continue
         if not isinstance(request, dict):
+            _send_websocket_error(websocket, "WebSocket request must be a JSON object.")
             continue
         if request.get("command") == "shutdown":
-            break
+            return True
 
         request_id = request.get("requestId")
         _CURRENT_REQUEST_ID = request_id if isinstance(request_id, str) else None
@@ -1514,35 +2216,54 @@ def serve(model: str, cache_dir: str) -> None:
         if not isinstance(payload, dict):
             payload = {}
 
+        def send_progress(progress_payload: dict[str, Any]) -> None:
+            websocket.send_json({"type": "progress", **progress_payload})
+
+        def send_audio_chunk(metadata: dict[str, Any], audio_bytes: Any) -> None:
+            websocket.send_json({"type": "audio_chunk", "requestId": _CURRENT_REQUEST_ID, **metadata})
+            websocket.send_binary(audio_bytes)
+
+        _PROGRESS_SINK = send_progress
         try:
-            if model == "neutts":
-                if not is_neutts_python_compatible():
-                    raise RuntimeError("NeuTTS requires Python <3.14 and >=3.10.")
-                result = generate_neutts(payload)
-            elif model == "qwen3":
-                result = generate_qwen3(payload, host=host)
-            else:
-                result = generate_kani(payload)
-            emit({"ok": True, "result": result})
+            result = _generate_for_model(
+                model,
+                payload,
+                host=model_host,
+                audio_chunk_sink=send_audio_chunk,
+            )
+            websocket.send_json({
+                "type": "result",
+                "requestId": _CURRENT_REQUEST_ID,
+                "ok": True,
+                "result": result,
+            })
         except Exception as exc:
-            emit({"ok": False, "error": str(exc), "details": traceback.format_exc()})
+            websocket.send_json({
+                "type": "result",
+                "requestId": _CURRENT_REQUEST_ID,
+                "ok": False,
+                "error": str(exc),
+                "details": traceback.format_exc(),
+            })
         finally:
             _CURRENT_REQUEST_ID = None
+            _PROGRESS_SINK = None
 
 
 def run() -> None:
     parser = argparse.ArgumentParser(description="Run local NeuTTS/Kani inference tasks.")
-    parser.add_argument("--action", required=True, choices=["probe", "generate", "serve"])
+    parser.add_argument("--action", required=True, choices=["probe", "serve-ws"])
     parser.add_argument("--model", required=True, choices=["neutts", "kani", "qwen3"])
     parser.add_argument("--cache-dir", required=True)
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=0)
     args = parser.parse_args()
 
-    if args.action == "serve":
-        serve(args.model, args.cache_dir)
+    if args.action == "serve-ws":
+        if args.port <= 0:
+            raise RuntimeError("WebSocket bridge requires a positive --port.")
+        serve_websocket(args.model, args.cache_dir, args.host, args.port)
         return
-
-    if args.model == "neutts" and args.action == "generate" and not is_neutts_python_compatible():
-        raise RuntimeError("NeuTTS requires Python <3.14 and >=3.10.")
 
     configure_cache_dir(args.cache_dir)
     payload = parse_stdin_payload()
@@ -1556,15 +2277,6 @@ def run() -> None:
             result = probe_kani()
         emit({"ok": True, "result": result})
         return
-
-    if args.model == "neutts":
-        result = generate_neutts(payload)
-    elif args.model == "qwen3":
-        result = generate_qwen3(payload)
-    else:
-        result = generate_kani(payload)
-
-    emit({"ok": True, "result": result})
 
 
 if __name__ == "__main__":

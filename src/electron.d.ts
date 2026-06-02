@@ -23,13 +23,15 @@ export interface LocalTtsProbeResult {
 }
 
 export interface LocalTtsGenerateResult {
-  wavBase64: string;
   sampleRate: number;
   modelRepo: string;
   durationSec: number;
   elapsedSec: number;
   speakerStatus?: string;
   speakers?: string[];
+  audioTransport: "websocket-binary";
+  audioChunkCount: number;
+  phaseTimingsSec: Record<string, number>;
 }
 
 export interface LocalTtsCacheInfo {
@@ -46,11 +48,23 @@ export interface LocalTtsProgressEvent {
   elapsedSec?: number;
 }
 
+export interface LocalTtsAudioChunkEvent {
+  requestId: string;
+  model: LocalTtsModel;
+  index: number;
+  total: number;
+  sampleRate: number;
+  sampleCount: number;
+  silenceAfterSamples: number;
+  audio: ArrayBuffer;
+}
+
 interface LocalTtsBridge {
   probe: (request: {
     model: LocalTtsModel;
     requestId?: string;
     pythonBinary?: string;
+    allowRuntimeSetup?: boolean;
     payload?: Record<string, unknown>;
   }) => Promise<LocalTtsProbeResult>;
   generate: (request: {
@@ -66,6 +80,7 @@ interface LocalTtsBridge {
   getCacheInfo: (request: { model: LocalTtsModel }) => Promise<LocalTtsCacheInfo>;
   clearCache: (request: { model: LocalTtsModel }) => Promise<{ path: string; cleared: boolean }>;
   subscribeProgress: (listener: (event: LocalTtsProgressEvent) => void) => () => void;
+  subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;
 }
 
 declare global {

@@ -6,9 +6,9 @@ import { pathToFileURL } from "url";
 import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import {
-  createPersistentBridgeWorkerPool,
-  type PersistentBridgeWorkerPool,
-} from "./persistentBridgeWorker";
+  createWebSocketBridgeWorkerPool,
+  type WebSocketBridgeWorkerPool,
+} from "./webSocketBridgeWorker";
 import {
   getBootstrapPythonCommandCandidates,
   getDefaultPythonRuntimeSetup,
@@ -35,8 +35,10 @@ import {
   assertTrustedIpcSender,
   extractUserFacingPythonProcessError,
   isRecord,
+  parseBridgeEnvelopeResult,
   parseBridgeProgressResult,
   parseBridgeResult,
+  parseOptionalBoolean,
   parseOptionalString,
   parseRequestId,
   sanitizeCacheRequest,
@@ -53,9 +55,10 @@ const isDev = !app.isPackaged;
 const PYTHON_BINARY_NAME_RE = /^(?:python(?:\d+(?:\.\d+)*)?|py)(?:\.exe)?$/i;
 const PYTHON_BRIDGE_TIMEOUT_MS = 5 * 60 * 1000;
 // Generation (model download + inference) can legitimately run for many minutes,
-// so it uses an inactivity watchdog instead of an absolute deadline: the bridge
-// emits a heartbeat while it works, and any output re-arms this timer. It only
-// fires when the process goes fully silent (i.e. is genuinely stuck).
+// so the WebSocket worker request uses an inactivity watchdog instead of an
+// absolute deadline: the bridge emits a heartbeat while it works, and any output
+// (stdout/stderr or a socket frame) re-arms this timer. It only fires when the
+// worker goes fully silent (i.e. is genuinely stuck).
 const PYTHON_BRIDGE_GENERATE_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 const PYTHON_BOOTSTRAP_TIMEOUT_MS = 20 * 60 * 1000;
 const PYTHON_EXECUTABLE_TIMEOUT_MS = 20_000;
@@ -64,15 +67,16 @@ const PYTHON_BRIDGE_MAX_STDERR_BYTES = 1_000_000;
 const PYTHON_BOOTSTRAP_MAX_OUTPUT_BYTES = 4_000_000;
 const PYTHON_CANCEL_KILL_AFTER_MS = 2_000;
 const GENERATE_RATE_WINDOW_MS = 500;
-// Qwen3 generation reuses a resident worker (load once, serve many) so repeat
-// generations skip the per-call Python/torch import, model load, and first-
-// inference warmup. The worker is killed after this much idle time to release
-// the model's memory; the next request transparently respawns it.
+// Generation reuses a resident WebSocket worker (load once, serve many) so
+// repeat generations skip the per-call Python/torch import, model load, and
+// first-inference warmup. The worker is killed after this much idle time to
+// release the model's memory; the next request transparently respawns it.
 const PYTHON_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
-// Local models served by a persistent worker instead of a one-shot subprocess.
-// Scoped to Qwen3, whose load + warmup dominate its wall time; NeuTTS and Kani
-// keep the one-shot path.
-const PERSISTENT_WORKER_MODELS: ReadonlySet<LocalModel> = new Set<LocalModel>(["qwen3"]);
+// All three local runtimes use the resident WebSocket worker for generation
+// instead of the legacy stdout line-framed subprocess protocol. There is
+// intentionally no stdout fallback for models in this set; generation is
+// WebSocket-only, and `probe` is the only remaining one-shot subprocess action.
+const WEBSOCKET_WORKER_MODELS: ReadonlySet<LocalModel> = new Set<LocalModel>(["neutts", "kani", "qwen3"]);
 protocol.registerSchemesAsPrivileged([
   {
     scheme: ELECTRON_APP_SCHEME,
@@ -96,27 +100,41 @@ interface SystemDependencySetup {
   macHomebrewPackage?: string;
 }
 
+// Only `probe` runs as a one-shot subprocess now; this lets a probe child be
+// force-killed by handleCancel/before-quit. Generation runs on the WebSocket
+// worker pool, which owns its own cancellation.
 const activeBridgeProcesses = new Map<string, ChildProcessWithoutNullStreams>();
-const cancelledBridgeRequests = new Set<string>();
 const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
   rateWindowMs: GENERATE_RATE_WINDOW_MS,
 });
-let persistentBridgeWorkers: PersistentBridgeWorkerPool<LocalModel> | null = null;
+let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
 
-function getPersistentBridgeWorkers(): PersistentBridgeWorkerPool<LocalModel> {
-  if (!persistentBridgeWorkers) {
-    persistentBridgeWorkers = createPersistentBridgeWorkerPool<LocalModel>({
+function getWebSocketBridgeWorkers(): WebSocketBridgeWorkerPool<LocalModel> {
+  if (!webSocketBridgeWorkers) {
+    webSocketBridgeWorkers = createWebSocketBridgeWorkerPool<LocalModel>({
       idleEvictMs: PYTHON_BRIDGE_WORKER_IDLE_EVICT_MS,
       killGraceMs: PYTHON_CANCEL_KILL_AFTER_MS,
-      spawn: (model, { pythonBinary, scriptPath, cacheDir, env }) =>
+      spawn: (model, { pythonBinary, scriptPath, cacheDir, env, host, port }) =>
         spawn(
           pythonBinary,
-          [scriptPath, "--action", "serve", "--model", model, "--cache-dir", cacheDir],
+          [
+            scriptPath,
+            "--action",
+            "serve-ws",
+            "--model",
+            model,
+            "--cache-dir",
+            cacheDir,
+            "--host",
+            host,
+            "--port",
+            String(port),
+          ],
           { stdio: ["pipe", "pipe", "pipe"], env, cwd: cacheDir },
         ),
     });
   }
-  return persistentBridgeWorkers;
+  return webSocketBridgeWorkers;
 }
 const autoPythonBinaryCache = new Map<LocalModel, PythonResolution>();
 const defaultPythonRuntimeSetupPromises = new Map<LocalModel, Promise<PythonResolution>>();
@@ -925,9 +943,10 @@ async function sanitizePythonBinary(
   input: unknown,
   model: LocalModel,
   {
+    allowRuntimeSetup,
     onProgress,
     requireModelDependency,
-  }: { onProgress?: RuntimeSetupProgress; requireModelDependency: boolean },
+  }: { allowRuntimeSetup: boolean; onProgress?: RuntimeSetupProgress; requireModelDependency: boolean },
 ): Promise<PythonResolution> {
   const explicit = parseOptionalString(input, "pythonBinary", { maxLength: 1024 });
   if (explicit) {
@@ -970,7 +989,7 @@ async function sanitizePythonBinary(
     }
   }
 
-  if (process.env.OPEN_TTS_DISABLE_AUTO_PYTHON_SETUP !== "1") {
+  if (allowRuntimeSetup && process.env.OPEN_TTS_DISABLE_AUTO_PYTHON_SETUP !== "1") {
     return await ensureDefaultPythonRuntime(model, onProgress);
   }
 
@@ -1004,9 +1023,13 @@ async function sanitizeLocalBridgeRequest(
   const requestId = action === "generate"
     ? parseRequestId(request.requestId, { required: true })
     : parseRequestId(request.requestId);
+  const allowRuntimeSetup = action === "generate"
+    ? true
+    : parseOptionalBoolean(request.allowRuntimeSetup, "allowRuntimeSetup") === true;
   const pythonResolution = await sanitizePythonBinary(request.pythonBinary, model, {
+    allowRuntimeSetup,
     onProgress,
-    requireModelDependency: request.pythonBinary == null,
+    requireModelDependency: request.pythonBinary == null && (action === "generate" || allowRuntimeSetup),
   });
 
   const payload = action === "generate"
@@ -1112,42 +1135,58 @@ async function runPythonBridge(
   const scriptPath = getBridgeScriptPath();
   const shouldRateLimit = action === "generate";
   const requestId = sanitized.requestId;
-  // Qwen3 generation runs on a resident worker (load once, serve many). Probe
-  // and the other models keep the one-shot subprocess path below.
-  const usePersistentWorker = action === "generate" && PERSISTENT_WORKER_MODELS.has(model);
+  // Generation for every local runtime runs on a resident WebSocket worker
+  // (load once, serve many). Probe keeps the one-shot subprocess path below.
+  const useWebSocketWorker = action === "generate" && WEBSOCKET_WORKER_MODELS.has(model);
 
-  const runPersistentGenerate = async (): Promise<unknown> => {
+  const runWebSocketGenerate = async (): Promise<unknown> => {
     await fs.access(scriptPath);
     await fs.mkdir(cacheDir, { recursive: true });
     const generateRequestId = requestId!; // generate always carries a requestId.
 
-    const onProgressLine = (line: string) => {
+    const onProgress = (payload: unknown) => {
       if (!event) return;
       try {
-        const progress = parseBridgeProgressResult(
-          JSON.parse(line.slice(BRIDGE_PROGRESS_PREFIX.length)),
-        );
+        const progress = parseBridgeProgressResult(payload);
         event.sender.send("local-tts:progress", { requestId: generateRequestId, model, ...progress });
       } catch (err) {
         console.warn(
-          `[local-tts:generate] Failed parsing bridge progress: ${err instanceof Error ? err.message : String(err)}`,
+          `[local-tts:generate] Failed parsing WebSocket bridge progress: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     };
 
-    const { stdout, stderr } = await getPersistentBridgeWorkers().run(model, {
+    const onAudioChunk = (payload: {
+      requestId: string;
+      index: number;
+      total: number;
+      sampleRate: number;
+      sampleCount: number;
+      silenceAfterSamples: number;
+      audio: ArrayBuffer;
+    }) => {
+      if (!event) return;
+      event.sender.send("local-tts:audio-chunk", { model, ...payload });
+    };
+
+    const { response } = await getWebSocketBridgeWorkers().run(model, {
       requestId: generateRequestId,
       payload: sanitized.payload,
       spawnConfig: { pythonBinary, scriptPath, cacheDir, env: buildPythonBridgeEnv() },
       idleTimeoutMs: PYTHON_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
       maxStdoutBytes: PYTHON_BRIDGE_MAX_STDOUT_BYTES,
       maxStderrBytes: PYTHON_BRIDGE_MAX_STDERR_BYTES,
-      onProgressLine,
+      onProgress,
+      onAudioChunk,
     });
-    return parseBridgeResult(stdout, stderr, "generate", sanitized.pythonResolution);
+    return parseBridgeEnvelopeResult(response, "generate", sanitized.pythonResolution);
   };
 
-  const runBridge = async () => {
+  // One-shot subprocess path. With generation served by the WebSocket worker
+  // pool, this is only ever reached for `probe`: it runs to a single absolute
+  // deadline, streams `runtime_setup` progress, and parses the stdout result
+  // envelope with parseBridgeResult(..., "probe", ...).
+  const runProbeBridge = async () => {
     await fs.access(scriptPath);
     await fs.mkdir(cacheDir, { recursive: true });
 
@@ -1185,33 +1224,17 @@ async function runPythonBridge(
       let stderrBytes = 0;
       let settled = false;
 
-      const isGenerate = action === "generate";
-      const timeoutMs = isGenerate
-        ? PYTHON_BRIDGE_GENERATE_IDLE_TIMEOUT_MS
-        : PYTHON_BRIDGE_TIMEOUT_MS;
+      const timeoutMs = PYTHON_BRIDGE_TIMEOUT_MS;
       const onTimeout = () => {
         if (settled) return;
         settled = true;
         child.kill();
         if (requestId) {
           activeBridgeProcesses.delete(requestId);
-          cancelledBridgeRequests.delete(requestId);
         }
-        reject(new Error(isGenerate
-          ? `Python bridge produced no output for ${timeoutMs / 1000}s and was stopped (the process may be stuck).`
-          : `Python bridge timed out after ${timeoutMs / 1000}s.`));
+        reject(new Error(`Python bridge timed out after ${timeoutMs / 1000}s.`));
       };
-      let timeoutHandle = setTimeout(onTimeout, timeoutMs);
-
-      // For generation, re-arm the watchdog on any output so long-but-progressing
-      // downloads/inference (which heartbeat steadily) are never killed mid-run.
-      const bumpTimeout = isGenerate
-        ? () => {
-          if (settled) return;
-          clearTimeout(timeoutHandle);
-          timeoutHandle = setTimeout(onTimeout, timeoutMs);
-        }
-        : () => {};
+      const timeoutHandle = setTimeout(onTimeout, timeoutMs);
 
       const cleanup = () => {
         clearTimeout(timeoutHandle);
@@ -1225,15 +1248,11 @@ async function runPythonBridge(
         settled = true;
         child.kill();
         cleanup();
-        if (requestId) {
-          cancelledBridgeRequests.delete(requestId);
-        }
         reject(new Error(`Python bridge ${streamName} exceeded ${limitBytes} bytes.`));
         return true;
       };
 
       child.stdout.on("data", (chunk: Buffer) => {
-        bumpTimeout();
         stdoutBytes += chunk.byteLength;
         if (stdoutBytes > PYTHON_BRIDGE_MAX_STDOUT_BYTES) {
           rejectForOutputLimit("stdout", PYTHON_BRIDGE_MAX_STDOUT_BYTES);
@@ -1266,7 +1285,6 @@ async function runPythonBridge(
       });
 
       child.stderr.on("data", (chunk: Buffer) => {
-        bumpTimeout();
         stderrBytes += chunk.byteLength;
         if (stderrBytes > PYTHON_BRIDGE_MAX_STDERR_BYTES) {
           rejectForOutputLimit("stderr", PYTHON_BRIDGE_MAX_STDERR_BYTES);
@@ -1285,16 +1303,7 @@ async function runPythonBridge(
       child.on("close", (code) => {
         if (settled) return;
         settled = true;
-        const wasCancelled = requestId ? cancelledBridgeRequests.has(requestId) : false;
         cleanup();
-        if (requestId) {
-          cancelledBridgeRequests.delete(requestId);
-        }
-
-        if (wasCancelled) {
-          reject(new Error("Generation cancelled."));
-          return;
-        }
 
         if (code !== 0) {
           if (stderr.trim()) {
@@ -1317,7 +1326,7 @@ async function runPythonBridge(
     });
   };
 
-  const task = usePersistentWorker ? runPersistentGenerate : runBridge;
+  const task = useWebSocketWorker ? runWebSocketGenerate : runProbeBridge;
   return shouldRateLimit
     ? generateRateLimiter.run(model, task)
     : task();
@@ -1367,19 +1376,18 @@ async function handleClearCache(request: unknown): Promise<{ path: string; clear
 async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
   const { requestId } = sanitizeCancelRequest(request);
 
-  // Persistent-worker generations (Qwen3) are cancelled by killing their worker;
-  // its exit rejects the in-flight request as cancelled and the next request respawns.
-  if (persistentBridgeWorkers?.cancel(requestId)) {
+  // Generation always runs on the WebSocket worker pool, so killing the worker
+  // is the only generation cancel path: its exit rejects the in-flight request
+  // as cancelled and the next request respawns. The activeBridgeProcesses
+  // fallback only ever matches an in-flight probe subprocess.
+  if (webSocketBridgeWorkers?.cancel(requestId)) {
     return { cancelled: true };
   }
 
   const child = activeBridgeProcesses.get(requestId);
   if (!child) {
-    cancelledBridgeRequests.delete(requestId);
     return { cancelled: false };
   }
-
-  cancelledBridgeRequests.add(requestId);
 
   try {
     child.kill();
@@ -1392,7 +1400,6 @@ async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
       }
     }, PYTHON_CANCEL_KILL_AFTER_MS).unref();
   } catch {
-    cancelledBridgeRequests.delete(requestId);
     throw new Error("Failed to cancel Python generation.");
   }
 
@@ -1452,8 +1459,7 @@ app.on("before-quit", () => {
     }
   }
   activeBridgeProcesses.clear();
-  cancelledBridgeRequests.clear();
-  persistentBridgeWorkers?.shutdownAll();
+  webSocketBridgeWorkers?.shutdownAll();
 });
 
 app.on("window-all-closed", () => {

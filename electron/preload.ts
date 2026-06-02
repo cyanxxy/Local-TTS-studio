@@ -6,6 +6,7 @@ interface LocalBridgeRequest {
   model: LocalModel;
   requestId?: string;
   pythonBinary?: string;
+  allowRuntimeSetup?: boolean;
   payload?: Record<string, unknown>;
 }
 
@@ -31,6 +32,13 @@ contextBridge.exposeInMainWorld("electron", {
       ipcRenderer.on("local-tts:progress", wrapped);
       return () => {
         ipcRenderer.off("local-tts:progress", wrapped);
+      };
+    },
+    subscribeAudioChunk: (listener: (event: unknown) => void) => {
+      const wrapped = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("local-tts:audio-chunk", wrapped);
+      return () => {
+        ipcRenderer.off("local-tts:audio-chunk", wrapped);
       };
     },
   },
