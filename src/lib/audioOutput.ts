@@ -6,7 +6,10 @@ interface NormalizedRawAudio {
 }
 
 function toFloat32Array(value: unknown): Float32Array {
-  if (value instanceof Float32Array) return value;
+  if (value instanceof Float32Array) {
+    validateFiniteSamples(value);
+    return value;
+  }
   if (Array.isArray(value)) {
     const numeric = value.map((entry) => {
       const converted = Number(entry);
@@ -22,10 +25,20 @@ function toFloat32Array(value: unknown): Float32Array {
     if (value instanceof DataView) {
       throw new Error("Unsupported DataView audio format returned by the model.");
     }
-    return Float32Array.from(value as unknown as ArrayLike<number>);
+    const converted = Float32Array.from(value as unknown as ArrayLike<number>);
+    validateFiniteSamples(converted);
+    return converted;
   }
 
   throw new Error("Unsupported raw audio format returned by the model.");
+}
+
+function validateFiniteSamples(audio: Float32Array): void {
+  for (let index = 0; index < audio.length; index += 1) {
+    if (!Number.isFinite(audio[index])) {
+      throw new Error("Raw audio contains non-finite values.");
+    }
+  }
 }
 
 export function normalizeRawAudioOutput(output: RawAudio): NormalizedRawAudio {

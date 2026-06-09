@@ -25,12 +25,19 @@ interface UseGenerationControlOptions {
 interface UseGenerationControlReturn {
   isRetakingSegment: boolean;
   isGenerationBusy: boolean;
+  retakeError: string | null;
   cancelRetake: (notifyWorker: boolean) => void;
   resetGeneratedAudio: () => void;
   cancelActiveGeneration: (forceCancelTts?: boolean) => void;
   handleGenerate: () => void;
   handleStop: () => void;
   handleRetakeSegment: (segmentId: string) => void;
+}
+
+function workerEventMessage(event: Event, fallback: string): string {
+  if (event instanceof ErrorEvent && event.message) return event.message;
+  if (event.type === "messageerror") return `${fallback} The worker sent an unreadable message.`;
+  return fallback;
 }
 
 export function useGenerationControl({
@@ -46,19 +53,30 @@ export function useGenerationControl({
   voice,
 }: UseGenerationControlOptions): UseGenerationControlReturn {
   const [isRetakingSegment, setIsRetakingSegment] = useState(false);
+  const [retakeError, setRetakeError] = useState<string | null>(null);
   const beginStream = player.beginStream;
   const endStream = player.endStream;
 
   const retakeWorkerRef = useRef<Worker | null>(null);
   const retakeListenerRef = useRef<((event: MessageEvent<WorkerOutMessage>) => void) | null>(null);
+  const retakeErrorListenerRef = useRef<((event: Event) => void) | null>(null);
+  const retakeMessageErrorListenerRef = useRef<((event: Event) => void) | null>(null);
   const retakeGenerationSeqRef = useRef(0);
 
   const clearRetakeListener = useCallback(() => {
     if (retakeWorkerRef.current && retakeListenerRef.current) {
       retakeWorkerRef.current.removeEventListener("message", retakeListenerRef.current as EventListener);
     }
+    if (retakeWorkerRef.current && retakeErrorListenerRef.current) {
+      retakeWorkerRef.current.removeEventListener("error", retakeErrorListenerRef.current as EventListener);
+    }
+    if (retakeWorkerRef.current && retakeMessageErrorListenerRef.current) {
+      retakeWorkerRef.current.removeEventListener("messageerror", retakeMessageErrorListenerRef.current as EventListener);
+    }
     retakeWorkerRef.current = null;
     retakeListenerRef.current = null;
+    retakeErrorListenerRef.current = null;
+    retakeMessageErrorListenerRef.current = null;
     setIsRetakingSegment(false);
   }, []);
 
@@ -80,6 +98,7 @@ export function useGenerationControl({
   }, [clearRetakeListener]);
 
   const resetGeneratedAudio = useCallback(() => {
+    setRetakeError(null);
     player.reset();
     setShowPlayer(false);
   }, [player, setShowPlayer]);
@@ -96,6 +115,7 @@ export function useGenerationControl({
   const handleGenerate = useCallback(() => {
     if (!canGenerate || isGenerationBusy) return;
     cancelRetake(false);
+    setRetakeError(null);
     player.reset();
     beginStream();
     setShowPlayer(true);
@@ -128,11 +148,17 @@ export function useGenerationControl({
     if (!segment || !worker) return;
 
     clearRetakeListener();
+    setRetakeError(null);
     retakeWorkerRef.current = worker;
     retakeGenerationSeqRef.current += 1;
     const generationId = `retake-${retakeGenerationSeqRef.current}`;
 
     const chunks: Array<{ audio: Float32Array; samplingRate: number }> = [];
+    const failRetake = (message: string) => {
+      console.error("Retake generation error:", message);
+      setRetakeError(message);
+      clearRetakeListener();
+    };
     const handleMessage = (event: MessageEvent<WorkerOutMessage>) => {
       const msg = event.data;
       if ("generationId" in msg && msg.generationId !== undefined && msg.generationId !== generationId) {
@@ -162,28 +188,41 @@ export function useGenerationControl({
           break;
         }
         case "ERROR":
-          console.error("Retake generation error:", msg.message);
-          clearRetakeListener();
+          failRetake(msg.message);
           break;
       }
     };
+    const handleWorkerError = (event: Event) => {
+      failRetake(workerEventMessage(event, "Retake worker failed."));
+    };
+    const handleWorkerMessageError = (event: Event) => {
+      failRetake(workerEventMessage(event, "Retake worker failed."));
+    };
 
     retakeListenerRef.current = handleMessage;
+    retakeErrorListenerRef.current = handleWorkerError;
+    retakeMessageErrorListenerRef.current = handleWorkerMessageError;
     worker.addEventListener("message", handleMessage as EventListener);
+    worker.addEventListener("error", handleWorkerError as EventListener);
+    worker.addEventListener("messageerror", handleWorkerMessageError as EventListener);
     setIsRetakingSegment(true);
-    worker.postMessage({
-      type: "GENERATE",
-      generationId,
-      text: segment.text,
-      voice,
-      speed: generationSettings.speed,
-      quality: generationSettings.quality,
-      finalPauseSec: segment.pauseAfterSec,
-      pauseOverridesSec: generationSettings.pauseOverridesSec,
-      sentenceSpeedVariance: generationSettings.sentenceSpeedVariance,
-      pronunciationRules: generationSettings.pronunciationRules,
-      emphasisStrength: generationSettings.emphasisStrength,
-    } satisfies WorkerInMessage);
+    try {
+      worker.postMessage({
+        type: "GENERATE",
+        generationId,
+        text: segment.text,
+        voice,
+        speed: generationSettings.speed,
+        quality: generationSettings.quality,
+        finalPauseSec: segment.pauseAfterSec,
+        pauseOverridesSec: generationSettings.pauseOverridesSec,
+        sentenceSpeedVariance: generationSettings.sentenceSpeedVariance,
+        pronunciationRules: generationSettings.pronunciationRules,
+        emphasisStrength: generationSettings.emphasisStrength,
+      } satisfies WorkerInMessage);
+    } catch (error) {
+      failRetake(error instanceof Error ? error.message : String(error));
+    }
   }, [
     activeModel,
     clearRetakeListener,
@@ -199,6 +238,7 @@ export function useGenerationControl({
   return {
     isRetakingSegment,
     isGenerationBusy,
+    retakeError,
     cancelRetake,
     resetGeneratedAudio,
     cancelActiveGeneration,

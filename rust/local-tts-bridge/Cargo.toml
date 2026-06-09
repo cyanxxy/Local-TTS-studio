@@ -1,0 +1,15 @@
+[package]
+name = "open-tts-local-bridge"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+candle-core = "0.9"
+clap = { version = "4.5", features = ["derive"] }
+neutts = { version = "0.1.1", features = ["espeak"] }
+qwen_tts = "0.1.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha1 = "0.10"

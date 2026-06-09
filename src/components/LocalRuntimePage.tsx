@@ -7,13 +7,13 @@ import type {
   LocalTtsProgressEvent,
   LocalTtsProbeResult,
 } from "../electron";
+import type { GenerationStats } from "../types";
+import { useAudioPlayer } from "../hooks/useAudioPlayer";
+import { AudioPlayer } from "./AudioPlayer";
 import { LocalRuntimeModelInputs } from "./localRuntime/LocalRuntimeModelInputs";
 import { LocalRuntimeRuntimeSettings } from "./localRuntime/LocalRuntimeRuntimeSettings";
 import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
 import {
-  KANI_OPTIONS,
-  DEFAULT_KANI_LANGUAGE_TAG,
-  DEFAULT_KANI_MAX_NEW_TOKENS,
   NEUTTS_OPTIONS,
   QWEN3_ATTENTION_OPTIONS,
   QWEN3_DEVICE_OPTIONS,
@@ -27,9 +27,6 @@ import {
 import {
   arrayBufferToBase64,
   float32ChunksToWavUrl,
-  getNeuttsReferenceGuidance,
-  inspectAudioFile,
-  isLikelyWavBuffer,
   type StatusTone,
 } from "./localRuntime/utils";
 
@@ -48,6 +45,17 @@ interface ReceivedAudioChunk {
   audio: ArrayBuffer;
   sampleCount: number;
   silenceAfterSamples: number;
+}
+
+function buildPlaybackSamples(chunk: ReceivedAudioChunk): Float32Array {
+  const samples = new Float32Array(chunk.audio, 0, chunk.sampleCount);
+  const silenceAfterSamples = Math.max(0, chunk.silenceAfterSamples);
+  const output = new Float32Array(samples.length + silenceAfterSamples);
+  for (let index = 0; index < samples.length; index += 1) {
+    const value = samples[index];
+    output[index] = Number.isFinite(value) ? value : 0;
+  }
+  return output;
 }
 
 function createLocalRequestId(model: LocalTtsModel): string {
@@ -98,23 +106,16 @@ export function LocalRuntimePage({
   const [cacheInfo, setCacheInfo] = useState<LocalTtsCacheInfo | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
   const [status, setStatus] = useState<StatusMessage>(null);
-  const [pythonOverride, setPythonOverride] = useState("");
   const [text, setText] = useState(
-    "This synthesis runs fully local on your machine through a Python runtime bridge.",
+    "This synthesis runs fully local on your machine through the Rust local bridge.",
   );
 
   const [neuttsModel, setNeuttsModel] = useState(NEUTTS_OPTIONS[0].value);
   const [referenceText, setReferenceText] = useState("");
   const [referenceAudioName, setReferenceAudioName] = useState("");
-  const [referenceAudioBase64, setReferenceAudioBase64] = useState<string | null>(null);
+  const [referenceCodesBase64, setReferenceCodesBase64] = useState<string | null>(null);
   const [referenceAudioGuidance, setReferenceAudioGuidance] = useState<StatusMessage>(null);
 
-  const [kaniModel, setKaniModel] = useState(KANI_OPTIONS[0].value);
-  const [languageTag, setLanguageTag] = useState(DEFAULT_KANI_LANGUAGE_TAG);
-  const [temperature, setTemperature] = useState(1.0);
-  const [topP, setTopP] = useState(0.95);
-  const [repetitionPenalty, setRepetitionPenalty] = useState(1.1);
-  const [maxNewTokens, setMaxNewTokens] = useState(DEFAULT_KANI_MAX_NEW_TOKENS);
   const [qwen3Model, setQwen3Model] = useState(QWEN3_OPTIONS[0].value);
   const [qwen3Speaker, setQwen3Speaker] = useState(QWEN3_SPEAKER_OPTIONS[0].value);
   const [qwen3Language, setQwen3Language] = useState(QWEN3_LANGUAGE_OPTIONS[0].value);
@@ -136,12 +137,21 @@ export function LocalRuntimePage({
   const pageVersionRef = useRef(0);
   const runtimeVersionRef = useRef(0);
   const generationVersionRef = useRef(0);
-  const pythonOverrideRef = useRef("");
   const activeRequestIdRef = useRef<string | null>(null);
   const activeProbeRequestIdRef = useRef<string | null>(null);
   const activeRequestGenerationVersionRef = useRef<number | null>(null);
   const streamedAudioChunksRef = useRef<ReceivedAudioChunk[]>([]);
   const streamedAudioSampleRateRef = useRef<number | null>(null);
+  const scheduledAudioChunkCountRef = useRef(0);
+  const audioPlayer = useAudioPlayer();
+  const {
+    beginStream: beginAudioStream,
+    download: downloadAudio,
+    endStream: endAudioStream,
+    reset: resetAudioPlayer,
+    scheduleChunk: scheduleAudioChunk,
+    stopAll: stopAudioPlayer,
+  } = audioPlayer;
 
   const electronAvailable = !!window.electron?.localTts;
   const qwen3LanguageOptions = useMemo(
@@ -178,9 +188,11 @@ export function LocalRuntimePage({
     }
     streamedAudioChunksRef.current = [];
     streamedAudioSampleRateRef.current = null;
+    scheduledAudioChunkCountRef.current = 0;
+    resetAudioPlayer();
     setAudioUrl(null);
     setResult(null);
-  }, []);
+  }, [resetAudioPlayer]);
 
   const invalidateGeneration = useCallback((options: { runtimeChanged?: boolean } = {}) => {
     generationVersionRef.current += 1;
@@ -195,7 +207,7 @@ export function LocalRuntimePage({
       setRuntime(null);
       setStatus({
         tone: "info",
-        text: "Runtime settings changed. Re-check the Python runtime before generating again.",
+        text: "Runtime settings changed. Re-check the Rust runtime before generating again.",
       });
     } else if (generateBusy) {
       setStatus({
@@ -209,6 +221,7 @@ export function LocalRuntimePage({
     const requestId = activeRequestIdRef.current;
     if (!requestId || !window.electron?.localTts) return false;
 
+    stopAudioPlayer();
     setStatus({ tone: "info", text: nextStatusText });
     setGenerationProgress({
       requestId,
@@ -225,7 +238,7 @@ export function LocalRuntimePage({
       setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
       return false;
     }
-  }, [model]);
+  }, [model, stopAudioPlayer]);
 
   const refreshCacheInfo = useCallback(async (pageVersion: number = pageVersionRef.current) => {
     if (!window.electron?.localTts) return;
@@ -234,10 +247,7 @@ export function LocalRuntimePage({
     setCacheInfo(info);
   }, [isCurrentPageVersion, model]);
 
-  const runProbe = useCallback(async (
-    pageVersion: number = pageVersionRef.current,
-    { allowRuntimeSetup = false }: { allowRuntimeSetup?: boolean } = {},
-  ) => {
+  const runProbe = useCallback(async (pageVersion: number = pageVersionRef.current) => {
     if (!window.electron?.localTts) return;
     runtimeVersionRef.current += 1;
     const runtimeVersion = runtimeVersionRef.current;
@@ -251,8 +261,6 @@ export function LocalRuntimePage({
       const probe = await window.electron.localTts.probe({
         model,
         requestId,
-        pythonBinary: pythonOverrideRef.current.trim() || undefined,
-        allowRuntimeSetup,
       });
       if (
         !isCurrentPageVersion(pageVersion)
@@ -301,8 +309,6 @@ export function LocalRuntimePage({
     setGenerationProgress(null);
     setStatus(null);
     setGenerateBusy(false);
-    pythonOverrideRef.current = "";
-    setPythonOverride("");
     clearGeneratedResult();
   }, [clearGeneratedResult, model]);
 
@@ -370,6 +376,24 @@ export function LocalRuntimePage({
         .filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
       if (contiguousChunks.length !== event.index + 1) return;
 
+      const sampleRate = streamedAudioSampleRateRef.current ?? event.sampleRate;
+      while (scheduledAudioChunkCountRef.current < contiguousChunks.length) {
+        const chunkIndex = scheduledAudioChunkCountRef.current;
+        const chunk = contiguousChunks[chunkIndex];
+        scheduledAudioChunkCountRef.current += 1;
+        void scheduleAudioChunk({
+          audio: buildPlaybackSamples(chunk),
+          samplingRate: sampleRate,
+          text: `${name} chunk ${chunkIndex + 1}`,
+          index: chunkIndex + 1,
+          total: event.total,
+          pauseAfterSec: chunk.silenceAfterSamples / sampleRate,
+        }).catch((err: unknown) => {
+          if (!mountedRef.current) return;
+          setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+        });
+      }
+
       if (event.index === 0 || event.index + 1 === event.total) {
         setNewAudioUrl(float32ChunksToWavUrl(contiguousChunks, event.sampleRate));
       }
@@ -378,7 +402,7 @@ export function LocalRuntimePage({
         text: `Received audio chunk ${event.index + 1}/${event.total}.`,
       });
     });
-  }, [electronAvailable, model, setNewAudioUrl]);
+  }, [electronAvailable, model, name, scheduleAudioChunk, setNewAudioUrl]);
 
   useEffect(() => () => {
     if (!window.electron?.localTts) return;
@@ -392,10 +416,10 @@ export function LocalRuntimePage({
   const canGenerate = useMemo(() => {
     if (text.trim().length < 10) return false;
     if (model === "neutts") {
-      return referenceText.trim().length > 0 && !!referenceAudioBase64;
+      return referenceText.trim().length > 0 && !!referenceCodesBase64;
     }
     return true;
-  }, [model, referenceAudioBase64, referenceText, text]);
+  }, [model, referenceCodesBase64, referenceText, text]);
 
   const handleTextChange = useCallback((nextText: string) => {
     invalidateGeneration();
@@ -410,36 +434,6 @@ export function LocalRuntimePage({
   const handleReferenceTextChange = useCallback((nextReferenceText: string) => {
     invalidateGeneration();
     setReferenceText(nextReferenceText);
-  }, [invalidateGeneration]);
-
-  const handleKaniModelChange = useCallback((nextModel: string) => {
-    invalidateGeneration();
-    setKaniModel(nextModel);
-  }, [invalidateGeneration]);
-
-  const handleLanguageTagChange = useCallback((nextLanguageTag: string) => {
-    invalidateGeneration();
-    setLanguageTag(nextLanguageTag);
-  }, [invalidateGeneration]);
-
-  const handleTemperatureChange = useCallback((nextTemperature: number) => {
-    invalidateGeneration();
-    setTemperature((current) => clampNumber(nextTemperature, current, 0.2, 2));
-  }, [invalidateGeneration]);
-
-  const handleTopPChange = useCallback((nextTopP: number) => {
-    invalidateGeneration();
-    setTopP((current) => clampNumber(nextTopP, current, 0.5, 1));
-  }, [invalidateGeneration]);
-
-  const handleRepetitionPenaltyChange = useCallback((nextRepetitionPenalty: number) => {
-    invalidateGeneration();
-    setRepetitionPenalty((current) => clampNumber(nextRepetitionPenalty, current, 1, 2));
-  }, [invalidateGeneration]);
-
-  const handleMaxNewTokensChange = useCallback((nextMaxNewTokens: number) => {
-    invalidateGeneration();
-    setMaxNewTokens((current) => clampInteger(nextMaxNewTokens, current, 64, 4096));
   }, [invalidateGeneration]);
 
   const handleQwen3ModelChange = useCallback((nextModel: string) => {
@@ -497,15 +491,6 @@ export function LocalRuntimePage({
     setQwen3MaxNewTokens((current) => clampInteger(nextMaxNewTokens, current, 64, 8192));
   }, [invalidateGeneration]);
 
-  const handlePythonOverrideChange = useCallback((nextPythonOverride: string) => {
-    pythonOverrideRef.current = nextPythonOverride;
-    runtimeVersionRef.current += 1;
-    activeProbeRequestIdRef.current = null;
-    setRuntimeBusy(false);
-    invalidateGeneration({ runtimeChanged: true });
-    setPythonOverride(nextPythonOverride);
-  }, [invalidateGeneration]);
-
   const handleReferenceAudioChange = useCallback(async (file: File | null) => {
     const pageVersion = pageVersionRef.current;
     invalidateGeneration();
@@ -513,27 +498,26 @@ export function LocalRuntimePage({
     if (!file) {
       if (!isCurrentPageVersion(pageVersion)) return;
       setReferenceAudioName("");
-      setReferenceAudioBase64(null);
+      setReferenceCodesBase64(null);
       setReferenceAudioGuidance(null);
       return;
     }
 
     try {
       const buffer = await file.arrayBuffer();
-      if (!isLikelyWavBuffer(buffer)) {
-        throw new Error("NeuTTS references should be uploaded as real .wav files. Convert MP3/M4A clips to WAV before generating.");
+      if (!file.name.toLowerCase().endsWith(".npy")) {
+        throw new Error("NeuTTS Rust references must be pre-encoded .npy code files.");
       }
 
-      const guidance = getNeuttsReferenceGuidance(await inspectAudioFile(buffer));
       if (!isCurrentPageVersion(pageVersion)) return;
-      setReferenceAudioBase64(arrayBufferToBase64(buffer));
+      setReferenceCodesBase64(arrayBufferToBase64(buffer));
       setReferenceAudioName(file.name);
-      setReferenceAudioGuidance(guidance);
-      setStatus({ tone: "info", text: `Loaded reference audio: ${file.name}. Enter the exact transcript of that clip before generating.` });
+      setReferenceAudioGuidance({ tone: "success", text: "Reference code file loaded." });
+      setStatus({ tone: "info", text: `Loaded reference codes: ${file.name}. Enter the matching transcript before generating.` });
     } catch (err) {
       if (!isCurrentPageVersion(pageVersion)) return;
       setReferenceAudioName("");
-      setReferenceAudioBase64(null);
+      setReferenceCodesBase64(null);
       setReferenceAudioGuidance(null);
       setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
     }
@@ -546,6 +530,7 @@ export function LocalRuntimePage({
     const requestId = createLocalRequestId(model);
 
     clearGeneratedResult();
+    beginAudioStream();
     setGenerateBusy(true);
     setGenerationProgress({
       requestId,
@@ -564,7 +549,7 @@ export function LocalRuntimePage({
       if (model === "neutts") {
         payload.modelRepo = neuttsModel;
         payload.referenceText = referenceText.trim();
-        payload.referenceAudioBase64 = referenceAudioBase64;
+        payload.referenceCodesBase64 = referenceCodesBase64;
       } else if (model === "qwen3") {
         payload.modelRepo = qwen3Model;
         payload.speaker = qwen3Speaker;
@@ -583,19 +568,11 @@ export function LocalRuntimePage({
         payload.temperature = qwen3Temperature;
         payload.topP = qwen3TopP;
         payload.maxNewTokens = qwen3MaxNewTokens;
-      } else {
-        payload.modelRepo = kaniModel;
-        payload.languageTag = languageTag.trim() || undefined;
-        payload.temperature = temperature;
-        payload.topP = topP;
-        payload.repetitionPenalty = repetitionPenalty;
-        payload.maxNewTokens = maxNewTokens;
       }
 
       const generated = await window.electron.localTts.generate({
         model,
         requestId,
-        pythonBinary: pythonOverride.trim() || undefined,
         payload,
       });
 
@@ -611,6 +588,7 @@ export function LocalRuntimePage({
         throw new Error("Generation returned incomplete streamed audio.");
       }
       setNewAudioUrl(float32ChunksToWavUrl(completeChunks, sampleRate));
+      endAudioStream();
       setGenerationProgress(null);
       setStatus({
         tone: "success",
@@ -622,6 +600,7 @@ export function LocalRuntimePage({
     } catch (err) {
       if (!isCurrentPageVersion(pageVersion)) return;
       if (activeRequestIdRef.current !== requestId) return;
+      endAudioStream();
       clearGeneratedResult();
       setGenerationProgress(null);
       const message = err instanceof Error ? err.message : String(err);
@@ -638,13 +617,11 @@ export function LocalRuntimePage({
     }
   }, [
     clearGeneratedResult,
-    kaniModel,
+    beginAudioStream,
+    endAudioStream,
     isCurrentPageVersion,
-    languageTag,
-    maxNewTokens,
     model,
     neuttsModel,
-    pythonOverride,
     qwen3Attention,
     qwen3DeviceMap,
     qwen3Dtype,
@@ -655,14 +632,11 @@ export function LocalRuntimePage({
     qwen3Speaker,
     qwen3Temperature,
     qwen3TopP,
-    referenceAudioBase64,
+    referenceCodesBase64,
     referenceText,
     refreshCacheInfo,
-    repetitionPenalty,
     setNewAudioUrl,
-    temperature,
     text,
-    topP,
   ]);
 
   const handleClearCache = useCallback(async (): Promise<boolean> => {
@@ -705,6 +679,36 @@ export function LocalRuntimePage({
 
   const busy = runtimeBusy || cacheBusy || generateBusy;
   const runtimeReady = runtime?.ready ?? false;
+  const activeSegmentNumber = useMemo(() => {
+    if (!audioPlayer.activeSegmentId) return null;
+    const index = audioPlayer.segments.findIndex((segment) => segment.id === audioPlayer.activeSegmentId);
+    return index >= 0 ? index + 1 : null;
+  }, [audioPlayer.activeSegmentId, audioPlayer.segments]);
+  const playerStats = useMemo<GenerationStats>(() => {
+    const processingTime = result?.elapsedSec ?? 0;
+    const duration = audioPlayer.totalDuration || result?.durationSec || 0;
+    return {
+      firstLatency: null,
+      processingTime,
+      charsPerSec: processingTime > 0 ? text.trim().length / processingTime : 0,
+      rtf: result && result.durationSec > 0 ? result.elapsedSec / result.durationSec : 0,
+      totalDuration: duration,
+      currentDuration: audioPlayer.currentTime,
+    };
+  }, [audioPlayer.currentTime, audioPlayer.totalDuration, result, text]);
+  const handleDownloadAudio = useCallback(() => {
+    const url = audioUrlRef.current;
+    if (url) {
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `open-tts-${model}.wav`;
+      link.click();
+      return;
+    }
+    void downloadAudio().catch((err: unknown) => {
+      setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+    });
+  }, [downloadAudio, model]);
 
   return (
     <div className="mt-6 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-5">
@@ -739,15 +743,11 @@ export function LocalRuntimePage({
           />
         </div>
 
-        {(model === "neutts" || model === "kani" || model === "qwen3") && (
+        {(model === "neutts" || model === "qwen3") && (
           <LocalRuntimeRuntimeSettings
-            onRecheckRuntime={() => { void runProbe(pageVersionRef.current, { allowRuntimeSetup: true }); }}
-            onPythonOverrideChange={handlePythonOverrideChange}
-            pythonOverride={pythonOverride}
+            onRecheckRuntime={() => { void runProbe(pageVersionRef.current); }}
             runtime={runtime}
             runtimeBusy={runtimeBusy}
-            showCompatibility={model === "neutts"}
-            showEspeak={model === "neutts"}
           />
         )}
 
@@ -760,18 +760,6 @@ export function LocalRuntimePage({
           referenceAudioName={referenceAudioName}
           referenceAudioGuidance={referenceAudioGuidance}
           onReferenceAudioChange={handleReferenceAudioChange}
-          kaniModel={kaniModel}
-          onKaniModelChange={handleKaniModelChange}
-          languageTag={languageTag}
-          onLanguageTagChange={handleLanguageTagChange}
-          temperature={temperature}
-          onTemperatureChange={handleTemperatureChange}
-          topP={topP}
-          onTopPChange={handleTopPChange}
-          repetitionPenalty={repetitionPenalty}
-          onRepetitionPenaltyChange={handleRepetitionPenaltyChange}
-          maxNewTokens={maxNewTokens}
-          onMaxNewTokensChange={handleMaxNewTokensChange}
           qwen3Model={qwen3Model}
           onQwen3ModelChange={handleQwen3ModelChange}
           qwen3Speaker={qwen3Speaker}
@@ -837,21 +825,39 @@ export function LocalRuntimePage({
           )}
         </div>
 
-        {audioUrl && (
+        {(audioUrl || audioPlayer.totalDuration > 0) && (
           <div className="border border-black/10 rounded-xl p-3 bg-surface/55 backdrop-blur-md">
             <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2">Output Audio</p>
-            <audio controls src={audioUrl} className="w-full" />
+            <AudioPlayer
+              embedded
+              isPlaying={audioPlayer.isPlaying}
+              currentTime={audioPlayer.currentTime}
+              totalDuration={audioPlayer.totalDuration}
+              segmentCount={audioPlayer.segments.length}
+              activeSegmentNumber={activeSegmentNumber}
+              stats={playerStats}
+              isGenerating={generateBusy}
+              onTogglePlay={audioPlayer.togglePlay}
+              onSeek={audioPlayer.seek}
+              onSkipBackward={() => audioPlayer.skip(-10)}
+              onSkipForward={() => audioPlayer.skip(10)}
+              onDownload={handleDownloadAudio}
+              onStop={generateBusy ? () => { void cancelActiveGeneration(); } : stopAudioPlayer}
+            />
             {result && (
               <p className="text-sm mt-2 text-text-muted">
                 {result.modelRepo} • {result.sampleRate} Hz • {result.durationSec.toFixed(2)}s
               </p>
+            )}
+            {audioPlayer.error && (
+              <p className="text-sm mt-2 text-danger">{audioPlayer.error}</p>
             )}
           </div>
         )}
 
         {!electronAvailable && (
           <p className="text-xs text-danger">
-            This integration runs only in the Electron desktop app because it calls local Python runtimes.
+            This integration runs only in the Electron desktop app because it calls local model runtimes.
           </p>
         )}
       </section>

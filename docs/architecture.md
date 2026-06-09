@@ -8,14 +8,15 @@ This document keeps maintainer-facing architecture details out of the top-level 
 - `@huggingface/transformers` v4 for the Supertonic TTS pipeline
 - `kokoro-js` v1 for Kokoro-82M generation with custom phonemization
 - Electron 42.3.0 for the optional desktop wrapper
+- Rust local bridge for Electron probe/WebSocket transport
 - Vitest 3 + Testing Library + jsdom for tests
 - `lucide-react` for icons
 
 ## Source Map
 
 ```text
-electron/        Desktop shell, custom protocol, preload bridge, Python runtime helpers
-python/          Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS
+electron/        Desktop shell, custom protocol, preload bridge, runtime helpers
+rust/            Rust local bridge for Electron probe/WebSocket transport
 src/
 |-- apps/
 |   |-- web/      Browser renderer shell and entrypoint
@@ -41,7 +42,7 @@ Workers are created at startup and load models lazily on selection.
 
 ## Browser Audio Path
 
-This contract applies to the Studio and Reader browser-model path. Electron local-runtime pages (NeuTTS, Kani, Qwen3) generate through the resident Python WebSocket bridge worker (`electron/webSocketBridgeWorker.ts` driving `python/local_tts_bridge.py --action serve-ws`), which streams binary Float32 audio chunks the renderer reassembles separately. See [Desktop local runtimes](./local-runtimes.md) for the bridge protocol.
+This contract applies to Studio, Reader, and Electron local-runtime playback. Browser models stream chunks from Web Workers; Electron local-runtime pages (NeuTTS and Qwen3) generate through the resident Rust WebSocket bridge worker (`electron/webSocketBridgeWorker.ts` driving `open-tts-local-bridge --action serve-ws`), which streams binary Float32 audio chunks that the renderer schedules through the same Web Audio player. See [Desktop local runtimes](./local-runtimes.md) for the bridge protocol.
 
 - Playback uses the Web Audio API: `AudioContext` + `AudioBufferSourceNode`.
 - Audio chunks are `Float32Array`.
@@ -50,7 +51,7 @@ This contract applies to the Studio and Reader browser-model path. Electron loca
 
 ## Model-Specific Notes
 
-- **Kokoro** splits text via the local `split()` helper and calls `tts.generate(string, ...)` per unit. `tts.stream()` is not used. `list_voices()` may return `void` in some `kokoro-js` versions, so fallback voices are required.
+- **Kokoro** builds inference units through `buildKokoroInferenceUnits()` in `src/lib/chunking.ts`, merging sentence ranges up to the selected backend budget and splitting oversized single ranges before generation. It calls `tts.generate(string, ...)` per unit; `tts.stream()` is not used. `list_voices()` may return `void` in some `kokoro-js` versions, so fallback voices are required.
 - **Supertonic** chunks text with min 100 / max 1000 chars per chunk, with 0.5 seconds of silence padding between chunks. Per-file download progress is aggregated dynamically.
 
 ## Browser Support Notes

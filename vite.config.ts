@@ -50,9 +50,6 @@ export default defineConfig({
         "./src/hooks/useModelLoader.ts",
       ],
     },
-    watch: {
-      ignored: ["**/.venv*/**"],
-    },
   },
   worker: {
     format: "es",

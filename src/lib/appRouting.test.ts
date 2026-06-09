@@ -6,13 +6,12 @@ describe("appRouting", () => {
     expect(getPageFromPath("/studio", false)).toBe("studio");
     expect(getPageFromPath("/reader", false)).toBe("reader");
     expect(getPageFromPath("/neutts", true)).toBe("neutts");
-    expect(getPageFromPath("/kani", true)).toBe("kani");
     expect(getPageFromPath("/qwen3", true)).toBe("qwen3");
   });
 
   it("falls back unsupported web-only desktop paths to studio", () => {
     expect(getPageFromPath("/neutts", false)).toBe("studio");
-    expect(getPageFromPath("/kani", false)).toBe("studio");
+    expect(getPageFromPath("/retired-local-runtime", false)).toBe("studio");
     expect(getPageFromPath("/qwen3", false)).toBe("studio");
   });
 
@@ -21,17 +20,17 @@ describe("appRouting", () => {
     expect(getCanonicalPagePath("/reader/", false)).toBe(PAGE_PATH.reader);
     expect(getCanonicalPagePath("/studio/", false)).toBe(PAGE_PATH.studio);
     expect(getCanonicalPagePath("/neutts", false)).toBe(PAGE_PATH.studio);
-    expect(getCanonicalPagePath("/kani", true)).toBe(PAGE_PATH.kani);
+    expect(getCanonicalPagePath("/retired-local-runtime", true)).toBe(PAGE_PATH.studio);
     expect(getCanonicalPagePath("/qwen3", true)).toBe(PAGE_PATH.qwen3);
     expect(getCanonicalPagePath("/unknown", true)).toBe(PAGE_PATH.studio);
   });
 
   it("scopes desktop routes under a base path", () => {
     expect(getPagePath("studio", "/desktop")).toBe("/desktop/studio");
-    expect(getPagePath("kani", "/desktop")).toBe("/desktop/kani");
+    expect(getPagePath("qwen3", "/desktop")).toBe("/desktop/qwen3");
     expect(getPageFromPath("/desktop/reader", true, "/desktop")).toBe("reader");
     expect(getPageFromPath("/desktop/neutts", true, "/desktop")).toBe("neutts");
-    expect(getPageFromPath("/kani", true, "/desktop")).toBe("studio");
+    expect(getPageFromPath("/retired-local-runtime", true, "/desktop")).toBe("studio");
     expect(getCanonicalPagePath("/desktop", true, "/desktop")).toBe("/desktop/studio");
     expect(getCanonicalPagePath("/desktop/qwen3/", true, "/desktop")).toBe("/desktop/qwen3");
     expect(getCanonicalPagePath("/desktop/unknown", true, "/desktop")).toBe("/desktop/studio");

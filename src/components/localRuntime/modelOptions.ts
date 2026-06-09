@@ -4,27 +4,15 @@ export interface LocalRuntimeOption {
 }
 
 export const NEUTTS_OPTIONS: LocalRuntimeOption[] = [
-  { value: "neuphonic/neutts-nano", label: "English · neutts-nano" },
-  { value: "neuphonic/neutts-nano-german", label: "German · neutts-nano-german" },
-  { value: "neuphonic/neutts-nano-french", label: "French · neutts-nano-french" },
-  { value: "neuphonic/neutts-nano-spanish", label: "Spanish · neutts-nano-spanish" },
+  { value: "neuphonic/neutts-nano-q4-gguf", label: "English · neutts-nano · Q4 GGUF" },
+  { value: "neuphonic/neutts-nano-q8-gguf", label: "English · neutts-nano · Q8 GGUF" },
+  { value: "neuphonic/neutts-nano-german-q4-gguf", label: "German · neutts-nano · Q4 GGUF" },
+  { value: "neuphonic/neutts-nano-german-q8-gguf", label: "German · neutts-nano · Q8 GGUF" },
+  { value: "neuphonic/neutts-nano-french-q4-gguf", label: "French · neutts-nano · Q4 GGUF" },
+  { value: "neuphonic/neutts-nano-french-q8-gguf", label: "French · neutts-nano · Q8 GGUF" },
+  { value: "neuphonic/neutts-nano-spanish-q4-gguf", label: "Spanish · neutts-nano · Q4 GGUF" },
+  { value: "neuphonic/neutts-nano-spanish-q8-gguf", label: "Spanish · neutts-nano · Q8 GGUF" },
 ];
-
-export const KANI_OPTIONS: LocalRuntimeOption[] = [
-  { value: "nineninesix/kani-tts-2-en", label: "English · kani-tts-2-en" },
-];
-
-export const KANI_LANGUAGE_TAG_OPTIONS: LocalRuntimeOption[] = [
-  { value: "en_us", label: "English · US" },
-  { value: "en_nyork", label: "English · New York" },
-  { value: "en_oakl", label: "English · Oakland" },
-  { value: "en_glasg", label: "English · Glasgow" },
-  { value: "en_bost", label: "English · Boston" },
-  { value: "en_scou", label: "English · Liverpool" },
-];
-
-export const DEFAULT_KANI_LANGUAGE_TAG = KANI_LANGUAGE_TAG_OPTIONS[0].value;
-export const DEFAULT_KANI_MAX_NEW_TOKENS = 1024;
 
 export const QWEN3_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto · fastest for this device" },
@@ -66,24 +54,12 @@ export const QWEN3_LANGUAGE_OPTIONS: LocalRuntimeOption[] = [
   { value: "Korean", label: "Korean" },
   { value: "German", label: "German" },
   { value: "French", label: "French" },
-  { value: "Russian", label: "Russian" },
-  { value: "Portuguese", label: "Portuguese" },
   { value: "Spanish", label: "Spanish" },
-  { value: "Italian", label: "Italian" },
 ];
 
-export const QWEN3_SPEAKER_PRIMARY_LANGUAGE: Record<string, string> = {
-  Ryan: "English",
-  Aiden: "English",
-  Vivian: "Chinese",
-  Serena: "Chinese",
-  Uncle_Fu: "Chinese",
-  Dylan: "Chinese",
-  Eric: "Chinese",
-  Ono_Anna: "Japanese",
-  Sohee: "Korean",
-};
-
+// All speakers expose the full language list (the model accepts any supported
+// language per speaker); kept as a function so the page can stay agnostic to
+// whether per-speaker filtering is introduced later.
 export function getQwen3LanguageOptionsForSpeaker(speaker: string): LocalRuntimeOption[] {
   void speaker;
   return QWEN3_LANGUAGE_OPTIONS;
@@ -91,32 +67,20 @@ export function getQwen3LanguageOptionsForSpeaker(speaker: string): LocalRuntime
 
 export const QWEN3_DEVICE_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto" },
-  { value: "cuda:0", label: "CUDA 0" },
   { value: "cpu", label: "CPU" },
-  { value: "mps", label: "Apple MPS" },
 ];
 
-// CUDA never exists on macOS and Apple MPS never exists off macOS, so hide the
-// options that would only produce a confusing "Torch not compiled with ..." error.
 export function getQwen3DeviceOptions(platform: string | undefined): LocalRuntimeOption[] {
-  const isMac = platform === "darwin";
-  return QWEN3_DEVICE_OPTIONS.filter((option) => {
-    if (option.value === "cuda:0") return !isMac;
-    if (option.value === "mps") return isMac;
-    return true;
-  });
+  void platform;
+  return QWEN3_DEVICE_OPTIONS;
 }
 
 export const QWEN3_DTYPE_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto" },
-  { value: "bfloat16", label: "bfloat16" },
-  { value: "float16", label: "float16 (advanced)" },
   { value: "float32", label: "float32" },
 ];
 
 export const QWEN3_ATTENTION_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto" },
-  { value: "flash_attention_2", label: "FlashAttention 2" },
-  { value: "sdpa", label: "SDPA" },
   { value: "eager", label: "Eager" },
 ];

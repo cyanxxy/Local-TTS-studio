@@ -1,21 +1,12 @@
-export type LocalTtsModel = "neutts" | "kani" | "qwen3";
+export type LocalTtsModel = "neutts" | "qwen3";
 
 export interface LocalTtsProbeResult {
   ready: boolean;
   message: string;
-  pythonVersion: string;
-  pythonBinary: string;
-  resolvedFrom: string;
+  runtime: "rust";
   package?: string;
   packageVersion?: string | null;
-  requiresPython?: string;
-  compatibilityMode?: "legacy_0_1_x" | "current_1_2_x_or_newer" | null;
   warnings?: string[];
-  espeakVersion?: string | null;
-  espeakSource?: string | null;
-  espeakPath?: string | null;
-  transformersVersion?: string | null;
-  torchVersion?: string | null;
   recommendedModelRepo?: string | null;
   recommendedDeviceMap?: string | null;
   recommendedDtype?: string | null;
@@ -63,14 +54,11 @@ interface LocalTtsBridge {
   probe: (request: {
     model: LocalTtsModel;
     requestId?: string;
-    pythonBinary?: string;
-    allowRuntimeSetup?: boolean;
     payload?: Record<string, unknown>;
   }) => Promise<LocalTtsProbeResult>;
   generate: (request: {
     model: LocalTtsModel;
     requestId: string;
-    pythonBinary?: string;
     payload?: Record<string, unknown>;
   }) => Promise<LocalTtsGenerateResult>;
   cancel: (request: {

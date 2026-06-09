@@ -1,8 +1,6 @@
 import { Fragment } from "react";
 import type { LocalTtsModel } from "../../electron";
 import {
-  KANI_OPTIONS,
-  KANI_LANGUAGE_TAG_OPTIONS,
   NEUTTS_OPTIONS,
   QWEN3_ATTENTION_OPTIONS,
   QWEN3_DTYPE_OPTIONS,
@@ -25,18 +23,6 @@ interface LocalRuntimeModelInputsProps {
   referenceAudioName: string;
   referenceAudioGuidance: StatusMessage;
   onReferenceAudioChange: (file: File | null) => void;
-  kaniModel: string;
-  onKaniModelChange: (value: string) => void;
-  languageTag: string;
-  onLanguageTagChange: (value: string) => void;
-  temperature: number;
-  onTemperatureChange: (value: number) => void;
-  topP: number;
-  onTopPChange: (value: number) => void;
-  repetitionPenalty: number;
-  onRepetitionPenaltyChange: (value: number) => void;
-  maxNewTokens: number;
-  onMaxNewTokensChange: (value: number) => void;
   qwen3Model: string;
   onQwen3ModelChange: (value: string) => void;
   qwen3Speaker: string;
@@ -69,18 +55,6 @@ export function LocalRuntimeModelInputs({
   referenceAudioName,
   referenceAudioGuidance,
   onReferenceAudioChange,
-  kaniModel,
-  onKaniModelChange,
-  languageTag,
-  onLanguageTagChange,
-  temperature,
-  onTemperatureChange,
-  topP,
-  onTopPChange,
-  repetitionPenalty,
-  onRepetitionPenaltyChange,
-  maxNewTokens,
-  onMaxNewTokensChange,
   qwen3Model,
   onQwen3ModelChange,
   qwen3Speaker,
@@ -121,15 +95,21 @@ export function LocalRuntimeModelInputs({
           </label>
 
           <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
-            Reference Audio
+            Reference Codes
             <input
               type="file"
-              accept=".wav,audio/wav,audio/x-wav"
+              accept=".npy,application/octet-stream"
               onChange={(event) => onReferenceAudioChange(event.target.files?.[0] ?? null)}
               className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
             <span className="text-sm font-normal normal-case text-text-muted">
-              {referenceAudioName || "Upload a clean 3-15s WAV reference clip"}
+              {referenceAudioName || "Upload pre-encoded NeuTTS .npy reference codes"}
+            </span>
+            <span className="text-sm font-normal normal-case text-text-muted">
+              The Rust runtime cannot encode a WAV clip itself. Produce the .npy
+              by encoding a 3–15s mono reference clip with NeuCodec from the
+              Neuphonic NeuTTS project (github.com/neuphonic/neutts-air), then
+              upload it here with its exact transcript below.
             </span>
             {referenceAudioGuidance && (
               <span className={`text-sm font-normal normal-case ${statusClass(referenceAudioGuidance.tone)}`}>
@@ -145,10 +125,10 @@ export function LocalRuntimeModelInputs({
             value={referenceText}
             onChange={(event) => onReferenceTextChange(event.target.value)}
             className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 backdrop-blur-sm text-sm normal-case text-text-primary"
-            placeholder="Paste the exact spoken transcript of the uploaded WAV clip"
+            placeholder="Paste the transcript that matches the encoded reference codes"
           />
           <span className="text-sm font-normal normal-case text-text-muted">
-            This must match the uploaded reference audio exactly. Same-language references work best.
+            The Rust NeuTTS crate consumes pre-encoded reference code arrays. Same-language references work best.
           </span>
         </label>
       </Fragment>
@@ -303,86 +283,5 @@ export function LocalRuntimeModelInputs({
     );
   }
 
-  return (
-    <Fragment key="kani">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
-          Model Variant
-          <select
-            value={kaniModel}
-            onChange={(event) => onKaniModelChange(event.target.value)}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
-          >
-            {KANI_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
-
-        <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
-          Accent / Voice Tag
-          <select
-            value={languageTag}
-            onChange={(event) => onLanguageTagChange(event.target.value)}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
-          >
-            {KANI_LANGUAGE_TAG_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
-            ))}
-          </select>
-        </label>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs font-medium text-text-secondary">
-        <label className="flex flex-col gap-1">
-          Temperature
-          <input
-            type="number"
-            value={temperature}
-            min={0.2}
-            max={2}
-            step={0.05}
-            onChange={(event) => onTemperatureChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          Top-p
-          <input
-            type="number"
-            value={topP}
-            min={0.5}
-            max={1}
-            step={0.01}
-            onChange={(event) => onTopPChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          Repetition Penalty
-          <input
-            type="number"
-            value={repetitionPenalty}
-            min={1}
-            max={2}
-            step={0.05}
-            onChange={(event) => onRepetitionPenaltyChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          Max Tokens
-          <input
-            type="number"
-            value={maxNewTokens}
-            min={64}
-            max={4096}
-            step={64}
-            onChange={(event) => onMaxNewTokensChange(Number(event.target.value))}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
-          />
-        </label>
-      </div>
-    </Fragment>
-  );
+  return null;
 }

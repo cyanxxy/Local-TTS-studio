@@ -1,6 +1,6 @@
 # Design System
 
-Open TTS aims for a flat, minimal, OS-native feel: typography-forward, restrained, and built on tokens rather than ad hoc component styling.
+Open TTS uses a Liquid Glass direction: translucent blurred surfaces, specular edges, and soft depth over an ambient color field. The implementation is token-first and lives in `src/index.css`; components should reuse the existing `.glass*` utilities and Tailwind token utilities instead of inventing new visual effects.
 
 | Token | Value |
 |---|---|
@@ -11,7 +11,8 @@ Open TTS aims for a flat, minimal, OS-native feel: typography-forward, restraine
 | `--color-panel` | `#FFFFFF` |
 | `--color-accent` | `#0071E3` |
 | `--color-text-primary` | `#1D1D1F` |
-| Shadows | `--shadow-xs/sm/md/lg`, `--shadow-accent-sm/md/lg` |
+| Glass utilities | `.glass`, `.glass-panel`, `.glass-pop`, `.glass-accent`, `.glass-inset` |
+| Shadows | `--shadow-xs/sm/md/lg`, `--shadow-accent-sm/md/lg`, `--shadow-glass-sm/md/lg` |
 | Icon sizes | `xs=12px`, `sm=14px`, `md=16px` |
 
-All colors and effects flow through `@theme` variables in `src/index.css`. Components should use tokens or `color-mix()` rather than hardcoded hex values.
+The `.glass*` utilities are intentionally unlayered so they win over Tailwind utilities. Use them on static containers and build interactive states from explicit utilities such as `bg-white/40`, `border-white/55`, `backdrop-blur-md`, and `shadow-glass-sm`. Electron on macOS also relies on transparent window vibrancy plus the `is-electron` / `is-mac` HTML classes, so keep that CSS scoping intact.

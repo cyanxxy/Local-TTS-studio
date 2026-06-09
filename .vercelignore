@@ -3,14 +3,12 @@ dist
 dist-electron
 release
 .venv
-.venv313
-.venv-neutts
+.venv*
 .claude
 .vercel
 electron/dist
 electron/build
 electron
-python
 CLAUDE.md
 AGENTS.md
 .DS_Store

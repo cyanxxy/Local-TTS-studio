@@ -1,158 +1,108 @@
 # Desktop Local Runtimes
 
-Electron exposes optional local Python-runtime integrations for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS. The desktop package includes the Electron app and bridge script, but it does not bundle Python or model weights.
+Electron exposes optional Rust-only local-runtime integrations for NeuTTS Nano and Qwen3-TTS. The desktop package includes the Electron app and the `open-tts-local-bridge` binary. It does not include model weights; first use downloads model assets into the app data cache.
 
-All three runtimes generate over the same resident WebSocket bridge worker — see [Resident worker (warm reuse)](#resident-worker-warm-reuse). The one-shot `probe` action is the only place the bridge runs as a fresh subprocess.
+There is no interpreter discovery, adapter script, managed virtual environment, or one-shot generation subprocess. The local runtime path is Rust from Electron process launch through model execution.
 
-On first use, if no usable runtime is found and no Python executable override is set, Electron creates a managed virtual environment and installs the selected runtime package automatically:
+## Available Runtimes
 
-- NeuTTS: `.venv-neutts` with `neutts`
-- Kani: `.venv-kani` with `kani-tts-2`, then `transformers==4.56.0`
-- Qwen3: `.venv-qwen3` with device-profiled `torch`, then `qwen-tts`
+| Runtime | Rust crate | Route | Notes |
+|---|---|---|---|
+| NeuTTS Nano | `neutts` | `/desktop/neutts` | Uses Neuphonic GGUF variants and pre-encoded `.npy` reference codes |
+| Qwen3-TTS CustomVoice | `qwen_tts` | `/desktop/qwen3` | Uses Qwen CustomVoice safetensors through Candle CPU execution |
 
-Managed environments use Python 3.12. If Python 3.12 is not installed but `uv` is available, Electron uses `uv venv --python 3.12` so uv can provide the interpreter. Development builds create these environments in the repo root. Packaged builds create them under the app's user data directory. Set `OPEN_TTS_DISABLE_AUTO_PYTHON_SETUP=1` to disable this behavior.
-
-Current NeuTTS wheels normally bundle the eSpeak NG shared library and data needed by phonemizer. The bridge validates that Python-level eSpeak backend first and only falls back to a system `espeak-ng`/`espeak` command if the bundled backend is unavailable.
-
-## Python Discovery Order
-
-Electron resolves a usable Python runtime in this order:
-
-1. The Python executable entered in the app's runtime settings
-2. `TTS_NEUTTS_PYTHON_BIN`, `TTS_KANI_PYTHON_BIN`, or `TTS_QWEN3_PYTHON_BIN` for the selected model
-3. `TTS_PYTHON_BIN`
-4. Local virtualenv names, if they exist:
-   - NeuTTS: `.venv-neutts` -> `.venv313` -> shared `.venv`
-   - Kani: `.venv-kani` -> `.venv313` -> shared `.venv`
-   - Qwen3: `.venv-qwen3` -> `.venv-qwen` -> `.venv312` -> shared `.venv`
-5. System Python:
-   - macOS/Linux: `python3.13` -> `python3.12` -> `python3.11` -> `python3.10` -> `python3` -> `python`
-   - Windows: `py` -> `python`
-6. Managed first-run setup for the selected runtime, using Python 3.12 or uv, unless disabled
-
-In development, Electron resolves virtualenv names from the repo root. In packaged apps, runtime discovery is stricter: Electron searches only the packaged app path and its resources directory unless an explicit Python executable or environment variable is provided.
+Kani-TTS-2 is retired from the app because there is no Rust runtime crate replacing its previous interpreter-only implementation.
 
 ## NeuTTS Nano
 
-Open TTS supports legacy repo environments such as `.venv-neutts` with `neutts 0.1.x`, plus current official NeuTTS installs from Neuphonic docs.
+Open TTS uses the Rust `neutts` crate with Neuphonic GGUF model repositories:
 
-Requirements:
+- `neuphonic/neutts-nano-q4-gguf`
+- `neuphonic/neutts-nano-q8-gguf`
+- German, French, and Spanish Q4/Q8 variants
 
-- Python 3.10 through 3.13
-- `pip install neutts`
-- A usable eSpeak NG backend. Current NeuTTS wheels bundle this; source/custom installs may need system eSpeak NG plus `PHONEMIZER_ESPEAK_LIBRARY`.
-- A reference transcript plus a real mono WAV clip
+The Rust crate consumes pre-encoded reference code arrays. Upload a `.npy` file containing those codes, then provide the matching reference transcript. WAV reference upload is not part of the Rust-only path because the crate does not implement a pure Rust WAV-to-code encoder. Produce the `.npy` externally by encoding a 3–15s mono reference clip with NeuCodec from the upstream Neuphonic NeuTTS project (`github.com/neuphonic/neutts-air`).
 
-Manual development setup:
-
-```bash
-python3.13 -m venv .venv-neutts
-source .venv-neutts/bin/activate
-pip install --upgrade pip
-pip install neutts
-```
-
-Packaged-app notes:
-
-- `TTS_NEUTTS_PYTHON_BIN` is the most reliable override for packaged builds.
-- Finder / Explorer launches may not inherit a useful `PATH`, so the bridge checks NeuTTS' bundled eSpeak library before trying command-line `espeak-ng`.
-- If you use a custom NeuTTS source install without bundled eSpeak files, install eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` plus `ESPEAK_DATA_PATH` if phonemizer cannot locate it.
-
-## Kani-TTS-2
-
-Requirements:
-
-- Python 3.10+
-- `pip install kani-tts-2`
-- `pip install -U "transformers==4.56.0"`
-- An importable `kani_tts`
-
-On macOS, the bridge defaults Kani to CPU to avoid known MPS issues. The app uses a 1024-token Kani decode cap by default for practical CPU latency; increase Max Tokens only when you need longer output.
-
-The `nineninesix/kani-tts-2-en` model exposes language/accent tags. Open TTS defaults to `en_us` and exposes the known English tags in the app (`en_us`, `en_nyork`, `en_oakl`, `en_glasg`, `en_bost`, `en_scou`) because generating without a tag can produce unstable or odd-sounding speech.
+Generation is whole-text and streams as one binary Float32 audio chunk.
 
 ## Qwen3-TTS CustomVoice
 
-Open TTS supports Qwen3-TTS CustomVoice as an Electron-only local runtime. Auto mode chooses `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` for fastest default generation, then selects the best available device profile for the machine: CUDA, Apple MPS, or CPU. The 1.7B CustomVoice model remains available as a manual quality option. Qwen3 is not wired into the browser WebGPU worker path because the released model ships Qwen-specific `qwen-tts` / safetensors assets rather than ONNX / Transformers.js browser artifacts.
+Open TTS uses the Rust `qwen_tts` crate for Qwen3-TTS CustomVoice:
 
-Requirements:
+- `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`
+- `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice`
+- `auto`, which resolves to the 0.6B model
 
-- Python 3.12 for the managed runtime
-- Python 3.9 through 3.13 for explicit user-provided Qwen environments
-- An importable `qwen_tts`
-- An importable `torch`
-- CUDA-capable GPU preferred for the 1.7B quality option
-- Apple MPS supported through PyTorch on Apple Silicon; Auto uses bfloat16 when the installed PyTorch MPS backend supports it, otherwise float32 for stability
-- FlashAttention 2 optional on CUDA; Auto uses SDPA when FlashAttention is unavailable
+The current Rust path exposes CPU execution with `float32` dtype and `eager` attention. The UI keeps device, dtype, and attention controls constrained to those supported values.
 
-Manual development setup on Apple Silicon:
+Supported UI languages are Auto, Chinese, English, Japanese, Korean, German, French, and Spanish. The page also exposes speaker, optional instruction prompt, temperature, top-p, and max token controls.
 
-```bash
-python3.12 -m venv .venv-qwen3
-source .venv-qwen3/bin/activate
-pip install --upgrade pip
-pip install torch
-pip install qwen-tts
+Speaker names are shown capitalized in the UI (`Ryan`, `Vivian`, `Serena`, `Uncle_Fu`, `Dylan`, `Eric`, `Aiden`, `Ono_Anna`, `Sohee`), but the model's `talker_config.spk_id` keys are lowercase and `qwen_tts` speaker validation is case-sensitive. The Rust bridge lowercases the speaker (e.g. `Ryan` → `ryan`, `Uncle_Fu` → `uncle_fu`) before generation; the UI/IPC keep the capitalized display names.
+
+First generation downloads the model (roughly 1–2 GB) and CPU inference can run for minutes. These are single blocking calls, so the bridge emits a periodic stderr heartbeat for the duration of each request to keep the host's inactivity watchdog armed; the watchdog only fires when the worker goes fully silent.
+
+## Bridge Protocol
+
+`open-tts-local-bridge` has exactly two actions:
+
+- `probe`
+- `serve-ws`
+
+Electron launches probe as:
+
+```sh
+open-tts-local-bridge --action probe --model <neutts|qwen3> --cache-dir <dir>
 ```
 
-Manual CUDA setup:
+Electron launches generation workers as:
 
-```bash
-python3.12 -m venv .venv-qwen3
-source .venv-qwen3/bin/activate
-pip install --upgrade pip
-pip install torch --index-url https://download.pytorch.org/whl/cu128
-pip install qwen-tts
-pip install -U flash-attn --no-build-isolation
+```sh
+open-tts-local-bridge --action serve-ws --model <neutts|qwen3> --cache-dir <dir> --host 127.0.0.1 --port 0 --auth-token <token>
 ```
 
-Electron uses the same policy for managed setup: CUDA systems get the CUDA PyTorch wheel index, CPU-only Linux/Windows get the CPU PyTorch wheel index, and macOS gets the normal PyPI PyTorch wheel with MPS support. Auto chooses bfloat16 on CUDA, bfloat16 or float32 on Apple MPS, and float32 on CPU. You can also point Open TTS at a pre-existing environment with `TTS_QWEN3_PYTHON_BIN=/absolute/path/to/python`.
+`serve-ws` binds the requested loopback host, prints `__PORT__<actual-port>` on stdout, and accepts a WebSocket connection only on `/<token>`. Electron uses `--port 0` so Rust owns the final port selection and there is no host-side reserve/bind race.
 
-The Qwen3 page exposes speaker, supported language, optional instruction prompt, device map, dtype, attention implementation, temperature, top-p, and max token controls. Upstream defaults are temperature `0.9`, top-p `1.0`, and max new tokens up to `8192`; Open TTS keeps the default max token value at `2048` for faster interactive generation. Style instruction prompts (`instruct`) are supported by both CustomVoice sizes — the official 0.6B and 1.7B model cards both demonstrate natural-language style control — so the instruction field is enabled for every Qwen3 option, including the Auto default. The device-map control hides options the OS cannot provide (CUDA off macOS, Apple MPS on non-macOS).
+Once connected, `serve-ws` reads WebSocket requests shaped like `{"requestId","payload"}` or `{"command":"shutdown"}`. Per generation request it emits zero or more `progress` JSON frames, then an `audio_chunk` JSON frame immediately followed by one binary Float32 frame, then one `result` JSON frame.
 
-Long first-run generations are expected: the model downloads on first use, and inference can take minutes on CPU or for the larger model. The bridge emits a steady heartbeat while it works, and the desktop app treats the generation timeout as an inactivity watchdog — it only stops a run that goes fully silent, never one that is slow but still progressing.
+Successful results include:
 
-## Resident worker (warm reuse)
+- `sampleRate`
+- `modelRepo`
+- `durationSec`
+- `elapsedSec`
+- `audioTransport: "websocket-binary"`
+- `audioChunkCount`
+- `phaseTimingsSec`
 
-All three local runtimes — NeuTTS, Kani, and Qwen3 — generate over a resident WebSocket bridge worker (`local_tts_bridge.py --action serve-ws`, pooled by `electron/webSocketBridgeWorker.ts`) rather than a fresh subprocess per request. Generation is WebSocket-only: the worker opens a loopback TCP server, accepts one RFC6455 WebSocket connection, and exchanges request/progress/result metadata as JSON frames while audio streams as binary Float32 PCM (no base64). Successful results include `audioTransport:"websocket-binary"`, `audioChunkCount`, and `phaseTimingsSec`; `wavBase64` is rejected. The legacy stdin `serve` action and the one-shot `generate` action are gone; `probe` is the only one-shot subprocess action.
+`wavBase64` is not supported on the local runtime path.
 
-The worker imports the runtime and loads the model once, then serves many requests, so only the first generation pays the Python/torch import, model load, and first-inference accelerator warmup. Repeat generations with the same profile reuse the resident model and are roughly 2–3× faster (on Apple MPS, a warm Qwen3 0.6B request is inference-only). A `make_model_host(model)` factory builds the right resident host:
+## Resident Worker
 
-- **Qwen3** — keyed by (repo, device, dtype, attention); reloads when any of those change. Text is chunked and streamed one binary frame per chunk.
-- **NeuTTS** — keyed by (backbone repo, codec repo, backbone device, codec device). Reference audio, reference text, and target text vary per request, so the reference is re-encoded every request and reference codes are not cached. Whole-text inference is unchanged (no sentence chunking) and streams as a single binary chunk.
-- **Kani** — keyed by (model repo, device map, max new tokens); `max_new_tokens` is a `KaniTTS` constructor argument, so changing it forces a reload. `language_tag`, `temperature`, `top_p`, and `repetition_penalty` vary per request. Whole-text inference is unchanged and streams as a single binary chunk.
+Generation uses a resident WebSocket worker pool in `electron/webSocketBridgeWorker.ts`. The bridge process loads a model once and serves repeated requests for that model until it is idle-evicted or cancelled. Requests are serialized per model by `generateRateLimiter`, so a resident model is never entered concurrently.
 
-The worker is killed after a few minutes idle to release the model's memory, and the next request respawns it; cancelling a generation also kills the worker (the next request reloads). Requests are serialized per model — one generation runs at a time.
+The bridge uses the literal `127.0.0.1` and sets `TCP_NODELAY` on accepted loopback sockets best-effort. Inbound WebSocket requests must be masked and stay within the bridge's frame size cap. Audio bytes are raw Float32 with only NaN/Inf cleanup in Rust; renderer-side playback uses Web Audio, and renderer-side WAV encoding owns peak normalization.
 
-Latency tuning: the worker sets `TCP_NODELAY` on the accepted loopback socket (best-effort) to disable Nagle, uses the literal `127.0.0.1` to skip DNS/IPv6 fallback, and keeps the model resident so warm requests are inference-only. The transport is pure Python stdlib sockets plus the Node global `WebSocket` (no `ws` dependency), so it works on macOS, Windows, and Linux.
+## Packaging (macOS)
 
-When the model is already cached, the worker loads it with Hugging Face offline mode forced on, so a cached generation never makes a network request (transformers' tokenizer setup otherwise calls `model_info()` against huggingface.co on every load). The first-run download path is unaffected, and an incomplete cache falls back to an online load.
+`scripts/build-rust-bridge.mjs` copies the bridge binary and its `ggml`/`llama`/`mtmd` dylibs into `dist-rust/`, which `electron-builder` ships as `extraResources`. On macOS the script also makes the bundle self-contained: it transitively copies external Homebrew dependencies the build links against (e.g. `libomp`, `openssl@3`'s `libssl`/`libcrypto`) into `dist-rust/`, rewrites every absolute install name to `@rpath`, adds the `@executable_path`/`@loader_path` rpath so `@rpath` resolves to the bundle directory, and re-signs each artifact ad-hoc so it still loads on Apple Silicon. Without this, a packaged build would fail to launch on machines without those Homebrew libraries. Distributed builds still require a Developer ID signature and notarization (configure `build.mac` in `package.json`); the ad-hoc signature is only for local/dev runs.
 
-## Runtime Probe
+## Cache
 
-The probe reports:
+Model assets are stored under the app data local model cache. The runtime sets Hugging Face cache environment variables under that per-model cache directory so NeuTTS and Qwen3 assets stay isolated and repeat loads can reuse downloaded files.
 
-- resolved interpreter path
-- where that interpreter came from
-- Python version
-- detected package and version
-- NeuTTS compatibility mode, when relevant
-- eSpeak NG backend status, when relevant
-- Qwen3 device/profile recommendation and CUDA/MPS/CPU warnings, when relevant
+## Probe
 
-A successful probe means the interpreter can launch the bridge and expose the required package. It does not prove that every reference WAV or generation request will succeed.
+Probe reports Rust runtime readiness and package metadata. Qwen3 probe also reports the recommended CPU/`float32`/`eager` execution profile. NeuTTS probe warns that `.npy` reference codes are required.
+
+A successful probe means the Rust bridge can start and the selected runtime is compiled into the binary. It does not prove every model file is already downloaded or every generation request will succeed.
 
 ## Troubleshooting
 
 | App message | Meaning | Fix |
 |---|---|---|
-| `No usable Python runtime found` | Electron could not resolve a Python interpreter | Set Python in app settings, or set the relevant `TTS_*_PYTHON_BIN` environment variable |
-| `NeuTTS currently requires Python 3.10-3.13` | Interpreter is too new or too old for current NeuTTS | Point the app at Python 3.10 through 3.13 |
-| `Failed to import neutts` | Python launched, but the environment does not expose `neutts` | Activate that environment and run `pip install neutts` |
-| `Failed to import qwen_tts` | Python launched, but the environment does not expose Qwen's TTS package | Activate that environment and install `qwen-tts` |
-| `Qwen3-TTS requires torch` | Qwen runtime is present, but PyTorch is missing | Install the PyTorch build that matches your CPU/GPU environment |
-| `No CUDA or Apple MPS accelerator was detected` | Qwen3 Auto mode will use the 0.6B model on CPU | Expect slower generation, or use a CUDA/Apple Silicon machine |
-| `Qwen3-TTS is unstable on Apple MPS with float16` | Manual dtype `float16` failed on Apple MPS | Use dtype Auto, bfloat16, or float32 |
-| `no usable eSpeak NG backend was found` | NeuTTS is installed, but phonemizer could not load bundled or system eSpeak support | Reinstall current `neutts`; for custom/source installs, install eSpeak NG and set `PHONEMIZER_ESPEAK_LIBRARY` plus `ESPEAK_DATA_PATH` |
-| `Reference audio must be a valid WAV file` | Uploaded reference clip is not a readable WAV | Convert the clip to WAV before uploading |
-| `Reference text is required` | NeuTTS needs the exact transcript of the reference clip | Paste the spoken transcript exactly as heard in the WAV |
+| `Rust local bridge exited...` | The desktop app could not run the bridge binary | Run `npm run build:rust`, then restart Electron |
+| `NeuTTS Rust references must be pre-encoded .npy code files` | A WAV or other file type was selected for NeuTTS | Upload a `.npy` reference-code file |
+| `referenceCodesBase64 is required` | NeuTTS generation was submitted without reference codes | Upload a reference `.npy` file before generating |
+| `Unsupported Qwen3-TTS dtype` | A request used a dtype outside the Rust-supported set | Use Auto or float32 |
+| `Unsupported Qwen3-TTS attention implementation` | A request used attention outside the Rust-supported set | Use Auto or eager |
+| `Local bridge timed out` | The one-shot probe did not return within its deadline | Rebuild the Rust bridge and check stderr logs |

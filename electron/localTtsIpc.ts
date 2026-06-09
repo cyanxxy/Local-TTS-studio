@@ -3,37 +3,25 @@ import { isAllowedAppUrl } from "./security";
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
 export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
-export const LOCAL_MODELS = ["neutts", "kani", "qwen3"] as const;
+export const LOCAL_MODELS = ["neutts", "qwen3"] as const;
 
 const MAX_TEXT_LENGTH = 6000;
 const MAX_REFERENCE_TEXT_LENGTH = 2000;
-const MAX_REFERENCE_AUDIO_BASE64_LENGTH = 25_000_000;
+const MAX_REFERENCE_CODES_BASE64_LENGTH = 25_000_000;
 
 const ALLOWED_NEUTTS_MODELS = new Set([
-  "neuphonic/neutts-nano",
-  "neuphonic/neutts-nano-german",
-  "neuphonic/neutts-nano-french",
-  "neuphonic/neutts-nano-spanish",
-]);
-
-const ALLOWED_KANI_MODELS = new Set([
-  "nineninesix/kani-tts-2-en",
-]);
-
-const DEFAULT_KANI_LANGUAGE_TAG = "en_us";
-const ALLOWED_KANI_LANGUAGE_TAGS = new Set([
-  "en_us",
-  "en_nyork",
-  "en_oakl",
-  "en_glasg",
-  "en_bost",
-  "en_scou",
+  "neuphonic/neutts-nano-q4-gguf",
+  "neuphonic/neutts-nano-q8-gguf",
+  "neuphonic/neutts-nano-german-q4-gguf",
+  "neuphonic/neutts-nano-german-q8-gguf",
+  "neuphonic/neutts-nano-french-q4-gguf",
+  "neuphonic/neutts-nano-french-q8-gguf",
+  "neuphonic/neutts-nano-spanish-q4-gguf",
+  "neuphonic/neutts-nano-spanish-q8-gguf",
 ]);
 
 const ALLOWED_QWEN3_MODELS = new Set([
   "auto",
-  // This page is intentionally scoped to the CustomVoice release because its
-  // speaker and language controls map to that repository's built-in voices.
   "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
   "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
 ]);
@@ -58,32 +46,11 @@ const ALLOWED_QWEN3_LANGUAGES = new Set([
   "Korean",
   "German",
   "French",
-  "Russian",
-  "Portuguese",
   "Spanish",
-  "Italian",
 ]);
 
-const ALLOWED_QWEN3_DTYPES = new Set([
-  "auto",
-  "bfloat16",
-  "float16",
-  "float32",
-]);
-
-const ALLOWED_QWEN3_ATTENTION = new Set([
-  "auto",
-  "flash_attention_2",
-  "sdpa",
-  "eager",
-]);
-
-const ALLOWED_NEUTTS_CODECS = new Set([
-  "neuphonic/neucodec",
-  "neuphonic/distill-neucodec",
-  "neuphonic/neucodec-onnx-decoder",
-  "neuphonic/neucodec-onnx-decoder-int8",
-]);
+const ALLOWED_QWEN3_DTYPES = new Set(["auto", "float32"]);
+const ALLOWED_QWEN3_ATTENTION = new Set(["auto", "eager"]);
 
 export type LocalModel = typeof LOCAL_MODELS[number];
 export type BridgeAction = "probe" | "generate";
@@ -102,34 +69,19 @@ export interface LocalCacheInfo {
   sizeBytes: number;
 }
 
-export interface PythonResolution {
-  pythonBinary: string;
-  resolvedFrom: string;
-}
-
 export interface ValidatedLocalBridgeRequest {
   model: LocalModel;
   requestId?: string;
-  pythonResolution: PythonResolution;
   payload: Record<string, unknown>;
 }
 
 export interface BridgeProbeResult {
   ready: boolean;
   message: string;
-  pythonVersion: string;
-  pythonBinary: string;
-  resolvedFrom: string;
+  runtime: "rust";
   package?: string;
   packageVersion?: string | null;
-  requiresPython?: string;
-  compatibilityMode?: "legacy_0_1_x" | "current_1_2_x_or_newer" | null;
   warnings?: string[];
-  espeakVersion?: string | null;
-  espeakSource?: string | null;
-  espeakPath?: string | null;
-  transformersVersion?: string | null;
-  torchVersion?: string | null;
   recommendedModelRepo?: string | null;
   recommendedDeviceMap?: string | null;
   recommendedDtype?: string | null;
@@ -212,12 +164,6 @@ export function parseOptionalNumber(
   return value;
 }
 
-export function parseOptionalBoolean(value: unknown, field: string): boolean | undefined {
-  if (value == null) return undefined;
-  if (typeof value !== "boolean") throw new Error(`\`${field}\` must be a boolean.`);
-  return value;
-}
-
 export function parseOptionalInteger(
   value: unknown,
   field: string,
@@ -268,12 +214,12 @@ export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown>
   const text = parseRequiredText(payload.text, "text");
   const referenceText = parseRequiredText(payload.referenceText, "referenceText", MAX_REFERENCE_TEXT_LENGTH);
 
-  if (typeof payload.referenceAudioBase64 !== "string" || payload.referenceAudioBase64.trim().length === 0) {
-    throw new Error("`referenceAudioBase64` is required.");
+  if (typeof payload.referenceCodesBase64 !== "string" || payload.referenceCodesBase64.trim().length === 0) {
+    throw new Error("`referenceCodesBase64` is required.");
   }
-  const referenceAudioBase64 = payload.referenceAudioBase64.trim();
-  if (referenceAudioBase64.length > MAX_REFERENCE_AUDIO_BASE64_LENGTH) {
-    throw new Error("`referenceAudioBase64` is too large.");
+  const referenceCodesBase64 = payload.referenceCodesBase64.trim();
+  if (referenceCodesBase64.length > MAX_REFERENCE_CODES_BASE64_LENGTH) {
+    throw new Error("`referenceCodesBase64` is too large.");
   }
 
   const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
@@ -281,59 +227,11 @@ export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown>
     throw new Error("Unsupported NeuTTS model repository.");
   }
 
-  const codecRepo = parseOptionalString(payload.codecRepo, "codecRepo", { maxLength: 128 });
-  if (codecRepo && !ALLOWED_NEUTTS_CODECS.has(codecRepo)) {
-    throw new Error("Unsupported NeuTTS codec repository.");
-  }
-
-  const backboneDevice = parseOptionalString(payload.backboneDevice, "backboneDevice", {
-    pattern: /^(cpu|gpu)$/i,
-  })?.toLowerCase();
-  const codecDevice = parseOptionalString(payload.codecDevice, "codecDevice", {
-    pattern: /^(cpu|gpu)$/i,
-  })?.toLowerCase();
-
   return {
     text,
     referenceText,
-    referenceAudioBase64,
+    referenceCodesBase64,
     modelRepo,
-    codecRepo,
-    backboneDevice,
-    codecDevice,
-  };
-}
-
-export function sanitizeKaniPayload(payload: unknown): Record<string, unknown> {
-  if (!isRecord(payload)) throw new Error("Kani payload must be an object.");
-
-  const text = parseRequiredText(payload.text, "text");
-  const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
-  if (modelRepo && !ALLOWED_KANI_MODELS.has(modelRepo)) {
-    throw new Error("Unsupported Kani model repository.");
-  }
-
-  const languageTag = parseOptionalString(payload.languageTag, "languageTag", {
-    maxLength: 32,
-    pattern: /^[a-zA-Z0-9_-]+$/,
-  })?.toLowerCase() ?? DEFAULT_KANI_LANGUAGE_TAG;
-  if (!ALLOWED_KANI_LANGUAGE_TAGS.has(languageTag)) {
-    throw new Error("Unsupported Kani language tag.");
-  }
-
-  const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
-  const topP = parseOptionalNumber(payload.topP, "topP", { min: 0.5, max: 1.0 });
-  const repetitionPenalty = parseOptionalNumber(payload.repetitionPenalty, "repetitionPenalty", { min: 1.0, max: 2.0 });
-  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 4096 });
-
-  return {
-    text,
-    modelRepo,
-    languageTag,
-    temperature,
-    topP,
-    repetitionPenalty,
-    maxNewTokens,
   };
 }
 
@@ -360,7 +258,7 @@ export function sanitizeQwen3Payload(payload: unknown): Record<string, unknown> 
 
   const deviceMap = parseOptionalString(payload.deviceMap, "deviceMap", {
     maxLength: 32,
-    pattern: /^(auto|cpu|mps|cuda(?::\d+)?)$/i,
+    pattern: /^(auto|cpu)$/i,
   })?.toLowerCase();
 
   const dtype = parseOptionalString(payload.dtype, "dtype", { maxLength: 16 })?.toLowerCase();
@@ -393,9 +291,7 @@ export function sanitizeQwen3Payload(payload: unknown): Record<string, unknown> 
 }
 
 export function sanitizeGeneratePayload(model: LocalModel, payload: unknown): Record<string, unknown> {
-  if (model === "neutts") return sanitizeNeuttsPayload(payload);
-  if (model === "qwen3") return sanitizeQwen3Payload(payload);
-  return sanitizeKaniPayload(payload);
+  return model === "neutts" ? sanitizeNeuttsPayload(payload) : sanitizeQwen3Payload(payload);
 }
 
 export function sanitizeCacheRequest(request: unknown): CacheRequest {
@@ -415,21 +311,16 @@ export function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
 
-export function parseBridgeProbeResult(
-  result: unknown,
-  pythonResolution: PythonResolution,
-): BridgeProbeResult {
-  if (!isRecord(result)) throw new Error("Invalid probe response from Python bridge.");
+export function parseBridgeProbeResult(result: unknown): BridgeProbeResult {
+  if (!isRecord(result)) throw new Error("Invalid probe response from local bridge.");
   if (typeof result.ready !== "boolean") throw new Error("Probe response missing `ready` boolean.");
   if (typeof result.message !== "string") throw new Error("Probe response missing `message` string.");
-  if (typeof result.pythonVersion !== "string") throw new Error("Probe response missing `pythonVersion` string.");
+  if (result.runtime !== "rust") throw new Error("Probe response missing Rust runtime marker.");
 
   const parsed: BridgeProbeResult = {
     ready: result.ready,
     message: result.message,
-    pythonVersion: result.pythonVersion,
-    pythonBinary: pythonResolution.pythonBinary,
-    resolvedFrom: pythonResolution.resolvedFrom,
+    runtime: "rust",
   };
 
   if (result.package != null) {
@@ -440,38 +331,8 @@ export function parseBridgeProbeResult(
     throw new Error("Probe response has invalid `packageVersion`.");
   }
   if (result.packageVersion != null) parsed.packageVersion = result.packageVersion;
-  if (result.requiresPython != null) {
-    if (typeof result.requiresPython !== "string") throw new Error("Probe response has invalid `requiresPython`.");
-    parsed.requiresPython = result.requiresPython;
-  }
-  if (result.compatibilityMode != null) {
-    if (result.compatibilityMode !== "legacy_0_1_x" && result.compatibilityMode !== "current_1_2_x_or_newer") {
-      throw new Error("Probe response has invalid `compatibilityMode`.");
-    }
-    parsed.compatibilityMode = result.compatibilityMode;
-  }
   const warnings = parseOptionalStringArray(result.warnings, "warnings");
   if (warnings) parsed.warnings = warnings;
-  if (result.espeakVersion != null) {
-    if (typeof result.espeakVersion !== "string") throw new Error("Probe response has invalid `espeakVersion`.");
-    parsed.espeakVersion = result.espeakVersion;
-  }
-  if (result.espeakSource != null) {
-    if (typeof result.espeakSource !== "string") throw new Error("Probe response has invalid `espeakSource`.");
-    parsed.espeakSource = result.espeakSource;
-  }
-  if (result.espeakPath != null) {
-    if (typeof result.espeakPath !== "string") throw new Error("Probe response has invalid `espeakPath`.");
-    parsed.espeakPath = result.espeakPath;
-  }
-  if (result.transformersVersion != null) {
-    if (typeof result.transformersVersion !== "string") throw new Error("Probe response has invalid `transformersVersion`.");
-    parsed.transformersVersion = result.transformersVersion;
-  }
-  if (result.torchVersion != null) {
-    if (typeof result.torchVersion !== "string") throw new Error("Probe response has invalid `torchVersion`.");
-    parsed.torchVersion = result.torchVersion;
-  }
   if (result.recommendedModelRepo != null) {
     if (typeof result.recommendedModelRepo !== "string") {
       throw new Error("Probe response has invalid `recommendedModelRepo`.");
@@ -499,7 +360,7 @@ export function parseBridgeProbeResult(
 }
 
 export function parseBridgeProgressResult(value: unknown): BridgeProgressResult {
-  if (!isRecord(value)) throw new Error("Invalid progress response from Python bridge.");
+  if (!isRecord(value)) throw new Error("Invalid progress response from local bridge.");
   if (typeof value.phase !== "string" || !value.phase.trim()) {
     throw new Error("Progress response missing `phase` string.");
   }
@@ -523,7 +384,7 @@ export function parseBridgeProgressResult(value: unknown): BridgeProgressResult 
 }
 
 export function parseBridgeGenerateResult(result: unknown): BridgeGenerateResult {
-  if (!isRecord(result)) throw new Error("Invalid generation response from Python bridge.");
+  if (!isRecord(result)) throw new Error("Invalid generation response from local bridge.");
   if ("wavBase64" in result) {
     throw new Error("Generation response must not include `wavBase64`; local generation is WebSocket-binary only.");
   }
@@ -587,7 +448,6 @@ export function parseBridgeResult(
   stdout: string,
   stderr: string,
   action: BridgeAction,
-  pythonResolution: PythonResolution,
 ): BridgeProbeResult | BridgeGenerateResult {
   const lines = stdout
     .split(/\r?\n/)
@@ -617,22 +477,21 @@ export function parseBridgeResult(
 
   if (!parsed.ok) {
     if (parsed.details) {
-      console.error(`[local-tts:${action}] Python bridge details\n${parsed.details}`);
+      console.error(`[local-tts:${action}] local bridge details\n${parsed.details}`);
     }
-    throw new Error(parsed.error ?? "Python bridge failed.");
+    throw new Error(parsed.error ?? "Local bridge failed.");
   }
 
   if (action !== "probe") {
     throw new Error("One-shot generate bridge results are not supported; generation is WebSocket-binary only.");
   }
 
-  return parseBridgeProbeResult(parsed.result, pythonResolution);
+  return parseBridgeProbeResult(parsed.result);
 }
 
 export function parseBridgeEnvelopeResult(
   decoded: unknown,
   action: BridgeAction,
-  pythonResolution: PythonResolution,
 ): BridgeProbeResult | BridgeGenerateResult {
   if (!isRecord(decoded) || typeof decoded.ok !== "boolean") {
     throw new Error("Missing required `ok` field.");
@@ -646,43 +505,12 @@ export function parseBridgeEnvelopeResult(
 
   if (!parsed.ok) {
     if (parsed.details) {
-      console.error(`[local-tts:${action}] Python bridge details\n${parsed.details}`);
+      console.error(`[local-tts:${action}] local bridge details\n${parsed.details}`);
     }
-    throw new Error(parsed.error ?? "Python bridge failed.");
+    throw new Error(parsed.error ?? "Local bridge failed.");
   }
 
   return action === "probe"
-    ? parseBridgeProbeResult(parsed.result, pythonResolution)
+    ? parseBridgeProbeResult(parsed.result)
     : parseBridgeGenerateResult(parsed.result);
-}
-
-// Some Python dependencies print unconditional setup noise to stderr at import
-// time (e.g. the `sox` package warns when the SoX CLI is absent, even though it
-// is unused). On a hard crash that noise must not be mistaken for the real error.
-const PYTHON_STDERR_NOISE_PATTERNS: RegExp[] = [
-  /sox: command not found/i,
-  /SoX could not be found/i,
-  /sox\.sourceforge\.net/i,
-  /have SoX/i,
-  /double-check your/i,
-  /^path variables\.?$/i,
-  /flash[-_]attn/i,
-];
-
-function isNoisyPythonStderrLine(line: string): boolean {
-  if (line.startsWith("Traceback")) return true;
-  if (line.startsWith("File ")) return true;
-  if (line.startsWith("During handling of the above exception")) return true;
-  // Decoration-only lines such as "********" or "- - -" carry no information.
-  if (/^[^A-Za-z0-9]+$/.test(line)) return true;
-  return PYTHON_STDERR_NOISE_PATTERNS.some((pattern) => pattern.test(line));
-}
-
-export function extractUserFacingPythonProcessError(stderr: string, code: number | null): string {
-  const lines = stderr
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const message = lines.find((line) => !isNoisyPythonStderrLine(line)) ?? lines.at(-1);
-  return message ?? `Python process exited with code ${code ?? "unknown"}.`;
 }

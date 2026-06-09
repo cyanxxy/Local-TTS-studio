@@ -20,7 +20,7 @@ export default defineConfig({
       // focused tests, but jsdom/Istanbul branch accounting makes those a poor
       // denominator for an enforceable 100% threshold.
       include: [
-        "electron/localTtsIpc.ts",
+        "electron/generateRateLimiter.ts",
         "src/constants.ts",
         "src/components/TextInput.tsx",
         "src/lib/audio.ts",

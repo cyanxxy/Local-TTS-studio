@@ -37,14 +37,14 @@ import {
 import { resolveKokoroVoice } from "../lib/voices";
 import { hasMinimumSynthesisText } from "../lib/textValidation";
 
-type LocalRuntimePageKey = Extract<AppPage, "neutts" | "kani" | "qwen3">;
+type LocalRuntimePageKey = Extract<AppPage, "neutts" | "qwen3">;
 
 interface SynthesisAppProps {
   enableDesktopRuntimes: boolean;
   routeBasePath?: string;
 }
 
-const LOCAL_RUNTIME_PAGE_KEYS = ["neutts", "kani", "qwen3"] as const satisfies readonly LocalRuntimePageKey[];
+const LOCAL_RUNTIME_PAGE_KEYS = ["neutts", "qwen3"] as const satisfies readonly LocalRuntimePageKey[];
 
 const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
   name: string;
@@ -60,26 +60,12 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
     highlights: [
       "On-device, CPU-focused speech generation and instant voice cloning from short references.",
       "Multilingual Nano variants published for English, German, French, and Spanish.",
-      "Uses local Python runtime bridge with cache controls in this desktop app.",
+      "Runs through the Rust local bridge using GGUF model variants and pre-encoded .npy reference codes.",
     ],
     links: [
       { label: "HF Model", href: "https://huggingface.co/neuphonic/neutts-nano" },
       { label: "HF Collection", href: "https://huggingface.co/collections/neuphonic/neutts-nano-multilingual-collection" },
       { label: "GitHub", href: "https://github.com/neuphonic/neutts" },
-    ],
-  },
-  kani: {
-    name: "Kani-TTS-2 (nineninesix)",
-    releaseDate: "February 15, 2026",
-    params: "~400M",
-    highlights: [
-      "Open model with low-VRAM local inference profile for desktop generation.",
-      "Maintainer reports stable generation expectations around long utterances; docs note quality drops past ~40 seconds.",
-      "Uses local Python runtime bridge with cache controls in this desktop app.",
-    ],
-    links: [
-      { label: "HF Model", href: "https://huggingface.co/nineninesix/kani-tts-2-en" },
-      { label: "GitHub", href: "https://github.com/nineninesix-ai/kani-tts-2" },
     ],
   },
   qwen3: {
@@ -88,8 +74,8 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
     params: "0.6B / 1.7B",
     highlights: [
       "CustomVoice model with nine built-in premium speakers and instruction-guided style control.",
-      "Supports Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.",
-      "Runs through the Electron Python bridge because the released model ships qwen-tts/safetensors assets, not browser ONNX artifacts.",
+      "Supports Chinese, English, Japanese, Korean, German, French, and Spanish in the Rust local runtime.",
+      "Runs through the Rust local bridge because the released model ships qwen-tts/safetensors assets, not browser ONNX artifacts.",
     ],
     links: [
       { label: "HF 0.6B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" },
@@ -215,6 +201,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const {
     isRetakingSegment,
     isGenerationBusy,
+    retakeError,
     cancelActiveGeneration,
     resetGeneratedAudio,
     handleGenerate: runBrowserGeneration,
@@ -412,7 +399,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     : null;
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
   const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
-  const visibleError = tts.error ?? currentModelState.error ?? exportError ?? player.error;
+  const visibleError = tts.error ?? retakeError ?? currentModelState.error ?? exportError ?? player.error;
   const activeSegmentIndex = player.activeSegmentId
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
     : -1;
@@ -584,7 +571,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
             <div className="mt-4">
               <SettingsPanel
                 activeModel={activeModel}
-                busy={cacheBusy}
+                busy={cacheBusy || currentModelState.loading}
                 status={cacheStatus}
                 onClearCache={handleClearCache}
                 onRedownloadActive={handleRedownloadActiveModel}

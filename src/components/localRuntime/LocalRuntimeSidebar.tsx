@@ -42,13 +42,8 @@ export function LocalRuntimeSidebar({
         </p>
         {runtime && (
           <div className="mt-3 space-y-1 text-sm text-text-secondary break-words">
-            <p className="break-all">Interpreter: {runtime.pythonBinary}</p>
-            <p>Resolved from: {runtime.resolvedFrom}</p>
-            <p>Python: {runtime.pythonVersion}</p>
+            <p>Runtime: {runtime.runtime}</p>
             {runtime.package && <p>Package: {runtime.package}{runtime.packageVersion ? ` ${runtime.packageVersion}` : ""}</p>}
-            {runtime.compatibilityMode && <p>Mode: {runtime.compatibilityMode}</p>}
-            {runtime.requiresPython && <p>Requirement: {runtime.requiresPython}</p>}
-            {runtime.espeakVersion != null && <p>espeak-ng: {runtime.espeakVersion}</p>}
             {runtime.warnings?.map((warning) => (
               <p key={warning} className="text-warning">{warning}</p>
             ))}

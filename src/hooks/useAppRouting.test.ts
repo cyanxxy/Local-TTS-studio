@@ -40,11 +40,11 @@ describe("useAppRouting", () => {
   });
 
   it("uses a desktop route base without dropping search or hash", () => {
-    window.history.replaceState(null, "", "/desktop/kani?profile=1#bench");
+    window.history.replaceState(null, "", "/desktop/qwen3?profile=1#bench");
 
     const { result } = renderHook(() => useAppRouting(true, "/desktop"));
 
-    expect(result.current.activePage).toBe("kani");
+    expect(result.current.activePage).toBe("qwen3");
 
     act(() => {
       result.current.navigateToPage("reader");

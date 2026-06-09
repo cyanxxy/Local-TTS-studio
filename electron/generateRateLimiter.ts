@@ -34,10 +34,19 @@ export function createGenerateRateLimiter<TModel extends string>({
       current.lastCallMs = currentTime;
       state.set(model, current);
 
+      let succeeded = false;
       try {
-        return await task();
+        const result = await task();
+        succeeded = true;
+        return result;
       } finally {
         current.inFlight = Math.max(0, current.inFlight - 1);
+        // Only a successful generation enforces the cooldown window; a failed or
+        // cancelled attempt clears it so the user can retry immediately instead
+        // of hitting a confusing "Too many generation requests" error.
+        if (!succeeded) {
+          current.lastCallMs = 0;
+        }
         state.set(model, current);
       }
     },

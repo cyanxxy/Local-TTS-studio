@@ -4,9 +4,11 @@ node_modules/
 # Build output
 dist/
 dist-electron/
+dist-rust/
 electron/dist/
 electron/build/
 release/
+rust/**/target/
 
 # AI assistant metadata (local dev only)
 /.agents/
@@ -47,18 +49,7 @@ logs/
 *.log
 npm-debug.log*
 
-# Python virtual environments & cache
-__pycache__/
-*.pyc
-.python-version
-.coverage
-.hypothesis/
-.mypy_cache/
-.nox/
-.pytest_cache/
-.ruff_cache/
-.tox/
-htmlcov/
+# Legacy local runtime artifacts
 .venv/
 .venv*/
 .model-cache/

@@ -1,14 +1,14 @@
 import type { ChildProcessWithoutNullStreams } from "child_process";
-import net from "net";
+import { randomBytes } from "crypto";
 
 export interface WebSocketWorkerSpawnConfig {
-  pythonBinary: string;
-  scriptPath: string;
+  bridgeBinary: string;
   cacheDir: string;
   env: NodeJS.ProcessEnv;
 }
 
 export interface WebSocketWorkerSpawnRuntimeConfig extends WebSocketWorkerSpawnConfig {
+  authToken: string;
   host: string;
   port: number;
 }
@@ -56,8 +56,8 @@ export interface CreateWebSocketBridgeWorkerPoolOptions<TModel extends string> {
 export interface WebSocketBridgeWorkerPool<TModel extends string> {
   run: (model: TModel, options: WebSocketWorkerRunOptions) => Promise<WebSocketWorkerRunResult>;
   cancel: (requestId: string) => boolean;
-  shutdown: (model: TModel) => void;
-  shutdownAll: () => void;
+  shutdown: (model: TModel) => Promise<boolean>;
+  shutdownAll: () => Promise<void>;
   isRunning: (requestId: string) => boolean;
 }
 
@@ -86,13 +86,21 @@ interface Worker {
   active: ActiveRequest | null;
   evictTimer: ReturnType<typeof setTimeout> | null;
   alive: boolean;
+  exitPromise: Promise<void>;
+  resolveExit: () => void;
 }
+
+const BRIDGE_PORT_PREFIX = "__PORT__";
 
 function spawnKeyOf(config: WebSocketWorkerSpawnConfig): string {
   const envPairs = Object.entries(config.env ?? {})
     .filter(([, value]) => value !== undefined)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
-  return JSON.stringify([config.pythonBinary, config.scriptPath, config.cacheDir, envPairs]);
+  return JSON.stringify([
+    config.bridgeBinary,
+    config.cacheDir,
+    envPairs,
+  ]);
 }
 
 function isOpen(socket: WebSocket): boolean {
@@ -103,25 +111,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
     timer.unref?.();
-  });
-}
-
-function findAvailablePort(host: string): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = net.createServer();
-    server.once("error", reject);
-    server.listen(0, host, () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close(() => reject(new Error("Failed to allocate a local WebSocket port.")));
-        return;
-      }
-      const { port } = address;
-      server.close((err) => {
-        if (err) reject(err);
-        else resolve(port);
-      });
-    });
   });
 }
 
@@ -202,6 +191,15 @@ function dataToArrayBuffer(data: unknown): ArrayBuffer | null {
   return null;
 }
 
+function parsePortAnnouncement(line: string): number | null {
+  if (!line.startsWith(BRIDGE_PORT_PREFIX)) return null;
+  const port = Number(line.slice(BRIDGE_PORT_PREFIX.length).trim());
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    throw new Error("Rust local bridge announced an invalid WebSocket port.");
+  }
+  return port;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -278,13 +276,21 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     hardKill(worker.child);
   }
 
+  async function killWorkerAndWait(model: TModel, worker: Worker): Promise<void> {
+    killWorker(model, worker);
+    await Promise.race([
+      worker.exitPromise,
+      delay(killGraceMs + 500),
+    ]);
+  }
+
   function armIdleTimer(model: TModel, worker: Worker, active: ActiveRequest): void {
     clearActiveIdleTimer(active);
     active.idleTimer = setTimeout(() => {
       settleActive(model, worker, {
         ok: false,
         error: new Error(
-          `Python WebSocket bridge produced no output for ${active.idleTimeoutMs / 1000}s and was stopped (the process may be stuck).`,
+          `Rust local bridge produced no output for ${active.idleTimeoutMs / 1000}s and was stopped (the process may be stuck).`,
         ),
       });
       killWorker(model, worker);
@@ -334,7 +340,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       if (active.stdoutBytes > active.maxStdoutBytes) {
         settleActive(model, worker, {
           ok: false,
-          error: new Error(`Python bridge stdout exceeded ${active.maxStdoutBytes} bytes.`),
+          error: new Error(`Rust local bridge stdout exceeded ${active.maxStdoutBytes} bytes.`),
         });
         killWorker(model, worker);
         return;
@@ -345,7 +351,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       if (active.stderrBytes > active.maxStderrBytes) {
         settleActive(model, worker, {
           ok: false,
-          error: new Error(`Python bridge stderr exceeded ${active.maxStderrBytes} bytes.`),
+          error: new Error(`Rust local bridge stderr exceeded ${active.maxStderrBytes} bytes.`),
         });
         killWorker(model, worker);
         return;
@@ -455,7 +461,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     if (parsed.type === "error") {
       settleActive(model, worker, {
         ok: false,
-        error: new Error(typeof parsed.error === "string" ? parsed.error : "Python WebSocket bridge failed."),
+        error: new Error(typeof parsed.error === "string" ? parsed.error : "Rust local bridge failed."),
       });
       killWorker(model, worker);
       return;
@@ -469,6 +475,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   }
 
   function handleWorkerExit(model: TModel, worker: Worker): void {
+    worker.resolveExit();
     const wasAlive = worker.alive;
     disposeWorker(model, worker);
     const active = worker.active;
@@ -480,8 +487,8 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         cancelled
           ? "Generation cancelled."
           : wasAlive
-            ? "Python WebSocket bridge exited before returning a result."
-            : "Python WebSocket bridge is no longer available.",
+            ? "Rust local bridge exited before returning a result."
+            : "Rust local bridge is no longer available.",
       ),
     });
   }
@@ -503,8 +510,12 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   }
 
   async function spawnWorker(model: TModel, spawnConfig: WebSocketWorkerSpawnConfig): Promise<Worker> {
-    const port = await findAvailablePort(host);
-    const child = spawn(model, { ...spawnConfig, host, port });
+    const authToken = randomBytes(32).toString("hex");
+    const child = spawn(model, { ...spawnConfig, authToken, host, port: 0 });
+    let resolveExit!: () => void;
+    const exitPromise = new Promise<void>((resolve) => {
+      resolveExit = resolve;
+    });
     const worker = {
       child,
       socket: null as unknown as WebSocket,
@@ -512,17 +523,70 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       active: null,
       evictTimer: null,
       alive: true,
+      exitPromise,
+      resolveExit,
+    };
+    let stdoutLineBuffer = "";
+    let portSettled = false;
+    let resolvePort!: (port: number) => void;
+    let rejectPort!: (error: Error) => void;
+    const announcedPort = new Promise<number>((resolve, reject) => {
+      resolvePort = resolve;
+      rejectPort = reject;
+    });
+    const portTimeout = setTimeout(() => {
+      if (portSettled) return;
+      portSettled = true;
+      rejectPort(new Error("Timed out waiting for Rust local bridge WebSocket port."));
+    }, connectTimeoutMs);
+    portTimeout.unref?.();
+
+    const rejectPortIfPending = (error: Error) => {
+      if (portSettled) return;
+      portSettled = true;
+      clearTimeout(portTimeout);
+      rejectPort(error);
     };
 
-    child.stdout.on("data", (chunk: Buffer) => handleChildOutput(model, worker, "stdout", chunk));
+    const handlePortStdout = (chunk: Buffer) => {
+      if (portSettled) return;
+      stdoutLineBuffer += chunk.toString("utf-8");
+      const lines = stdoutLineBuffer.split(/\r?\n/);
+      stdoutLineBuffer = lines.pop() ?? "";
+      for (const rawLine of lines) {
+        try {
+          const port = parsePortAnnouncement(rawLine.trim());
+          if (port === null) continue;
+          portSettled = true;
+          clearTimeout(portTimeout);
+          resolvePort(port);
+          return;
+        } catch (error) {
+          rejectPortIfPending(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+      }
+    };
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      handlePortStdout(chunk);
+      handleChildOutput(model, worker, "stdout", chunk);
+    });
     child.stderr.on("data", (chunk: Buffer) => handleChildOutput(model, worker, "stderr", chunk));
-    child.on("error", () => handleWorkerExit(model, worker));
-    child.on("close", () => handleWorkerExit(model, worker));
+    child.on("error", (error) => {
+      rejectPortIfPending(new Error(`Rust local bridge worker failed before startup: ${error.message}`));
+      handleWorkerExit(model, worker);
+    });
+    child.on("close", () => {
+      rejectPortIfPending(new Error("Rust local bridge exited before announcing its WebSocket port."));
+      handleWorkerExit(model, worker);
+    });
     child.on("exit", () => handleWorkerExit(model, worker));
 
     try {
+      const port = await announcedPort;
       worker.socket = await openWebSocketWithRetry(
-        `ws://${host}:${port}`,
+        `ws://${host}:${port}/${authToken}`,
         connectTimeoutMs,
         () => worker.alive,
       );
@@ -534,10 +598,10 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
 
     worker.socket.addEventListener("message", (event) => handleWebSocketMessage(model, worker, event.data));
     worker.socket.addEventListener("close", () => {
-      handleTransportFailure(model, worker, "Python WebSocket bridge closed before returning a result.");
+      handleTransportFailure(model, worker, "Rust local bridge closed before returning a result.");
     });
     worker.socket.addEventListener("error", () => {
-      handleTransportFailure(model, worker, "Python WebSocket bridge connection failed.");
+      handleTransportFailure(model, worker, "Rust local bridge connection failed.");
     });
 
     workers.set(model, worker);
@@ -569,7 +633,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       try {
         worker = await acquireWorker(model, options.spawnConfig);
       } catch (err) {
-        throw new Error(`Failed to start Python WebSocket bridge worker: ${err instanceof Error ? err.message : String(err)}`);
+        throw new Error(`Failed to start Rust local bridge worker: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         startingModels.delete(model);
       }
@@ -606,7 +670,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         } catch (err) {
           settleActive(model, worker, {
             ok: false,
-            error: new Error(`Failed to send request to Python WebSocket bridge: ${err instanceof Error ? err.message : String(err)}`),
+            error: new Error(`Failed to send request to Rust local bridge: ${err instanceof Error ? err.message : String(err)}`),
           });
           killWorker(model, worker);
         }
@@ -625,13 +689,11 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
 
     shutdown(model) {
       const worker = workers.get(model);
-      if (worker) killWorker(model, worker);
+      return worker ? killWorkerAndWait(model, worker).then(() => true) : Promise.resolve(false);
     },
 
-    shutdownAll() {
-      for (const [model, worker] of [...workers.entries()]) {
-        killWorker(model, worker);
-      }
+    async shutdownAll() {
+      await Promise.all([...workers.entries()].map(([model, worker]) => killWorkerAndWait(model, worker)));
       requestModel.clear();
       cancelledRequests.clear();
       startingModels.clear();

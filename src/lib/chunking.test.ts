@@ -170,6 +170,18 @@ describe("kokoro inference units", () => {
     }
   });
 
+  it("splits oversized single Kokoro units before generation", () => {
+    const text = "x".repeat(251);
+    const units = buildKokoroInferenceUnits(text, 80);
+
+    expect(units.length).toBeGreaterThan(1);
+    expect(units.every((unit) => unit.text.length <= 80)).toBe(true);
+    expect(units.map((unit) => unit.text).join("")).toBe(text);
+    for (const unit of units) {
+      expect(unit.text).toBe(text.slice(unit.start, unit.end));
+    }
+  });
+
   it("matches the reader preview boundaries to the generated merge budget", () => {
     const text = "Alpha sentence. Beta sentence. Gamma sentence.";
 

@@ -10,6 +10,6 @@ describe("vite dev server config", () => {
 
     expect(config.server?.port).toBe(5173);
     expect(config.server?.strictPort).toBe(true);
-    expect(config.server?.watch?.ignored).toEqual(expect.arrayContaining(["**/.venv*/**"]));
+    expect(config.server?.watch).toBeUndefined();
   });
 });

@@ -30,6 +30,12 @@ function clampPercent(percent: number): number {
   return Math.max(0, Math.min(100, percent));
 }
 
+function workerEventMessage(event: Event, fallback: string): string {
+  if (event instanceof ErrorEvent && event.message) return event.message;
+  if (event.type === "messageerror") return `${fallback} The worker sent an unreadable message.`;
+  return fallback;
+}
+
 /**
  * Manages loading both TTS models via Web Workers.
  * Workers are created on startup, but models load lazily when selected.
@@ -62,6 +68,30 @@ export function useModelLoader(
     debugProfilingRef.current = debugProfiling;
   }, [debugProfiling, preferredSupertonicVoice]);
 
+  const setLoadingState = useCallback((model: ModelType) => {
+    const setter = model === "kokoro" ? setKokoroState : setSupertonicState;
+    setter((prev) => ({
+      ...prev,
+      loading: true,
+      downloadProgress: 0,
+      error: null,
+      backend: null,
+    }));
+  }, []);
+
+  const setLoadFailure = useCallback((model: ModelType, message: string) => {
+    const requestedRef = model === "kokoro" ? kokoroLoadRequestedRef : supertonicLoadRequestedRef;
+    const setter = model === "kokoro" ? setKokoroState : setSupertonicState;
+    requestedRef.current = false;
+    setter((prev) => ({
+      ...prev,
+      ready: false,
+      loading: false,
+      error: message,
+      backend: null,
+    }));
+  }, []);
+
   const loadModel = useCallback((model: ModelType) => {
     if (!enabled) return;
     if (model === "kokoro" && !supportsKokoro) return;
@@ -72,12 +102,17 @@ export function useModelLoader(
     if (!worker || requestedRef.current) return;
 
     requestedRef.current = true;
-    worker.postMessage({
-      type: "LOAD",
-      preferredVoice: model === "supertonic" ? preferredSupertonicVoiceRef.current : undefined,
-      debugProfiling: debugProfilingRef.current,
-    });
-  }, [enabled, supportsKokoro, supportsSupertonic]);
+    setLoadingState(model);
+    try {
+      worker.postMessage({
+        type: "LOAD",
+        preferredVoice: model === "supertonic" ? preferredSupertonicVoiceRef.current : undefined,
+        debugProfiling: debugProfilingRef.current,
+      });
+    } catch (error) {
+      setLoadFailure(model, error instanceof Error ? error.message : String(error));
+    }
+  }, [enabled, setLoadFailure, setLoadingState, supportsKokoro, supportsSupertonic]);
 
   const reloadModel = useCallback((model: ModelType) => {
     if (!enabled) return;
@@ -86,7 +121,7 @@ export function useModelLoader(
 
     const worker = model === "kokoro" ? kokoroWorker.current : supertonicWorker.current;
     const requestedRef = model === "kokoro" ? kokoroLoadRequestedRef : supertonicLoadRequestedRef;
-    if (!worker) return;
+    if (!worker || requestedRef.current) return;
 
     requestedRef.current = true;
     if (model === "kokoro") {
@@ -109,13 +144,17 @@ export function useModelLoader(
       }));
     }
 
-    worker.postMessage({
-      type: "LOAD",
-      forceReload: true,
-      preferredVoice: model === "supertonic" ? preferredSupertonicVoiceRef.current : undefined,
-      debugProfiling: debugProfilingRef.current,
-    });
-  }, [enabled, supportsKokoro, supportsSupertonic]);
+    try {
+      worker.postMessage({
+        type: "LOAD",
+        forceReload: true,
+        preferredVoice: model === "supertonic" ? preferredSupertonicVoiceRef.current : undefined,
+        debugProfiling: debugProfilingRef.current,
+      });
+    } catch (error) {
+      setLoadFailure(model, error instanceof Error ? error.message : String(error));
+    }
+  }, [enabled, setLoadFailure, supportsKokoro, supportsSupertonic]);
 
   const handleKokoroMessage = useCallback((e: MessageEvent<WorkerOutMessage>) => {
     const msg = e.data;
@@ -199,31 +238,63 @@ export function useModelLoader(
       return;
     }
 
-    // Create supported workers once; model loading is triggered separately.
-    const kWorker = supportsKokoro
-      ? new Worker(
-        new URL("../workers/kokoro.worker.ts", import.meta.url),
-        { type: "module" },
-      )
-      : null;
-    const sWorker = supportsSupertonic
-      ? new Worker(
-        new URL("../workers/supertonic.worker.ts", import.meta.url),
-        { type: "module" },
-      )
-      : null;
+    let kWorker: Worker | null = null;
+    let sWorker: Worker | null = null;
+    let disposed = false;
+    const reportLoadFailure = (model: ModelType, message: string) => {
+      queueMicrotask(() => {
+        if (!disposed) {
+          setLoadFailure(model, message);
+        }
+      });
+    };
+
+    if (supportsKokoro) {
+      try {
+        kWorker = new Worker(
+          new URL("../workers/kokoro.worker.ts", import.meta.url),
+          { type: "module" },
+        );
+      } catch (error) {
+        reportLoadFailure("kokoro", error instanceof Error ? error.message : String(error));
+      }
+    }
+
+    if (supportsSupertonic) {
+      try {
+        sWorker = new Worker(
+          new URL("../workers/supertonic.worker.ts", import.meta.url),
+          { type: "module" },
+        );
+      } catch (error) {
+        reportLoadFailure("supertonic", error instanceof Error ? error.message : String(error));
+      }
+    }
 
     if (kWorker) {
       kWorker.onmessage = handleKokoroMessage;
+      kWorker.onerror = (event) => {
+        setLoadFailure("kokoro", workerEventMessage(event, "Kokoro worker failed."));
+      };
+      kWorker.onmessageerror = (event) => {
+        setLoadFailure("kokoro", workerEventMessage(event, "Kokoro worker failed."));
+      };
     }
     if (sWorker) {
       sWorker.onmessage = handleSupertonicMessage;
+      sWorker.onerror = (event) => {
+        setLoadFailure("supertonic", workerEventMessage(event, "Supertonic worker failed."));
+      };
+      sWorker.onmessageerror = (event) => {
+        setLoadFailure("supertonic", workerEventMessage(event, "Supertonic worker failed."));
+      };
     }
 
     kokoroWorker.current = kWorker;
     supertonicWorker.current = sWorker;
 
     return () => {
+      disposed = true;
       kokoroLoadRequestedRef.current = false;
       supertonicLoadRequestedRef.current = false;
       kokoroWorker.current = null;
@@ -235,13 +306,22 @@ export function useModelLoader(
     enabled,
     handleKokoroMessage,
     handleSupertonicMessage,
+    setLoadFailure,
     supportsKokoro,
     supportsSupertonic,
   ]);
 
   useEffect(() => {
     if (!enabled) return;
-    loadModel(activeModel);
+    let disposed = false;
+    queueMicrotask(() => {
+      if (!disposed) {
+        loadModel(activeModel);
+      }
+    });
+    return () => {
+      disposed = true;
+    };
   }, [activeModel, enabled, loadModel]);
 
   const visibleKokoroState = enabled ? kokoroState : INITIAL_MODEL_STATE;

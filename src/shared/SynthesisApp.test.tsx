@@ -541,14 +541,6 @@ describe("SynthesisApp", () => {
 
     mock.routing = {
       ...mock.routing,
-      activePage: "kani",
-    };
-    rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
-
-    expect(screen.getByText("Kani-TTS-2 (nineninesix)")).toBeInTheDocument();
-
-    mock.routing = {
-      ...mock.routing,
       activePage: "qwen3",
     };
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
@@ -563,7 +555,6 @@ describe("SynthesisApp", () => {
       availableTabs: [
         { key: "studio", label: "Studio" },
         { key: "neutts", label: "NeuTTS Nano" },
-        { key: "kani", label: "Kani-TTS-2" },
         { key: "qwen3", label: "Qwen3-TTS" },
       ],
       isReaderPage: false,
@@ -574,18 +565,18 @@ describe("SynthesisApp", () => {
     const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
     const neuttsState = screen.getByTestId("local-draft-neutts") as HTMLInputElement;
     fireEvent.change(neuttsState, { target: { value: "voice reference kept" } });
-    expect(screen.queryByTestId("local-draft-kani")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-draft-qwen3")).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("link", { name: "Kani-TTS-2" }));
+    fireEvent.click(screen.getByRole("link", { name: "Qwen3-TTS" }));
     mock.routing = {
       ...mock.routing,
-      activePage: "kani",
+      activePage: "qwen3",
     };
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
-    const kaniState = screen.getByTestId("local-draft-kani") as HTMLInputElement;
-    fireEvent.change(kaniState, { target: { value: "kani settings kept" } });
+    const qwen3State = screen.getByTestId("local-draft-qwen3") as HTMLInputElement;
+    fireEvent.change(qwen3State, { target: { value: "qwen3 settings kept" } });
 
     fireEvent.click(screen.getByRole("link", { name: "Studio" }));
     mock.routing = {
@@ -596,9 +587,9 @@ describe("SynthesisApp", () => {
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
-    expect(screen.getByTestId("local-runtime-panel-kani")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("local-runtime-panel-qwen3")).toHaveAttribute("hidden");
     expect(screen.getByTestId("local-draft-neutts")).toHaveValue("voice reference kept");
-    expect(screen.getByTestId("local-draft-kani")).toHaveValue("kani settings kept");
+    expect(screen.getByTestId("local-draft-qwen3")).toHaveValue("qwen3 settings kept");
 
     mock.routing = {
       ...mock.routing,
@@ -608,7 +599,7 @@ describe("SynthesisApp", () => {
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).not.toHaveAttribute("hidden");
-    expect(screen.getByTestId("local-runtime-panel-kani")).toHaveAttribute("hidden");
+    expect(screen.getByTestId("local-runtime-panel-qwen3")).toHaveAttribute("hidden");
     expect(screen.getByTestId("local-draft-neutts")).toHaveValue("voice reference kept");
   });
 

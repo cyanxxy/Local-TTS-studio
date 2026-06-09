@@ -479,6 +479,26 @@ function buildKokoroSentenceRanges(text: string): KokoroInferenceUnit[] {
   return units;
 }
 
+function splitOversizedKokoroUnit(
+  text: string,
+  unit: KokoroInferenceUnit,
+  maxInferenceChars: number,
+): KokoroInferenceUnit[] {
+  if (unit.text.length <= maxInferenceChars) return [unit];
+
+  if (unit.start !== undefined && unit.end !== undefined) {
+    return splitOversizedRange(text, unit.start, unit.end, maxInferenceChars).map((range) => ({
+      text: text.slice(range.start, range.end),
+      start: range.start,
+      end: range.end,
+    }));
+  }
+
+  return splitOversizedRange(unit.text, 0, unit.text.length, maxInferenceChars).map((range) => ({
+    text: unit.text.slice(range.start, range.end),
+  }));
+}
+
 /**
  * Builds the inference units Kokoro actually generates: sentences are merged
  * greedily until the per-backend character budget is reached. Shared by the
@@ -486,7 +506,9 @@ function buildKokoroSentenceRanges(text: string): KokoroInferenceUnit[] {
  * boundaries), so the editor never shows more sections than are produced.
  */
 export function buildKokoroInferenceUnits(text: string, maxInferenceChars: number): KokoroInferenceUnit[] {
-  const sentenceUnits = buildKokoroSentenceRanges(text);
+  const safeMaxInferenceChars = Math.max(1, Math.floor(maxInferenceChars));
+  const sentenceUnits = buildKokoroSentenceRanges(text)
+    .flatMap((unit) => splitOversizedKokoroUnit(text, unit, safeMaxInferenceChars));
   if (sentenceUnits.length === 0) return [];
 
   const mergedUnits: KokoroInferenceUnit[] = [];
@@ -506,14 +528,14 @@ export function buildKokoroInferenceUnits(text: string, maxInferenceChars: numbe
     const canMergeByRange: boolean = current.start !== undefined
       && unit.end !== undefined
       && unit.end > current.start
-      && unit.end - current.start <= maxInferenceChars;
+      && unit.end - current.start <= safeMaxInferenceChars;
     const fallbackText = `${current.text} ${unit.text}`;
     const candidateText: string = canMergeByRange
       ? getTextBetween(text, current.start, unit.end, fallbackText)
       : fallbackText;
     const canMergeByText = current.start === undefined
       && unit.start === undefined
-      && candidateText.length <= maxInferenceChars;
+      && candidateText.length <= safeMaxInferenceChars;
 
     if (canMergeByRange || canMergeByText) {
       current = { text: candidateText, start: current.start, end: unit.end };

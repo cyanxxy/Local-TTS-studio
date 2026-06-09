@@ -43,6 +43,12 @@ const INITIAL_STATS: GenerationStats = {
   currentDuration: 0,
 };
 
+function workerEventMessage(event: Event, fallback: string): string {
+  if (event instanceof ErrorEvent && event.message) return event.message;
+  if (event.type === "messageerror") return `${fallback} The worker sent an unreadable message.`;
+  return fallback;
+}
+
 /**
  * Unified TTS hook. Model-agnostic — delegates to the right worker
  * based on the active model. Tracks generation stats.
@@ -65,13 +71,23 @@ export function useTTS({
   const activeWorkerRef = useRef<Worker | null>(null);
   const listenerWorkerRef = useRef<Worker | null>(null);
   const listenerRef = useRef<((e: MessageEvent<WorkerOutMessage>) => void) | null>(null);
+  const errorListenerRef = useRef<((event: Event) => void) | null>(null);
+  const messageErrorListenerRef = useRef<((event: Event) => void) | null>(null);
   const generationSeqRef = useRef(0);
 
   const cleanup = useCallback(() => {
     if (listenerWorkerRef.current && listenerRef.current) {
       listenerWorkerRef.current.removeEventListener("message", listenerRef.current as EventListener);
-      listenerRef.current = null;
     }
+    if (listenerWorkerRef.current && errorListenerRef.current) {
+      listenerWorkerRef.current.removeEventListener("error", errorListenerRef.current as EventListener);
+    }
+    if (listenerWorkerRef.current && messageErrorListenerRef.current) {
+      listenerWorkerRef.current.removeEventListener("messageerror", messageErrorListenerRef.current as EventListener);
+    }
+    listenerRef.current = null;
+    errorListenerRef.current = null;
+    messageErrorListenerRef.current = null;
     listenerWorkerRef.current = null;
     activeWorkerRef.current = null;
   }, []);
@@ -148,8 +164,25 @@ export function useTTS({
         }
       };
 
+      const failGeneration = (message: string) => {
+        console.error("Worker error:", message);
+        setError(message);
+        setIsGenerating(false);
+        cleanup();
+      };
+      const handleWorkerError = (event: Event) => {
+        failGeneration(workerEventMessage(event, "TTS worker failed."));
+      };
+      const handleWorkerMessageError = (event: Event) => {
+        failGeneration(workerEventMessage(event, "TTS worker failed."));
+      };
+
       listenerRef.current = handleMessage;
+      errorListenerRef.current = handleWorkerError;
+      messageErrorListenerRef.current = handleWorkerMessageError;
       worker.addEventListener("message", handleMessage as EventListener);
+      worker.addEventListener("error", handleWorkerError as EventListener);
+      worker.addEventListener("messageerror", handleWorkerMessageError as EventListener);
       listenerWorkerRef.current = worker;
 
       const message: WorkerInMessage = {
@@ -164,7 +197,11 @@ export function useTTS({
         pronunciationRules: settings.pronunciationRules,
         emphasisStrength: settings.emphasisStrength,
       };
-      worker.postMessage(message);
+      try {
+        worker.postMessage(message);
+      } catch (error) {
+        failGeneration(error instanceof Error ? error.message : String(error));
+      }
     },
     [kokoroWorker, supertonicWorker, onAudioChunk, onComplete, cleanup],
   );

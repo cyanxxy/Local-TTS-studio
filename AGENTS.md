@@ -6,7 +6,7 @@ Build and maintain a browser-native, fully local text-to-speech app with two cor
 - Supertonic via `@huggingface/transformers`
 
 Inference runs client-side (WebGPU with fallback behavior), with optional Electron packaging from the same codebase.
-Electron also exposes optional local Python-runtime integrations for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS.
+Electron also exposes optional local-runtime integrations for NeuTTS Nano and Qwen3-TTS through a Rust bridge.
 
 ## Stack
 - React 19 + TypeScript 5.9 + Vite 7
@@ -14,7 +14,7 @@ Electron also exposes optional local Python-runtime integrations for NeuTTS Nano
 - `@huggingface/transformers` (Supertonic pipeline)
 - `kokoro-js` (Kokoro generation)
 - Electron 42.3.0 (desktop wrapper)
-- Python local bridge (`python/local_tts_bridge.py`) for Electron local-runtime models
+- Rust local bridge (`rust/local-tts-bridge`) for Electron probe/WebSocket transport and local model execution
 - Vitest + Testing Library + jsdom
 
 ## Commands
@@ -25,10 +25,13 @@ npm run dev:desktop    # Vite + Electron together
 npm run dev:electron   # Alias for dev:desktop
 npm run build          # Type check + production web build
 npm run build:web      # Explicit production web build
-npm run build:desktop  # Build web + compile Electron main/preload
+npm run build:rust     # Build and copy Rust local bridge to dist-rust/
+npm run build:desktop  # Build web + Rust bridge + compile Electron main/preload
 npm run build:electron # Alias for build:desktop
 npm run dist           # Build + package desktop app via electron-builder
-npm run test           # Run tests once
+npm run test           # Run Vitest + Rust bridge tests once
+npm run test:js        # Run Vitest once
+npm run test:rust      # Run Rust bridge tests once
 npm run test:watch     # Watch tests
 npm run lint           # ESLint
 ```
@@ -83,11 +86,11 @@ src/
     AdvancedReaderPage.tsx
     LocalRuntimePage.tsx
 
-python/
-  local_tts_bridge.py # Electron local-runtime probe/serve-ws bridge
+rust/
+  local-tts-bridge/   # Rust probe/WebSocket bridge and local model runtime binary
 ```
 
-Desktop host helpers live in `electron/` (e.g. `webSocketBridgeWorker.ts` for the resident WebSocket worker pool shared by all three local runtimes, `generateRateLimiter.ts`).
+Desktop host helpers live in `electron/` (e.g. `webSocketBridgeWorker.ts` for the resident WebSocket worker pool shared by local runtimes, `generateRateLimiter.ts`).
 
 ## Runtime Contracts (Do Not Break)
 
@@ -99,20 +102,18 @@ Defined in `src/types.ts`:
 If you add fields/events, update both workers and all hook/component consumers.
 
 ### Local bridge protocol
-`python/local_tts_bridge.py` has exactly two `--action` values: `probe` and `serve-ws`. The legacy stdin `serve()` worker and the one-shot `generate` action are removed; generation is WebSocket-only with no stdout/base64 fallback.
-- Action `probe` is the only one-shot subprocess call, over stdin/stdout. Results and progress use stdout lines prefixed `__PROGRESS__` and `__RESULT__` (JSON after the prefix), keeping bridge messages separable from library noise. `emit`/`emit_progress` target the real stdout (`_REAL_STDOUT`), captured before any `redirect_stdout_to_stderr()` swap.
-- Action `serve-ws` is the resident generation worker for **all three** local runtimes (NeuTTS, Kani, Qwen3). Electron spawns `--action serve-ws --model <m> --cache-dir <dir> --host 127.0.0.1 --port <p>`, then request/progress/result metadata travels over WebSocket JSON frames and audio travels over binary Float32 frames. There is no stdout result fallback and no base64 audio payload for this path; `serve-ws` emits nothing via `__PROGRESS__`/`__RESULT__` (progress routes through the module-global `_PROGRESS_SINK` to the socket).
-- `serve-ws` loads the model once and reads WebSocket requests `{"requestId", "payload"}` (or `{"command":"shutdown"}`). Per request it emits zero or more `progress` frames, then for each audio segment an `audio_chunk` TEXT frame `{index,total,sampleRate,sampleCount,silenceAfterSamples}` immediately followed by one binary Float32 frame of exactly `sampleCount*4` bytes, then exactly one `result` frame. The `result` carries `{sampleRate, modelRepo, durationSec, elapsedSec, audioTransport:"websocket-binary", audioChunkCount, phaseTimingsSec, ...}` and no `wavBase64`. A failing request reports `ok:false` but keeps the worker alive.
-- `make_model_host(model)` builds the right resident host for the worker's `--model`, and a per-model dispatch routes generation:
-  - `Qwen3ModelHost` keyed by (repo, device, dtype, attention) — text is chunked and streamed one binary frame per chunk.
-  - `NeuttsModelHost` keyed by (backbone_repo, codec_repo, backbone_device, codec_device). The reference audio/text/text vary per request, so `encode_reference`/`infer` run fresh every request — reference codes are NOT cached on the host.
-  - `KaniModelHost` keyed by (model_repo, device_map, max_new_tokens). `max_new_tokens` is a `KaniTTS` constructor arg, so changing it forces a reload; `language_tag`/`temperature`/`top_p`/`repetition_penalty` vary per request and stay out of the key.
-  Each host reloads only when its key changes, releasing the previous model first.
-- NeuTTS/Kani inference stays byte-identical to the prior one-shot path: whole-text generation (no sentence chunking), a single `audio_chunk` (index 0, total 1, `silenceAfterSamples 0`) per request, same `encode_reference`/`infer` (NeuTTS) and `KaniTTS(...)`/`.generate()` (Kani) calls. `durationSec` is computed from the streamed sample count.
-- `audio_to_float32_bytes` is the single binary serializer for all three models — it ships raw Float32 (only `nan_to_num`, no normalization). The renderer's `float32ChunksToWavBytes` (`src/components/localRuntime/utils.ts`) owns peak-normalization (`peak>1` → scale → int16), reproducing what the old base64 WAV path did, so binary output is byte-equivalent after renderer encoding. Do not add normalization to the Python serializer.
-- Latency: `serve-ws` sets `TCP_NODELAY` on the accepted loopback socket (best-effort, try/except) to disable Nagle, uses the literal `127.0.0.1` (never `localhost`, to skip DNS/IPv6 fallback), and keeps resident hosts warm so repeat generations are inference-only.
-- Host side: `electron/webSocketBridgeWorker.ts` owns the worker pool (process lifecycle, WebSocket connection/retry, progress routing, per-request stall watchdog, output caps, cancellation, idle eviction). It uses the Node global `WebSocket` (no `ws` dependency) and pure stdlib loopback sockets on the Python side, so the transport works on macOS, Windows, and Linux. It is injected with `spawn` and unit-tested without Electron. Generation is serialized per model by `generateRateLimiter`, so a resident model is never entered concurrently. The one-shot `probe` subprocess path stays separate.
-- Cached loads force Hugging Face offline mode (`qwen3_snapshot_present` → `huggingface_offline`) so a cached generation makes no network request; first-run downloads and incomplete caches fall back to online.
+`open-tts-local-bridge` has exactly two `--action` values: `probe` and `serve-ws`. Electron launches it directly; there are no interpreter, adapter-script, or one-shot `generate` arguments. Generation is WebSocket-only with no stdout/base64 fallback.
+- Action `probe` is the only one-shot subprocess call. It returns an Electron-facing `__RESULT__` envelope with Rust runtime metadata.
+- Action `serve-ws` is the resident generation worker for NeuTTS and Qwen3. Electron spawns `open-tts-local-bridge --action serve-ws --model <m> --cache-dir <dir> --host 127.0.0.1 --port 0 --auth-token <token>`, waits for the Rust `__PORT__<actual-port>` stdout announcement, then connects to `ws://127.0.0.1:<actual-port>/<token>`. Request/progress/result metadata travels over WebSocket JSON frames and audio travels over binary Float32 frames. There is no stdout result fallback and no base64 audio payload for this path.
+- Rust owns the RFC6455 server, TCP socket options, request loop, model loading, inference, Float32 serialization, and binary frame relay.
+- `serve-ws` reads WebSocket requests `{"requestId", "payload"}` (or `{"command":"shutdown"}`). Per request it emits zero or more `progress` frames, then for each audio segment an `audio_chunk` TEXT frame `{index,total,sampleRate,sampleCount,silenceAfterSamples}` immediately followed by one binary Float32 frame of exactly `sampleCount*4` bytes, then exactly one `result` frame. The `result` carries `{sampleRate, modelRepo, durationSec, elapsedSec, audioTransport:"websocket-binary", audioChunkCount, phaseTimingsSec, ...}` and no `wavBase64`. A failing request reports `ok:false` but keeps the worker alive.
+- The Rust bridge owns model host reuse. Qwen3 is keyed by (repo, device, dtype); attention is validated but not part of the reuse key. NeuTTS is keyed by model repo and consumes pre-encoded `.npy` reference codes per request.
+- Qwen3 speaker names are capitalized in the UI/IPC (display names) but the model's `spk_id` keys are lowercase and `qwen_tts` validation is case-sensitive, so the Rust bridge lowercases the speaker (`qwen3_speaker_id`) before generation. Do not lowercase in the IPC/frontend layer — keep display names there.
+- NeuTTS inference is whole-text generation (no sentence chunking) and streams a single `audio_chunk` (index 0, total 1, `silenceAfterSamples 0`) per request. `durationSec` is computed from the streamed sample count.
+- Rust Float32 serialization ships raw Float32 with only NaN/Inf cleanup and no normalization. The renderer's `float32ChunksToWavBytes` (`src/components/localRuntime/utils.ts`) owns peak-normalization (`peak>1` → scale → int16). Do not add normalization to the Rust serializer or relay.
+- Latency: the Rust bridge sets `TCP_NODELAY` on the accepted loopback socket (best-effort) to disable Nagle, uses the literal `127.0.0.1` (never `localhost`, to skip DNS/IPv6 fallback), and keeps resident hosts warm so repeat generations are inference-only.
+- Host side: `electron/webSocketBridgeWorker.ts` owns the worker pool (process lifecycle, authenticated WebSocket connection/retry, progress routing, per-request stall watchdog, output caps, cancellation, idle eviction). The stall watchdog re-arms on any child stdout/stderr or socket frame; because model download and CPU inference are single blocking calls, the Rust bridge emits a periodic stderr heartbeat for the duration of each request so the watchdog only fires on a genuinely silent (stuck) worker. It uses the Node global `WebSocket` (no `ws` dependency), and generation is serialized per model by `generateRateLimiter`, so a resident model is never entered concurrently. The one-shot `probe` subprocess path stays separate.
+- Model caches live under the per-model app data cache. First-run downloads are expected; cached runs reuse those files.
 
 ### Audio path
 - Playback is Web Audio API based (`AudioContext` + `AudioBufferSourceNode`), not `<audio>`.
@@ -122,10 +123,8 @@ If you add fields/events, update both workers and all hook/component consumers.
 
 ### Local runtime product policy
 - Treat Electron local runtimes as product features for arbitrary user machines, not dev-machine fixes.
-- Detect the user's OS, accelerator, Python compatibility, and installed packages before choosing setup steps or defaults.
-- Managed setup should install the runtime build that matches the detected device class (CUDA, Apple MPS, or CPU) and should repair incompatible managed envs instead of surfacing raw package errors.
-- Model defaults should prioritize fastest practical generation for the detected device; larger/slower models should remain explicit quality choices.
-- Probe warnings must describe the detected runtime profile and the app's selected fallback, not assume CUDA-only hardware.
+- Model defaults should prioritize fastest practical generation for the supported Rust runtime profile; larger/slower models should remain explicit quality choices.
+- Probe warnings must describe the Rust runtime profile and selected fallback.
 
 ### Model specifics
 - Kokoro:

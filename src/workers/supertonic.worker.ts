@@ -567,6 +567,7 @@ async function generate(
     let hadChunkFailure = false;
     let firstChunkFailure: unknown = null;
     let recordedFirstChunk = false;
+    let hasDynamicTotal = false;
 
     while (isGenerationCurrent(generationEpoch) && queue.length > 0) {
       const selectedBatch = takeSupertonicBatch(queue, {
@@ -576,7 +577,7 @@ async function generate(
       }).filter(({ chunk }) => chunk.text.trim().length > 0);
       if (selectedBatch.length === 0) continue;
 
-      const total = emitted + selectedBatch.length + queue.length;
+      const total = hasDynamicTotal ? 0 : emitted + selectedBatch.length + queue.length;
 
       if (selectedBatch.length > 1) {
         try {
@@ -617,6 +618,7 @@ async function generate(
           continue;
         } catch {
           if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
+          hasDynamicTotal = true;
           queue.unshift(...selectedBatch.slice(1));
         }
       }
@@ -665,6 +667,7 @@ async function generate(
           continue;
         }
 
+        hasDynamicTotal = true;
         queue.unshift(...retryChunks.map((retryChunk) => ({ chunk: retryChunk, depth: depth + 1 })));
       }
     }

@@ -299,6 +299,7 @@ async function generate(
     const queue: KokoroChunkUnit[] = [...units];
     let hadFailure = false;
     let firstFailure: unknown = null;
+    let hasDynamicTotal = false;
 
     while (isGenerationCurrent(generationEpoch) && queue.length > 0) {
       const unit = queue.shift();
@@ -317,7 +318,7 @@ async function generate(
         const resolvedPauseSec = resolvePauseSeconds(unit.pauseKind, unit.pauseAfterSec, pauseOverridesSec);
         const currentIndex = emitted + 1;
         const hasFollowing = queue.length > 0;
-        const total = currentIndex + queue.length;
+        const total = hasDynamicTotal ? 0 : currentIndex + queue.length;
         const pauseSec = hasFollowing ? resolvedPauseSec : normalizeFinalPauseSec(finalPauseSec);
         const audio = pauseSec > 0
           ? concatFloat32Arrays([
@@ -345,6 +346,7 @@ async function generate(
         const retryUnits = splitForRetry(unit);
         if (retryUnits.length > 1) {
           // Requeue split retries in-order at the front.
+          hasDynamicTotal = true;
           queue.unshift(...retryUnits);
           continue;
         }

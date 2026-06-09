@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Browser-native TTS app with two WebGPU browser models (Kokoro-82M + Supertonic TTS). 100% local inference, no server or cloud. Ships as both a web app and an Electron desktop app from one codebase. The desktop app additionally exposes three optional Python-backed local runtimes — NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS — through an IPC bridge (`python/local_tts_bridge.py`).
+Browser-native TTS app with two WebGPU browser models (Kokoro-82M + Supertonic TTS). 100% local inference, no server or cloud. Ships as both a web app and an Electron desktop app from one codebase. The desktop app additionally exposes two optional local runtimes — NeuTTS Nano and Qwen3-TTS — through a Rust IPC/WebSocket bridge.
 
 ## Tech Stack
 
@@ -10,7 +10,7 @@ Browser-native TTS app with two WebGPU browser models (Kokoro-82M + Supertonic T
 - **@huggingface/transformers** v4 — Supertonic TTS pipeline
 - **kokoro-js** v1 — Kokoro-82M (custom phonemization, NOT standard pipeline)
 - **Electron 42.3.0** — optional desktop wrapper (Chromium 148, bundles Node 24; dev/build requires Node >=22.12)
-- **Python bridge** — desktop-only local runtimes (NeuTTS Nano, Kani-TTS-2, Qwen3-TTS) via `python/local_tts_bridge.py`
+- **Rust bridge** — desktop-only local runtimes (NeuTTS Nano, Qwen3-TTS) via `rust/local-tts-bridge`
 - **Vitest 3** + **@testing-library/react** — testing
 - **lucide-react** — icons
 
@@ -23,9 +23,11 @@ npm run dev:desktop  # Vite + Electron concurrently
 npm run dev:electron # Alias for dev:desktop
 npm run build        # Alias for build:web
 npm run build:web    # TypeScript check + Vite production web build
-npm run build:desktop # Build web + compile Electron TS
+npm run build:desktop # Build web + Rust bridge + compile Electron TS
 npm run build:electron # Alias for build:desktop
-npm run test         # vitest run
+npm run test         # Vitest + Rust unit tests
+npm run test:js      # Vitest only
+npm run test:rust    # Rust bridge unit tests
 npm run test:watch   # vitest watch mode
 npm run lint         # ESLint
 npx tsc -b --noEmit  # Type check only
@@ -50,8 +52,8 @@ src/
   workers/           # Browser inference workers for Kokoro, Supertonic, export
   types.ts           # Worker protocol + shared UI types
 
-electron/            # Desktop shell, security, protocol, preload, Python runtime helpers
-python/              # Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS
+electron/            # Desktop shell, security, protocol, preload, runtime helpers
+rust/                # Rust local bridge for probe/WebSocket transport and local model execution
 ```
 
 ## Key Patterns
@@ -109,19 +111,21 @@ Liquid Glass design (Apple): translucent, blurred, light-refracting surfaces flo
 | Kokoro-82M | `onnx-community/Kokoro-82M-v1.0-ONNX` | kokoro-js | 24000 Hz | 24 named voices |
 | Supertonic | `onnx-community/Supertonic-TTS-2-ONNX` | @huggingface/transformers | 44100 Hz | F1–F5, M1–M5 (10 voices) |
 
-### Desktop-only local runtimes (Electron + Python bridge)
+### Desktop-only local runtimes (Electron + Rust bridge)
 
 Sample rate is read from each model's output at runtime, never hardcoded. Allowed repos/speakers are enforced in `electron/localTtsIpc.ts`.
 
-| Model | ID(s) | Python package | Voices |
+| Model | ID(s) | Rust crate | Voices |
 |---|---|---|---|
-| NeuTTS Nano | `neuphonic/neutts-nano` (+ `-german`/`-french`/`-spanish`) | `neutts` (Python 3.10–3.13) | reference-audio voice cloning |
-| Kani-TTS-2 | `nineninesix/kani-tts-2-en` | `kani-tts-2` (transformers 4.56, NVIDIA NeMo) | language-tagged, no named voices |
-| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` (Auto default) + `…-1.7B-CustomVoice` | `qwen-tts` + device-profiled `torch` | 9 speakers, 11 language options |
+| NeuTTS Nano | Neuphonic GGUF Q4/Q8 variants | `neutts` | `.npy` reference-code voice cloning |
+| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` (Auto default) + `…-1.7B-CustomVoice` | `qwen_tts` | 9 speakers, supported language options |
 
-**All three local runtimes run on a resident bridge worker** (`local_tts_bridge.py --action serve-ws`, pooled by `electron/webSocketBridgeWorker.ts`): the model loads once and serves many requests, so repeat generations skip the per-call import + model load + first-inference warmup (~2–3× faster warm). Generation is **WebSocket-only** — request/progress/result metadata travels over loopback WebSocket JSON frames and audio streams as binary Float32 PCM (no base64). `probe` is the only one-shot subprocess action; the legacy stdin `serve` and one-shot `generate` actions are removed. A `make_model_host(model)` factory builds the right resident host: `Qwen3ModelHost` keyed by (repo, device, dtype, attention), `NeuttsModelHost` keyed by (backbone_repo, codec_repo, backbone_device, codec_device), and `KaniModelHost` keyed by (model_repo, device_map, max_new_tokens). Each reloads on key change; the worker is idle-evicted after ~5 min and respawns on demand; cancel kills it. NeuTTS/Kani inference is byte-identical to before — whole-text generation (no sentence chunking), a single binary audio chunk per request, and NeuTTS re-encodes its reference every request (no ref-code caching). Cached loads force HF offline mode so a cached generation makes no network call. Latency wins: `TCP_NODELAY` on the accepted loopback socket, literal `127.0.0.1`, and no base64 on the generate path. See AGENTS.md → "Local bridge protocol".
+Both local runtimes run on a resident Rust bridge worker (`open-tts-local-bridge --action serve-ws`, pooled by `electron/webSocketBridgeWorker.ts`). Electron launches it with `--port 0 --auth-token <token>`, waits for Rust to print `__PORT__<actual-port>`, then connects to `ws://127.0.0.1:<actual-port>/<token>`. Generation is WebSocket-only: request/progress/result metadata travels over loopback WebSocket JSON frames and audio streams as binary Float32 PCM. `probe` is the only one-shot subprocess action. There is no interpreter discovery, adapter script, stdout generation fallback, or base64 audio payload on this path. See AGENTS.md -> "Local bridge protocol".
 
 ## Maintenance Notes
 
-- Keep the managed runtime virtualenvs (`.venv-neutts`, `.venv-kani`, `.venv-qwen3`) and the shared `.venv313` unchanged during normal cleanup work.
-- If you revisit Python env dedupe, test any `Janome` or `wandb` pruning in a disposable `.venv313` copy first, or rebuild the runtime envs with a shared-link workflow such as `uv` before changing the runtime defaults.
+- Keep local runtime behavior Rust-only. Do not add interpreter discovery, adapter scripts, or managed environment setup.
+- Kani-TTS-2 remains retired unless a Rust runtime replacement exists.
+- Qwen3 speakers: UI/IPC use capitalized display names; the model's `spk_id` keys are lowercase and validation is case-sensitive, so the Rust bridge lowercases the speaker (`qwen3_speaker_id`) before generation. Don't lowercase in the IPC/frontend layer.
+- The Rust bridge emits a periodic stderr heartbeat during each generation so the host inactivity watchdog isn't tripped by a slow first-run model download or long CPU inference (both are single blocking calls).
+- macOS packaging: `scripts/build-rust-bridge.mjs` makes `dist-rust/` self-contained — it bundles external Homebrew dylibs (libomp, openssl@3) the build links against, rewrites install names to `@rpath`, and re-signs ad-hoc. Don't reintroduce absolute `/opt/homebrew` link paths into the shipped binary/dylibs.

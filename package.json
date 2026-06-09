@@ -10,7 +10,8 @@
   "scripts": {
     "dev": "npm run dev:web",
     "dev:web": "vite --port 5173",
-    "build:electron:main": "node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json && node -e \"require('node:fs').copyFileSync('electron/package.json', 'dist-electron/package.json')\"",
+    "build:rust": "node scripts/build-rust-bridge.mjs",
+    "build:electron:main": "npm run build:rust && node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json && node -e \"require('node:fs').copyFileSync('electron/package.json', 'dist-electron/package.json')\"",
     "dev:desktop": "npm run build:electron:main && concurrently \"npm run dev:web\" \"wait-on http://localhost:5173/desktop/studio && electron .\"",
     "dev:electron": "npm run dev:desktop",
     "build": "npm run build:web",
@@ -20,7 +21,9 @@
     "dist": "npm run build:electron && electron-builder",
     "preview": "vite preview",
     "lint": "eslint .",
-    "test": "vitest run",
+    "test": "npm run test:js && npm run test:rust",
+    "test:js": "vitest run",
+    "test:rust": "cargo test --manifest-path rust/local-tts-bridge/Cargo.toml",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "eval:inference": "node scripts/inference-speed-eval.mjs"
@@ -84,13 +87,10 @@
     ],
     "extraResources": [
       {
-        "from": "python",
-        "to": "python",
+        "from": "dist-rust",
+        "to": "dist-rust",
         "filter": [
-          "**/*",
-          "!**/__pycache__/**",
-          "!**/*.pyc",
-          "!**/*.pyo"
+          "**/*"
         ]
       }
     ],

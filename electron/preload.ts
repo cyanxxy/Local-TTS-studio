@@ -1,12 +1,10 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
 
-type LocalModel = "neutts" | "kani" | "qwen3";
+type LocalModel = "neutts" | "qwen3";
 
 interface LocalBridgeRequest {
   model: LocalModel;
   requestId?: string;
-  pythonBinary?: string;
-  allowRuntimeSetup?: boolean;
   payload?: Record<string, unknown>;
 }
 

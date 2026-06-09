@@ -65,9 +65,9 @@ export function useModelCacheControls({
     const modelLabel = activeModel === "kokoro" ? MODELS.kokoro.label : MODELS.supertonic.label;
     setCacheStatus({ type: "info", message: `Re-downloading ${modelLabel}…` });
     try {
-      const result = await clearModelCacheForModel(activeModel);
       cancelActiveGeneration(true);
       resetGeneratedAudio();
+      const result = await clearModelCacheForModel(activeModel);
       reloadModel(activeModel);
       const deletedLabel = result.deletedEntries === 1 ? "file" : "files";
       const voiceCacheNote = result.deletedKeys.length > 0

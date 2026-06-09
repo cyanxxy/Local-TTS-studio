@@ -55,7 +55,7 @@ export function toAudioSegment(
   totalCount: number,
 ): AudioSegment {
   const chunkIndex = typeof chunk.index === "number" ? chunk.index : index + 1;
-  const chunkTotal = typeof chunk.total === "number" ? chunk.total : totalCount;
+  const chunkTotal = typeof chunk.total === "number" && chunk.total > 0 ? chunk.total : totalCount;
   const label = (chunk.text || "").trim() || `Segment ${chunkIndex}`;
 
   return {

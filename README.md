@@ -11,6 +11,7 @@ Browser-native neural speech synthesis through WebGPU — no server, no account,
 [![Vite 7](https://img.shields.io/badge/Vite-7-646CFF?style=flat-square&logo=vite&logoColor=white)](https://vite.dev)
 [![Tailwind 4](https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 [![Electron 42](https://img.shields.io/badge/Electron-42-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
+[![Rust](https://img.shields.io/badge/Rust-local%20bridge-B7410E?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 [![WebGPU](https://img.shields.io/badge/WebGPU-Preferred-FF6F00?style=flat-square)](https://www.w3.org/TR/webgpu/)
 [![Local first](https://img.shields.io/badge/Inference-100%25%20Local-1D1D1F?style=flat-square)](#capabilities)
 [![License](https://img.shields.io/badge/License-Apache%202.0-1D1D1F?style=flat-square)](./LICENSE)
@@ -26,7 +27,7 @@ Browser-native neural speech synthesis through WebGPU — no server, no account,
 Open TTS is two applications built from a single codebase:
 
 - **Web** — a browser-native Studio and Reader at `/studio` and `/reader`, with every inference step running client-side in Web Workers.
-- **Desktop** — an Electron shell that serves the same Studio and Reader under `/desktop/*`, and adds three optional Python-backed local runtimes.
+- **Desktop** — an Electron shell that serves the same Studio and Reader under `/desktop/*`, and adds two optional local runtimes through a Rust bridge.
 - **Shared core** — model loading, generation, playback, export, and routing live in shared React/TypeScript modules used by both shells.
 
 Browser models prefer WebGPU, fall back to WASM where supported, and cache their weights after first load for offline reuse. Nothing you type or generate leaves the machine.
@@ -39,9 +40,8 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 |---|---|---|:---:|:---:|---|
 | **Kokoro-82M** | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 24 kHz browser model, 24 named voices |
 | **Supertonic TTS** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 44.1 kHz browser model, 10 voices |
-| **NeuTTS Nano** | Neuphonic, via local Python bridge | `/desktop/neutts` | No | Yes | Reference-audio voice cloning; managed Python setup available |
-| **Kani-TTS-2** | `nineninesix/kani-tts-2-en`, via local Python bridge | `/desktop/kani` | No | Yes | Language/accent tags, no named voices; managed Python setup available |
-| **Qwen3-TTS CustomVoice** | Qwen 0.6B / 1.7B, via local Python bridge | `/desktop/qwen3` | No | Yes | Auto-selects 0.6B + device profile for CUDA, Apple MPS, or CPU; 1.7B is manual |
+| **NeuTTS Nano** | Neuphonic GGUF variants via Rust `neutts` | `/desktop/neutts` | No | Yes | Rust-only local runtime; requires pre-encoded `.npy` reference codes |
+| **Qwen3-TTS CustomVoice** | Qwen 0.6B / 1.7B via Rust `qwen_tts` | `/desktop/qwen3` | No | Yes | Rust-only local runtime; CPU/float32/eager execution today |
 
 > The deployed web app exposes Studio and Reader. Desktop-only routes live under `/desktop/*` and are opened by Electron.
 
@@ -59,7 +59,22 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 | **Creator presets** | One-click TikTok Voiceover, YouTube Shorts, and YouTube Long-form profiles. |
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
 | **Offline-ready** | Model weights cache in-browser (IndexedDB + Cache API) for repeat, network-free use. |
-| **Desktop runtimes** | Electron adds optional NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS through a resident local Python WebSocket bridge. |
+| **Desktop runtimes** | Electron adds optional NeuTTS Nano and Qwen3-TTS through a resident Rust WebSocket bridge. |
+
+---
+
+## Rust Local Bridge
+
+The desktop-only NeuTTS Nano and Qwen3-TTS integrations run through a compiled Rust binary at `rust/local-tts-bridge`. Electron launches `open-tts-local-bridge` directly; there is no Python runtime, adapter script, interpreter discovery, or managed virtual environment.
+
+The bridge has two actions:
+
+- `probe` — a one-shot readiness check that reports Rust runtime metadata.
+- `serve-ws` — a resident per-model worker used for generation.
+
+For generation, Electron starts the bridge with `--host 127.0.0.1 --port 0 --auth-token <token>`. Rust binds the loopback socket, prints `__PORT__<actual-port>` on stdout, and accepts WebSocket traffic only on `/<token>`. Metadata travels as JSON frames, while audio streams as raw Float32 binary chunks. The renderer schedules those chunks with Web Audio and owns WAV normalization/export.
+
+`npm run build:rust` builds the release bridge and copies the binary plus native runtime libraries into `dist-rust/` for Electron packaging.
 
 ---
 
@@ -81,15 +96,18 @@ The web app is served at [`http://localhost:5173/studio`](http://localhost:5173/
 | `npm run dev` · `npm run dev:web` | Vite web app on `localhost:5173` |
 | `npm run dev:desktop` · `npm run dev:electron` | Vite + Electron desktop app |
 | `npm run build` · `npm run build:web` | Type check + production web build |
-| `npm run build:desktop` · `npm run build:electron` | Web build + compile Electron main process |
-| `npm run build:electron:main` | Compile Electron main/preload code only |
+| `npm run build:rust` | Build and copy the Rust local bridge into `dist-rust/` |
+| `npm run build:desktop` · `npm run build:electron` | Web build + Rust bridge + compile Electron main process |
+| `npm run build:electron:main` | Build Rust bridge and compile Electron main/preload code only |
 | `npm run dist` | Package the desktop app into `release/` |
 | `npm run preview` | Preview the production web build locally |
 | `npm run lint` | ESLint |
-| `npm run test` · `npm run test:watch` · `npm run test:coverage` | Vitest |
+| `npm run test` | Vitest + Rust bridge unit tests |
+| `npm run test:js` · `npm run test:watch` · `npm run test:coverage` | Vitest |
+| `npm run test:rust` | Rust bridge unit tests |
 | `npm run eval:inference` | Reproducible inference-speed benchmark (see [docs](./docs/performance.md)) |
 
-Packaged desktop builds bundle the Electron shell and the Python bridge script. They do **not** ship Python, model weights, or model-specific Python dependencies. On first use, Electron can create managed per-runtime virtualenvs when Python 3.12 or `uv` is available; see [local runtime setup](./docs/local-runtimes.md).
+Packaged desktop builds bundle the Electron shell and the Rust local bridge binary. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the build makes the bridge self-contained — its native libraries are bundled into `dist-rust/` and relinked to `@rpath` — so it runs without Homebrew; distributing the app still requires a Developer ID signature and notarization. There is no adapter script, interpreter discovery, or managed virtual environment setup; see [local runtime setup](./docs/local-runtimes.md).
 
 ---
 
@@ -99,7 +117,8 @@ Packaged desktop builds bundle the Electron shell and the Python bridge script. 
 - WebGPU is preferred where available; the WASM fallback is expected behavior.
 - iPhone and iPad browsers expose Supertonic only — Kokoro is intentionally disabled on iOS pending further validation.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.
-- Electron local runtimes generate through `local_tts_bridge.py --action serve-ws`, with metadata over loopback WebSocket JSON and audio as binary Float32 chunks.
+- Electron local runtimes generate through `open-tts-local-bridge --action serve-ws --port 0 --auth-token <token>`; Rust announces the bound loopback port, metadata travels over authenticated WebSocket JSON, and audio streams as binary Float32 chunks.
+- Local-runtime models download on first generation (Qwen3 is roughly 1–2 GB); the bridge streams progress and emits a heartbeat so a slow first-run download or long CPU inference is not mistaken for a stalled worker. NeuTTS additionally requires a pre-encoded `.npy` reference-code file plus its transcript.
 - `vercel.json` provides SPA rewrites plus COOP/COEP headers, which keep the WASM fallback cross-origin isolated (and multi-threaded) for the browser build.
 
 ---
@@ -107,8 +126,8 @@ Packaged desktop builds bundle the Electron shell and the Python bridge script. 
 ## Project Layout
 
 ```text
-electron/        Desktop shell, custom protocol, preload bridge, Python runtime helpers
-python/          Local TTS bridge for NeuTTS Nano, Kani-TTS-2, and Qwen3-TTS
+electron/        Desktop shell, custom protocol, preload bridge, runtime helpers
+rust/            Rust local bridge binary for probe and WebSocket transport
 src/
 ├─ apps/
 │  ├─ web/       Browser renderer shell and entrypoint
@@ -126,7 +145,7 @@ src/
 ## Documentation
 
 - [Architecture](./docs/architecture.md) — source map, worker protocol, and audio path
-- [Desktop local runtimes](./docs/local-runtimes.md) — Python discovery, setup, and troubleshooting
+- [Desktop local runtimes](./docs/local-runtimes.md) — Rust bridge protocol, setup, and troubleshooting
 - [Performance benchmarks](./docs/performance.md) — reproducible inference-speed eval
 - [Design system](./docs/design-system.md) — tokens, typography, and color
 - [Agent workflow and runtime contracts](./AGENTS.md) — the canonical project map

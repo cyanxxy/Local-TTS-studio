@@ -34,6 +34,10 @@ class FakeChild extends EventEmitter {
     this.stdout.emit("data", Buffer.from(text, "utf-8"));
   }
 
+  emitStderr(text: string) {
+    this.stderr.emit("data", Buffer.from(text, "utf-8"));
+  }
+
   exit(code = 0) {
     this.emit("exit", code);
     this.emit("close", code);
@@ -50,8 +54,18 @@ class FakeWebSocketServer {
   constructor(
     private readonly host: string,
     private readonly port: number,
+    private readonly expectedPath: string,
+    private readonly onListening: (port: number) => void,
     private readonly onMessage?: (message: Record<string, unknown>, server: FakeWebSocketServer) => void,
   ) {
+    this.server.on("listening", () => {
+      const address = this.server.address();
+      if (typeof address === "object" && address?.port) {
+        this.onListening(address.port);
+      } else {
+        this.onListening(port);
+      }
+    });
     this.server.listen(port, host);
   }
 
@@ -102,6 +116,12 @@ class FakeWebSocketServer {
       const headerEnd = this.buffer.indexOf("\r\n\r\n");
       if (headerEnd === -1) return;
       const header = this.buffer.subarray(0, headerEnd).toString("latin1");
+      const requestPath = /^GET\s+(\S+)\s+HTTP\/1\.1$/im.exec(header)?.[1];
+      if (requestPath !== this.expectedPath) {
+        this.socket?.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n");
+        this.socket?.destroy();
+        return;
+      }
       const key = /^Sec-WebSocket-Key:\s*(.+)$/im.exec(header)?.[1]?.trim();
       if (!key || !this.socket) throw new Error("Missing WebSocket key.");
       const accept = createHash("sha1")
@@ -157,13 +177,12 @@ class FakeWebSocketServer {
   }
 }
 
-// The pool is generic over its model literal; all three local runtimes share
-// the exact same WebSocket transport, so the harness is parametrized too.
-type TestModel = "neutts" | "kani" | "qwen3";
+// The pool is generic over its model literal; Rust local runtimes share the
+// exact same WebSocket transport, so the harness is parametrized too.
+type TestModel = "neutts" | "qwen3";
 
 const SPAWN_CONFIG: WebSocketWorkerSpawnConfig = {
-  pythonBinary: "/usr/bin/python3",
-  scriptPath: "/app/bridge.py",
+  bridgeBinary: "/app/dist-rust/open-tts-local-bridge",
   cacheDir: "/cache/qwen3",
   env: { PATH: "/usr/bin" },
 };
@@ -184,7 +203,13 @@ function makePool(
   const spawnModels: TestModel[] = [];
   const spawn = vi.fn((model: TestModel, config: WebSocketWorkerSpawnRuntimeConfig) => {
     const child = new FakeChild();
-    const server = new FakeWebSocketServer(config.host, config.port, onMessage);
+    const server = new FakeWebSocketServer(
+      config.host,
+      config.port,
+      `/${config.authToken}`,
+      (port) => child.emitStdout(`__PORT__${port}\n`),
+      onMessage,
+    );
     child.onKill = () => server.close();
     children.push(child);
     servers.push(server);
@@ -207,6 +232,10 @@ async function waitFor(assertion: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Timed out waiting for condition.");
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 afterEach(() => {
@@ -271,7 +300,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(second.response).toMatchObject({ ok: true, requestId: "r2" });
   });
 
-  it("spawns an independent worker per model and streams binary audio for neutts and kani", async () => {
+  it("spawns an independent worker per model and streams binary audio for neutts and qwen3", async () => {
     const { pool, spawn, spawnModels } = makePool((message, server) => {
       const repo = (message.payload as { modelRepo?: string }).modelRepo ?? "R";
       server.sendJson({
@@ -304,8 +333,8 @@ describe("createWebSocketBridgeWorkerPool", () => {
       });
     });
 
-    const models = ["neutts", "kani"] as const;
-    const chunksByModel: Record<string, unknown[]> = { neutts: [], kani: [] };
+    const models = ["neutts", "qwen3"] as const;
+    const chunksByModel: Record<string, unknown[]> = { neutts: [], qwen3: [] };
     const results = await Promise.all(
       models.map((model, index) =>
         pool.run(model, {
@@ -322,11 +351,11 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(spawn).toHaveBeenCalledTimes(2);
     expect(new Set(spawnModels)).toEqual(new Set(models));
     expect(chunksByModel.neutts).toHaveLength(1);
-    expect(chunksByModel.kani).toHaveLength(1);
+    expect(chunksByModel.qwen3).toHaveLength(1);
     expect(chunksByModel.neutts[0]).toMatchObject({ requestId: "neutts-r0", sampleRate: 24000, sampleCount: 2 });
-    expect(chunksByModel.kani[0]).toMatchObject({ requestId: "kani-r1", sampleRate: 24000, sampleCount: 2 });
+    expect(chunksByModel.qwen3[0]).toMatchObject({ requestId: "qwen3-r1", sampleRate: 24000, sampleCount: 2 });
     expect(results[0].response).toMatchObject({ ok: true, result: { modelRepo: "neutts" } });
-    expect(results[1].response).toMatchObject({ ok: true, result: { modelRepo: "kani" } });
+    expect(results[1].response).toMatchObject({ ok: true, result: { modelRepo: "qwen3" } });
   });
 
   it("does not resolve Qwen3 generation from legacy stdout result lines", async () => {
@@ -366,6 +395,65 @@ describe("createWebSocketBridgeWorkerPool", () => {
     await expect(run).resolves.toMatchObject({
       response: { ok: true, result: { audioTransport: "websocket-binary" } },
     });
+  });
+
+  it("stops a silent worker after the idle timeout with a no-output error", async () => {
+    const { pool, servers, children } = makePool();
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      idleTimeoutMs: 100,
+      requestId: "r1",
+      payload: { text: "silent" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+
+    await waitFor(() => servers[0]?.messages.length === 1);
+    // The worker connects and receives the request but never emits output or a
+    // socket frame, so the inactivity watchdog must fire and kill it.
+    await expect(run).rejects.toThrow(/no output/i);
+    expect(children[0].killed).toBe(true);
+  });
+
+  it("keeps a long-running request alive while the bridge emits a stderr heartbeat", async () => {
+    const { pool, children, servers } = makePool();
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      idleTimeoutMs: 200,
+      requestId: "r1",
+      payload: { text: "long" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+
+    await waitFor(() => servers[0]?.messages.length === 1);
+
+    // Emit the bridge's stderr heartbeat before the original 200ms deadline; it
+    // must re-arm the watchdog so the request survives past that deadline.
+    await delay(120);
+    children[0].emitStderr(" ");
+    await delay(120); // now well past the original 200ms deadline measured from start
+
+    await expect(Promise.race([
+      run.then(() => "resolved"),
+      delay(0).then(() => "pending"),
+    ])).resolves.toBe("pending");
+    expect(children[0].killed).toBe(false);
+
+    // A real result still completes the request normally.
+    servers[0].sendJson({
+      type: "result",
+      requestId: "r1",
+      ok: true,
+      result: {
+        audioTransport: "websocket-binary",
+        audioChunkCount: 1,
+        sampleRate: 24000,
+        modelRepo: "R",
+        durationSec: 1,
+        elapsedSec: 1,
+        phaseTimingsSec: { modelLoadSec: 0, inferenceSec: 0.9, outputEncodingSec: 0.1 },
+      },
+    });
+    await expect(run).resolves.toMatchObject({ response: { ok: true, requestId: "r1" } });
   });
 
   it("cancels an in-flight request by killing the WebSocket worker", async () => {

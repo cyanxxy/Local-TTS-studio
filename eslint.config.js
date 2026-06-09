@@ -7,7 +7,7 @@ import tseslint from "typescript-eslint";
 import { defineConfig, globalIgnores } from "eslint/config";
 
 export default defineConfig([
-  globalIgnores(["coverage", "dist", "dist-electron", ".venv", ".venv*/**"]),
+  globalIgnores(["coverage", "dist", "dist-electron", "release", ".*", "rust/**/target/**"]),
   {
     files: ["**/*.{ts,tsx}"],
     extends: [
@@ -31,6 +31,17 @@ export default defineConfig([
     rules: {
       "react-hooks/exhaustive-deps": "error",
       "react/jsx-key": "error",
+    },
+  },
+  {
+    files: ["*.{js,mjs,cjs}", "scripts/**/*.{js,mjs,cjs}"],
+    extends: [
+      js.configs.recommended,
+    ],
+    languageOptions: {
+      ecmaVersion: 2022,
+      sourceType: "module",
+      globals: globals.node,
     },
   },
 ]);

@@ -10,7 +10,7 @@ describe("appProtocol", () => {
   it("builds production app URLs with clean routes", () => {
     expect(getElectronAppUrl()).toBe("app://-/desktop/studio");
     expect(getElectronAppUrl("/reader")).toBe("app://-/desktop/reader");
-    expect(getElectronAppUrl("kani")).toBe("app://-/desktop/kani");
+    expect(getElectronAppUrl("qwen3")).toBe("app://-/desktop/qwen3");
     expect(getElectronAppUrl("/desktop/qwen3")).toBe("app://-/desktop/qwen3");
   });
 
