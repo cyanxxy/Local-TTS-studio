@@ -210,6 +210,13 @@ function registerNavigationSecurityHandlers() {
 
       return { action: "deny" };
     });
+
+    // The app never uses <webview>, so block attachment outright (security
+    // checklist item 12: a webview can be created by page script even when
+    // the embedder itself never renders one).
+    contents.on("will-attach-webview", (event) => {
+      event.preventDefault();
+    });
   });
 }
 

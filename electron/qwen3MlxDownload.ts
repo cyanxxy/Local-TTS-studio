@@ -1,6 +1,6 @@
 import { createWriteStream } from "fs";
 import { promises as fs } from "fs";
-import { request as httpRequest, type IncomingMessage } from "http";
+import type { IncomingMessage } from "http";
 import { request as httpsRequest } from "https";
 import path from "path";
 
@@ -80,6 +80,10 @@ export function encodeHuggingFacePath(filePath: string): string {
   return filePath.split("/").map((part) => encodeURIComponent(part)).join("/");
 }
 
+// Remote content must only ever load over HTTPS (Electron security checklist
+// item 1), so plain-http URLs are rejected up front — including redirect
+// targets, which re-enter this function and could otherwise downgrade an
+// https download to http.
 export function requestUrl(url: string, redirectCount = 0): Promise<IncomingMessage> {
   if (redirectCount > 8) {
     return Promise.reject(new Error(`Too many redirects while downloading ${url}`));
@@ -87,7 +91,11 @@ export function requestUrl(url: string, redirectCount = 0): Promise<IncomingMess
 
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
-    const request = (parsed.protocol === "http:" ? httpRequest : httpsRequest)(
+    if (parsed.protocol !== "https:") {
+      reject(new Error(`Refusing to download over insecure protocol: ${url}`));
+      return;
+    }
+    const request = httpsRequest(
       parsed,
       {
         headers: {

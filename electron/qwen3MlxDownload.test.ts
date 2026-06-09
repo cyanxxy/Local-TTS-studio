@@ -12,6 +12,7 @@ import {
   downloadQwen3MlxModel,
   isSafeHuggingFaceFileName,
   listHuggingFaceModelFiles,
+  requestUrl,
   resolveDownloadDestination,
   type Qwen3MlxDownloadProgress,
   type Qwen3MlxDownloadResult,
@@ -109,6 +110,17 @@ describe("isSafeHuggingFaceFileName", () => {
     expect(isSafeHuggingFaceFileName("")).toBe(false);
     expect(isSafeHuggingFaceFileName("a\0b")).toBe(false);
     expect(isSafeHuggingFaceFileName(42)).toBe(false);
+  });
+});
+
+describe("requestUrl", () => {
+  it("rejects plain-http URLs before issuing any request", async () => {
+    await expect(requestUrl("http://huggingface.co/api/models/x")).rejects.toThrow(/insecure protocol/);
+  });
+
+  it("rejects non-http(s) protocols before issuing any request", async () => {
+    await expect(requestUrl("file:///etc/passwd")).rejects.toThrow(/insecure protocol/);
+    await expect(requestUrl("ftp://example.com/file")).rejects.toThrow(/insecure protocol/);
   });
 });
 
