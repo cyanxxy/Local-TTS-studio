@@ -69,15 +69,18 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
     ],
   },
   qwen3: {
-    name: "Qwen3-TTS 12Hz CustomVoice",
+    name: "Qwen3-TTS 12Hz MLX",
     releaseDate: "January 29, 2026",
     params: "0.6B / 1.7B",
     highlights: [
-      "CustomVoice model with nine built-in premium speakers and instruction-guided style control.",
-      "Supports Chinese, English, Japanese, Korean, German, French, and Spanish in the Rust local runtime.",
-      "Runs through the Rust local bridge because the released model ships qwen-tts/safetensors assets, not browser ONNX artifacts.",
+      "Apple-first Qwen3 path defaults to the upstream 0.6B CustomVoice 6-bit MLX profile with built-in speakers.",
+      "Base MLX voice cloning remains available as an advanced profile when a reference WAV and transcript are provided.",
+      "Runs through the resident Rust WebSocket bridge because the released model assets are local runtime formats, not browser ONNX artifacts.",
     ],
     links: [
+      { label: "MLX CustomVoice 0.6B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit" },
+      { label: "MLX CustomVoice 1.7B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit" },
+      { label: "MLX Base 0.6B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit" },
       { label: "HF 0.6B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" },
       { label: "HF 1.7B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" },
       { label: "HF Tokenizer", href: "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz" },

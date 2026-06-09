@@ -4,12 +4,12 @@ import { AUDIO_PLAYER_MAX_BUFFER_SECONDS } from "../constants";
 import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
 import { downloadAudioChunks } from "../lib/audioExportClient";
 import { downloadBlob } from "../lib/exportAudio";
+import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
 import {
   buildAudioSegments,
   buildCaptionSegments,
   getChunkDuration,
   retimeStoredChunks,
-  toAudioSegment,
   type AudioChunkData,
   type AudioSegment,
   type StoredAudioChunk,
@@ -79,6 +79,9 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const segmentCounterRef = useRef(0);
   const autoPlayOnChunkRef = useRef(true);
   const streamCompleteRef = useRef(true);
+  const timelineUiFlushCancelRef = useRef<CancelScheduledUiFlush | null>(null);
+  const timelineSegmentsDirtyRef = useRef(false);
+  const timelineDurationDirtyRef = useRef(false);
 
   const getContext = useCallback((): AudioContext => {
     if (!audioContextRef.current) {
@@ -94,9 +97,38 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     interruptedRef.current = false;
   }, []);
 
-  const rebuildSegmentState = useCallback(() => {
-    setSegments(buildAudioSegments(allChunksRef.current));
+  const flushTimelineState = useCallback(() => {
+    timelineUiFlushCancelRef.current = null;
+
+    if (timelineDurationDirtyRef.current) {
+      timelineDurationDirtyRef.current = false;
+      setTotalDuration(totalDurationRef.current);
+    }
+
+    if (timelineSegmentsDirtyRef.current) {
+      timelineSegmentsDirtyRef.current = false;
+      setSegments(buildAudioSegments(allChunksRef.current));
+    }
   }, []);
+
+  const queueTimelineStateFlush = useCallback(() => {
+    if (timelineUiFlushCancelRef.current) return;
+    timelineUiFlushCancelRef.current = scheduleNextUiFrame(flushTimelineState);
+  }, [flushTimelineState]);
+
+  const cancelTimelineStateFlush = useCallback(() => {
+    if (timelineUiFlushCancelRef.current) {
+      timelineUiFlushCancelRef.current();
+      timelineUiFlushCancelRef.current = null;
+    }
+    timelineSegmentsDirtyRef.current = false;
+    timelineDurationDirtyRef.current = false;
+  }, []);
+
+  const rebuildSegmentState = useCallback(() => {
+    cancelTimelineStateFlush();
+    setSegments(buildAudioSegments(allChunksRef.current));
+  }, [cancelTimelineStateFlush]);
 
   const activeSegmentCursorRef = useRef(0);
 
@@ -133,14 +165,20 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     return clamped;
   }, [updateActiveSegment]);
 
-  const syncTotalDuration = useCallback((nextDuration: number) => {
+  const syncTotalDuration = useCallback((nextDuration: number, options: { deferUi?: boolean } = {}) => {
     const clamped = Math.max(0, nextDuration);
     totalDurationRef.current = clamped;
-    setTotalDuration(clamped);
+    if (options.deferUi) {
+      timelineDurationDirtyRef.current = true;
+      queueTimelineStateFlush();
+    } else {
+      timelineDurationDirtyRef.current = false;
+      setTotalDuration(clamped);
+    }
     if (currentTimeRef.current > clamped) {
       syncCurrentTime(clamped);
     }
-  }, [syncCurrentTime]);
+  }, [queueTimelineStateFlush, syncCurrentTime]);
 
   const getLiveTimelineTime = useCallback((): number => {
     const ctx = audioContextRef.current;
@@ -355,8 +393,9 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     };
     allChunksRef.current.push(storedChunk);
 
-    syncTotalDuration(totalDurationRef.current + chunkDuration);
-    setSegments((prev) => [...prev, toAudioSegment(storedChunk, prev.length, allChunksRef.current.length)]);
+    syncTotalDuration(totalDurationRef.current + chunkDuration, { deferUi: true });
+    timelineSegmentsDirtyRef.current = true;
+    queueTimelineStateFlush();
 
     if (interruptedRef.current) return;
 
@@ -377,7 +416,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }
 
     if (nextPlayTimeRef.current === 0) {
-      nextPlayTimeRef.current = ctx.currentTime + 0.15;
+      nextPlayTimeRef.current = ctx.currentTime + 0.05;
       timelineAnchorRef.current = currentTimeRef.current;
       contextAnchorRef.current = nextPlayTimeRef.current;
     }
@@ -401,7 +440,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       setIsPlaying(true);
       isPlayingRef.current = true;
     }
-  }, [failPlaybackStart, findChunkIndexAtTime, getContext, scheduleBufferedChunks, syncTotalDuration]);
+  }, [
+    failPlaybackStart,
+    findChunkIndexAtTime,
+    getContext,
+    queueTimelineStateFlush,
+    scheduleBufferedChunks,
+    syncTotalDuration,
+  ]);
 
   const togglePlay = useCallback(async () => {
     const ctx = getContext();
@@ -573,6 +619,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const reset = useCallback(() => {
     stopAllNodes();
+    cancelTimelineStateFlush();
 
     allChunksRef.current = [];
     nextPlayTimeRef.current = 0;
@@ -592,7 +639,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     syncCurrentTime(0);
     syncTotalDuration(0);
-  }, [stopAllNodes, syncCurrentTime, syncTotalDuration]);
+  }, [cancelTimelineStateFlush, stopAllNodes, syncCurrentTime, syncTotalDuration]);
 
   const stopAll = useCallback(() => {
     stopAllNodes();
@@ -613,12 +660,13 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   useEffect(() => {
     return () => {
       cancelAnimationFrame(animFrameRef.current);
+      cancelTimelineStateFlush();
       stopAllNodes();
       if (audioContextRef.current) {
         void audioContextRef.current.close();
       }
     };
-  }, [stopAllNodes]);
+  }, [cancelTimelineStateFlush, stopAllNodes]);
 
   return {
     isPlaying,

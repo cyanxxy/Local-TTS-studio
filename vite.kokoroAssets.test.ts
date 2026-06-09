@@ -97,6 +97,22 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
     );
   });
 
+  it("exposes Kokoro's internal ONNX Runtime wasm thread setting", () => {
+    const root = makeAssetRoot();
+    const plugin = kokoroOnnxWasmAssetPlugin(root);
+    const code =
+      "const Mf={set wasmPaths(e){Wg.backends.onnx.wasm.wasmPaths=e},get wasmPaths(){return Wg.backends.onnx.wasm.wasmPaths}};";
+
+    const transformed = transformCode(
+      plugin,
+      code,
+      join(root, "node_modules/kokoro-js/dist/kokoro.web.js"),
+    );
+
+    expect(transformed).toContain("set numThreads(e){Wg.backends.onnx.wasm.numThreads=e}");
+    expect(transformed).toContain("get numThreads(){return Wg.backends.onnx.wasm.numThreads}");
+  });
+
   it("throws a clear error when a required asset is missing", () => {
     const root = mkdtempSync(join(tmpdir(), "kokoro-assets-missing-"));
     const plugin = kokoroOnnxWasmAssetPlugin(root);

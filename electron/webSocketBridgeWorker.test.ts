@@ -238,6 +238,29 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function sendAudioChunk(
+  server: FakeWebSocketServer,
+  requestId: unknown,
+  options: {
+    index?: number;
+    total?: number;
+    sampleRate?: number;
+    sampleCount?: number;
+  } = {},
+) {
+  const sampleCount = options.sampleCount ?? 2;
+  server.sendJson({
+    type: "audio_chunk",
+    requestId,
+    index: options.index ?? 0,
+    total: options.total ?? 1,
+    sampleRate: options.sampleRate ?? 24000,
+    sampleCount,
+    silenceAfterSamples: 0,
+  });
+  server.sendBinary(Buffer.alloc(sampleCount * Float32Array.BYTES_PER_ELEMENT));
+}
+
 afterEach(() => {
   vi.useRealTimers();
 });
@@ -358,6 +381,41 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(results[1].response).toMatchObject({ ok: true, result: { modelRepo: "qwen3" } });
   });
 
+  it("accepts streamed audio chunks with an unknown total and validates the final result count", async () => {
+    const { pool } = makePool((message, server) => {
+      sendAudioChunk(server, message.requestId, { index: 0, total: 0 });
+      sendAudioChunk(server, message.requestId, { index: 1, total: 0 });
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: {
+          audioTransport: "websocket-binary",
+          audioChunkCount: 2,
+          sampleRate: 24000,
+          modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+          durationSec: 1,
+          elapsedSec: 2,
+          phaseTimingsSec: { modelLoadSec: 0, inferenceSec: 2 },
+        },
+      });
+    });
+    const audioChunks: unknown[] = [];
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r-stream",
+      payload: { text: "stream" },
+      spawnConfig: SPAWN_CONFIG,
+      onAudioChunk: (payload) => audioChunks.push(payload),
+    })).resolves.toMatchObject({
+      response: { ok: true, result: { audioChunkCount: 2 } },
+    });
+    expect(audioChunks).toHaveLength(2);
+    expect(audioChunks[0]).toMatchObject({ index: 0, total: 0 });
+    expect(audioChunks[1]).toMatchObject({ index: 1, total: 0 });
+  });
+
   it("does not resolve Qwen3 generation from legacy stdout result lines", async () => {
     const { pool, children, servers } = makePool();
     const run = pool.run("qwen3", {
@@ -378,6 +436,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
       new Promise((resolve) => setTimeout(() => resolve("pending"), 25)),
     ])).resolves.toBe("pending");
 
+    sendAudioChunk(servers[0], "r1");
     servers[0].sendJson({
       type: "result",
       requestId: "r1",
@@ -439,6 +498,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(children[0].killed).toBe(false);
 
     // A real result still completes the request normally.
+    sendAudioChunk(servers[0], "r1");
     servers[0].sendJson({
       type: "result",
       requestId: "r1",
@@ -454,6 +514,212 @@ describe("createWebSocketBridgeWorkerPool", () => {
       },
     });
     await expect(run).resolves.toMatchObject({ response: { ok: true, requestId: "r1" } });
+  });
+
+  it("rejects successful results when the streamed audio chunk count is incomplete", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      sendAudioChunk(server, message.requestId, { index: 0, total: 2 });
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: {
+          audioTransport: "websocket-binary",
+          audioChunkCount: 2,
+          sampleRate: 24000,
+          modelRepo: "R",
+          durationSec: 1,
+          elapsedSec: 1,
+          phaseTimingsSec: { modelLoadSec: 0, inferenceSec: 1 },
+        },
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "partial" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow("chunk count");
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects out-of-sequence audio chunk metadata before accepting binary audio", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 1,
+        total: 2,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "bad order" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow("out of sequence");
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("cancels a request while its worker is still spawning", async () => {
+    // The bridge never announces its port, so the run stays in the spawn phase.
+    const children: FakeChild[] = [];
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      children.push(child);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      killGraceMs: 2_000,
+      connectTimeoutMs: 5_000,
+    });
+
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    });
+    run.catch(() => {});
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(pool.cancel("r1")).toBe(true);
+    expect(children[0].killed).toBe(true);
+    children[0].exit(null as unknown as number);
+    await expect(run).rejects.toThrow(/cancelled/i);
+    // The request id is released for reuse after the cancelled run settles.
+    expect(pool.isRunning("r1")).toBe(false);
+  });
+
+  it("rejects a duplicate request id while the original request is still spawning", async () => {
+    const children: FakeChild[] = [];
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      children.push(child);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      killGraceMs: 2_000,
+      connectTimeoutMs: 5_000,
+    });
+
+    const run = pool.run("neutts", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    });
+    run.catch(() => {});
+
+    // The duplicate-id guard must see ids registered before the spawn await,
+    // even when the duplicate arrives for a different model.
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/already running/i);
+    expect(spawn).toHaveBeenCalledTimes(1);
+
+    expect(pool.cancel("r1")).toBe(true);
+    children[0].exit(null as unknown as number);
+    await expect(run).rejects.toThrow(/cancelled/i);
+  });
+
+  it("kills workers that are still spawning when the pool shuts down", async () => {
+    const children: FakeChild[] = [];
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      children.push(child);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      killGraceMs: 2_000,
+      connectTimeoutMs: 5_000,
+    });
+
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    });
+    run.catch(() => {});
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const shutdown = pool.shutdownAll();
+    expect(children[0].killed).toBe(true);
+    children[0].exit(null as unknown as number);
+    await shutdown;
+    await expect(run).rejects.toThrow(/Failed to start Rust local bridge worker/);
+  });
+
+  it("kills a single model's spawning worker via shutdown(model)", async () => {
+    const children: FakeChild[] = [];
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      children.push(child);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      killGraceMs: 2_000,
+      connectTimeoutMs: 5_000,
+    });
+
+    const run = pool.run("neutts", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    });
+    run.catch(() => {});
+
+    const shutdown = pool.shutdown("neutts");
+    expect(children[0].killed).toBe(true);
+    children[0].exit(null as unknown as number);
+    await expect(shutdown).resolves.toBe(true);
+    await expect(run).rejects.toThrow(/Failed to start Rust local bridge worker/);
+  });
+
+  it("reports a startup exit instead of a connect timeout when the bridge dies before connecting", async () => {
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      setTimeout(() => {
+        // Announce a port nobody listens on, then exit before the first
+        // connection attempt can even fail.
+        child.emitStdout("__PORT__1\n");
+        child.exit(1);
+      }, 0);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      killGraceMs: 2_000,
+      connectTimeoutMs: 5_000,
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/exited during startup|exited before announcing/i);
   });
 
   it("cancels an in-flight request by killing the WebSocket worker", async () => {

@@ -90,8 +90,9 @@ async function loadWorkerModule({
   };
 
   vi.stubGlobal("self", workerGlobal);
+  const fetchModeRef = { current: fetchMode };
   vi.stubGlobal("fetch", vi.fn(async () => {
-    const payload = fetchMode === "valid"
+    const payload = fetchModeRef.current === "valid"
       ? new Float32Array(128).buffer
       : new Uint8Array([1, 2]).buffer;
     return new Response(payload, {
@@ -189,6 +190,7 @@ async function loadWorkerModule({
 
   return {
     dispatch,
+    fetchModeRef,
     flushPromises,
     pipelineCalls,
     postedMessages,
@@ -503,6 +505,76 @@ describe("supertonic.worker", () => {
       message: "Model returned no audio chunks.",
       scope: "generate",
     }));
+  });
+
+  it("keeps the resident pipeline alive when a hot-reload voice preload fails", async () => {
+    const pipelineCalls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const instance = createPipelineInstance([createRawAudio(), createRawAudio()], pipelineCalls);
+    const { dispatch, fetchModeRef, postedMessages } = await loadWorkerModule({
+      chunkTexts: ["Only sentence."],
+      pipelineInstances: [instance],
+    });
+
+    dispatch({ type: "LOAD", preferredVoice: "Male" });
+    await vi.waitFor(() => {
+      expect(postedMessages.some((message) => message.type === "READY")).toBe(true);
+    });
+
+    fetchModeRef.current = "invalid";
+    dispatch({ type: "LOAD", preferredVoice: "Male 2" });
+    await vi.waitFor(() => {
+      expect(postedMessages.filter((message) => message.type === "READY")).toHaveLength(2);
+    });
+
+    expect(instance.dispose).not.toHaveBeenCalled();
+    expect(postedMessages.some((message) => message.type === "ERROR")).toBe(false);
+
+    fetchModeRef.current = "valid";
+    dispatch({
+      type: "GENERATE",
+      text: "Only sentence.",
+      voice: "Female",
+      speed: 1,
+      quality: 5,
+    });
+    await vi.waitFor(() => {
+      expect(postedMessages.some((message) => message.type === "GENERATION_COMPLETE")).toBe(true);
+    });
+  });
+
+  it("does not re-emit already emitted batch items when a later batch item fails", async () => {
+    const pipelineCalls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const instance = createPipelineInstance([
+      createRawAudio(), // warmup
+      createRawAudio(), // single: "First."
+      [createRawAudio(), createRawAudio(0)], // batch: "Second." valid, "Third." empty audio
+      createRawAudio(), // single retry: "Third."
+    ], pipelineCalls);
+    const { dispatch, postedMessages } = await loadWorkerModule({
+      chunkTexts: ["First.", "Second.", "Third."],
+      pipelineInstances: [instance],
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => {
+      expect(postedMessages.some((message) => message.type === "READY")).toBe(true);
+    });
+
+    dispatch({
+      type: "GENERATE",
+      text: "First. Second. Third.",
+      voice: "Female",
+      speed: 1,
+      quality: 5,
+    });
+    await vi.waitFor(() => {
+      expect(postedMessages.some((message) => message.type === "GENERATION_COMPLETE")).toBe(true);
+    });
+
+    const audioChunks = postedMessages.filter((message): message is Extract<WorkerOutMessage, { type: "AUDIO_CHUNK" }> => (
+      message.type === "AUDIO_CHUNK"
+    ));
+    expect(audioChunks.map((chunk) => chunk.text)).toEqual(["First.", "Second.", "Third."]);
   });
 
   it("reports disabled remote downloads during voice preload", async () => {

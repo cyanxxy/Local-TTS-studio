@@ -1,5 +1,5 @@
 import { act, renderHook } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenerationTuningSettings, WorkerInMessage, WorkerOutMessage } from "../types";
 import { useTTS } from "./useTTS";
 
@@ -46,10 +46,28 @@ const SETTINGS: GenerationTuningSettings = {
 
 describe("useTTS", () => {
   let now = 0;
+  let animationFrameCallbacks: FrameRequestCallback[];
+
+  const flushNextAnimationFrame = () => {
+    act(() => {
+      animationFrameCallbacks.shift()?.(now);
+    });
+  };
 
   beforeEach(() => {
     now = 0;
+    animationFrameCallbacks = [];
     vi.spyOn(performance, "now").mockImplementation(() => now);
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      animationFrameCallbacks.push(callback);
+      return animationFrameCallbacks.length;
+    }));
+    vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("posts generate settings to the active worker and tracks chunk progress", () => {
@@ -100,6 +118,10 @@ describe("useTTS", () => {
     });
 
     expect(onAudioChunk).toHaveBeenCalledOnce();
+    expect(result.current.generationProgress).toBe(0);
+
+    flushNextAnimationFrame();
+
     expect(result.current.stats).toMatchObject({
       firstLatency: 1,
       processingTime: 1,
@@ -144,6 +166,8 @@ describe("useTTS", () => {
         total: 0,
       });
     });
+
+    flushNextAnimationFrame();
 
     expect(result.current.generationProgress).toBe(50);
 

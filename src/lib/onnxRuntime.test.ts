@@ -56,10 +56,30 @@ describe("onnxRuntime", () => {
   it("configures kokoro-js to use local jsep wasm assets", () => {
     const runtimeEnv = {
       wasmPaths: "",
+      numThreads: 1,
     };
 
     configureKokoroOnnxRuntime(runtimeEnv, kokoroAssets);
 
     expect(runtimeEnv.wasmPaths).toEqual(kokoroAssets.jsep);
+  });
+
+  it("configures kokoro-js wasm threads when its env exposes the setting", () => {
+    const runtimeEnv = {
+      wasmPaths: "",
+      numThreads: 1,
+    };
+
+    configureKokoroOnnxRuntime(runtimeEnv, kokoroAssets, {
+      backend: "wasm",
+      maxWasmThreads: 4,
+      crossOriginIsolated: true,
+      hasSharedArrayBuffer: true,
+    });
+
+    expect(runtimeEnv).toMatchObject({
+      wasmPaths: kokoroAssets.jsep,
+      numThreads: 4,
+    });
   });
 });

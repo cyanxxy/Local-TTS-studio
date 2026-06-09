@@ -26,6 +26,7 @@ export interface SupertonicBatchSelectionOptions {
   backend: InferenceBackend | null;
   emitted: number;
   sentenceSpeedVariance: number;
+  batchingDisabled?: boolean;
 }
 
 export interface SupertonicVoiceStore {
@@ -97,8 +98,9 @@ export function getSupertonicBatchSize(
   backend: InferenceBackend | null,
   emitted: number,
   sentenceSpeedVariance: number,
+  batchingDisabled = false,
 ): number {
-  if (emitted === 0 || sentenceSpeedVariance !== 0) {
+  if (batchingDisabled || emitted === 0 || sentenceSpeedVariance !== 0) {
     return 1;
   }
 
@@ -123,6 +125,7 @@ export function takeSupertonicBatch(
     options.backend,
     options.emitted,
     options.sentenceSpeedVariance,
+    options.batchingDisabled,
   );
 
   return queue.splice(0, Math.min(queue.length, batchSize));

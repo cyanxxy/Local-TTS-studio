@@ -9,6 +9,8 @@ import type {
   LocalTtsModel,
   LocalTtsProgressEvent,
   LocalTtsProbeResult,
+  LocalTtsQwen3MlxDownloadProgress,
+  LocalTtsQwen3MlxSetup,
 } from "../electron";
 
 interface Deferred<T> {
@@ -33,17 +35,33 @@ const baseProbe: LocalTtsProbeResult = {
   runtime: "rust",
   package: "qwen_tts",
   packageVersion: "0.1.1",
-  recommendedModelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-  recommendedDeviceMap: "cpu",
+  recommendedModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+  recommendedDeviceMap: "auto",
   recommendedDtype: "float32",
   recommendedAttention: "eager",
-  warnings: ["Rust Qwen3 currently uses Candle CPU execution."],
+  warnings: ["Qwen3 defaults to the upstream MLX CustomVoice 6-bit profile on Apple Silicon."],
+  recommendedBaseModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
 };
 
 const baseCacheInfo: LocalTtsCacheInfo = {
   path: "/cache/qwen3",
   exists: true,
   sizeBytes: 2048,
+};
+
+const baseQwen3MlxSetup: LocalTtsQwen3MlxSetup = {
+  workerAvailable: true,
+  workerPath: "/app/dist-rust/pibot-tts-worker",
+  ttsAvailable: true,
+  ttsPath: "/app/dist-rust/tts",
+  apiServerAvailable: true,
+  apiServerPath: "/app/dist-rust/api_server",
+  recommendedModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+  recommendedModelDir: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+  modelDirExists: true,
+  modelDirLooksReady: true,
+  workerBuildCommand: "npm run build:qwen3-mlx-worker && npm run build:rust",
+  modelDownloadCommand: "hf download mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit --local-dir '/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit'",
 };
 
 const baseGenerateResult: LocalTtsGenerateResult = {
@@ -53,10 +71,12 @@ const baseGenerateResult: LocalTtsGenerateResult = {
   modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
   durationSec: 1.25,
   elapsedSec: 0.42,
+  device: "metal",
   phaseTimingsSec: {
     modelLoadSec: 0.01,
     inferenceSec: 0.39,
     outputEncodingSec: 0.02,
+    transportEncodingSec: 0,
   },
 };
 
@@ -211,16 +231,35 @@ async function emitGeneratedAudioChunk(
   });
 }
 
+function selectCustomVoiceFallback() {
+  fireEvent.change(screen.getByLabelText(/^model variant$/i), {
+    target: { value: "auto" },
+  });
+}
+
 describe("LocalRuntimePage", () => {
   const probe = vi.fn();
   const generate = vi.fn();
   const cancel = vi.fn();
   const getCacheInfo = vi.fn();
   const clearCache = vi.fn();
+  const getQwen3MlxSetup = vi.fn();
+  const downloadQwen3MlxModel = vi.fn();
+  const chooseQwen3MlxModelDir = vi.fn();
+  const subscribeQwen3MlxDownloadProgress = vi.fn();
   const subscribeProgress = vi.fn();
   const subscribeAudioChunk = vi.fn();
+  let qwen3MlxDownloadProgressListener: ((event: LocalTtsQwen3MlxDownloadProgress) => void) | null = null;
   let progressListener: ((event: LocalTtsProgressEvent) => void) | null = null;
   let audioChunkListener: ((event: LocalTtsAudioChunkEvent) => void) | null = null;
+  let animationFrameCallbacks: FrameRequestCallback[] = [];
+
+  const flushNextAnimationFrame = async () => {
+    await act(async () => {
+      animationFrameCallbacks.shift()?.(0);
+      await Promise.resolve();
+    });
+  };
 
   beforeEach(() => {
     probe.mockReset();
@@ -228,16 +267,37 @@ describe("LocalRuntimePage", () => {
     cancel.mockReset();
     getCacheInfo.mockReset();
     clearCache.mockReset();
+    getQwen3MlxSetup.mockReset();
+    downloadQwen3MlxModel.mockReset();
+    chooseQwen3MlxModelDir.mockReset();
+    subscribeQwen3MlxDownloadProgress.mockReset();
     subscribeProgress.mockReset();
     subscribeAudioChunk.mockReset();
+    qwen3MlxDownloadProgressListener = null;
     progressListener = null;
     audioChunkListener = null;
+    animationFrameCallbacks = [];
 
     probe.mockResolvedValue(baseProbe);
     generate.mockResolvedValue(baseGenerateResult);
     cancel.mockResolvedValue({ cancelled: true });
     getCacheInfo.mockResolvedValue(baseCacheInfo);
     clearCache.mockResolvedValue({ path: baseCacheInfo.path, cleared: true });
+    getQwen3MlxSetup.mockResolvedValue(baseQwen3MlxSetup);
+    downloadQwen3MlxModel.mockResolvedValue({
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      modelDir: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      downloadedFiles: 2,
+      skippedFiles: 0,
+      modelDirLooksReady: true,
+    });
+    chooseQwen3MlxModelDir.mockResolvedValue({ path: "/chosen/qwen3-customvoice-6bit" });
+    subscribeQwen3MlxDownloadProgress.mockImplementation((listener: (event: LocalTtsQwen3MlxDownloadProgress) => void) => {
+      qwen3MlxDownloadProgressListener = listener;
+      return () => {
+        if (qwen3MlxDownloadProgressListener === listener) qwen3MlxDownloadProgressListener = null;
+      };
+    });
     subscribeProgress.mockImplementation((listener: (event: LocalTtsProgressEvent) => void) => {
       progressListener = listener;
       return () => {
@@ -262,7 +322,10 @@ describe("LocalRuntimePage", () => {
       value: vi.fn(),
     });
     vi.stubGlobal("AudioContext", MockAudioContext as unknown as typeof AudioContext);
-    vi.stubGlobal("requestAnimationFrame", vi.fn(() => 1));
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
+      animationFrameCallbacks.push(callback);
+      return animationFrameCallbacks.length;
+    }));
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
 
     window.electron = {
@@ -274,6 +337,10 @@ describe("LocalRuntimePage", () => {
         cancel,
         getCacheInfo,
         clearCache,
+        getQwen3MlxSetup,
+        downloadQwen3MlxModel,
+        chooseQwen3MlxModelDir,
+        subscribeQwen3MlxDownloadProgress,
         subscribeProgress,
         subscribeAudioChunk,
       },
@@ -299,8 +366,14 @@ describe("LocalRuntimePage", () => {
     expect(probe.mock.calls[0][0]).not.toHaveProperty("allowRuntimeSetup");
     expect(await screen.findAllByText("Runtime: rust")).toHaveLength(2);
     expect(screen.getByText("Package: qwen_tts")).toBeInTheDocument();
-    expect(screen.getByText("Recommended device: cpu")).toBeInTheDocument();
-    expect(screen.getAllByText("Rust Qwen3 currently uses Candle CPU execution.")).toHaveLength(2);
+    expect(screen.getByText("Recommended device: auto")).toBeInTheDocument();
+    expect(screen.getByText("Recommended model: mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit")).toBeInTheDocument();
+    expect(screen.getByText("Recommended Base model: mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit")).toBeInTheDocument();
+    expect(screen.getAllByText("Qwen3 defaults to the upstream MLX CustomVoice 6-bit profile on Apple Silicon.")).toHaveLength(2);
+    expect(getQwen3MlxSetup).toHaveBeenCalledOnce();
+    expect(screen.getByLabelText(/^model variant$/i)).toHaveValue("mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit");
+    expect(await screen.findByText("Model directory: ready")).toBeInTheDocument();
+    expect(screen.getByText(/CustomVoice api_server:/)).toHaveTextContent("/app/dist-rust/api_server");
   });
 
   it("loads NeuTTS .npy reference codes and generates with referenceCodesBase64", async () => {
@@ -360,6 +433,7 @@ describe("LocalRuntimePage", () => {
       });
       await generateDeferred.promise;
     });
+    await flushNextAnimationFrame();
 
     expect(await screen.findByText(/neuphonic\/neutts-nano-q4-gguf/)).toBeInTheDocument();
     expect(screen.getByText("Output Audio")).toBeInTheDocument();
@@ -382,10 +456,16 @@ describe("LocalRuntimePage", () => {
     expect(screen.getByRole("button", { name: /generate locally/i })).toBeDisabled();
   });
 
-  it("generates Qwen3 audio with Rust-supported speaker, language, and runtime options", async () => {
+  it("generates Qwen3 MLX CustomVoice without reference audio", async () => {
     const generateDeferred = createDeferred<LocalTtsGenerateResult>();
     generate.mockReturnValue(generateDeferred.promise);
     renderPage();
+
+    await screen.findByText("Model directory: ready");
+    expect(screen.getByLabelText(/^model variant$/i)).toHaveValue(
+      "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+    );
+    expect(screen.queryByLabelText(/reference wav/i)).not.toBeInTheDocument();
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
@@ -400,6 +480,7 @@ describe("LocalRuntimePage", () => {
       target: { value: "Speak warmly with a calm documentary narration style." },
     });
     fireEvent.change(screen.getByLabelText(/^temperature$/i), { target: { value: "0.75" } });
+    fireEvent.change(screen.getByLabelText(/^top-k$/i), { target: { value: "64" } });
     fireEvent.change(screen.getByLabelText(/^top-p$/i), { target: { value: "0.88" } });
     fireEvent.change(screen.getByLabelText(/^max tokens$/i), { target: { value: "2304" } });
 
@@ -413,7 +494,9 @@ describe("LocalRuntimePage", () => {
       payload: Record<string, unknown>;
     };
     expect(request.payload).toMatchObject({
-      modelRepo: "auto",
+      mode: "customVoice",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      baseModelPath: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
       speaker: "Aiden",
       language: "English",
       instruct: "Speak warmly with a calm documentary narration style.",
@@ -421,18 +504,148 @@ describe("LocalRuntimePage", () => {
       dtype: "float32",
       attnImplementation: "eager",
       temperature: 0.75,
+      topK: 64,
       topP: 0.88,
       maxNewTokens: 2304,
     });
+    expect(request.payload).not.toHaveProperty("referenceAudioBase64");
+    expect(request.payload).not.toHaveProperty("referenceText");
 
     await emitGeneratedAudioChunk(audioChunkListener, request.requestId, "qwen3");
     await act(async () => {
-      generateDeferred.resolve(baseGenerateResult);
+      generateDeferred.resolve({
+        ...baseGenerateResult,
+        modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+        device: "mlx",
+      });
       await generateDeferred.promise;
     });
 
     await waitFor(() => {
-      expect(screen.getAllByText(/Qwen\/Qwen3-TTS-12Hz-0\.6B-CustomVoice/).length).toBeGreaterThanOrEqual(2);
+      expect(screen.getAllByText(/mlx-community\/Qwen3-TTS-12Hz-0\.6B-CustomVoice-6bit/).length)
+        .toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it("generates Qwen3 Base voice-clone requests with model path and reference WAV", async () => {
+    const generateDeferred = createDeferred<LocalTtsGenerateResult>();
+    generate.mockReturnValue(generateDeferred.promise);
+    renderPage();
+
+    await screen.findByText("Model directory: ready");
+    fireEvent.change(screen.getByLabelText(/^model variant$/i), {
+      target: { value: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit" },
+    });
+    expect(screen.getByLabelText(/^model variant$/i)).toHaveValue("mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit");
+    expect(screen.getByRole("button", { name: /generate locally/i })).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/^mlx model directory$/i), {
+      target: { value: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-Base-6bit" },
+    });
+    fireEvent.change(screen.getByLabelText(/^reference transcript/i), {
+      target: { value: "These are the reference words." },
+    });
+    const referenceInput = screen.getByLabelText(/reference wav/i);
+    const wavFile = new File([new Uint8Array([1, 2, 3])], "voice.wav", { type: "audio/wav" });
+    await act(async () => {
+      fireEvent.change(referenceInput, { target: { files: [wavFile] } });
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+
+    await waitFor(() => {
+      expect(generate).toHaveBeenCalledTimes(1);
+    });
+
+    const request = generate.mock.calls[0][0] as {
+      requestId: string;
+      payload: Record<string, unknown>;
+    };
+    expect(request.payload).toMatchObject({
+      mode: "voiceClone",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+      baseModelPath: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+      referenceAudioBase64: "AQID",
+      referenceAudioName: "voice.wav",
+      referenceText: "These are the reference words.",
+    });
+
+    await emitGeneratedAudioChunk(audioChunkListener, request.requestId, "qwen3");
+    await act(async () => {
+      generateDeferred.resolve({
+        ...baseGenerateResult,
+        modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+        device: "mlx",
+      });
+      await generateDeferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getAllByText(/mlx-community\/Qwen3-TTS-12Hz-0\.6B-Base-6bit/).length)
+        .toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it("chooses a Qwen3 MLX model directory through Electron", async () => {
+    renderPage();
+
+    await screen.findByText("Model directory: ready");
+    fireEvent.click(screen.getByRole("button", { name: /choose/i }));
+
+    await waitFor(() => {
+      expect(chooseQwen3MlxModelDir).toHaveBeenCalledOnce();
+      expect(screen.getByLabelText(/^mlx model directory$/i)).toHaveValue("/chosen/qwen3-customvoice-6bit");
+    });
+    expect(screen.getByText("Qwen3 MLX model directory selected.")).toBeInTheDocument();
+  });
+
+  it("downloads the selected Qwen3 MLX model from settings", async () => {
+    const downloadDeferred = createDeferred<Awaited<ReturnType<typeof downloadQwen3MlxModel>>>();
+    downloadQwen3MlxModel.mockReturnValue(downloadDeferred.promise);
+    renderPage();
+
+    await screen.findByText("Model directory: ready");
+    fireEvent.click(screen.getByRole("button", { name: /^download model$/i }));
+
+    await waitFor(() => {
+      expect(downloadQwen3MlxModel).toHaveBeenCalledWith({
+        modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      });
+    });
+    await act(async () => {
+      qwen3MlxDownloadProgressListener?.({
+        modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+        modelDir: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+        fileName: "model.safetensors",
+        fileIndex: 2,
+        totalFiles: 4,
+        downloadedBytes: 10 * 1024 * 1024,
+        totalBytes: 20 * 1024 * 1024,
+      });
+      await Promise.resolve();
+    });
+    expect(screen.getAllByText(/Downloading model\.safetensors/).length).toBeGreaterThanOrEqual(1);
+
+    await act(async () => {
+      downloadDeferred.resolve({
+        modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+        modelDir: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+        downloadedFiles: 4,
+        skippedFiles: 0,
+        modelDirLooksReady: true,
+      });
+      await downloadDeferred.promise;
+    });
+
+    await waitFor(() => {
+      expect(screen.getByLabelText(/^mlx model directory$/i)).toHaveValue(
+        "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      );
+      expect(screen.getByText(/Downloaded mlx-community\/Qwen3-TTS-12Hz-0\.6B-CustomVoice-6bit/))
+        .toBeInTheDocument();
     });
   });
 
@@ -440,6 +653,9 @@ describe("LocalRuntimePage", () => {
     const deferred = createDeferred<LocalTtsGenerateResult>();
     generate.mockReturnValue(deferred.promise);
     renderPage();
+
+    await screen.findByText("Model directory: ready");
+    selectCustomVoiceFallback();
 
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
@@ -470,6 +686,9 @@ describe("LocalRuntimePage", () => {
     generate.mockReturnValue(deferred.promise);
     renderPage();
 
+    await screen.findByText("Model directory: ready");
+    selectCustomVoiceFallback();
+
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
     });
@@ -483,6 +702,7 @@ describe("LocalRuntimePage", () => {
       message: "Loading local model...",
       elapsedSec: 2.4,
     });
+    await flushNextAnimationFrame();
     expect(await screen.findByText("Loading local model...")).toBeInTheDocument();
 
     fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {

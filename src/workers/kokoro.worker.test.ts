@@ -5,6 +5,7 @@ interface MockKokoroInstance {
   voices?: Record<string, unknown>;
   list_voices: ReturnType<typeof vi.fn>;
   generate: ReturnType<typeof vi.fn>;
+  dispose?: ReturnType<typeof vi.fn>;
 }
 
 interface LoadOptions {
@@ -169,8 +170,25 @@ describe("kokoro.worker", () => {
     });
   });
 
+  it("warms WebGPU before reporting ready", async () => {
+    const instance = createInstance([createRawAudio()], { af_heart: {}, am_echo: {} });
+    const { dispatch, postedMessages } = await loadWorkerModule({
+      canUseWebGPU: true,
+      instances: [instance],
+    });
+
+    dispatch({ type: "LOAD" });
+
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+    expect(instance.generate).toHaveBeenCalledWith("Warm up.", expect.objectContaining({
+      voice: "af_heart",
+      speed: 1,
+    }));
+  });
+
   it("reuses a loaded model and reloads when forced", async () => {
     const first = createInstance([createRawAudio()]);
+    first.dispose = vi.fn(async () => undefined);
     const second = createInstance([createRawAudio()]);
     const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ instances: [first, second] });
 
@@ -184,6 +202,7 @@ describe("kokoro.worker", () => {
     dispatch({ type: "LOAD", forceReload: true });
     await vi.waitFor(() => expect(postedMessages.filter((message) => message.type === "READY")).toHaveLength(3));
     expect(fromPretrained).toHaveBeenCalledTimes(2);
+    expect(first.dispose).toHaveBeenCalledTimes(1);
   });
 
   it("merges short adjacent sentences into a single inference chunk", async () => {
@@ -267,6 +286,21 @@ describe("kokoro.worker", () => {
       message: expect.stringContaining("Generation completed with skipped segments"),
       scope: "generate",
     }));
+  });
+
+  it("splits a failing unit whose only punctuation is its final character", async () => {
+    const text = "This failing sentence has plenty of internal whitespace but only one exclamation mark!";
+    const instance = createInstance([new Error("too long"), createRawAudio(), createRawAudio()]);
+    const { dispatch, postedMessages } = await loadWorkerModule({ instances: [instance] });
+
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+    dispatch({ type: "GENERATE", text, voice: "af_heart", speed: 1, quality: 5 });
+
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "GENERATION_COMPLETE")).toBe(true));
+    expect(instance.generate).toHaveBeenCalledTimes(3);
+    expect(postedMessages.filter((message) => message.type === "AUDIO_CHUNK")).toHaveLength(2);
+    expect(postedMessages.some((message) => message.type === "ERROR")).toBe(false);
   });
 
   it("reports load and validation errors", async () => {

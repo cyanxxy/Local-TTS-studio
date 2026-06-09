@@ -84,6 +84,12 @@ function makeChunk(text: string, length: number, samplingRate: number) {
 describe("useAudioPlayer", () => {
   let animationFrameCallbacks: FrameRequestCallback[];
 
+  const flushNextAnimationFrame = (timestamp = 0) => {
+    act(() => {
+      animationFrameCallbacks.shift()?.(timestamp);
+    });
+  };
+
   beforeEach(() => {
     animationFrameCallbacks = [];
     MockAudioContext.instances = [];
@@ -137,6 +143,9 @@ describe("useAudioPlayer", () => {
       await result.current.scheduleChunk(makeChunk("First section", 500, 1));
       await result.current.scheduleChunk(makeChunk("Second section", 450, 1));
     });
+
+    expect(result.current.segments).toHaveLength(0);
+    flushNextAnimationFrame();
 
     expect(result.current.segments).toHaveLength(2);
     expect(result.current.totalDuration).toBe(950);
@@ -208,6 +217,8 @@ describe("useAudioPlayer", () => {
       await result.current.scheduleChunk(makeChunk("Second", 10, 10));
       await result.current.togglePlay();
     });
+
+    flushNextAnimationFrame();
 
     expect(result.current.isPlaying).toBe(false);
     expect(result.current.totalDuration).toBe(2);
@@ -361,12 +372,12 @@ describe("useAudioPlayer", () => {
       await result.current.scheduleChunk(makeChunk("First", 4, 4));
     });
 
+    flushNextAnimationFrame();
+
     const ctx = MockAudioContext.instances[0];
     ctx.currentTime = 1.3;
 
-    act(() => {
-      animationFrameCallbacks.shift()?.(0);
-    });
+    flushNextAnimationFrame();
 
     expect(result.current.currentTime).toBe(1);
     expect(result.current.isPlaying).toBe(true);
@@ -385,9 +396,7 @@ describe("useAudioPlayer", () => {
     });
 
     ctx.currentTime = 2.4;
-    act(() => {
-      animationFrameCallbacks.shift()?.(0);
-    });
+    flushNextAnimationFrame();
 
     expect(result.current.currentTime).toBe(2);
     expect(result.current.isPlaying).toBe(false);

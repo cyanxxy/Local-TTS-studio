@@ -56,8 +56,20 @@ const PAUSE_SECONDS: Record<ChunkPauseKind, number> = {
   paragraph: 0.44,
 };
 
+/** Two consecutive line breaks (LF or CRLF) — a paragraph boundary. */
+const PARAGRAPH_BREAK = /\r?\n\r?\n/;
+
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function isParagraphBreakAt(text: string, index: number): boolean {
+  let i = index;
+  if (text[i] === "\r") i += 1;
+  if (text[i] !== "\n") return false;
+  i += 1;
+  if (text[i] === "\r") i += 1;
+  return text[i] === "\n";
 }
 
 function getTextBetween(text: string, start: number | undefined, end: number | undefined, fallback: string): string {
@@ -89,7 +101,7 @@ function normalizeParagraphs(text: string): Array<{ start: number; end: number }
 
     const start = i;
     while (i < len) {
-      if (text[i] === "\n" && text[i + 1] === "\n") break;
+      if (isParagraphBreakAt(text, i)) break;
       i += 1;
     }
     ranges.push({ start, end: i });
@@ -241,7 +253,8 @@ function splitOversizedRange(text: string, start: number, end: number, maxCharac
     const minBreak = cursor + Math.floor(maxCharacters * 0.45);
     let splitAt = -1;
 
-    for (let i = idealEnd; i > minBreak; i -= 1) {
+    // Scan from idealEnd - 1 so `splitAt = i + 1` never exceeds maxCharacters.
+    for (let i = idealEnd - 1; i > minBreak; i -= 1) {
       const c = text[i];
       if (c === "\n" || c === " " || /[.,;:!?]/.test(c)) {
         splitAt = i + 1;
@@ -302,7 +315,7 @@ function resolvePauseKind(text: string, current: ChunkRange, next: ChunkRange | 
   if (!next) return "none";
 
   const boundary = text.slice(current.end, next.start);
-  if (/\n{2,}/.test(boundary)) return "paragraph";
+  if (PARAGRAPH_BREAK.test(boundary)) return "paragraph";
 
   const currentText = text.slice(current.start, current.end);
   const punctuationMatch = currentText.match(/([,;:!?。？！.]?)(\s*)$/);
@@ -383,7 +396,7 @@ function buildChunkRanges(text: string, units: SemanticUnit[], limits: ChunkingL
     const candidateEnd = unit.end;
     const candidateLength = candidateEnd - current.start;
     const boundary = previousUnit ? text.slice(previousUnit.end, unit.start) : "";
-    const paragraphBoundary = /\n{2,}/.test(boundary);
+    const paragraphBoundary = PARAGRAPH_BREAK.test(boundary);
     const paragraphChanged = previousUnit ? unit.paragraphIndex !== previousUnit.paragraphIndex : false;
     const strongKind = unit.kind === "heading" || unit.kind === "list" || unit.kind === "quote" || unit.kind === "code";
     const previousStrong = previousUnit?.kind === "heading"

@@ -8,6 +8,7 @@ export interface LocalTtsProbeResult {
   packageVersion?: string | null;
   warnings?: string[];
   recommendedModelRepo?: string | null;
+  recommendedBaseModelRepo?: string | null;
   recommendedDeviceMap?: string | null;
   recommendedDtype?: string | null;
   recommendedAttention?: string | null;
@@ -18,6 +19,8 @@ export interface LocalTtsGenerateResult {
   modelRepo: string;
   durationSec: number;
   elapsedSec: number;
+  device?: string;
+  warnings?: string[];
   speakerStatus?: string;
   speakers?: string[];
   audioTransport: "websocket-binary";
@@ -29,6 +32,39 @@ export interface LocalTtsCacheInfo {
   path: string;
   exists: boolean;
   sizeBytes: number;
+}
+
+export interface LocalTtsQwen3MlxSetup {
+  workerAvailable: boolean;
+  workerPath?: string;
+  ttsAvailable: boolean;
+  ttsPath?: string;
+  apiServerAvailable: boolean;
+  apiServerPath?: string;
+  recommendedModelRepo: string;
+  recommendedModelDir: string;
+  modelDirExists: boolean;
+  modelDirLooksReady: boolean;
+  workerBuildCommand: string;
+  modelDownloadCommand: string;
+}
+
+export interface LocalTtsQwen3MlxDownloadProgress {
+  modelRepo: string;
+  modelDir: string;
+  fileName: string;
+  fileIndex: number;
+  totalFiles: number;
+  downloadedBytes: number;
+  totalBytes?: number;
+}
+
+export interface LocalTtsQwen3MlxDownloadResult {
+  modelRepo: string;
+  modelDir: string;
+  downloadedFiles: number;
+  skippedFiles: number;
+  modelDirLooksReady: boolean;
 }
 
 export interface LocalTtsProgressEvent {
@@ -67,6 +103,12 @@ interface LocalTtsBridge {
   }) => Promise<{ cancelled: boolean }>;
   getCacheInfo: (request: { model: LocalTtsModel }) => Promise<LocalTtsCacheInfo>;
   clearCache: (request: { model: LocalTtsModel }) => Promise<{ path: string; cleared: boolean }>;
+  getQwen3MlxSetup: () => Promise<LocalTtsQwen3MlxSetup>;
+  downloadQwen3MlxModel: (request: { modelRepo: string }) => Promise<LocalTtsQwen3MlxDownloadResult>;
+  chooseQwen3MlxModelDir: () => Promise<{ path: string | null }>;
+  subscribeQwen3MlxDownloadProgress: (
+    listener: (event: LocalTtsQwen3MlxDownloadProgress) => void,
+  ) => () => void;
   subscribeProgress: (listener: (event: LocalTtsProgressEvent) => void) => () => void;
   subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;
 }

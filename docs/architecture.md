@@ -42,16 +42,17 @@ Workers are created at startup and load models lazily on selection.
 
 ## Browser Audio Path
 
-This contract applies to Studio, Reader, and Electron local-runtime playback. Browser models stream chunks from Web Workers; Electron local-runtime pages (NeuTTS and Qwen3) generate through the resident Rust WebSocket bridge worker (`electron/webSocketBridgeWorker.ts` driving `open-tts-local-bridge --action serve-ws`), which streams binary Float32 audio chunks that the renderer schedules through the same Web Audio player. See [Desktop local runtimes](./local-runtimes.md) for the bridge protocol.
+This contract applies to Studio, Reader, and Electron local-runtime playback. Browser models stream chunks from Web Workers; Electron local-runtime pages (NeuTTS and Qwen3) generate through the resident Rust WebSocket bridge worker (`electron/webSocketBridgeWorker.ts` driving `open-tts-local-bridge --action serve-ws`), which streams binary Float32 audio chunks that the renderer schedules through the same Web Audio player. Qwen3 defaults to CustomVoice 6-bit MLX on macOS when configured, relaying upstream `tts` WAV output as Float32 chunks; Base voice cloning remains available as an advanced upstream worker profile, and Candle CustomVoice remains available as a fallback. See [Desktop local runtimes](./local-runtimes.md) for the bridge protocol.
 
 - Playback uses the Web Audio API: `AudioContext` + `AudioBufferSourceNode`.
 - Audio chunks are `Float32Array`.
+- Streaming chunk handling keeps playback/export refs immediate, while `useTTS` stats/progress and `useAudioPlayer` segment/timeline UI state are coalesced to the next UI frame to avoid per-chunk React render pressure.
 - Export supports `wav-f32`, `wav-pcm24`, `wav-pcm16`, and `mp3`.
 - Sample rate comes from model output unless the user selects an export resample target.
 
 ## Model-Specific Notes
 
-- **Kokoro** builds inference units through `buildKokoroInferenceUnits()` in `src/lib/chunking.ts`, merging sentence ranges up to the selected backend budget and splitting oversized single ranges before generation. It calls `tts.generate(string, ...)` per unit; `tts.stream()` is not used. `list_voices()` may return `void` in some `kokoro-js` versions, so fallback voices are required.
+- **Kokoro** builds inference units through `buildKokoroInferenceUnits()` in `src/lib/chunking.ts`, merging sentence ranges up to the selected backend budget and splitting oversized single ranges before generation. It calls `tts.generate(string, ...)` per unit; `tts.stream()` is not used. `list_voices()` may return `void` in some `kokoro-js` versions, so fallback voices are required. WebGPU loads run a small warmup generation before READY, forced reload disposes the previous model when supported, and WASM fallback sets a safe multi-thread count when cross-origin isolation allows SharedArrayBuffer.
 - **Supertonic** chunks text with min 100 / max 1000 chars per chunk, with 0.5 seconds of silence padding between chunks. Per-file download progress is aggregated dynamically.
 
 ## Browser Support Notes

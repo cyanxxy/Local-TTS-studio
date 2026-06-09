@@ -75,13 +75,16 @@ interface ActiveRequest {
   stdoutBytes: number;
   stderrBytes: number;
   pendingAudioChunk: Omit<WebSocketAudioChunk, "audio"> | null;
+  audioChunkTotal: number | null;
+  receivedAudioChunkIndexes: Set<number>;
   idleTimer: ReturnType<typeof setTimeout> | null;
   settled: boolean;
 }
 
 interface Worker {
   child: ChildProcessWithoutNullStreams;
-  socket: WebSocket;
+  // Null while the worker is still spawning (port wait + WebSocket connect).
+  socket: WebSocket | null;
   spawnKey: string;
   active: ActiveRequest | null;
   evictTimer: ReturnType<typeof setTimeout> | null;
@@ -103,8 +106,8 @@ function spawnKeyOf(config: WebSocketWorkerSpawnConfig): string {
   ]);
 }
 
-function isOpen(socket: WebSocket): boolean {
-  return socket.readyState === WebSocket.OPEN;
+function isOpen(socket: WebSocket | null): boolean {
+  return socket !== null && socket.readyState === WebSocket.OPEN;
 }
 
 function delay(ms: number): Promise<void> {
@@ -169,7 +172,12 @@ async function openWebSocketWithRetry(
     }
   }
 
-  throw lastError ?? new Error(`Timed out connecting to ${url}.`);
+  if (lastError) throw lastError;
+  throw new Error(
+    isWorkerAlive()
+      ? `Timed out connecting to ${url}.`
+      : "Rust local bridge process exited during startup.",
+  );
 }
 
 function dataToText(data: unknown): string {
@@ -211,14 +219,44 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
       throw new Error(`WebSocket bridge returned invalid audio chunk \`${field}\`.`);
     }
   }
+  const index = Number(parsed.index);
+  const total = Number(parsed.total);
+  const sampleRate = Number(parsed.sampleRate);
+  const sampleCount = Number(parsed.sampleCount);
+  const silenceAfterSamples = Number(parsed.silenceAfterSamples);
+  if (total < 0) {
+    throw new Error("WebSocket bridge returned an audio chunk with an invalid total.");
+  }
+  if (total > 0 && index >= total) {
+    throw new Error("WebSocket bridge returned an audio chunk index outside the declared total.");
+  }
+  if (sampleRate <= 0 || sampleCount <= 0) {
+    throw new Error("WebSocket bridge returned an audio chunk with invalid sample metadata.");
+  }
   return {
     requestId,
-    index: Number(parsed.index),
-    total: Number(parsed.total),
-    sampleRate: Number(parsed.sampleRate),
-    sampleCount: Number(parsed.sampleCount),
-    silenceAfterSamples: Number(parsed.silenceAfterSamples),
+    index,
+    total,
+    sampleRate,
+    sampleCount,
+    silenceAfterSamples,
   };
+}
+
+function parseResultAudioChunkCount(parsed: Record<string, unknown>): number | null {
+  if (parsed.ok !== true) return null;
+  if (!isRecord(parsed.result)) {
+    throw new Error("WebSocket bridge returned a successful result without a result object.");
+  }
+  const audioChunkCount = parsed.result.audioChunkCount;
+  if (
+    typeof audioChunkCount !== "number"
+    || !Number.isInteger(audioChunkCount)
+    || audioChunkCount <= 0
+  ) {
+    throw new Error("WebSocket bridge returned a successful result with an invalid audio chunk count.");
+  }
+  return audioChunkCount;
 }
 
 export function createWebSocketBridgeWorkerPool<TModel extends string>({
@@ -269,7 +307,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   function killWorker(model: TModel, worker: Worker): void {
     disposeWorker(model, worker);
     try {
-      worker.socket.close();
+      worker.socket?.close();
     } catch {
       // Socket may already be closed.
     }
@@ -385,6 +423,10 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         killWorker(model, worker);
         return;
       }
+      if (metadata.total > 0) {
+        active.audioChunkTotal = metadata.total;
+      }
+      active.receivedAudioChunkIndexes.add(metadata.index);
       try {
         active.onAudioChunk({ ...metadata, audio: binaryData });
       } catch {
@@ -434,7 +476,23 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
 
     if (parsed.type === "audio_chunk") {
       try {
-        active.pendingAudioChunk = parseAudioChunkMetadata(parsed, active.requestId);
+        if (active.pendingAudioChunk) {
+          throw new Error("WebSocket bridge returned audio chunk metadata before the pending binary frame.");
+        }
+        const metadata = parseAudioChunkMetadata(parsed, active.requestId);
+        if (active.audioChunkTotal != null && metadata.total > 0 && metadata.total !== active.audioChunkTotal) {
+          throw new Error("WebSocket bridge changed the audio chunk total mid-stream.");
+        }
+        if (active.receivedAudioChunkIndexes.has(metadata.index)) {
+          throw new Error("WebSocket bridge returned a duplicate audio chunk index.");
+        }
+        if (metadata.index !== active.receivedAudioChunkIndexes.size) {
+          throw new Error("WebSocket bridge returned audio chunks out of sequence.");
+        }
+        if (metadata.total > 0) {
+          active.audioChunkTotal = metadata.total;
+        }
+        active.pendingAudioChunk = metadata;
       } catch (err) {
         settleActive(model, worker, {
           ok: false,
@@ -450,6 +508,30 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         settleActive(model, worker, {
           ok: false,
           error: new Error("WebSocket bridge returned a result before the pending audio binary frame."),
+        });
+        killWorker(model, worker);
+        return;
+      }
+      try {
+        const expectedAudioChunkCount = parseResultAudioChunkCount(parsed);
+        if (expectedAudioChunkCount != null) {
+          const receivedAudioChunkCount = active.receivedAudioChunkIndexes.size;
+          if (
+            expectedAudioChunkCount !== receivedAudioChunkCount
+            || (active.audioChunkTotal != null && expectedAudioChunkCount !== active.audioChunkTotal)
+          ) {
+            settleActive(model, worker, {
+              ok: false,
+              error: new Error("WebSocket bridge result did not match the streamed audio chunk count."),
+            });
+            killWorker(model, worker);
+            return;
+          }
+        }
+      } catch (err) {
+        settleActive(model, worker, {
+          ok: false,
+          error: err instanceof Error ? err : new Error(String(err)),
         });
         killWorker(model, worker);
         return;
@@ -516,9 +598,9 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     const exitPromise = new Promise<void>((resolve) => {
       resolveExit = resolve;
     });
-    const worker = {
+    const worker: Worker = {
       child,
-      socket: null as unknown as WebSocket,
+      socket: null,
       spawnKey: spawnKeyOf(spawnConfig),
       active: null,
       evictTimer: null,
@@ -526,6 +608,10 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       exitPromise,
       resolveExit,
     };
+    // Register the worker before the (potentially long) port wait + WebSocket
+    // connect so shutdown/shutdownAll/cancel can kill a mid-spawn child instead
+    // of leaking it.
+    workers.set(model, worker);
     let stdoutLineBuffer = "";
     let portSettled = false;
     let resolvePort!: (port: number) => void;
@@ -583,28 +669,39 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     });
     child.on("exit", () => handleWorkerExit(model, worker));
 
+    let socket: WebSocket;
     try {
       const port = await announcedPort;
-      worker.socket = await openWebSocketWithRetry(
+      socket = await openWebSocketWithRetry(
         `ws://${host}:${port}/${authToken}`,
         connectTimeoutMs,
         () => worker.alive,
       );
-      worker.socket.binaryType = "arraybuffer";
+      socket.binaryType = "arraybuffer";
+      if (!worker.alive) {
+        // Killed (cancel/shutdown) while the connection was being established.
+        try {
+          socket.close();
+        } catch {
+          // Socket may already be closed.
+        }
+        throw new Error("Rust local bridge process exited during startup.");
+      }
     } catch (err) {
+      disposeWorker(model, worker);
       hardKill(child);
       throw err;
     }
 
-    worker.socket.addEventListener("message", (event) => handleWebSocketMessage(model, worker, event.data));
-    worker.socket.addEventListener("close", () => {
+    worker.socket = socket;
+    socket.addEventListener("message", (event) => handleWebSocketMessage(model, worker, event.data));
+    socket.addEventListener("close", () => {
       handleTransportFailure(model, worker, "Rust local bridge closed before returning a result.");
     });
-    worker.socket.addEventListener("error", () => {
+    socket.addEventListener("error", () => {
       handleTransportFailure(model, worker, "Rust local bridge connection failed.");
     });
 
-    workers.set(model, worker);
     return worker;
   }
 
@@ -627,15 +724,31 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       if (requestModel.has(options.requestId)) {
         throw new Error(`A request with id ${options.requestId} is already running.`);
       }
+      // Register the request before acquiring the worker so a cancel that
+      // arrives during the (potentially long) spawn can find and kill it.
+      requestModel.set(options.requestId, model);
 
       startingModels.add(model);
       let worker: Worker;
       try {
         worker = await acquireWorker(model, options.spawnConfig);
       } catch (err) {
+        const cancelled = cancelledRequests.has(options.requestId);
+        requestModel.delete(options.requestId);
+        cancelledRequests.delete(options.requestId);
+        if (cancelled) {
+          throw new Error("Generation cancelled.");
+        }
         throw new Error(`Failed to start Rust local bridge worker: ${err instanceof Error ? err.message : String(err)}`);
       } finally {
         startingModels.delete(model);
+      }
+
+      if (cancelledRequests.has(options.requestId)) {
+        requestModel.delete(options.requestId);
+        cancelledRequests.delete(options.requestId);
+        killWorker(model, worker);
+        throw new Error("Generation cancelled.");
       }
 
       if (worker.evictTimer) {
@@ -658,14 +771,18 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
           stdoutBytes: 0,
           stderrBytes: 0,
           pendingAudioChunk: null,
+          audioChunkTotal: null,
+          receivedAudioChunkIndexes: new Set<number>(),
           idleTimer: null,
           settled: false,
         };
         worker.active = active;
-        requestModel.set(options.requestId, model);
         armIdleTimer(model, worker, active);
 
         try {
+          if (!worker.socket) {
+            throw new Error("worker socket is not connected");
+          }
           worker.socket.send(JSON.stringify({ requestId: options.requestId, payload: options.payload }));
         } catch (err) {
           settleActive(model, worker, {
@@ -681,7 +798,11 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       const model = requestModel.get(requestId);
       if (model === undefined) return false;
       const worker = workers.get(model);
-      if (!worker || worker.active?.requestId !== requestId) return false;
+      if (!worker) return false;
+      // A worker with no active request is still spawning for this request
+      // (run registers the request before acquiring the worker). Killing it
+      // rejects the pending run with a cancellation error.
+      if (worker.active && worker.active.requestId !== requestId) return false;
       cancelledRequests.add(requestId);
       killWorker(model, worker);
       return true;

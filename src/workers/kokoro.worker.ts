@@ -26,6 +26,7 @@ const BACKEND_CONFIG: ReadonlyArray<{ backend: InferenceBackend; dtype: KokoroDt
   { backend: "wasm", dtype: "q8" },
 ];
 const KOKORO_LOAD_TIMEOUT_MS = 120_000;
+const KOKORO_MAX_WASM_THREADS = 4;
 const SPEED_MIN_SAFE = 0.85;
 const SPEED_MAX_SAFE = 1.15;
 
@@ -61,11 +62,7 @@ function isGenerationCurrent(generationEpoch: number): boolean {
 
 async function loadKokoroModule(): Promise<KokoroModule> {
   if (!kokoroModulePromise) {
-    kokoroModulePromise = (async () => {
-      const module = await import("kokoro-js");
-      configureKokoroOnnxRuntime(module.env, KOKORO_ONNX_WASM_ASSETS);
-      return module;
-    })();
+    kokoroModulePromise = import("kokoro-js");
   }
   return kokoroModulePromise;
 }
@@ -130,11 +127,32 @@ async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: str
   });
 }
 
+async function disposeKokoroModel(instance: KokoroTTSInstance | null): Promise<void> {
+  const disposable = instance as unknown as { dispose?: () => void | Promise<void> } | null;
+  if (typeof disposable?.dispose !== "function") return;
+  try {
+    await disposable.dispose();
+  } catch (error) {
+    console.warn("[kokoro] Failed to dispose model cleanly", error);
+  }
+}
+
+async function warmupKokoroModel(instance: KokoroTTSInstance, availableVoices: string[]): Promise<void> {
+  const warmupVoice = resolveKokoroVoice(availableVoices[0] ?? "af_heart", availableVoices);
+  if (!warmupVoice) return;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- kokoro-js voice type is a strict literal union
+  await instance.generate("Warm up.", { voice: warmupVoice as any, speed: 1 });
+}
+
 async function loadModel(forceReload: boolean = false) {
+  let previousTts: KokoroTTSInstance | null = null;
   if (forceReload) {
     invalidateActiveGeneration();
+    previousTts = tts;
     tts = null;
     activeBackend = null;
+    voices = [];
+    await disposeKokoroModel(previousTts);
   }
 
   if (tts && activeBackend) {
@@ -144,16 +162,22 @@ async function loadModel(forceReload: boolean = false) {
 
   try {
     post({ type: "LOAD_PROGRESS", percent: 0 });
-    const { KokoroTTS } = await loadKokoroModule();
+    const kokoroModule = await loadKokoroModule();
+    const { KokoroTTS } = kokoroModule;
     let lastError: unknown = null;
 
     const progressMap = new Map<string, number>();
     for (const { backend, dtype } of BACKEND_CONFIG) {
+      let candidate: KokoroTTSInstance | null = null;
       try {
+        configureKokoroOnnxRuntime(kokoroModule.env, KOKORO_ONNX_WASM_ASSETS, {
+          backend,
+          maxWasmThreads: KOKORO_MAX_WASM_THREADS,
+        });
         if (backend === "webgpu" && !(await canInitializeWebGPU())) {
           throw new Error("WebGPU device initialization failed.");
         }
-        tts = await withTimeout(
+        candidate = await withTimeout(
           KokoroTTS.from_pretrained(MODEL_ID, {
             dtype,
             device: backend,
@@ -178,10 +202,21 @@ async function loadModel(forceReload: boolean = false) {
           KOKORO_LOAD_TIMEOUT_MS,
           `Kokoro ${backend} load`,
         );
+        const candidateVoices = listVoices(candidate);
+        if (backend === "webgpu") {
+          await warmupKokoroModel(candidate, candidateVoices);
+        }
+        tts = candidate;
+        voices = candidateVoices;
         activeBackend = backend;
         break;
       } catch (err) {
         lastError = err;
+        await disposeKokoroModel(candidate);
+        if (tts === candidate) {
+          tts = null;
+          activeBackend = null;
+        }
         if (backend === "webgpu") {
           progressMap.clear();
           post({ type: "LOAD_PROGRESS", percent: 0 });
@@ -195,9 +230,9 @@ async function loadModel(forceReload: boolean = false) {
         : new Error(lastError ? String(lastError) : "Failed to load Kokoro model");
     }
 
-    voices = listVoices(tts);
     post({ type: "READY", voices, backend: activeBackend });
   } catch (err) {
+    await disposeKokoroModel(tts);
     tts = null;
     activeBackend = null;
     post({ type: "ERROR", message: err instanceof Error ? err.message : String(err), scope: "load" });
@@ -247,7 +282,9 @@ async function generate(
       let splitAt = -1;
 
       for (let i = midpoint; i < source.length; i += 1) {
-        if (/[,;:!?]/.test(source[i])) {
+        // Punctuation at the final index would split off an empty right side —
+        // keep the recorded whitespace fallback instead of bailing.
+        if (i < source.length - 1 && /[,;:!?]/.test(source[i])) {
           splitAt = i + 1;
           break;
         }

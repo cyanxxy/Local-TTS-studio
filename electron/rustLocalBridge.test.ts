@@ -164,8 +164,8 @@ describe("open-tts-local-bridge", () => {
           runtime: "rust",
           package: "qwen_tts",
           packageVersion: "0.1.1",
-          recommendedDeviceMap: "cpu",
-          recommendedDtype: "float32",
+          recommendedDeviceMap: "auto",
+          recommendedDtype: "auto",
           recommendedAttention: "eager",
         },
       });

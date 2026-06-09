@@ -7,6 +7,7 @@ import type {
   WorkerInMessage,
   WorkerOutMessage,
 } from "../types";
+import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
 
 interface UseTTSOptions {
   kokoroWorker: React.RefObject<Worker | null>;
@@ -74,8 +75,49 @@ export function useTTS({
   const errorListenerRef = useRef<((event: Event) => void) | null>(null);
   const messageErrorListenerRef = useRef<((event: Event) => void) | null>(null);
   const generationSeqRef = useRef(0);
+  const firstLatencyRef = useRef<number | null>(null);
+  const pendingStatsRef = useRef<GenerationStats | null>(null);
+  const pendingProgressRef = useRef<number | null>(null);
+  const uiFlushCancelRef = useRef<CancelScheduledUiFlush | null>(null);
+
+  const flushGenerationUi = useCallback(() => {
+    uiFlushCancelRef.current = null;
+
+    if (pendingStatsRef.current) {
+      setStats(pendingStatsRef.current);
+      pendingStatsRef.current = null;
+    }
+
+    if (pendingProgressRef.current !== null) {
+      setGenerationProgress(pendingProgressRef.current);
+      pendingProgressRef.current = null;
+    }
+  }, []);
+
+  const queueGenerationUiFlush = useCallback(() => {
+    if (uiFlushCancelRef.current) return;
+    uiFlushCancelRef.current = scheduleNextUiFrame(flushGenerationUi);
+  }, [flushGenerationUi]);
+
+  const discardGenerationUiFlush = useCallback(() => {
+    if (uiFlushCancelRef.current) {
+      uiFlushCancelRef.current();
+      uiFlushCancelRef.current = null;
+    }
+    pendingStatsRef.current = null;
+    pendingProgressRef.current = null;
+  }, []);
+
+  const flushGenerationUiNow = useCallback(() => {
+    if (uiFlushCancelRef.current) {
+      uiFlushCancelRef.current();
+      uiFlushCancelRef.current = null;
+    }
+    flushGenerationUi();
+  }, [flushGenerationUi]);
 
   const cleanup = useCallback(() => {
+    discardGenerationUiFlush();
     if (listenerWorkerRef.current && listenerRef.current) {
       listenerWorkerRef.current.removeEventListener("message", listenerRef.current as EventListener);
     }
@@ -90,7 +132,7 @@ export function useTTS({
     messageErrorListenerRef.current = null;
     listenerWorkerRef.current = null;
     activeWorkerRef.current = null;
-  }, []);
+  }, [discardGenerationUiFlush]);
 
   useEffect(() => cleanup, [cleanup]);
 
@@ -110,6 +152,7 @@ export function useTTS({
       processedCharsRef.current = 0;
       inputCharsRef.current = Math.max(1, text.trim().length);
       generatedAudioSecsRef.current = 0;
+      firstLatencyRef.current = null;
       activeWorkerRef.current = worker;
       generationSeqRef.current += 1;
       const generationId = `browser-${generationSeqRef.current}`;
@@ -128,28 +171,31 @@ export function useTTS({
 
             generatedAudioSecsRef.current += chunkDuration;
             processedCharsRef.current += msg.text.length;
+            firstLatencyRef.current ??= elapsedSec;
 
-            setStats((prev) => ({
-              firstLatency: prev.firstLatency ?? elapsedSec,
+            pendingStatsRef.current = {
+              firstLatency: firstLatencyRef.current,
               processingTime: elapsedSec,
-              charsPerSec: processedCharsRef.current / elapsedSec,
-              rtf: elapsedSec / generatedAudioSecsRef.current,
+              charsPerSec: elapsedSec > 0 ? processedCharsRef.current / elapsedSec : 0,
+              rtf: generatedAudioSecsRef.current > 0 ? elapsedSec / generatedAudioSecsRef.current : 0,
               totalDuration: generatedAudioSecsRef.current,
               currentDuration: generatedAudioSecsRef.current,
-            }));
+            };
 
             if (msg.total > 0) {
               const byChunks = (msg.index / msg.total) * 100;
               const byChars = Math.min(100, (processedCharsRef.current / inputCharsRef.current) * 100);
-              setGenerationProgress(Math.min(100, Math.max(byChunks, byChars)));
+              pendingProgressRef.current = Math.min(100, Math.max(byChunks, byChars));
             } else {
-              setGenerationProgress(Math.min(100, (processedCharsRef.current / inputCharsRef.current) * 100));
+              pendingProgressRef.current = Math.min(100, (processedCharsRef.current / inputCharsRef.current) * 100);
             }
+            queueGenerationUiFlush();
 
             onAudioChunk(msg);
             break;
           }
           case "GENERATION_COMPLETE":
+            flushGenerationUiNow();
             setGenerationProgress(100);
             setIsGenerating(false);
             cleanup();
@@ -203,7 +249,7 @@ export function useTTS({
         failGeneration(error instanceof Error ? error.message : String(error));
       }
     },
-    [kokoroWorker, supertonicWorker, onAudioChunk, onComplete, cleanup],
+    [kokoroWorker, supertonicWorker, onAudioChunk, onComplete, cleanup, flushGenerationUiNow, queueGenerationUiFlush],
   );
 
   const cancel = useCallback(() => {

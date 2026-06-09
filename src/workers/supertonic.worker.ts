@@ -449,9 +449,17 @@ async function loadModel(
     }
 
     if (tts && activeBackend) {
-      await preloadPreferredVoice(preferredVoice);
+      try {
+        await preloadPreferredVoice(preferredVoice);
+        perf.mark("voicePreloadReady");
+      } catch (voicePreloadError) {
+        // The resident pipeline is still healthy — never tear it down over a
+        // transient voice fetch failure. The voice lazy-loads on generate.
+        if (PERF_DEBUG) {
+          console.warn("[supertonic] Voice preload failed on resident pipeline", voicePreloadError);
+        }
+      }
       postLoadProgress(EMBEDDINGS_READY_PROGRESS);
-      perf.mark("voicePreloadReady");
       perf.finish({ backend: activeBackend });
       post({ type: "READY", backend: activeBackend });
       return;
@@ -550,6 +558,9 @@ async function generate(
     }
 
     const normalizedSpeed = clampSpeed(speed);
+    // The embedding never changes within a generation — build the tensor once
+    // instead of re-allocating it per inference call.
+    const speakerEmbeddingsTensor = createSpeakerEmbeddingsTensor(speakerEmbeddings);
     const runtimeProfile = { backend: activeBackend, quality };
     const initialChunks = chunkWithConstraintsDetailed(text, { runtime: runtimeProfile });
     if (initialChunks.length === 0) {
@@ -569,23 +580,27 @@ async function generate(
     let recordedFirstChunk = false;
     let hasDynamicTotal = false;
 
+    let batchingDisabled = false;
+
     while (isGenerationCurrent(generationEpoch) && queue.length > 0) {
       const selectedBatch = takeSupertonicBatch(queue, {
         backend: activeBackend,
         emitted,
         sentenceSpeedVariance,
+        batchingDisabled,
       }).filter(({ chunk }) => chunk.text.trim().length > 0);
       if (selectedBatch.length === 0) continue;
 
       const total = hasDynamicTotal ? 0 : emitted + selectedBatch.length + queue.length;
 
       if (selectedBatch.length > 1) {
+        let batchEmittedCount = 0;
         try {
           const taggedTexts = selectedBatch.map(({ chunk }) => getTaggedText(
             tuneChunkText(chunk.text, pronunciationRules, emphasisStrength),
           ));
           const output = await ttsInstance(taggedTexts, {
-            speaker_embeddings: createSpeakerEmbeddingsTensor(speakerEmbeddings),
+            speaker_embeddings: speakerEmbeddingsTensor,
             num_inference_steps: quality,
             speed: normalizedSpeed,
           }) as RawAudio | RawAudio[];
@@ -608,6 +623,7 @@ async function generate(
               !hasFollowing ? finalPauseSec : undefined,
               pauseOverridesSec,
             );
+            batchEmittedCount = index + 1;
             if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
             if (!recordedFirstChunk) {
               perf.mark("firstChunkReady");
@@ -618,8 +634,12 @@ async function generate(
           continue;
         } catch {
           if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
+          batchingDisabled = true;
           hasDynamicTotal = true;
-          queue.unshift(...selectedBatch.slice(1));
+          // Only requeue/retry items that were not already emitted; the first
+          // unemitted item falls through to the single-chunk retry below.
+          queue.unshift(...selectedBatch.slice(batchEmittedCount + 1));
+          selectedBatch.splice(0, batchEmittedCount);
         }
       }
 
@@ -628,7 +648,7 @@ async function generate(
         const tunedText = tuneChunkText(chunk.text, pronunciationRules, emphasisStrength);
         const chunkSpeed = clampSpeed(resolveSentenceSpeed(normalizedSpeed, sentenceSpeedVariance, tunedText));
         const output = (await ttsInstance(getTaggedText(tunedText), {
-          speaker_embeddings: createSpeakerEmbeddingsTensor(speakerEmbeddings),
+          speaker_embeddings: speakerEmbeddingsTensor,
           num_inference_steps: quality,
           speed: chunkSpeed,
         })) as RawAudio;

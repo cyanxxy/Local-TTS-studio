@@ -30,6 +30,7 @@ interface TransformersOnnxEnv {
 
 interface KokoroOnnxEnv {
   wasmPaths: OnnxWasmPrefixOrFilePaths;
+  numThreads?: number;
 }
 
 interface WasmThreadCapabilities {
@@ -41,6 +42,8 @@ interface ConfigureTransformersOnnxRuntimeOptions extends WasmThreadCapabilities
   backend: InferenceBackend;
   maxWasmThreads: number;
 }
+
+type ConfigureKokoroOnnxRuntimeOptions = ConfigureTransformersOnnxRuntimeOptions;
 
 function supportsMultiThreadedWasm({
   crossOriginIsolated = globalThis.crossOriginIsolated === true,
@@ -81,8 +84,15 @@ export function configureTransformersOnnxRuntime(
 export function configureKokoroOnnxRuntime(
   runtimeEnv: KokoroOnnxEnv,
   assets: KokoroOnnxWasmAssets,
+  options?: ConfigureKokoroOnnxRuntimeOptions,
 ): void {
   // kokoro-js bundles its own ORT runtime, so these assets must come from its
   // nested onnxruntime-web version rather than the app-level Transformers.js one.
   runtimeEnv.wasmPaths = assets.jsep;
+
+  if (options?.backend === "wasm") {
+    runtimeEnv.numThreads = getSafeWasmThreadCount(options.maxWasmThreads, options);
+  } else if (options?.backend === "webgpu") {
+    runtimeEnv.numThreads = 1;
+  }
 }

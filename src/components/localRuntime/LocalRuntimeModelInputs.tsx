@@ -1,5 +1,9 @@
 import { Fragment } from "react";
-import type { LocalTtsModel } from "../../electron";
+import type {
+  LocalTtsModel,
+  LocalTtsQwen3MlxDownloadProgress,
+  LocalTtsQwen3MlxSetup,
+} from "../../electron";
 import {
   NEUTTS_OPTIONS,
   QWEN3_ATTENTION_OPTIONS,
@@ -8,11 +12,22 @@ import {
   QWEN3_SPEAKER_OPTIONS,
   getQwen3DeviceOptions,
   qwen3SupportsInstruct,
+  qwen3UsesMlx,
+  qwen3UsesMlxCustomVoice,
+  qwen3UsesVoiceClone,
   type LocalRuntimeOption,
 } from "./modelOptions";
 import { statusClass, type StatusTone } from "./utils";
 
 type StatusMessage = { tone: StatusTone; text: string } | null;
+
+function formatDownloadProgress(progress: LocalTtsQwen3MlxDownloadProgress): string {
+  const downloadedMb = (progress.downloadedBytes / (1024 * 1024)).toFixed(1);
+  const total = progress.totalBytes
+    ? ` of ${(progress.totalBytes / (1024 * 1024)).toFixed(1)} MB`
+    : " MB";
+  return `${progress.fileName} (${progress.fileIndex}/${progress.totalFiles}) ${downloadedMb}${total}`;
+}
 
 interface LocalRuntimeModelInputsProps {
   model: LocalTtsModel;
@@ -25,6 +40,20 @@ interface LocalRuntimeModelInputsProps {
   onReferenceAudioChange: (file: File | null) => void;
   qwen3Model: string;
   onQwen3ModelChange: (value: string) => void;
+  qwen3BaseModelPath: string;
+  onQwen3BaseModelPathChange: (value: string) => void;
+  qwen3MlxSetup: LocalTtsQwen3MlxSetup | null;
+  qwen3MlxSetupBusy: boolean;
+  qwen3MlxDownloadBusy: boolean;
+  qwen3MlxDownloadProgress: LocalTtsQwen3MlxDownloadProgress | null;
+  onQwen3RefreshMlxSetup: () => void;
+  onQwen3DownloadMlxModel: () => void;
+  onQwen3ChooseBaseModelPath: () => void;
+  qwen3ReferenceAudioName: string;
+  qwen3ReferenceAudioGuidance: StatusMessage;
+  onQwen3ReferenceAudioChange: (file: File | null) => void;
+  qwen3ReferenceText: string;
+  onQwen3ReferenceTextChange: (value: string) => void;
   qwen3Speaker: string;
   onQwen3SpeakerChange: (value: string) => void;
   qwen3Language: string;
@@ -40,6 +69,8 @@ interface LocalRuntimeModelInputsProps {
   onQwen3AttentionChange: (value: string) => void;
   qwen3Temperature: number;
   onQwen3TemperatureChange: (value: number) => void;
+  qwen3TopK: number;
+  onQwen3TopKChange: (value: number) => void;
   qwen3TopP: number;
   onQwen3TopPChange: (value: number) => void;
   qwen3MaxNewTokens: number;
@@ -57,6 +88,20 @@ export function LocalRuntimeModelInputs({
   onReferenceAudioChange,
   qwen3Model,
   onQwen3ModelChange,
+  qwen3BaseModelPath,
+  onQwen3BaseModelPathChange,
+  qwen3MlxSetup,
+  qwen3MlxSetupBusy,
+  qwen3MlxDownloadBusy,
+  qwen3MlxDownloadProgress,
+  onQwen3RefreshMlxSetup,
+  onQwen3DownloadMlxModel,
+  onQwen3ChooseBaseModelPath,
+  qwen3ReferenceAudioName,
+  qwen3ReferenceAudioGuidance,
+  onQwen3ReferenceAudioChange,
+  qwen3ReferenceText,
+  onQwen3ReferenceTextChange,
   qwen3Speaker,
   onQwen3SpeakerChange,
   qwen3Language,
@@ -72,6 +117,8 @@ export function LocalRuntimeModelInputs({
   onQwen3AttentionChange,
   qwen3Temperature,
   onQwen3TemperatureChange,
+  qwen3TopK,
+  onQwen3TopKChange,
   qwen3TopP,
   onQwen3TopPChange,
   qwen3MaxNewTokens,
@@ -138,6 +185,12 @@ export function LocalRuntimeModelInputs({
   if (model === "qwen3") {
     const qwen3DeviceOptions = getQwen3DeviceOptions(window.electron?.platform);
     const qwen3InstructSupported = qwen3SupportsInstruct(qwen3Model);
+    const qwen3VoiceClone = qwen3UsesVoiceClone(qwen3Model);
+    const qwen3MlxCustomVoice = qwen3UsesMlxCustomVoice(qwen3Model);
+    const qwen3Mlx = qwen3UsesMlx(qwen3Model);
+    const qwen3MlxToolAvailable = qwen3VoiceClone
+      ? qwen3MlxSetup?.workerAvailable
+      : ((qwen3MlxSetup?.apiServerAvailable ?? false) || (qwen3MlxSetup?.ttsAvailable ?? false));
     return (
       <Fragment key="qwen3">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -196,6 +249,135 @@ export function LocalRuntimeModelInputs({
           </label>
         </div>
 
+        {qwen3Mlx && (
+          <div className="grid grid-cols-1 gap-3">
+            <div className="rounded-xl border border-black/10 bg-white/35 p-3 text-sm text-text-secondary backdrop-blur-md">
+              <div className="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
+                <div className="space-y-1">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Apple MLX Path</p>
+                  <p>
+                    {qwen3MlxCustomVoice
+                      ? "Uses the upstream 6-bit MLX CustomVoice api_server for resident streaming inference."
+                      : "Uses the upstream 6-bit MLX Base worker for voice cloning."}
+                    {qwen3MlxToolAvailable
+                      ? " Required MLX binary found."
+                      : " Build or bundle the required MLX binary before generating."}
+                  </p>
+                  {qwen3MlxSetup && (
+                    <div className="space-y-1 break-all text-xs text-text-muted">
+                      <p>
+                        {qwen3VoiceClone ? "Worker" : "CustomVoice api_server"}: {" "}
+                        {qwen3VoiceClone
+                          ? qwen3MlxSetup.workerPath ?? "not found"
+                          : qwen3MlxSetup.apiServerPath
+                            ?? qwen3MlxSetup.ttsPath
+                            ?? "not found"}
+                      </p>
+                      <p>Recommended model dir: {qwen3MlxSetup.recommendedModelDir}</p>
+                      <p>Model directory: {qwen3MlxSetup.modelDirLooksReady ? "ready" : "not ready"}</p>
+                    </div>
+                  )}
+                </div>
+                <div className="flex flex-col gap-2 sm:flex-row">
+                  <button
+                    type="button"
+                    onClick={onQwen3DownloadMlxModel}
+                    disabled={qwen3MlxDownloadBusy || qwen3MlxSetupBusy}
+                    className="rounded-md border border-white/55 bg-white/40 px-3 py-2 text-xs font-semibold text-text-primary shadow-glass-sm transition-colors hover:bg-white/60 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
+                  >
+                    {qwen3MlxDownloadBusy ? "Downloading…" : "Download Model"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={onQwen3RefreshMlxSetup}
+                    disabled={qwen3MlxSetupBusy || qwen3MlxDownloadBusy}
+                    className="rounded-md border border-white/55 bg-white/40 px-3 py-2 text-xs font-semibold text-text-primary shadow-glass-sm transition-colors hover:bg-white/60 disabled:cursor-not-allowed disabled:border-border disabled:text-text-muted"
+                  >
+                    {qwen3MlxSetupBusy ? "Checking…" : "Refresh"}
+                  </button>
+                </div>
+              </div>
+              {qwen3MlxDownloadProgress && (
+                <p className="mt-3 break-all text-xs text-text-muted">
+                  Downloading {formatDownloadProgress(qwen3MlxDownloadProgress)}
+                </p>
+              )}
+              {qwen3MlxSetup && !qwen3MlxSetup.modelDirLooksReady && (
+                <div className="mt-3 space-y-1">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Fallback CLI Command</p>
+                  <code className="block overflow-x-auto rounded-lg border border-black/10 bg-white/50 px-2 py-1 text-xs normal-case text-text-primary">
+                    {qwen3MlxSetup.modelDownloadCommand}
+                  </code>
+                </div>
+              )}
+              {qwen3MlxSetup && !qwen3MlxToolAvailable && (
+                <div className="mt-3 space-y-1">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">MLX Tool Build Command</p>
+                  <code className="block overflow-x-auto rounded-lg border border-black/10 bg-white/50 px-2 py-1 text-xs normal-case text-text-primary">
+                    {qwen3MlxSetup.workerBuildCommand}
+                  </code>
+                </div>
+              )}
+            </div>
+
+            <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+              MLX Model Directory
+              <div className="flex flex-col gap-2 sm:flex-row">
+                <input
+                  type="text"
+                  value={qwen3BaseModelPath}
+                  onChange={(event) => onQwen3BaseModelPathChange(event.target.value)}
+                  className="min-w-0 flex-1 px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
+                  placeholder={
+                    qwen3VoiceClone
+                      ? "/path/to/Qwen3-TTS-12Hz-0.6B-Base-6bit"
+                      : "/path/to/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit"
+                  }
+                />
+                <button
+                  type="button"
+                  onClick={onQwen3ChooseBaseModelPath}
+                  className="rounded-md border border-white/55 bg-white/40 px-3 py-2 text-xs font-semibold text-text-primary shadow-glass-sm transition-colors hover:bg-white/60"
+                >
+                  Choose…
+                </button>
+              </div>
+            </label>
+
+            {qwen3VoiceClone && (
+              <>
+                <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+                  Reference WAV
+                  <input
+                    type="file"
+                    accept=".wav,audio/wav,audio/x-wav"
+                    onChange={(event) => onQwen3ReferenceAudioChange(event.target.files?.[0] ?? null)}
+                    className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
+                  />
+                  <span className="text-sm font-normal normal-case text-text-muted">
+                    {qwen3ReferenceAudioName || "Upload a mono 24 kHz WAV reference voice sample"}
+                  </span>
+                  {qwen3ReferenceAudioGuidance && (
+                    <span className={`text-sm font-normal normal-case ${statusClass(qwen3ReferenceAudioGuidance.tone)}`}>
+                      {qwen3ReferenceAudioGuidance.text}
+                    </span>
+                  )}
+                </label>
+
+                <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
+                  Reference Transcript (exact)
+                  <textarea
+                    value={qwen3ReferenceText}
+                    onChange={(event) => onQwen3ReferenceTextChange(event.target.value)}
+                    className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 backdrop-blur-sm text-sm normal-case text-text-primary"
+                    placeholder="Paste the transcript that exactly matches the reference WAV"
+                  />
+                </label>
+              </>
+            )}
+          </div>
+        )}
+
         <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
           Instruction (optional)
           <textarea
@@ -253,7 +435,7 @@ export function LocalRuntimeModelInputs({
           </label>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs font-medium text-text-secondary">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs font-medium text-text-secondary">
           <label className="flex flex-col gap-1">
             Temperature
             <input
@@ -263,6 +445,18 @@ export function LocalRuntimeModelInputs({
               max={2}
               step={0.05}
               onChange={(event) => onQwen3TemperatureChange(Number(event.target.value))}
+              className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            Top-k
+            <input
+              type="number"
+              value={qwen3TopK}
+              min={0}
+              max={1000}
+              step={1}
+              onChange={(event) => onQwen3TopKChange(Number(event.target.value))}
               className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
           </label>

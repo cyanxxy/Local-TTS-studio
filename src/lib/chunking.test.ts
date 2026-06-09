@@ -121,6 +121,32 @@ describe("chunkWithConstraintsDetailed", () => {
     expect(chunkWithConstraintsDetailed(whitespaceOnly, { minCharacters: 40, maxCharacters: 90 }).length).toBeGreaterThan(2);
     expect(chunkWithConstraintsDetailed(hardLimit, { minCharacters: 40, maxCharacters: 90 }).every((chunk) => chunk.text.length <= 90)).toBe(true);
   });
+
+  it("never exceeds maxCharacters when punctuation sits exactly on the budget boundary", () => {
+    // Char at index 90 is punctuation: the oversized-range scan used to split
+    // at index 91, producing a 91-char chunk for a 90-char budget.
+    const text = `${"a".repeat(90)},${"b".repeat(100)}`;
+    const chunks = chunkWithConstraintsDetailed(text, { minCharacters: 40, maxCharacters: 90 });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(chunk.text.length).toBeLessThanOrEqual(90);
+      expect(chunk.text).toBe(text.slice(chunk.start, chunk.end));
+    }
+  });
+
+  it("recognizes CRLF paragraph boundaries with offsets mapping to the original text", () => {
+    const lfText = "A short paragraph.\n\nAnother paragraph starts here with more text.";
+    const crlfText = lfText.replace(/\n/g, "\r\n");
+
+    const chunks = chunkWithConstraintsDetailed(crlfText, { minCharacters: 1, maxCharacters: 200 });
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].pauseKind).toBe("paragraph");
+    for (const chunk of chunks) {
+      expect(chunk.text).toBe(crlfText.slice(chunk.start, chunk.end));
+    }
+  });
 });
 
 describe("adaptive limits", () => {

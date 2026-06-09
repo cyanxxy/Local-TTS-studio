@@ -3,6 +3,12 @@ export interface LocalRuntimeOption {
   label: string;
 }
 
+export const QWEN3_CUSTOMVOICE_AUTO_MODEL = "auto";
+export const QWEN3_MLX_CUSTOMVOICE_06B_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
+export const QWEN3_MLX_CUSTOMVOICE_17B_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit";
+export const QWEN3_MLX_BASE_06B_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
+export const QWEN3_MLX_BASE_17B_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit";
+
 export const NEUTTS_OPTIONS: LocalRuntimeOption[] = [
   { value: "neuphonic/neutts-nano-q4-gguf", label: "English · neutts-nano · Q4 GGUF" },
   { value: "neuphonic/neutts-nano-q8-gguf", label: "English · neutts-nano · Q8 GGUF" },
@@ -15,10 +21,16 @@ export const NEUTTS_OPTIONS: LocalRuntimeOption[] = [
 ];
 
 export const QWEN3_OPTIONS: LocalRuntimeOption[] = [
-  { value: "auto", label: "Auto · fastest for this device" },
-  { value: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", label: "CustomVoice · 0.6B · 12Hz" },
-  { value: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", label: "CustomVoice · 1.7B · 12Hz" },
+  { value: QWEN3_MLX_CUSTOMVOICE_06B_MODEL, label: "Apple MLX first · CustomVoice · 0.6B · 6-bit" },
+  { value: QWEN3_MLX_CUSTOMVOICE_17B_MODEL, label: "Apple MLX first · CustomVoice · 1.7B · 6-bit" },
+  { value: QWEN3_MLX_BASE_06B_MODEL, label: "Apple MLX advanced · Base voice clone · 0.6B · 6-bit" },
+  { value: QWEN3_MLX_BASE_17B_MODEL, label: "Apple MLX advanced · Base voice clone · 1.7B · 6-bit" },
+  { value: QWEN3_CUSTOMVOICE_AUTO_MODEL, label: "Candle fallback · CustomVoice · Auto · 0.6B" },
+  { value: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", label: "Candle fallback · CustomVoice · 0.6B · 12Hz" },
+  { value: "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice", label: "Candle fallback · CustomVoice · 1.7B · 12Hz" },
 ];
+
+export const QWEN3_DEFAULT_MAX_NEW_TOKENS = 1536;
 
 // Both CustomVoice sizes honor natural-language style instructions — the
 // official model cards demonstrate `instruct` on the 0.6B and 1.7B alike — and
@@ -28,10 +40,28 @@ export const QWEN3_INSTRUCT_CAPABLE_MODELS = new Set<string>([
   "auto",
   "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
   "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
+  QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
+  QWEN3_MLX_CUSTOMVOICE_17B_MODEL,
 ]);
 
 export function qwen3SupportsInstruct(model: string): boolean {
   return QWEN3_INSTRUCT_CAPABLE_MODELS.has(model);
+}
+
+export function qwen3UsesVoiceClone(model: string): boolean {
+  return model.includes("-Base-");
+}
+
+export function qwen3UsesMlxCustomVoice(model: string): boolean {
+  return model.startsWith("mlx-community/") && model.includes("-CustomVoice-");
+}
+
+export function qwen3UsesMlx(model: string): boolean {
+  return qwen3UsesMlxCustomVoice(model) || qwen3UsesVoiceClone(model);
+}
+
+export function getDefaultQwen3Model(platform: string | undefined): string {
+  return platform === "darwin" ? QWEN3_MLX_CUSTOMVOICE_06B_MODEL : QWEN3_CUSTOMVOICE_AUTO_MODEL;
 }
 
 export const QWEN3_SPEAKER_OPTIONS: LocalRuntimeOption[] = [
@@ -66,21 +96,26 @@ export function getQwen3LanguageOptionsForSpeaker(speaker: string): LocalRuntime
 }
 
 export const QWEN3_DEVICE_OPTIONS: LocalRuntimeOption[] = [
-  { value: "auto", label: "Auto" },
+  { value: "auto", label: "Auto · Metal then CPU" },
+  { value: "cpu", label: "CPU" },
+];
+
+export const QWEN3_MAC_DEVICE_OPTIONS: LocalRuntimeOption[] = [
+  { value: "auto", label: "Auto · Apple Metal" },
+  { value: "metal", label: "Apple Metal" },
   { value: "cpu", label: "CPU" },
 ];
 
 export function getQwen3DeviceOptions(platform: string | undefined): LocalRuntimeOption[] {
-  void platform;
-  return QWEN3_DEVICE_OPTIONS;
+  return platform === "darwin" ? QWEN3_MAC_DEVICE_OPTIONS : QWEN3_DEVICE_OPTIONS;
 }
 
 export const QWEN3_DTYPE_OPTIONS: LocalRuntimeOption[] = [
   { value: "auto", label: "Auto" },
   { value: "float32", label: "float32" },
+  { value: "bfloat16", label: "bfloat16 (Metal)" },
 ];
 
 export const QWEN3_ATTENTION_OPTIONS: LocalRuntimeOption[] = [
-  { value: "auto", label: "Auto" },
   { value: "eager", label: "Eager" },
 ];

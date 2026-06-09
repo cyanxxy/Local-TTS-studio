@@ -59,10 +59,10 @@ rust/                # Rust local bridge for probe/WebSocket transport and local
 ## Key Patterns
 
 - **Worker protocol**: `WorkerInMessage` (LOAD, GENERATE, CANCEL) and `WorkerOutMessage` (LOAD_PROGRESS, READY, AUDIO_CHUNK, GENERATION_COMPLETE, ERROR) — defined in `src/types.ts`.
-- **Audio playback**: Uses Web Audio API (`AudioContext` + `createBufferSource`), NOT `<audio>` element. Chunks scheduled with `source.start(nextPlayTime)`.
+- **Audio playback**: Uses Web Audio API (`AudioContext` + `createBufferSource`), NOT `<audio>` element. Chunks scheduled with `source.start(nextPlayTime)`. Playback scheduling/export refs stay immediate; rendered stats/progress and segment/timeline state are coalesced to the next UI frame to avoid per-chunk React render pressure.
 - **WAV encoding**: IEEE Float 32-bit PCM (AudioFormat = 3). Sample rate comes from model output, never hardcoded.
 - **Kokoro voices**: `list_voices()` may return void in some kokoro-js versions — always use fallback array.
-- **Kokoro generation**: Worker builds inference units via shared `buildKokoroInferenceUnits()` (`lib/chunking.ts`) — sentences merged greedily up to a per-backend budget (`KOKORO_WEBGPU/WASM_MAX_INFERENCE_CHARS`), then `tts.generate(string, ...)` per unit (no `tts.stream()`). The reader preview (`chunkTextForModelDetailed`) uses the same builder so editor section boundaries match generated segments. Voice param is a strict literal union — cast with `as any`.
+- **Kokoro generation**: Worker builds inference units via shared `buildKokoroInferenceUnits()` (`lib/chunking.ts`) — sentences merged greedily up to a per-backend budget (`KOKORO_WEBGPU/WASM_MAX_INFERENCE_CHARS`), then `tts.generate(string, ...)` per unit (no `tts.stream()`). WebGPU loads run one warmup generation before READY; forced reload disposes the previous model when supported; WASM fallback configures a safe thread count through the kokoro-js bundle transform. The reader preview (`chunkTextForModelDetailed`) uses the same builder so editor section boundaries match generated segments. Voice param is a strict literal union — cast with `as any`.
 - **Supertonic chunking**: min 100 / max 1000 chars per chunk. 0.5s silence padding between chunks.
 - **Supertonic progress**: Aggregates per-file download progress dynamically (not hardcoded file counts).
 
@@ -118,14 +118,15 @@ Sample rate is read from each model's output at runtime, never hardcoded. Allowe
 | Model | ID(s) | Rust crate | Voices |
 |---|---|---|---|
 | NeuTTS Nano | Neuphonic GGUF Q4/Q8 variants | `neutts` | `.npy` reference-code voice cloning |
-| Qwen3-TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` (Auto default) + `…-1.7B-CustomVoice` | `qwen_tts` | 9 speakers, supported language options |
+| Qwen3-TTS | `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit` (macOS default) + 1.7B MLX CustomVoice + Base clone advanced + Candle fallback | upstream MLX `tts`/worker + `qwen_tts` | MLX CustomVoice first; 9 built-in speakers; optional Base voice cloning |
 
-Both local runtimes run on a resident Rust bridge worker (`open-tts-local-bridge --action serve-ws`, pooled by `electron/webSocketBridgeWorker.ts`). Electron launches it with `--port 0 --auth-token <token>`, waits for Rust to print `__PORT__<actual-port>`, then connects to `ws://127.0.0.1:<actual-port>/<token>`. Generation is WebSocket-only: request/progress/result metadata travels over loopback WebSocket JSON frames and audio streams as binary Float32 PCM. `probe` is the only one-shot subprocess action. There is no interpreter discovery, adapter script, stdout generation fallback, or base64 audio payload on this path. See AGENTS.md -> "Local bridge protocol".
+Both local runtimes run on a resident Rust bridge worker (`open-tts-local-bridge --action serve-ws`, pooled by `electron/webSocketBridgeWorker.ts`). Electron launches it with `--port 0 --auth-token <token>`, waits for Rust to print `__PORT__<actual-port>`, then connects to `ws://127.0.0.1:<actual-port>/<token>`. Generation is WebSocket-only: request/progress/result metadata travels over loopback WebSocket JSON frames and audio streams as binary Float32 PCM. Qwen3 defaults to the upstream MLX CustomVoice 6-bit `tts` path on macOS when configured; Candle CustomVoice keeps its model resident by repo/device/dtype/attention; Qwen3 Base clone keeps the upstream MLX worker resident by model/reference/settings. `probe` is the only one-shot subprocess action exposed to Electron. There is no interpreter discovery, adapter script, stdout generation fallback, or base64 audio payload on this path. See AGENTS.md -> "Local bridge protocol".
 
 ## Maintenance Notes
 
 - Keep local runtime behavior Rust-only. Do not add interpreter discovery, adapter scripts, or managed environment setup.
 - Kani-TTS-2 remains retired unless a Rust runtime replacement exists.
 - Qwen3 speakers: UI/IPC use capitalized display names; the model's `spk_id` keys are lowercase and validation is case-sensitive, so the Rust bridge lowercases the speaker (`qwen3_speaker_id`) before generation. Don't lowercase in the IPC/frontend layer.
-- The Rust bridge emits a periodic stderr heartbeat during each generation so the host inactivity watchdog isn't tripped by a slow first-run model download or long CPU inference (both are single blocking calls).
+- The Rust bridge emits a periodic stderr heartbeat during each generation so the host inactivity watchdog isn't tripped by a slow first-run model download or long CPU inference (both are single blocking calls). Because the heartbeat keeps the host watchdog re-armed, the bridge itself enforces a child-output inactivity deadline (10 min without any MLX worker/api_server output) so a wedged child errors out instead of hanging forever.
+- Qwen3 MLX model downloads are handled by `electron/qwen3MlxDownload.ts` (HF file listing/streaming, path containment, destroyed-sender-safe progress, in-flight dedup per model dir) — keep download logic there, not in `main.ts`.
 - macOS packaging: `scripts/build-rust-bridge.mjs` makes `dist-rust/` self-contained — it bundles external Homebrew dylibs (libomp, openssl@3) the build links against, rewrites install names to `@rpath`, and re-signs ad-hoc. Don't reintroduce absolute `/opt/homebrew` link paths into the shipped binary/dylibs.

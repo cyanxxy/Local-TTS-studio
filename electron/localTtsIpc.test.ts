@@ -129,6 +129,7 @@ describe("localTtsIpc request sanitizers", () => {
       dtype: "FLOAT32",
       attnImplementation: "eager",
       temperature: 0.75,
+      topK: 64,
       topP: 0.88,
       maxNewTokens: 2304,
     })).toEqual({
@@ -141,13 +142,72 @@ describe("localTtsIpc request sanitizers", () => {
       dtype: "float32",
       attnImplementation: "eager",
       temperature: 0.75,
+      topK: 64,
       topP: 0.88,
       maxNewTokens: 2304,
     });
 
+    expect(sanitizeGeneratePayload("qwen3", { text: "Hello", deviceMap: "metal", topK: 0 }))
+      .toMatchObject({ deviceMap: "metal", topK: 0 });
+
+    expect(sanitizeGeneratePayload("qwen3", {
+      text: "Built-in speaker.",
+      mode: "customVoice",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      baseModelPath: " /models/qwen3-customvoice-6bit ",
+      speaker: "Ryan",
+    })).toMatchObject({
+      text: "Built-in speaker.",
+      mode: "customVoice",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      baseModelPath: "/models/qwen3-customvoice-6bit",
+      speaker: "Ryan",
+    });
+
+    expect(sanitizeGeneratePayload("qwen3", {
+      text: "Clone this.",
+      mode: "voiceClone",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+      baseModelPath: " /models/qwen3-base-6bit ",
+      referenceText: "Exact reference words.",
+      referenceAudioName: "voice.wav",
+      referenceAudioBase64: " AQID ",
+      language: "German",
+      topK: 30,
+    })).toMatchObject({
+      text: "Clone this.",
+      mode: "voiceClone",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+      baseModelPath: "/models/qwen3-base-6bit",
+      referenceText: "Exact reference words.",
+      referenceAudioName: "voice.wav",
+      referenceAudioBase64: "AQID",
+      language: "German",
+      topK: 30,
+    });
+
     expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", deviceMap: "mps" }))
       .toThrow("invalid format");
-    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", dtype: "bfloat16" }))
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", topK: 1001 }))
+      .toThrow("between 0 and 1000");
+    expect(() => sanitizeGeneratePayload("qwen3", {
+      text: "Hello",
+      mode: "voiceClone",
+      modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+    })).toThrow("Base model");
+    expect(() => sanitizeGeneratePayload("qwen3", {
+      text: "Hello",
+      mode: "customVoice",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+      baseModelPath: "/models/base",
+    })).toThrow("Base models require voiceClone");
+    expect(() => sanitizeGeneratePayload("qwen3", {
+      text: "Hello",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+    })).toThrow("MLX CustomVoice");
+    expect(sanitizeGeneratePayload("qwen3", { text: "Hello", dtype: "BFLOAT16" }))
+      .toMatchObject({ dtype: "bfloat16" });
+    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", dtype: "float16" }))
       .toThrow("Unsupported Qwen3-TTS dtype");
     expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", attnImplementation: "sdpa" }))
       .toThrow("Unsupported Qwen3-TTS attention");
@@ -173,9 +233,10 @@ describe("localTtsIpc bridge result parsing", () => {
     runtime: "rust",
     package: "qwen_tts",
     packageVersion: "0.1.1",
-    warnings: ["CPU execution selected."],
+    warnings: ["Metal auto-selection is enabled."],
     recommendedModelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-    recommendedDeviceMap: "cpu",
+    recommendedBaseModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
+    recommendedDeviceMap: "auto",
     recommendedDtype: "float32",
     recommendedAttention: "eager",
   };
@@ -185,6 +246,8 @@ describe("localTtsIpc bridge result parsing", () => {
     modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     durationSec: 1.25,
     elapsedSec: 0.5,
+    device: "metal",
+    warnings: ["using Metal"],
     audioTransport: "websocket-binary",
     audioChunkCount: 1,
     phaseTimingsSec: {

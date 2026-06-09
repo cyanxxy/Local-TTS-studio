@@ -1,10 +1,17 @@
-import { app, BrowserWindow, ipcMain, Menu, net, protocol, session, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell, type IpcMainInvokeEvent } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { existsSync } from "fs";
 import { promises as fs } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
+import {
+  createQwen3MlxDownloadCoordinator,
+  createSafeProgressSender,
+  qwen3MlxModelDirLooksReady,
+  type Qwen3MlxDownloadResult,
+} from "./qwen3MlxDownload";
 import {
   createWebSocketBridgeWorkerPool,
   type WebSocketBridgeWorkerPool,
@@ -56,6 +63,17 @@ const RUST_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
 // intentionally no stdout fallback for models in this set; generation is
 // WebSocket-only, and `probe` is the only remaining one-shot subprocess action.
 const WEBSOCKET_WORKER_MODELS: ReadonlySet<LocalModel> = new Set<LocalModel>(["neutts", "qwen3"]);
+const QWEN3_MLX_CUSTOMVOICE_06B_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
+const QWEN3_MLX_CUSTOMVOICE_17B_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit";
+const QWEN3_MLX_BASE_06B_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
+const QWEN3_MLX_BASE_17B_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit";
+const QWEN3_MLX_CUSTOMVOICE_06B_DIR_NAME = "Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
+const QWEN3_MLX_DOWNLOAD_MODELS = new Set([
+  QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
+  QWEN3_MLX_CUSTOMVOICE_17B_MODEL,
+  QWEN3_MLX_BASE_06B_MODEL,
+  QWEN3_MLX_BASE_17B_MODEL,
+]);
 protocol.registerSchemesAsPrivileged([
   {
     scheme: ELECTRON_APP_SCHEME,
@@ -225,6 +243,18 @@ function getRustBridgeBinaryName(): string {
   return process.platform === "win32" ? "open-tts-local-bridge.exe" : "open-tts-local-bridge";
 }
 
+function getQwen3MlxWorkerBinaryName(): string {
+  return process.platform === "win32" ? "pibot-tts-worker.exe" : "pibot-tts-worker";
+}
+
+function getQwen3MlxTtsBinaryName(): string {
+  return process.platform === "win32" ? "tts.exe" : "tts";
+}
+
+function getQwen3MlxApiServerBinaryName(): string {
+  return process.platform === "win32" ? "api_server.exe" : "api_server";
+}
+
 function getRustBridgeBinaryPath(): string {
   const binaryName = getRustBridgeBinaryName();
   if (isDev) {
@@ -273,8 +303,140 @@ function buildRustBridgeEnv(cacheDir: string): NodeJS.ProcessEnv {
   env.HF_HOME = hfHome;
   env.HF_HUB_CACHE = path.join(hfHome, "hub");
   env.HUGGINGFACE_HUB_CACHE = path.join(hfHome, "hub");
+  if (!env.OPEN_TTS_QWEN3_MLX_WORKER) {
+    const bundledWorker = path.join(path.dirname(getRustBridgeBinaryPath()), getQwen3MlxWorkerBinaryName());
+    if (existsSync(bundledWorker)) {
+      env.OPEN_TTS_QWEN3_MLX_WORKER = bundledWorker;
+    }
+  }
+  if (!env.OPEN_TTS_QWEN3_MLX_TTS) {
+    const bundledTts = path.join(path.dirname(getRustBridgeBinaryPath()), getQwen3MlxTtsBinaryName());
+    if (existsSync(bundledTts)) {
+      env.OPEN_TTS_QWEN3_MLX_TTS = bundledTts;
+    }
+  }
+  if (!env.OPEN_TTS_QWEN3_MLX_API_SERVER) {
+    const bundledApiServer = path.join(path.dirname(getRustBridgeBinaryPath()), getQwen3MlxApiServerBinaryName());
+    if (existsSync(bundledApiServer)) {
+      env.OPEN_TTS_QWEN3_MLX_API_SERVER = bundledApiServer;
+    }
+  }
 
   return env;
+}
+
+function getQwen3MlxRecommendedModelDir(): string {
+  return path.join(getCacheDir("qwen3"), "mlx", QWEN3_MLX_CUSTOMVOICE_06B_DIR_NAME);
+}
+
+function getQwen3MlxModelDir(modelRepo: string): string {
+  const dirName = modelRepo.split("/").pop();
+  if (!dirName || dirName.includes("..") || dirName.includes("/") || dirName.includes("\\")) {
+    throw new Error("Invalid Qwen3 MLX model repository.");
+  }
+  return path.join(getCacheDir("qwen3"), "mlx", dirName);
+}
+
+function assertQwen3MlxDownloadModel(modelRepo: unknown): string {
+  const repo = typeof modelRepo === "string" && modelRepo.trim()
+    ? modelRepo.trim()
+    : QWEN3_MLX_CUSTOMVOICE_06B_MODEL;
+  if (!QWEN3_MLX_DOWNLOAD_MODELS.has(repo)) {
+    throw new Error("Unsupported Qwen3 MLX model download.");
+  }
+  return repo;
+}
+
+function getQwen3MlxWorkerPath(): string | undefined {
+  const env = buildRustBridgeEnv(getCacheDir("qwen3"));
+  return env.OPEN_TTS_QWEN3_MLX_WORKER;
+}
+
+function getQwen3MlxTtsPath(): string | undefined {
+  const env = buildRustBridgeEnv(getCacheDir("qwen3"));
+  return env.OPEN_TTS_QWEN3_MLX_TTS;
+}
+
+function getQwen3MlxApiServerPath(): string | undefined {
+  const env = buildRustBridgeEnv(getCacheDir("qwen3"));
+  return env.OPEN_TTS_QWEN3_MLX_API_SERVER;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+const qwen3MlxDownloads = createQwen3MlxDownloadCoordinator();
+
+async function handleQwen3MlxSetup(): Promise<{
+  workerAvailable: boolean;
+  workerPath?: string;
+  ttsAvailable: boolean;
+  ttsPath?: string;
+  apiServerAvailable: boolean;
+  apiServerPath?: string;
+  recommendedModelRepo: string;
+  recommendedModelDir: string;
+  modelDirExists: boolean;
+  modelDirLooksReady: boolean;
+  workerBuildCommand: string;
+  modelDownloadCommand: string;
+}> {
+  const workerPath = getQwen3MlxWorkerPath();
+  const ttsPath = getQwen3MlxTtsPath();
+  const apiServerPath = getQwen3MlxApiServerPath();
+  const recommendedModelDir = getQwen3MlxRecommendedModelDir();
+  const [workerAvailable, ttsAvailable, apiServerAvailable, modelDirStats, modelDirLooksReady] = await Promise.all([
+    workerPath ? fs.access(workerPath).then(() => true, () => false) : Promise.resolve(false),
+    ttsPath ? fs.access(ttsPath).then(() => true, () => false) : Promise.resolve(false),
+    apiServerPath ? fs.access(apiServerPath).then(() => true, () => false) : Promise.resolve(false),
+    fs.stat(recommendedModelDir).then((stats) => stats, () => null),
+    qwen3MlxModelDirLooksReady(recommendedModelDir),
+  ]);
+
+  return {
+    workerAvailable,
+    ...(workerPath ? { workerPath } : {}),
+    ttsAvailable,
+    ...(ttsPath ? { ttsPath } : {}),
+    apiServerAvailable,
+    ...(apiServerPath ? { apiServerPath } : {}),
+    recommendedModelRepo: QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
+    recommendedModelDir,
+    modelDirExists: modelDirStats?.isDirectory() ?? false,
+    modelDirLooksReady,
+    workerBuildCommand: "npm run build:qwen3-mlx-worker && npm run build:rust",
+    modelDownloadCommand: `hf download ${QWEN3_MLX_CUSTOMVOICE_06B_MODEL} --local-dir ${shellQuote(recommendedModelDir)}`,
+  };
+}
+
+async function handleDownloadQwen3MlxModel(
+  request: unknown,
+  event: IpcMainInvokeEvent,
+): Promise<Qwen3MlxDownloadResult> {
+  assertTrustedIpcSender(event, { allowDevServer: isDev });
+  const modelRepo = assertQwen3MlxDownloadModel(
+    isRecord(request) ? request.modelRepo : undefined,
+  );
+  const modelDir = getQwen3MlxModelDir(modelRepo);
+  // Concurrent invokes for the same model directory share one download, and
+  // progress sends tolerate a window that closes mid-download.
+  return qwen3MlxDownloads.download(
+    modelRepo,
+    modelDir,
+    createSafeProgressSender(event.sender, "local-tts:qwen3-mlx-download-progress"),
+  );
+}
+
+async function handleChooseQwen3MlxModelDir(): Promise<{ path: string | null }> {
+  const result = await dialog.showOpenDialog({
+    title: "Choose Qwen3 MLX model directory",
+    properties: ["openDirectory"],
+  });
+  if (result.canceled || result.filePaths.length === 0) {
+    return { path: null };
+  }
+  return { path: result.filePaths[0] };
 }
 
 function terminateBridgeChild(child: ChildProcessWithoutNullStreams): void {
@@ -607,14 +769,40 @@ app.whenReady().then(() => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
     return handleClearCache(request);
   });
+
+  ipcMain.handle("local-tts:qwen3-mlx-setup", (event) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return handleQwen3MlxSetup();
+  });
+
+  ipcMain.handle("local-tts:download-qwen3-mlx-model", (event, request: unknown) => (
+    handleDownloadQwen3MlxModel(request, event)
+  ));
+
+  ipcMain.handle("local-tts:choose-qwen3-mlx-model-dir", (event) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return handleChooseQwen3MlxModelDir();
+  });
 });
 
-app.on("before-quit", () => {
+let bridgeShutdownStarted = false;
+app.on("before-quit", (event) => {
   for (const child of activeBridgeProcesses.values()) {
     terminateBridgeChild(child);
   }
   activeBridgeProcesses.clear();
-  void webSocketBridgeWorkers?.shutdownAll();
+
+  // Hold the quit until the worker pool shutdown (SIGTERM + SIGKILL
+  // escalation) has a bounded window to run; otherwise the unref'd kill
+  // timers die with the process and a SIGTERM-ignoring child survives.
+  if (bridgeShutdownStarted || !webSocketBridgeWorkers) return;
+  bridgeShutdownStarted = true;
+  event.preventDefault();
+  const timeout = new Promise<void>((resolve) => {
+    setTimeout(resolve, RUST_CANCEL_KILL_AFTER_MS + 500);
+  });
+  void Promise.race([webSocketBridgeWorkers.shutdownAll(), timeout])
+    .then(() => app.quit(), () => app.quit());
 });
 
 app.on("window-all-closed", () => {

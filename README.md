@@ -41,7 +41,7 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 | **Kokoro-82M** | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 24 kHz browser model, 24 named voices |
 | **Supertonic TTS** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 44.1 kHz browser model, 10 voices |
 | **NeuTTS Nano** | Neuphonic GGUF variants via Rust `neutts` | `/desktop/neutts` | No | Yes | Rust-only local runtime; requires pre-encoded `.npy` reference codes |
-| **Qwen3-TTS CustomVoice** | Qwen 0.6B / 1.7B via Rust `qwen_tts` | `/desktop/qwen3` | No | Yes | Rust-only local runtime; CPU/float32/eager execution today |
+| **Qwen3-TTS MLX + CustomVoice** | Apple-first CustomVoice 6-bit via upstream MLX `tts`; Base cloning via upstream MLX worker; Candle fallback via Rust `qwen_tts` | `/desktop/qwen3` | No | Yes | Rust-only local runtime; MLX CustomVoice is the default macOS profile with built-in speakers, while Base voice cloning is advanced/optional |
 
 > The deployed web app exposes Studio and Reader. Desktop-only routes live under `/desktop/*` and are opened by Electron.
 
@@ -118,7 +118,7 @@ Packaged desktop builds bundle the Electron shell and the Rust local bridge bina
 - iPhone and iPad browsers expose Supertonic only — Kokoro is intentionally disabled on iOS pending further validation.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.
 - Electron local runtimes generate through `open-tts-local-bridge --action serve-ws --port 0 --auth-token <token>`; Rust announces the bound loopback port, metadata travels over authenticated WebSocket JSON, and audio streams as binary Float32 chunks.
-- Local-runtime models download on first generation (Qwen3 is roughly 1–2 GB); the bridge streams progress and emits a heartbeat so a slow first-run download or long CPU inference is not mistaken for a stalled worker. NeuTTS additionally requires a pre-encoded `.npy` reference-code file plus its transcript.
+- Local-runtime models download on first generation (Qwen3 is roughly 1–2 GB); the bridge streams progress and emits a heartbeat so a slow first-run download or long CPU inference is not mistaken for a stalled worker. NeuTTS additionally requires a pre-encoded `.npy` reference-code file plus its transcript. Qwen3 MLX CustomVoice requires a local upstream `tts` binary and MLX model directory; Base voice cloning additionally requires `pibot-tts-worker`, a reference WAV, and its transcript.
 - `vercel.json` provides SPA rewrites plus COOP/COEP headers, which keep the WASM fallback cross-origin isolated (and multi-threaded) for the browser build.
 
 ---

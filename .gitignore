@@ -9,6 +9,9 @@ electron/dist/
 electron/build/
 release/
 rust/**/target/
+rust/qwen3_tts_rs/
+rust/qwen3-tts-rs/
+vendor/qwen3_tts_rs/
 
 # AI assistant metadata (local dev only)
 /.agents/

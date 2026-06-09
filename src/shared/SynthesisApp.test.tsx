@@ -545,7 +545,7 @@ describe("SynthesisApp", () => {
     };
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
-    expect(screen.getByText("Qwen3-TTS 12Hz CustomVoice")).toBeInTheDocument();
+    expect(screen.getByText("Qwen3-TTS 12Hz MLX")).toBeInTheDocument();
   });
 
   it("preserves local runtime tab DOM state when switching tabs", () => {
