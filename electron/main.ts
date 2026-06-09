@@ -7,6 +7,7 @@ import { pathToFileURL } from "url";
 import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import {
+  buildQwen3SetupWarnings,
   createQwen3MlxDownloadCoordinator,
   createSafeProgressSender,
   qwen3MlxModelDirLooksReady,
@@ -752,9 +753,16 @@ app.whenReady().then(() => {
   registerPermissionHandlers();
   createMainWindow();
 
-  ipcMain.handle("local-tts:probe", (event, request: unknown) => {
+  ipcMain.handle("local-tts:probe", async (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    return runRustBridge("probe", request, event);
+    const probe = await runRustBridge("probe", request, event);
+    // The Rust probe ships static, hypothetical warnings; replace them for
+    // Qwen3 with the actual MLX engine status detected on this machine.
+    if (isRecord(request) && request.model === "qwen3" && isRecord(probe)) {
+      const setup = await handleQwen3MlxSetup();
+      probe.warnings = buildQwen3SetupWarnings(setup);
+    }
+    return probe;
   });
 
   ipcMain.handle("local-tts:generate", (event, request: unknown) => {

@@ -54,6 +54,43 @@ export function createSafeProgressSender(
   };
 }
 
+export interface Qwen3MlxSetupState {
+  ttsAvailable: boolean;
+  apiServerAvailable: boolean;
+  workerAvailable: boolean;
+  modelDirLooksReady: boolean;
+}
+
+// The Rust probe can only describe configuration hypothetically ("when ... are
+// configured"); the host knows what is actually installed, so it replaces the
+// probe warnings with the real engine status for this machine.
+export function buildQwen3SetupWarnings(setup: Qwen3MlxSetupState): string[] {
+  const warnings: string[] = [];
+  const mlxEngineAvailable = setup.ttsAvailable || setup.apiServerAvailable;
+
+  if (mlxEngineAvailable && setup.modelDirLooksReady) {
+    warnings.push(
+      "Qwen3 MLX CustomVoice (6-bit) is set up and used by default on this machine.",
+    );
+  } else if (mlxEngineAvailable) {
+    warnings.push(
+      "MLX CustomVoice binaries are installed, but the 6-bit model is not downloaded yet — Qwen3 uses the Candle CustomVoice engine until the model is downloaded from this page.",
+    );
+  } else {
+    warnings.push(
+      "MLX CustomVoice is not installed on this machine, so Qwen3 uses the Candle CustomVoice engine. To enable the faster MLX default, run `npm run build:qwen3-mlx-worker && npm run build:rust`, then download the model from this page.",
+    );
+  }
+
+  warnings.push(
+    setup.workerAvailable
+      ? "Base voice cloning (pibot-tts-worker) is available when explicitly selected."
+      : "Base voice cloning is unavailable until the pibot-tts-worker binary is built (`npm run build:qwen3-mlx-worker`).",
+  );
+
+  return warnings;
+}
+
 // Hugging Face file listings are remote input: reject anything that could
 // escape the model directory on any platform (Windows treats "\\" as a
 // separator, so "..\\evil" must fail just like "../evil").

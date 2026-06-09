@@ -7,6 +7,7 @@ import { Readable } from "stream";
 import type { IncomingMessage } from "http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  buildQwen3SetupWarnings,
   createQwen3MlxDownloadCoordinator,
   createSafeProgressSender,
   downloadQwen3MlxModel,
@@ -265,5 +266,41 @@ describe("createQwen3MlxDownloadCoordinator", () => {
     expect(download).toHaveBeenCalledTimes(2);
     resolvers[1](RESULT);
     await expect(retry).resolves.toMatchObject({ modelDir: "/cache/a" });
+  });
+});
+
+describe("buildQwen3SetupWarnings", () => {
+  it("reports the MLX default as active when an engine and the model are present", () => {
+    const warnings = buildQwen3SetupWarnings({
+      ttsAvailable: true,
+      apiServerAvailable: false,
+      workerAvailable: true,
+      modelDirLooksReady: true,
+    });
+    expect(warnings[0]).toMatch(/MLX CustomVoice \(6-bit\) is set up and used by default/);
+    expect(warnings[1]).toMatch(/Base voice cloning \(pibot-tts-worker\) is available/);
+  });
+
+  it("reports the Candle fallback when the model is not downloaded", () => {
+    const warnings = buildQwen3SetupWarnings({
+      ttsAvailable: false,
+      apiServerAvailable: true,
+      workerAvailable: false,
+      modelDirLooksReady: false,
+    });
+    expect(warnings[0]).toMatch(/model is not downloaded yet/);
+    expect(warnings[0]).toMatch(/Candle CustomVoice engine until/);
+    expect(warnings[1]).toMatch(/Base voice cloning is unavailable/);
+  });
+
+  it("reports the Candle fallback with setup steps when MLX is not installed", () => {
+    const warnings = buildQwen3SetupWarnings({
+      ttsAvailable: false,
+      apiServerAvailable: false,
+      workerAvailable: false,
+      modelDirLooksReady: true,
+    });
+    expect(warnings[0]).toMatch(/MLX CustomVoice is not installed/);
+    expect(warnings[0]).toMatch(/build:qwen3-mlx-worker/);
   });
 });
