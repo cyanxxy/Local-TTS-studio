@@ -14,16 +14,13 @@ export function LocalRuntimeRuntimeSettings({
   return (
     <section className="rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md p-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Rust Runtime</h3>
-          <p className="mt-1 text-sm text-text-muted">Local bridge and model execution are Rust-only.</p>
-        </div>
+        <h3 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">Runtime</h3>
         <button
           type="button"
           onClick={onRecheckRuntime}
           disabled={runtimeBusy}
           className={`
-            rounded-md border px-3 py-2 text-xs font-semibold transition-colors
+            rounded-lg border px-3 py-2 text-xs font-semibold transition-colors
             ${runtimeBusy
               ? "cursor-not-allowed border-border text-text-muted"
               : "border-white/55 bg-white/40 backdrop-blur-md text-text-primary hover:bg-white/60"
@@ -35,9 +32,9 @@ export function LocalRuntimeRuntimeSettings({
       </div>
 
       <div className="mt-4 grid grid-cols-1 gap-2 text-sm text-text-secondary md:grid-cols-2">
-        <p>Runtime: {runtime?.runtime ?? "-"}</p>
-        <p>Package: {runtime?.package ?? "-"}</p>
-        <p>Package version: {runtime?.packageVersion ?? "-"}</p>
+        {runtime?.runtime && <p>Runtime: {runtime.runtime}</p>}
+        {runtime?.package && <p>Package: {runtime.package}</p>}
+        {runtime?.packageVersion && <p>Package version: {runtime.packageVersion}</p>}
         {runtime?.recommendedModelRepo && <p className="break-all">Recommended model: {runtime.recommendedModelRepo}</p>}
         {runtime?.recommendedBaseModelRepo && <p className="break-all">Recommended Base model: {runtime.recommendedBaseModelRepo}</p>}
         {runtime?.recommendedDeviceMap && <p>Recommended device: {runtime.recommendedDeviceMap}</p>}

@@ -35,6 +35,7 @@
     "@breezystack/lamejs": "^1.2.7",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/literata": "^5.2.8",
     "@fontsource-variable/outfit": "^5.2.8",
     "@huggingface/transformers": "4.2.0",
     "@tailwindcss/vite": "^4.1.17",

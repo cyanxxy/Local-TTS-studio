@@ -148,7 +148,7 @@ export function LocalRuntimePage({
   const [cacheBusy, setCacheBusy] = useState(false);
   const [status, setStatus] = useState<StatusMessage>(null);
   const [text, setText] = useState(
-    "This synthesis runs fully local on your machine through the Rust local bridge.",
+    "Everything you hear is generated right here on this machine.",
   );
 
   const [neuttsModel, setNeuttsModel] = useState(NEUTTS_OPTIONS[0].value);
@@ -993,18 +993,20 @@ export function LocalRuntimePage({
       <section className="flex flex-col gap-4 rounded-[22px] glass-panel p-4 transition-all duration-300 sm:p-6 lg:col-span-3">
         <div>
           <h2 className="text-xl font-display font-semibold text-text-primary">{name}</h2>
-          <div className="mt-1 flex flex-wrap gap-x-2 gap-y-1 text-sm text-text-secondary">
-            <span>Released: {releaseDate}</span>
-            <span className="hidden sm:inline">•</span>
-            <span>Parameters: {params}</span>
+          <div className="mt-2 flex flex-wrap gap-1.5">
+            <span className="rounded-full border border-white/50 bg-white/40 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-sm">
+              {releaseDate}
+            </span>
+            <span className="rounded-full border border-white/50 bg-white/40 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-sm">
+              {params}
+            </span>
           </div>
-        </div>
-
-        <div>
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-text-secondary">Highlights</h3>
-          <ul className="mt-2 space-y-1 text-sm text-text-primary">
+          <ul className="mt-3 space-y-1 text-sm text-text-secondary">
             {highlights.map((item) => (
-              <li key={item} className="leading-relaxed">{item}</li>
+              <li key={item} className="flex gap-2 leading-relaxed">
+                <span aria-hidden className="mt-[0.55em] h-1 w-1 shrink-0 rounded-full bg-accent/60" />
+                {item}
+              </li>
             ))}
           </ul>
         </div>
@@ -1098,21 +1100,21 @@ export function LocalRuntimePage({
             onClick={runGeneration}
             disabled={!electronAvailable || !runtimeReady || !canGenerate || busy}
             className={`
-              w-full rounded-xl px-5 py-2.5 text-lg font-bold transition-all duration-300 sm:w-auto
+              w-full rounded-2xl px-6 py-2.5 text-sm font-semibold tracking-wide transition-all duration-300 sm:w-auto
               ${!electronAvailable || !runtimeReady || !canGenerate || busy
                 ? "bg-border/50 text-text-muted cursor-not-allowed backdrop-blur-sm"
                 : "glass-accent text-white"
               }
             `}
           >
-            {generateBusy ? "Generating…" : "Generate Locally"}
+            {generateBusy ? "Generating…" : "Generate"}
           </button>
 
           {generateBusy && (
             <button
               type="button"
               onClick={() => { void cancelActiveGeneration(); }}
-              className="w-full rounded-xl border border-white/55 bg-white/40 backdrop-blur-md px-5 py-2.5 text-lg font-semibold text-text-primary shadow-glass-sm transition-all duration-200 hover:bg-white/60 hover:-translate-y-0.5 sm:w-auto"
+              className="w-full rounded-2xl border border-white/55 bg-white/40 backdrop-blur-md px-5 py-2.5 text-sm font-semibold text-text-primary shadow-glass-sm transition-all duration-200 hover:bg-white/60 hover:-translate-y-0.5 sm:w-auto"
             >
               Cancel
             </button>
@@ -1121,7 +1123,7 @@ export function LocalRuntimePage({
 
         {(audioUrl || audioPlayer.totalDuration > 0) && (
           <div className="border border-black/10 rounded-xl p-3 bg-surface/55 backdrop-blur-md">
-            <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary mb-2">Output Audio</p>
+            <p className="text-xs font-semibold uppercase tracking-widest text-text-secondary mb-2">Output</p>
             <AudioPlayer
               embedded
               isPlaying={audioPlayer.isPlaying}
@@ -1151,7 +1153,7 @@ export function LocalRuntimePage({
 
         {!electronAvailable && (
           <p className="text-xs text-danger">
-            This integration runs only in the Electron desktop app because it calls local model runtimes.
+            Available only in the desktop app — this model runs through local runtimes.
           </p>
         )}
       </section>

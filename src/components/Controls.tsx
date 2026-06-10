@@ -117,7 +117,7 @@ export function Controls() {
           ) : modelReady ? (
             <>
               <Sparkles size={14} />
-              <span>Generate Speech</span>
+              <span>Generate</span>
             </>
           ) : modelError ? (
             <>

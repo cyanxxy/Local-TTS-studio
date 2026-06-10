@@ -58,9 +58,9 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
     releaseDate: "February 12, 2026",
     params: "~120M active (~229M with embeddings)",
     highlights: [
-      "On-device, CPU-focused speech generation and instant voice cloning from short references.",
-      "Multilingual Nano variants published for English, German, French, and Spanish.",
-      "Runs through the Rust local bridge using GGUF model variants and pre-encoded .npy reference codes.",
+      "CPU-friendly speech with instant voice cloning from short references.",
+      "Nano variants for English, German, French, and Spanish.",
+      "Runs on the Rust bridge with GGUF models and .npy reference codes.",
     ],
     links: [
       { label: "HF Model", href: "https://huggingface.co/neuphonic/neutts-nano" },
@@ -73,9 +73,9 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
     releaseDate: "January 29, 2026",
     params: "0.6B / 1.7B",
     highlights: [
-      "Apple-first Qwen3 path defaults to the upstream 0.6B CustomVoice 6-bit MLX profile with built-in speakers.",
-      "Base MLX voice cloning remains available as an advanced profile when a reference WAV and transcript are provided.",
-      "Runs through the resident Rust WebSocket bridge because the released model assets are local runtime formats, not browser ONNX artifacts.",
+      "Defaults to the 0.6B CustomVoice 6-bit MLX profile with nine built-in speakers.",
+      "Voice cloning available via the Base profile with a reference WAV and transcript.",
+      "Runs on the resident Rust bridge — these models ship as local runtime formats, not browser ONNX.",
     ],
     links: [
       { label: "MLX CustomVoice 0.6B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit" },
@@ -425,7 +425,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
   return (
     <div className="min-h-screen font-sans text-text-primary">
-      <div className={isReaderPage ? "w-full px-3 py-3 sm:px-4 sm:py-4 md:px-6 md:py-6" : "mx-auto max-w-5xl px-4 py-8 sm:px-5 sm:py-10 md:py-14"}>
+      <div className={isReaderPage ? "w-full px-3 py-3 sm:px-4 sm:py-4 md:px-6 md:py-6" : "w-full px-4 py-6 sm:px-6 sm:py-8 md:px-8 md:py-10"}>
 
         {/* Header */}
         <header className={isReaderPage ? "mb-4" : "mb-8 sm:mb-10"}>
@@ -438,7 +438,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               </h1>
               {!isReaderPage && (
                 <p className="mt-3 text-base font-medium tracking-wide text-text-secondary sm:text-lg">
-                  On-device synthesis — no server, no keys, no data leaves your device.
+                  Text to speech, entirely on your device.
                 </p>
               )}
             </div>
@@ -615,6 +615,8 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               isPlaying={player.isPlaying}
               currentTime={player.currentTime}
               totalDuration={player.totalDuration}
+              playbackRate={player.playbackRate}
+              onPlaybackRateChange={player.setPlaybackRate}
               segments={player.segments}
               activeSegmentId={player.activeSegmentId}
               onTogglePlay={player.togglePlay}
@@ -677,8 +679,8 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                 {isStudioPage
                   ? activeModelSupportMessage
                     ?? browserSupport.message
-                    ?? "Tracking promising local TTS models — full in-app integration depends on compatible runtimes."
-                  : "Tracking promising local TTS models — full in-app integration depends on compatible runtimes."}
+                    ?? "More local models as compatible runtimes land."
+                  : "More local models as compatible runtimes land."}
               </p>
             )}
           </footer>

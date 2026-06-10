@@ -43,7 +43,7 @@ export function SettingsPanel({
       {open && (
         <div className="px-4 pb-4 flex flex-col gap-2 border-t border-black/5 animate-fade-up">
           <p className="text-sm text-text-muted pt-3 pb-1">
-            Models download once and stay cached locally — the app still reinitializes them after a page refresh.
+            Models download once and load from the local cache.
           </p>
 
           <button

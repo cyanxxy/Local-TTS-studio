@@ -89,12 +89,13 @@ Liquid Glass design (Apple): translucent, blurred, light-refracting surfaces flo
   - For interactive/stateful buttons use Tailwind utilities instead: `bg-white/40 backdrop-blur-md border border-white/55 shadow-glass-sm` + hover/active variants (predictable cascade).
 - **Glass shadows**: `--shadow-glass-sm/md/lg` (`@theme` → `shadow-glass-*` utilities) bake in the drop shadow + inset top specular highlight.
 - **Electron (macOS)**: window uses native `vibrancy: "under-window"` + transparent background + `titleBarStyle: "hiddenInset"`; the renderer adds `is-electron`/`is-mac` classes on `<html>` to make the body transparent (so the vibrancy shows) and inset/drag the header for traffic lights.
-- **Fonts**: Self-hosted via `@fontsource-variable` (Inter, Outfit, JetBrains Mono) — no external CDN. Global: `font-optical-sizing: auto`, `text-rendering: optimizeLegibility`, `font-feature-settings: kern/liga/calt`.
+- **Fonts**: Self-hosted via `@fontsource-variable` (Inter, Outfit, JetBrains Mono, Literata) — no external CDN. Global: `font-optical-sizing: auto`, `text-rendering: optimizeLegibility`, `font-feature-settings: kern/liga/calt`.
   - `font-sans` (Inter) — body + UI text
   - `font-display` (Outfit) — all headings (h1/h2 content titles). Pair display sizes with this class.
   - `font-mono` (JetBrains Mono) — stats, code, numeric values (add `tabular-nums` for aligned digits)
+  - `font-reading` (Literata) — Reader document body only, paired with `text-reader`/`text-reader-lg`. The reader overlay and textarea must share identical font/size/padding classes (incl. `.reader-doc-pad`, which centers the text column inside the full-bleed panel).
 - **Type scale** (one canonical scale in `@theme`, each token carries a tuned line-height; display tokens also carry negative tracking). ALWAYS use these utilities — never ad-hoc `text-[Npx]`/`text-[Nrem]`:
-  - UI: `text-2xs` 9 · `text-xs` 10 · `text-sm` 11 · `text-base` 13 · `text-lg` 14 · `text-xl` 16 (px)
+  - UI: `text-2xs` 9 · `text-xs` 10 · `text-sm` 11 · `text-base` 13 · `text-lg` 14 · `text-xl` 16 (px) · `text-reader` 17 / `text-reader-lg` 19 (reading body, 1.85 lh)
   - Display: `text-2xl` 1.5 · `text-3xl` 1.75 · `text-4xl` 2 · `text-5xl` 2.2 · `text-6xl` 2.8 (rem)
   - Small uppercase section labels: `text-xs font-semibold uppercase tracking-widest` (not `font-bold`).
 - **Colors**: `--color-surface` #F5F5F7, `--color-panel` #FFFFFF, `--color-accent` #0071E3, `--color-text-primary` #1D1D1F

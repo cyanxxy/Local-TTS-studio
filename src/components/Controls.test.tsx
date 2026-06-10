@@ -28,9 +28,9 @@ function renderControls(overrides: Partial<typeof defaultProps> = {}) {
 }
 
 describe("Controls", () => {
-  it("shows Generate Speech button when model is ready", () => {
+  it("shows Generate button when model is ready", () => {
     renderControls();
-    expect(screen.getByText("Generate Speech")).toBeInTheDocument();
+    expect(screen.getByText("Generate")).toBeInTheDocument();
   });
 
   it("shows Preparing when not ready", () => {
@@ -61,14 +61,14 @@ describe("Controls", () => {
 
   it("disables Generate when canGenerate is false", () => {
     renderControls({ canGenerate: false });
-    const button = screen.getByText("Generate Speech");
+    const button = screen.getByText("Generate");
     expect(button.closest("button")).toBeDisabled();
   });
 
   it("calls onGenerate when button is clicked", () => {
     const onGenerate = vi.fn();
     renderControls({ onGenerate });
-    fireEvent.click(screen.getByText("Generate Speech"));
+    fireEvent.click(screen.getByText("Generate"));
     expect(onGenerate).toHaveBeenCalledOnce();
   });
 

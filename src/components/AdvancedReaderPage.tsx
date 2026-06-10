@@ -1,15 +1,33 @@
-import { useEffect, useId, useMemo, useRef } from "react";
-import { BookOpen, ChevronLeft, ChevronRight, RotateCcw } from "lucide-react";
-import { MIN_TEXT_LENGTH } from "../constants";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import {
+  BookOpen,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Loader2,
+  Pause,
+  Play,
+  RefreshCw,
+  RotateCcw,
+  RotateCw,
+  SlidersHorizontal,
+  Sparkles,
+  Square,
+} from "lucide-react";
+import {
+  MIN_TEXT_LENGTH,
+  MODELS,
+  QUALITY_MIN,
+  QUALITY_MAX,
+  QUALITY_STEP,
+} from "../constants";
 import { getMeaningfulTextLength } from "../lib/textValidation";
 import type { ModelState, ModelType, GenerationStats } from "../types";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
 import { ModelToggle } from "./ModelToggle";
 import { VoiceSelector } from "./VoiceSelector";
-import { ControlsProvider } from "./ControlsContext";
-import { Controls } from "./Controls";
-import { AudioPlayer } from "./AudioPlayer";
 
 interface AdvancedReaderPageProps {
   fullScreen?: boolean;
@@ -38,6 +56,8 @@ interface AdvancedReaderPageProps {
   isPlaying: boolean;
   currentTime: number;
   totalDuration: number;
+  playbackRate?: number;
+  onPlaybackRateChange?: (rate: number) => void;
   segments: AudioSegment[];
   activeSegmentId: string | null;
   onTogglePlay: () => void;
@@ -64,6 +84,31 @@ interface SectionBoundary {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+
+function nextPlaybackRate(current: number): number {
+  const index = PLAYBACK_RATES.findIndex((rate) => Math.abs(rate - current) < 0.001);
+  return PLAYBACK_RATES[(index + 1) % PLAYBACK_RATES.length] ?? 1;
+}
+
+function formatPlaybackRate(rate: number): string {
+  return `${rate.toFixed(2).replace(/\.?0+$/, "")}×`;
+}
+
+function formatTime(secs: number): string {
+  const m = Math.floor(secs / 60);
+  const s = (secs % 60).toFixed(1);
+  return `${m}:${s.padStart(4, "0")}`;
+}
+
+/** "af_heart" → "Heart" */
+function formatVoiceName(id: string): string {
+  const i = id.indexOf("_");
+  if (i === -1) return id;
+  const name = id.slice(i + 1).replace(/_/g, " ");
+  return name.charAt(0).toUpperCase() + name.slice(1);
 }
 
 /**
@@ -118,6 +163,19 @@ function buildOverlayParts(
   return parts;
 }
 
+/* Shared metrics for the overlay and the transparent textarea beneath it.
+   Both must be glyph-for-glyph identical, so they always use this one string. */
+const DOCUMENT_TEXT_CLASSES =
+  "whitespace-pre-wrap break-words font-reading text-reader sm:text-reader-lg";
+
+/* Horizontal padding comes from .reader-doc-pad, which centers a readable
+   text column inside the full-bleed panel at any window size. */
+function documentPadding(fullScreen: boolean): string {
+  return fullScreen
+    ? "reader-doc-pad pt-8 pb-44 sm:pt-12 sm:pb-48"
+    : "reader-doc-pad py-8";
+}
+
 export function AdvancedReaderPage({
   fullScreen = false,
   text,
@@ -145,6 +203,8 @@ export function AdvancedReaderPage({
   isPlaying,
   currentTime,
   totalDuration,
+  playbackRate = 1,
+  onPlaybackRateChange,
   segments,
   activeSegmentId,
   onTogglePlay,
@@ -156,18 +216,32 @@ export function AdvancedReaderPage({
   onRetakeSegment,
   onJumpToSegment,
 }: AdvancedReaderPageProps) {
-  const activeSegmentNumber = useMemo(() => {
-    if (!activeSegmentId) return null;
-    const index = segments.findIndex((segment) => segment.id === activeSegmentId);
-    return index >= 0 ? index + 1 : null;
-  }, [activeSegmentId, segments]);
-
   const runtimeBackend = activeModel === "kokoro"
     ? kokoroState.backend
     : supertonicState.backend;
+  const activeModelState = activeModel === "kokoro" ? kokoroState : supertonicState;
   const overlayRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const readingTextId = useId();
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsRef = useRef<HTMLDivElement>(null);
+  const settingsOpenRef = useRef(settingsOpen);
+
+  useEffect(() => {
+    settingsOpenRef.current = settingsOpen;
+  }, [settingsOpen]);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (!settingsOpenRef.current) return;
+      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+        setSettingsOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, []);
 
   const previewChunks = useMemo(
     () => chunkTextForModelDetailed(text, activeModel, { runtime: { backend: runtimeBackend, quality } }),
@@ -228,230 +302,578 @@ export function AdvancedReaderPage({
   const hasGeneratedSegments = segments.length > 0;
   const meaningfulLength = getMeaningfulTextLength(text);
   const charsRemaining = MIN_TEXT_LENGTH - meaningfulLength;
+  const hasAudio = totalDuration > 0;
+  const focusMode = isPlaying && activeRange !== null;
+
+  // Auto-follow backs off after the user scrolls manually, so reading ahead
+  // or reviewing earlier text is never yanked back to the spoken sentence.
+  const programmaticScrollRef = useRef(false);
+  const lastUserScrollAtRef = useRef(0);
+  const USER_SCROLL_GRACE_MS = 4000;
 
   const syncOverlayScroll = (target: HTMLTextAreaElement) => {
+    if (programmaticScrollRef.current) {
+      programmaticScrollRef.current = false;
+    } else {
+      lastUserScrollAtRef.current = Date.now();
+    }
     if (!overlayRef.current) return;
     overlayRef.current.scrollTop = target.scrollTop;
     overlayRef.current.scrollLeft = target.scrollLeft;
   };
 
   useEffect(() => {
+    if (!isPlaying) return;
+    if (Date.now() - lastUserScrollAtRef.current < USER_SCROLL_GRACE_MS) return;
     if (!overlayRef.current || !textareaRef.current) return;
     const marker = overlayRef.current.querySelector<HTMLElement>(".reader-chunk-highlight-active");
     if (!marker) return;
 
-    const nextTop = Math.max(0, marker.offsetTop - 32);
+    // Keep the spoken sentence in the upper third of the page, book-style.
+    const lead = Math.max(32, overlayRef.current.clientHeight * 0.28);
+    const nextTop = Math.max(0, marker.offsetTop - lead);
+    if (Math.abs(textareaRef.current.scrollTop - nextTop) < 1) return;
+    programmaticScrollRef.current = true;
     overlayRef.current.scrollTop = nextTop;
     textareaRef.current.scrollTop = nextTop;
-  }, [activeRange]);
+  }, [activeRange, isPlaying]);
+
+  /* ── Seek slider (pointer + keyboard) ─────────────────────── */
+  const barRef = useRef<HTMLDivElement>(null);
+  const isDragging = useRef(false);
+  const onSeekRef = useRef(onSeek);
+  const currentTimeRef = useRef(currentTime);
+  const totalDurationRef = useRef(totalDuration);
+
+  useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
+  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
+  useEffect(() => { totalDurationRef.current = totalDuration; }, [totalDuration]);
+
+  const progress = hasAudio ? Math.min(100, (currentTime / totalDuration) * 100) : 0;
+
+  const getSeekPct = useCallback((clientX: number): number => {
+    if (!barRef.current) return 0;
+    const rect = barRef.current.getBoundingClientRect();
+    return clamp((clientX - rect.left) / rect.width, 0, 1);
+  }, []);
+
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!hasAudio) return;
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      isDragging.current = true;
+      onSeekRef.current(getSeekPct(e.clientX));
+    },
+    [getSeekPct, hasAudio],
+  );
+
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDragging.current) return;
+      onSeekRef.current(getSeekPct(e.clientX));
+    },
+    [getSeekPct],
+  );
+
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    isDragging.current = false;
+  }, []);
+
+  const handlePointerCancel = useCallback(() => {
+    isDragging.current = false;
+  }, []);
+
+  const handleSeekKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const dur = totalDurationRef.current;
+      if (dur === 0) return;
+      const cur = currentTimeRef.current;
+      const step = 5 / dur;
+      if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+        e.preventDefault();
+        onSeekRef.current(Math.min(1, cur / dur + step));
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+        e.preventDefault();
+        onSeekRef.current(Math.max(0, cur / dur - step));
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        onSeekRef.current(0);
+      } else if (e.key === "End") {
+        e.preventDefault();
+        onSeekRef.current(1);
+      }
+    },
+    [],
+  );
+
+  /* ── Primary action state ─────────────────────────────────── */
+  const showRetry = !modelReady && !!modelError;
+  const isPreparing = !modelReady && !modelError;
+  const displayProgress = clamp(generationProgress, 0, 100);
+  const canStop = isGenerating || hasAudio || isPlaying || currentTime > 0;
+  const hasStats =
+    stats.firstLatency !== null ||
+    stats.processingTime > 0 ||
+    stats.charsPerSec > 0 ||
+    stats.rtf > 0;
+
+  const statusLabel = isGenerating
+    ? displayProgress > 0 ? `Generating ${Math.round(displayProgress)}%` : "Generating…"
+    : showRetry
+      ? "Model failed to load"
+      : isPreparing
+        ? loadingProgress > 0 ? `Preparing ${Math.round(loadingProgress)}%` : "Preparing…"
+        : hasAudio
+          ? null
+          : canGenerate
+            ? "Ready to generate"
+            : charsRemaining > 0
+              ? `Need ${charsRemaining.toLocaleString()} more character${charsRemaining !== 1 ? "s" : ""}`
+              : "Ready";
+
+  // Play/pause wins as soon as any audio exists — including while later
+  // chunks are still streaming in, so listening is never locked out.
+  const ctaDisabled = !showRetry && !hasAudio && (isGenerating || isPreparing || !canGenerate);
+
+  const handleCtaClick = () => {
+    if (showRetry) {
+      onRetryLoad();
+      return;
+    }
+    if (hasAudio) {
+      onTogglePlay();
+      return;
+    }
+    if (isGenerating || isPreparing) return;
+    if (canGenerate) onGenerate();
+  };
+
+  const ctaLabel = showRetry
+    ? "Retry model load"
+    : hasAudio
+      ? isPlaying ? "Pause" : "Play"
+      : isGenerating
+        ? "Generating"
+        : "Generate speech";
+
+  const ctaIcon = showRetry ? (
+    <RefreshCw size={18} />
+  ) : hasAudio ? (
+    isPlaying
+      ? <Pause size={19} fill="currentColor" />
+      : <Play size={19} fill="currentColor" className="translate-x-px" />
+  ) : isGenerating ? (
+    <span className="flex flex-col items-center justify-center gap-0.5">
+      <Loader2 size={18} className="animate-spin" />
+      {displayProgress > 0 && (
+        <span className="font-mono text-2xs tabular-nums leading-none">
+          {Math.round(displayProgress)}%
+        </span>
+      )}
+    </span>
+  ) : isPreparing ? (
+    <Loader2 size={18} className="animate-spin" />
+  ) : (
+    <Sparkles size={19} />
+  );
+
+  const ctaIsAccent = !ctaDisabled || isGenerating;
+
+  const smallTransportButton = (enabled: boolean) =>
+    `flex h-9 w-9 items-center justify-center rounded-full border transition-all duration-200 ${
+      enabled
+        ? "border-white/55 bg-white/45 backdrop-blur-md text-text-secondary shadow-glass-sm hover:-translate-y-0.5 hover:bg-white/65 hover:text-accent"
+        : "border-border/60 text-text-muted/60 cursor-not-allowed"
+    }`;
+
+  const dockUtilityButton = (enabled: boolean) =>
+    `flex h-8 w-8 items-center justify-center rounded-full transition-all duration-200 ${
+      enabled
+        ? "text-text-muted hover:bg-white/55 hover:text-accent"
+        : "text-text-muted/50 cursor-not-allowed"
+    }`;
 
   return (
-    <div className={`grid grid-cols-1 lg:grid-cols-5 ${fullScreen ? "gap-3 sm:gap-4" : "mt-6 gap-4 sm:gap-5"} ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : ""}`}>
-      <section className="lg:col-span-3 flex h-full flex-col gap-4 rounded-[22px] glass-panel p-4 sm:gap-5 sm:p-6">
-        <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-accent-light flex items-center justify-center shrink-0">
+    <div className={`flex w-full flex-col gap-3 sm:gap-4 ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : "mt-6"}`}>
+
+      {/* ── Toolbar ─────────────────────────────────────────── */}
+      {/* relative z-30 lifts the toolbar's stacking context above the document
+          panel so the settings popover never paints behind the reader overlay */}
+      <div className="glass relative z-30 flex items-center justify-between gap-3 rounded-2xl py-2 pr-2 pl-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent-light">
             <BookOpen size={14} className="text-accent" />
           </div>
-          <div>
-            <h2 className="text-lg font-display font-semibold text-text-primary">Reader Mode</h2>
-            <p className="text-xs text-text-muted">
-              Edit your text with section boundaries shown directly in the editor.
+          <div className="min-w-0">
+            <h2 className="font-display text-lg leading-none font-semibold text-text-primary">Reader</h2>
+            <p className="mt-0.5 truncate font-mono text-xs tabular-nums text-text-muted">
+              {meaningfulLength.toLocaleString()} chars · {previewChunks.length} section{previewChunks.length !== 1 ? "s" : ""}
+              {statusLabel ? ` · ${statusLabel}` : ""}
             </p>
           </div>
         </div>
 
-        <div className="space-y-2">
-          <label
-            htmlFor={readingTextId}
-            className="text-xs font-semibold uppercase tracking-widest text-text-muted"
+        {/* Voice & model settings popover */}
+        <div ref={settingsRef} className="relative shrink-0">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen((o) => !o)}
+            aria-expanded={settingsOpen}
+            aria-label="Voice settings"
+            className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98]"
           >
-            Reading Text
-          </label>
-          <div className={`relative rounded-2xl border border-black/10 bg-surface/50 backdrop-blur-md shadow-glass-sm transition-shadow duration-200 focus-within:shadow-accent-sm ${fullScreen ? "min-h-[40vh] sm:min-h-[45vh]" : "min-h-64"}`}>
-
-            <div
-              ref={overlayRef}
-              aria-hidden
-              className="pointer-events-none absolute inset-0 z-20 overflow-auto whitespace-pre-wrap break-words px-4 py-3 text-lg leading-6 text-text-primary select-none sm:text-xl sm:leading-7"
-            >
-              {overlayParts.map((part, index) => {
-                const activeClass = part.isActive
-                  ? "reader-chunk-highlight reader-chunk-highlight-active"
-                  : "";
-                const tintClass = part.sectionIndex >= 0
-                  ? part.sectionIndex % 2 === 0
-                    ? "reader-section-even"
-                    : "reader-section-odd"
-                  : "";
-                const className = `${tintClass} ${activeClass}`.trim();
-
-                return (
-                  <span key={`part-${index}`} className={className || undefined}>
-                    {part.text}
-                  </span>
-                );
-              })}
-              {/* Mirror a trailing blank line so the textarea's final newline keeps overlay height in sync. */}
-              {text.endsWith("\n") && <span>{"\n"}</span>}
-            </div>
-
-            <textarea
-              id={readingTextId}
-              ref={textareaRef}
-              value={text}
-              onChange={(event) => onTextChange(event.target.value)}
-              onScroll={(event) => syncOverlayScroll(event.currentTarget)}
-              onMouseUp={(event) => {
-                if (!hasGeneratedSegments) return;
-                const ta = event.currentTarget;
-                if (ta.selectionStart !== ta.selectionEnd) return;
-                const pos = ta.selectionStart;
-                const boundary = sectionBoundaries.find(
-                  (b) => b.id !== null && pos >= b.start && pos < b.end,
-                );
-                if (boundary?.id) onJumpToSegment(boundary.id);
-              }}
-              placeholder="Type or paste long-form text to read aloud…"
-              className={`relative z-10 h-full w-full resize-none rounded-xl bg-transparent px-4 py-3 text-lg leading-6 text-transparent caret-text-primary placeholder:text-text-muted focus:outline-none sm:text-xl sm:leading-7 ${
-                fullScreen ? "min-h-[40vh] sm:min-h-[45vh]" : "min-h-64"
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                activeModelState.ready ? "bg-success" : activeModelState.error ? "bg-danger" : "bg-text-muted animate-pulse"
               }`}
-              style={{ WebkitTextFillColor: "transparent" }}
+              style={activeModelState.ready ? { boxShadow: "0 0 6px color-mix(in srgb, var(--color-success) 60%, transparent)" } : undefined}
             />
-          </div>
-          {hasGeneratedSegments && (
-            <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-white/55 bg-white/40 backdrop-blur-md shadow-glass-sm px-3 py-2 animate-fade-up sm:flex-nowrap">
-              <button
-                type="button"
-                aria-label="Previous section"
-                onClick={() => {
-                  if (activeSegmentIndex > 0) {
-                    onJumpToSegment(segments[activeSegmentIndex - 1].id);
-                  }
-                }}
-                disabled={activeSegmentIndex <= 0}
-                className="order-1 rounded-lg p-1.5 text-text-secondary transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:text-text-muted"
-              >
-                <ChevronLeft size={13} />
-              </button>
+            <span className="hidden font-medium sm:inline">{formatVoiceName(voice)}</span>
+            <span className="hidden text-xs text-text-muted md:inline">{MODELS[activeModel].label}</span>
+            <SlidersHorizontal size={13} className="text-text-muted sm:hidden" />
+            <ChevronDown
+              size={13}
+              className={`hidden text-text-muted transition-transform duration-200 sm:block ${settingsOpen ? "rotate-180" : ""}`}
+            />
+          </button>
 
-              <div className="order-4 flex min-w-0 basis-full items-center gap-2.5 sm:order-2 sm:basis-auto sm:flex-1">
-                <div className="flex-1 h-[3px] rounded-full bg-surface overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-accent transition-all duration-300 ease-out"
-                    style={{
-                      width: activeSegmentIndex >= 0
-                        ? `${((activeSegmentIndex + 1) / segments.length) * 100}%`
-                        : "0%",
-                    }}
-                  />
-                </div>
-                <span className="text-xs font-mono text-text-muted tabular-nums whitespace-nowrap shrink-0">
-                  {activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : "–"} / {segments.length}
-                </span>
+          {settingsOpen && (
+            <div className="glass-pop animate-scale-in absolute top-full right-0 z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] origin-top-right rounded-2xl p-4">
+              <div className="flex flex-col gap-4">
+                <ModelToggle
+                  activeModel={activeModel}
+                  onModelChange={onModelChange}
+                  kokoroState={kokoroState}
+                  supertonicState={supertonicState}
+                  unavailableModels={unavailableModels}
+                />
+
+                <VoiceSelector
+                  activeModel={activeModel}
+                  voice={voice}
+                  onVoiceChange={onVoiceChange}
+                  kokoroVoices={kokoroVoices}
+                />
+
+                {activeModel === "supertonic" && (
+                  <div>
+                    <div className="mb-2 flex items-baseline justify-between">
+                      <label
+                        htmlFor={`${readingTextId}-quality`}
+                        className="text-xs font-semibold uppercase tracking-widest text-text-muted"
+                      >
+                        Quality
+                      </label>
+                      <span className="font-mono text-sm font-medium tabular-nums text-text-primary">
+                        {quality} steps
+                      </span>
+                    </div>
+                    <input
+                      id={`${readingTextId}-quality`}
+                      type="range"
+                      min={QUALITY_MIN}
+                      max={QUALITY_MAX}
+                      step={QUALITY_STEP}
+                      value={quality}
+                      onChange={(e) => onQualityChange(parseInt(e.target.value))}
+                    />
+                    <div className="mt-1.5 flex justify-between">
+                      <span className="text-xs text-text-muted">Faster</span>
+                      <span className="text-xs text-text-muted">Higher quality</span>
+                    </div>
+                  </div>
+                )}
               </div>
-
-              <button
-                type="button"
-                aria-label="Next section"
-                onClick={() => {
-                  if (activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1) {
-                    onJumpToSegment(segments[activeSegmentIndex + 1].id);
-                  }
-                }}
-                disabled={activeSegmentIndex < 0 || activeSegmentIndex >= segments.length - 1}
-                className="order-2 rounded-lg p-1.5 text-text-secondary transition-colors hover:bg-surface disabled:cursor-not-allowed disabled:text-text-muted sm:order-3"
-              >
-                <ChevronRight size={13} />
-              </button>
-
-              <div className="mx-0.5 hidden h-4 w-px shrink-0 bg-border sm:order-4 sm:block" />
-
-              <button
-                type="button"
-                onClick={() => {
-                  if (activeSegmentIndex >= 0) {
-                    onRetakeSegment(segments[activeSegmentIndex].id);
-                  }
-                }}
-                disabled={activeSegmentIndex < 0 || isRetaking}
-                className="order-5 flex w-full items-center justify-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-semibold text-accent transition-colors hover:bg-accent-light disabled:cursor-not-allowed disabled:text-text-muted sm:w-auto sm:justify-start"
-              >
-                <RotateCcw size={10} />
-                {isRetaking ? "Retaking…" : "Retake"}
-              </button>
             </div>
           )}
-
-          <div className="flex flex-col gap-1 text-sm text-text-muted sm:flex-row sm:items-center sm:justify-between">
-            <span className="tabular-nums">{meaningfulLength.toLocaleString()} chars</span>
-            <span className={meaningfulLength >= MIN_TEXT_LENGTH ? "text-success" : ""}>
-              {previewChunks.length} section{previewChunks.length !== 1 ? "s" : ""}
-              {charsRemaining > 0
-                ? ` · Need ${charsRemaining.toLocaleString()} more character${charsRemaining !== 1 ? "s" : ""}`
-                : " · Ready"}
-            </span>
-          </div>
         </div>
+      </div>
 
-      </section>
+      {/* ── Document ────────────────────────────────────────── */}
+      <section className={`glass-panel relative overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}>
+        <label htmlFor={readingTextId} className="sr-only">
+          Reading Text
+        </label>
+        <div className={`relative ${fullScreen ? "h-full min-h-[55vh]" : "min-h-72"}`}>
+          <div
+            ref={overlayRef}
+            aria-hidden
+            className={`pointer-events-none absolute inset-0 z-20 select-none overflow-auto text-text-primary ${DOCUMENT_TEXT_CLASSES} ${documentPadding(fullScreen)} ${focusMode ? "reader-focus" : ""}`}
+          >
+            {overlayParts.map((part, index) => {
+              const activeClass = part.isActive
+                ? "reader-chunk-highlight reader-chunk-highlight-active"
+                : "";
+              const tintClass = part.sectionIndex >= 0
+                ? part.sectionIndex % 2 === 0
+                  ? "reader-section-even"
+                  : "reader-section-odd"
+                : "";
+              const className = `${tintClass} ${activeClass}`.trim();
 
-      <aside className="lg:col-span-2 flex h-full flex-col gap-5 rounded-[22px] glass-panel p-4 sm:gap-6 sm:p-6">
-        <ModelToggle
-          activeModel={activeModel}
-          onModelChange={onModelChange}
-          kokoroState={kokoroState}
-          supertonicState={supertonicState}
-          unavailableModels={unavailableModels}
-        />
+              return (
+                <span key={`part-${index}`} className={className || undefined}>
+                  {part.text}
+                </span>
+              );
+            })}
+            {/* Mirror a trailing blank line so the textarea's final newline keeps overlay height in sync. */}
+            {text.endsWith("\n") && <span>{"\n"}</span>}
+          </div>
 
-        <VoiceSelector
-          activeModel={activeModel}
-          voice={voice}
-          onVoiceChange={onVoiceChange}
-          kokoroVoices={kokoroVoices}
-        />
-
-        <ControlsProvider
-          value={{
-            activeModel,
-            quality,
-            onQualityChange,
-            onGenerate,
-            onRetryLoad,
-            onStop,
-            isGenerating,
-            canGenerate,
-            modelReady,
-            modelError,
-            loadingProgress,
-            generationProgress,
-          }}
-        >
-          <Controls />
-        </ControlsProvider>
-
-      </aside>
-
-      {(totalDuration > 0 || isGenerating) && (
-        <div className="lg:col-span-5">
-          <AudioPlayer
-            compact={fullScreen}
-            isPlaying={isPlaying}
-            currentTime={currentTime}
-            totalDuration={totalDuration}
-            segmentCount={segments.length}
-            activeSegmentNumber={activeSegmentNumber}
-            stats={stats}
-            isGenerating={isGenerating}
-            onTogglePlay={onTogglePlay}
-            onSeek={onSeek}
-            onSkipBackward={onSkipBackward}
-            onSkipForward={onSkipForward}
-            onDownload={onDownload}
-            onStop={onStop}
+          <textarea
+            id={readingTextId}
+            ref={textareaRef}
+            value={text}
+            onChange={(event) => onTextChange(event.target.value)}
+            onScroll={(event) => syncOverlayScroll(event.currentTarget)}
+            onMouseUp={(event) => {
+              if (!hasGeneratedSegments) return;
+              const ta = event.currentTarget;
+              if (ta.selectionStart !== ta.selectionEnd) return;
+              const pos = ta.selectionStart;
+              const boundary = sectionBoundaries.find(
+                (b) => b.id !== null && pos >= b.start && pos < b.end,
+              );
+              if (boundary?.id) onJumpToSegment(boundary.id);
+            }}
+            placeholder="Type or paste long-form text to read aloud…"
+            className={`absolute inset-0 z-10 h-full w-full resize-none bg-transparent text-transparent caret-text-primary placeholder:font-sans placeholder:text-text-muted focus:outline-none ${DOCUMENT_TEXT_CLASSES} ${documentPadding(fullScreen)}`}
+            style={{ WebkitTextFillColor: "transparent" }}
           />
         </div>
-      )}
+      </section>
+
+      {/* ── Player dock ─────────────────────────────────────── */}
+      <div
+        className={
+          fullScreen
+            ? "fixed bottom-4 left-1/2 z-40 w-[min(44rem,calc(100vw-1.5rem))] -translate-x-1/2 sm:bottom-6"
+            : "w-full"
+        }
+      >
+        {hasStats && (
+          <div className="mb-2 flex flex-wrap items-center justify-center gap-1.5">
+            {stats.firstLatency !== null && (
+              <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md">
+                first audio {stats.firstLatency.toFixed(2)}s
+              </span>
+            )}
+            {stats.processingTime > 0 && (
+              <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md">
+                total {stats.processingTime.toFixed(2)}s
+              </span>
+            )}
+            {stats.charsPerSec > 0 && (
+              <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md">
+                {stats.charsPerSec.toFixed(0)} chars/s
+              </span>
+            )}
+            {stats.rtf > 0 && (
+              <span
+                title="Real-time factor — generation time ÷ audio duration (lower is faster)"
+                className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md"
+              >
+                RTF {stats.rtf.toFixed(3)}×
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="glass-pop rounded-[26px] px-4 pt-3 pb-2.5 sm:px-5">
+          {/* Seek row */}
+          <div className="flex items-center gap-3">
+            <span className="w-11 shrink-0 text-right font-mono text-xs tabular-nums text-text-muted">
+              {formatTime(currentTime)}
+            </span>
+            <div
+              ref={barRef}
+              className={`group relative h-1.5 flex-1 select-none rounded-full ${
+                hasAudio ? "cursor-pointer bg-border-strong" : "bg-border"
+              }`}
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerCancel}
+              onLostPointerCapture={handlePointerCancel}
+              onKeyDown={handleSeekKeyDown}
+              role="slider"
+              tabIndex={hasAudio ? 0 : -1}
+              aria-label="Seek"
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(progress)}
+              aria-valuetext={`${formatTime(currentTime)} of ${formatTime(totalDuration)}`}
+            >
+              <div
+                className="absolute top-0 left-0 h-full rounded-full bg-accent"
+                style={{ width: `${progress}%` }}
+              />
+              <div
+                className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-accent opacity-0 transition-opacity group-hover:opacity-100"
+                style={{
+                  left: `calc(${progress}% - 6px)`,
+                  boxShadow: "var(--shadow-accent-lg)",
+                }}
+              />
+            </div>
+            <span className="w-11 shrink-0 font-mono text-xs tabular-nums text-text-muted">
+              {formatTime(totalDuration)}
+            </span>
+          </div>
+
+          {/* Transport row */}
+          <div className="mt-2 flex items-center justify-between gap-2">
+            {/* Sections */}
+            <div className="flex min-w-0 flex-1 basis-0 items-center gap-0.5">
+              {hasGeneratedSegments ? (
+                <>
+                  <button
+                    type="button"
+                    aria-label="Previous section"
+                    onClick={() => {
+                      if (activeSegmentIndex > 0) {
+                        onJumpToSegment(segments[activeSegmentIndex - 1].id);
+                      }
+                    }}
+                    disabled={activeSegmentIndex <= 0}
+                    className={dockUtilityButton(activeSegmentIndex > 0)}
+                  >
+                    <ChevronLeft size={14} />
+                  </button>
+                  <span className="min-w-9 text-center font-mono text-xs tabular-nums whitespace-nowrap text-text-muted">
+                    {activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : "–"}/{segments.length}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="Next section"
+                    onClick={() => {
+                      if (activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1) {
+                        onJumpToSegment(segments[activeSegmentIndex + 1].id);
+                      }
+                    }}
+                    disabled={activeSegmentIndex < 0 || activeSegmentIndex >= segments.length - 1}
+                    className={dockUtilityButton(activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1)}
+                  >
+                    <ChevronRight size={14} />
+                  </button>
+                </>
+              ) : (
+                <span className="font-mono text-2xs text-text-muted/70">
+                  {previewChunks.length > 0 ? `${previewChunks.length} sections` : ""}
+                </span>
+              )}
+            </div>
+
+            {/* Center transport */}
+            <div className="flex items-center gap-2.5 sm:gap-3">
+              <button
+                onClick={onSkipBackward}
+                disabled={!hasAudio}
+                aria-label="Back 10 seconds"
+                className={smallTransportButton(hasAudio)}
+              >
+                <RotateCcw size={14} />
+              </button>
+
+              <button
+                onClick={handleCtaClick}
+                disabled={ctaDisabled}
+                aria-label={ctaLabel}
+                title={ctaLabel}
+                className={`flex h-13 w-13 items-center justify-center rounded-full transition-all duration-300 ${
+                  isGenerating && !hasAudio
+                    ? "glass-accent cursor-wait text-white"
+                    : showRetry
+                      ? "border border-danger/30 bg-danger-light text-danger shadow-glass-sm backdrop-blur-md hover:bg-danger hover:text-white"
+                      : ctaIsAccent
+                        ? "glass-accent text-white"
+                        : "border border-border/70 bg-white/35 text-text-muted/70 cursor-not-allowed backdrop-blur-md"
+                }`}
+              >
+                {ctaIcon}
+              </button>
+
+              <button
+                onClick={onSkipForward}
+                disabled={!hasAudio}
+                aria-label="Forward 10 seconds"
+                className={smallTransportButton(hasAudio)}
+              >
+                <RotateCw size={14} />
+              </button>
+            </div>
+
+            {/* Utilities */}
+            <div className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-0.5">
+              {hasAudio && onPlaybackRateChange && (
+                <button
+                  type="button"
+                  onClick={() => onPlaybackRateChange(nextPlaybackRate(playbackRate))}
+                  aria-label={`Playback speed ${formatPlaybackRate(playbackRate)}`}
+                  title="Playback speed"
+                  className="flex h-8 min-w-8 items-center justify-center rounded-full px-1 font-mono text-xs tabular-nums text-text-muted transition-all duration-200 hover:bg-white/55 hover:text-accent"
+                >
+                  {formatPlaybackRate(playbackRate)}
+                </button>
+              )}
+              {hasAudio && !isGenerating && (
+                <button
+                  type="button"
+                  onClick={onGenerate}
+                  disabled={!canGenerate}
+                  aria-label="Regenerate speech"
+                  title="Regenerate speech"
+                  className={dockUtilityButton(canGenerate)}
+                >
+                  <Sparkles size={14} />
+                </button>
+              )}
+              {hasGeneratedSegments && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeSegmentIndex >= 0) {
+                      onRetakeSegment(segments[activeSegmentIndex].id);
+                    }
+                  }}
+                  disabled={activeSegmentIndex < 0 || isRetaking}
+                  aria-label={isRetaking ? "Retaking section" : "Retake section"}
+                  title="Retake current section"
+                  className={dockUtilityButton(activeSegmentIndex >= 0 && !isRetaking)}
+                >
+                  <RefreshCw size={14} className={isRetaking ? "animate-spin" : undefined} />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onDownload}
+                disabled={!hasAudio}
+                aria-label="Download audio"
+                title="Download audio"
+                className={dockUtilityButton(hasAudio)}
+              >
+                <Download size={14} />
+              </button>
+              {canStop && (
+                <button
+                  type="button"
+                  onClick={onStop}
+                  aria-label={isGenerating ? "Stop generation" : "Stop playback"}
+                  title={isGenerating ? "Stop generation" : "Stop playback"}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger hover:text-white"
+                >
+                  <Square size={12} />
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }

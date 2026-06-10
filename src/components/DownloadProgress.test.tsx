@@ -22,7 +22,7 @@ describe("DownloadProgress", () => {
 
     expect(screen.getByText("Preparing Model")).toBeInTheDocument();
     expect(
-      screen.getByText("Downloads once, then loads from local cache"),
+      screen.getByText("Downloads once"),
     ).toBeInTheDocument();
     expect(screen.getByText("Kokoro")).toBeInTheDocument();
   });

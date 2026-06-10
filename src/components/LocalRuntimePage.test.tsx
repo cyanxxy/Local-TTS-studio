@@ -405,9 +405,9 @@ describe("LocalRuntimePage", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
     });
-    fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
 
     await waitFor(() => {
       expect(generate).toHaveBeenCalledTimes(1);
@@ -436,7 +436,7 @@ describe("LocalRuntimePage", () => {
     await flushNextAnimationFrame();
 
     expect(await screen.findByText(/neuphonic\/neutts-nano-q4-gguf/)).toBeInTheDocument();
-    expect(screen.getByText("Output Audio")).toBeInTheDocument();
+    expect(screen.getByText("Output")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /download audio/i })).toBeEnabled();
     expect(URL.createObjectURL).toHaveBeenCalled();
   });
@@ -453,7 +453,7 @@ describe("LocalRuntimePage", () => {
 
     expect(await screen.findByText("NeuTTS Rust references must be pre-encoded .npy code files."))
       .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /generate locally/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^generate$/i })).toBeDisabled();
   });
 
   it("generates Qwen3 MLX CustomVoice without reference audio", async () => {
@@ -468,7 +468,7 @@ describe("LocalRuntimePage", () => {
     expect(screen.queryByLabelText(/reference wav/i)).not.toBeInTheDocument();
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
     });
 
     fireEvent.change(screen.getByLabelText(/^speaker$/i), { target: { value: "Aiden" } });
@@ -484,7 +484,7 @@ describe("LocalRuntimePage", () => {
     fireEvent.change(screen.getByLabelText(/^top-p$/i), { target: { value: "0.88" } });
     fireEvent.change(screen.getByLabelText(/^max tokens$/i), { target: { value: "2304" } });
 
-    fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
     await waitFor(() => {
       expect(generate).toHaveBeenCalledTimes(1);
     });
@@ -537,7 +537,7 @@ describe("LocalRuntimePage", () => {
       target: { value: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit" },
     });
     expect(screen.getByLabelText(/^model variant$/i)).toHaveValue("mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit");
-    expect(screen.getByRole("button", { name: /generate locally/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /^generate$/i })).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText(/^mlx model directory$/i), {
       target: { value: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-Base-6bit" },
@@ -552,9 +552,9 @@ describe("LocalRuntimePage", () => {
     });
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
     });
-    fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
 
     await waitFor(() => {
       expect(generate).toHaveBeenCalledTimes(1);
@@ -658,9 +658,9 @@ describe("LocalRuntimePage", () => {
     selectCustomVoiceFallback();
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
     });
-    fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
 
     await waitFor(() => {
       expect(generate).toHaveBeenCalledTimes(1);
@@ -690,9 +690,9 @@ describe("LocalRuntimePage", () => {
     selectCustomVoiceFallback();
 
     await waitFor(() => {
-      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+      expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
     });
-    fireEvent.click(screen.getByRole("button", { name: /generate locally/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
     const request = generate.mock.calls[0][0] as { requestId: string };
 
     await emitProgress(progressListener, {
@@ -724,8 +724,8 @@ describe("LocalRuntimePage", () => {
       await deferred.promise;
     });
     await waitFor(() => {
-      expect(screen.queryByText("Output Audio")).not.toBeInTheDocument();
-      expect(screen.getByRole("button", { name: /generate locally/i })).toBeEnabled();
+      expect(screen.queryByText("Output")).not.toBeInTheDocument();
+      expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
     });
   });
 
@@ -812,8 +812,8 @@ describe("LocalRuntimePage", () => {
     unmount();
     delete window.electron;
     renderPage();
-    expect(screen.getByText(/runs only in the Electron desktop app/i)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /generate locally/i })).toBeDisabled();
+    expect(screen.getByText(/Available only in the desktop app/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^generate$/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /clear local cache/i })).toBeDisabled();
   });
 });

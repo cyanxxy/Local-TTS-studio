@@ -1,6 +1,7 @@
 @import "@fontsource-variable/inter";
 @import "@fontsource-variable/outfit";
 @import "@fontsource-variable/jetbrains-mono";
+@import "@fontsource-variable/literata";
 @import "tailwindcss";
 
 @theme {
@@ -8,6 +9,8 @@
   --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
   --font-display: "Outfit Variable", "Outfit", system-ui, sans-serif;
+  /* Long-form reading serif (Reader page document) */
+  --font-reading: "Literata Variable", "Literata", Georgia, "Times New Roman", serif;
 
   /* ── Colors ───────────────────────────────────────────────── */
   --color-surface: #F5F5F7;
@@ -66,6 +69,11 @@
   --text-lg--line-height: 1.5;
   --text-xl: 16px;
   --text-xl--line-height: 1.6;
+  /* Reader document body — generous leading for long-form listening */
+  --text-reader: 17px;
+  --text-reader--line-height: 1.85;
+  --text-reader-lg: 19px;
+  --text-reader-lg--line-height: 1.85;
 
   /* Display scale (headings — pair with font-display) */
   --text-2xl: 1.5rem;
@@ -392,21 +400,28 @@ input[type="range"]::-moz-range-thumb {
 
 .reader-chunk-highlight {
   background: transparent;
-  border-radius: 8px;
+  border-radius: 6px;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-  padding: 0;
+  padding: 0.08em 0;
 }
 
+/* Spoken-sentence highlight — soft tinted glass sweep under the words */
 .reader-chunk-highlight-active {
-  background: rgba(90, 197, 245, 0.40);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #5AC5F5 50%, transparent);
-  animation: reader-highlight-pulse 2.8s ease-in-out infinite;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, #5AC5F5 26%, transparent) 0%,
+    color-mix(in srgb, var(--color-accent) 18%, transparent) 100%
+  );
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 55%, transparent),
+    0 1px 8px color-mix(in srgb, var(--color-accent) 14%, transparent);
+  animation: reader-highlight-pulse 3.2s ease-in-out infinite;
 }
 
 @keyframes reader-highlight-pulse {
-  0%, 100% { background: rgba(90, 197, 245, 0.33); }
-  50%       { background: rgba(90, 197, 245, 0.52); }
+  0%, 100% { background-color: color-mix(in srgb, #5AC5F5 8%, transparent); }
+  50%       { background-color: color-mix(in srgb, #5AC5F5 22%, transparent); }
 }
 
 /* ── Reader section tints ─────────────────────────────────── */
@@ -415,13 +430,38 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .reader-section-odd {
-  background-color: color-mix(in srgb, var(--color-accent) 5%, transparent);
-  border-radius: 2px;
+  background-color: color-mix(in srgb, var(--color-accent) 4%, transparent);
+  border-radius: 4px;
 }
 
 .reader-section-odd.reader-chunk-highlight-active,
 .reader-section-even.reader-chunk-highlight-active {
-  background: rgba(90, 197, 245, 0.45);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, #5AC5F5 30%, transparent) 0%,
+    color-mix(in srgb, var(--color-accent) 20%, transparent) 100%
+  );
+}
+
+/* ── Reader document column ───────────────────────────────────
+   The reader panel is full-bleed; this centers a readable text
+   column inside it at any window width. Applied to both the
+   overlay and the textarea so their metrics stay identical. */
+.reader-doc-pad {
+  padding-inline: max(1.25rem, calc((100% - 44rem) / 2));
+}
+
+/* ── Reader focus mode — while audio plays, the page recedes and the
+   spoken sentence stays ink-dark, like a finger tracing the line. ── */
+.reader-focus span {
+  color: color-mix(in srgb, var(--color-text-primary) 42%, transparent);
+  transition: color 0.45s ease;
+}
+.reader-focus span.reader-chunk-highlight-active {
+  color: var(--color-text-primary);
+}
+.reader-focus .reader-section-odd:not(.reader-chunk-highlight-active) {
+  background-color: transparent;
 }
 
 /* ── Respect reduced-motion ───────────────────────────────── */

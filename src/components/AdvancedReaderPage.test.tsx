@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps, ReactNode } from "react";
 import { AdvancedReaderPage } from "./AdvancedReaderPage";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
@@ -113,6 +113,35 @@ describe("AdvancedReaderPage", () => {
     const overlay = container.querySelector("div[aria-hidden='true'].pointer-events-none");
 
     expect(overlay).toHaveClass("z-20");
+  });
+
+  it("keeps play/pause usable while later chunks are still generating", () => {
+    const onTogglePlay = vi.fn();
+    renderReader({
+      totalDuration: 4,
+      isGenerating: true,
+      isPlaying: true,
+      onTogglePlay,
+      segments: [createSegment()],
+    });
+
+    const pause = screen.getByRole("button", { name: "Pause" });
+    expect(pause).toBeEnabled();
+    fireEvent.click(pause);
+    expect(onTogglePlay).toHaveBeenCalledTimes(1);
+  });
+
+  it("cycles playback speed through the dock control", () => {
+    const onPlaybackRateChange = vi.fn();
+    renderReader({
+      totalDuration: 4,
+      playbackRate: 1,
+      onPlaybackRateChange,
+      segments: [createSegment()],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Playback speed 1×" }));
+    expect(onPlaybackRateChange).toHaveBeenCalledWith(1.25);
   });
 
   it("exposes accessible names for reader segment navigation", () => {
