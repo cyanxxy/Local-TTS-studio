@@ -90,6 +90,12 @@ export interface ValidatedLocalBridgeRequest {
   payload: Record<string, unknown>;
 }
 
+export interface BridgeProbeMlxEngines {
+  apiServer: boolean;
+  tts: boolean;
+  worker: boolean;
+}
+
 export interface BridgeProbeResult {
   ready: boolean;
   message: string;
@@ -102,6 +108,18 @@ export interface BridgeProbeResult {
   recommendedDeviceMap?: string | null;
   recommendedDtype?: string | null;
   recommendedAttention?: string | null;
+  /** Engine binaries the Rust bridge itself resolved (Qwen3 only). */
+  mlxEngines?: BridgeProbeMlxEngines;
+}
+
+export interface WarmRequest {
+  model: LocalModel;
+  payload: Record<string, unknown>;
+}
+
+export interface BridgeWarmResult {
+  warmed: boolean;
+  message?: string;
 }
 
 export interface BridgeGenerateResult {
@@ -358,6 +376,19 @@ export function sanitizeGeneratePayload(model: LocalModel, payload: unknown): Re
   return model === "neutts" ? sanitizeNeuttsPayload(payload) : sanitizeQwen3Payload(payload);
 }
 
+export function sanitizeWarmRequest(request: unknown): WarmRequest {
+  if (!isRecord(request)) throw new Error("Invalid warm request payload.");
+  const model = assertLocalModel(String(request.model));
+  const baseModelPath = parseOptionalString(request.baseModelPath, "baseModelPath", {
+    maxLength: 1000,
+    pattern: /^[^\0]+$/,
+  });
+  return {
+    model,
+    payload: baseModelPath ? { baseModelPath } : {},
+  };
+}
+
 export function sanitizeCacheRequest(request: unknown): CacheRequest {
   if (!isRecord(request)) throw new Error("Invalid cache request payload.");
   return { model: assertLocalModel(String(request.model)) };
@@ -425,8 +456,42 @@ export function parseBridgeProbeResult(result: unknown): BridgeProbeResult {
     }
     parsed.recommendedAttention = result.recommendedAttention;
   }
+  if (result.mlxEngines != null) {
+    if (
+      !isRecord(result.mlxEngines)
+      || typeof result.mlxEngines.apiServer !== "boolean"
+      || typeof result.mlxEngines.tts !== "boolean"
+      || typeof result.mlxEngines.worker !== "boolean"
+    ) {
+      throw new Error("Probe response has invalid `mlxEngines`.");
+    }
+    parsed.mlxEngines = {
+      apiServer: result.mlxEngines.apiServer,
+      tts: result.mlxEngines.tts,
+      worker: result.mlxEngines.worker,
+    };
+  }
 
   return parsed;
+}
+
+// Warm-up is best-effort: a malformed or failed envelope degrades to
+// `warmed: false` with the reason instead of throwing, so a warm-up can never
+// surface an error dialog the generation path would explain better.
+export function parseBridgeWarmResult(decoded: unknown): BridgeWarmResult {
+  if (!isRecord(decoded) || decoded.ok !== true) {
+    const error = isRecord(decoded) && typeof decoded.error === "string"
+      ? decoded.error
+      : "Local bridge warm-up failed.";
+    return { warmed: false, message: error };
+  }
+  if (!isRecord(decoded.result) || typeof decoded.result.warmed !== "boolean") {
+    return { warmed: false, message: "Local bridge returned an invalid warm-up result." };
+  }
+  return {
+    warmed: decoded.result.warmed,
+    ...(typeof decoded.result.message === "string" ? { message: decoded.result.message } : {}),
+  };
 }
 
 export function parseBridgeProgressResult(value: unknown): BridgeProgressResult {

@@ -21,6 +21,9 @@ export type WebSocketWorkerSpawn<TModel extends string> = (
 export interface WebSocketWorkerRunOptions {
   requestId: string;
   payload: Record<string, unknown>;
+  /** Optional bridge command (e.g. "warm"). Command requests return a result
+   * frame without streamed audio, so audio-count validation is skipped. */
+  command?: string;
   spawnConfig: WebSocketWorkerSpawnConfig;
   idleTimeoutMs: number;
   maxStdoutBytes: number;
@@ -63,6 +66,7 @@ export interface WebSocketBridgeWorkerPool<TModel extends string> {
 
 interface ActiveRequest {
   requestId: string;
+  expectAudio: boolean;
   resolve: (result: WebSocketWorkerRunResult) => void;
   reject: (error: Error) => void;
   onProgress: (payload: unknown) => void;
@@ -513,7 +517,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         return;
       }
       try {
-        const expectedAudioChunkCount = parseResultAudioChunkCount(parsed);
+        const expectedAudioChunkCount = active.expectAudio ? parseResultAudioChunkCount(parsed) : null;
         if (expectedAudioChunkCount != null) {
           const receivedAudioChunkCount = active.receivedAudioChunkIndexes.size;
           if (
@@ -759,6 +763,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       return await new Promise<WebSocketWorkerRunResult>((resolve, reject) => {
         const active: ActiveRequest = {
           requestId: options.requestId,
+          expectAudio: options.command == null,
           resolve,
           reject,
           onProgress: options.onProgress,
@@ -783,7 +788,11 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
           if (!worker.socket) {
             throw new Error("worker socket is not connected");
           }
-          worker.socket.send(JSON.stringify({ requestId: options.requestId, payload: options.payload }));
+          worker.socket.send(JSON.stringify({
+            requestId: options.requestId,
+            ...(options.command != null ? { command: options.command } : {}),
+            payload: options.payload,
+          }));
         } catch (err) {
           settleActive(model, worker, {
             ok: false,

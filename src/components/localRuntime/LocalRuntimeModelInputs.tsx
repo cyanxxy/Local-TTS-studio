@@ -473,6 +473,14 @@ export function LocalRuntimeModelInputs({
             />
           </label>
         </div>
+
+        {qwen3VoiceClone && (
+          <p className="text-sm font-normal normal-case text-text-muted">
+            Voice clone keeps a resident MLX worker keyed to temperature, top-k,
+            max tokens, and the reference clip — changing any of them restarts
+            the worker and reloads the model on the next generation.
+          </p>
+        )}
       </Fragment>
     );
   }

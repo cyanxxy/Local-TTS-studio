@@ -270,15 +270,27 @@ describe("createQwen3MlxDownloadCoordinator", () => {
 });
 
 describe("buildQwen3SetupWarnings", () => {
-  it("reports the MLX default as active when an engine and the model are present", () => {
+  it("reports the MLX default as active when the api_server and the model are present", () => {
+    const warnings = buildQwen3SetupWarnings({
+      ttsAvailable: true,
+      apiServerAvailable: true,
+      workerAvailable: true,
+      modelDirLooksReady: true,
+    });
+    expect(warnings[0]).toMatch(/MLX CustomVoice \(6-bit\) is set up and used by default/);
+    expect(warnings[1]).toMatch(/Base voice cloning \(pibot-tts-worker\) is available/);
+  });
+
+  it("calls out the slow one-shot tts fallback when only the tts binary is present", () => {
     const warnings = buildQwen3SetupWarnings({
       ttsAvailable: true,
       apiServerAvailable: false,
       workerAvailable: true,
       modelDirLooksReady: true,
     });
-    expect(warnings[0]).toMatch(/MLX CustomVoice \(6-bit\) is set up and used by default/);
-    expect(warnings[1]).toMatch(/Base voice cloning \(pibot-tts-worker\) is available/);
+    expect(warnings[0]).toMatch(/api_server binary is missing/);
+    expect(warnings[0]).toMatch(/much slower/);
+    expect(warnings[0]).toMatch(/build:qwen3-mlx-worker/);
   });
 
   it("reports the Candle fallback when the model is not downloaded", () => {

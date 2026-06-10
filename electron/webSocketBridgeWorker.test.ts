@@ -323,6 +323,58 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(second.response).toMatchObject({ ok: true, requestId: "r2" });
   });
 
+  it("runs warm commands whose results carry no streamed audio and reuses the worker for generation", async () => {
+    const { pool, spawn } = makePool((message, server) => {
+      if (message.command === "warm") {
+        server.sendJson({
+          type: "result",
+          requestId: message.requestId,
+          ok: true,
+          result: { warmed: true, message: "resident" },
+        });
+        return;
+      }
+      sendAudioChunk(server, message.requestId);
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: {
+          audioTransport: "websocket-binary",
+          audioChunkCount: 1,
+          sampleRate: 24000,
+          modelRepo: "R",
+          durationSec: 1,
+          elapsedSec: 2,
+          phaseTimingsSec: {},
+        },
+      });
+    });
+
+    const warm = await pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "warm-1",
+      command: "warm",
+      payload: { baseModelPath: "/models/qwen3" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+    expect(warm.response).toMatchObject({
+      ok: true,
+      requestId: "warm-1",
+      result: { warmed: true },
+    });
+
+    // The warmed worker stays resident and serves the next generation.
+    const generated = await pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+    expect(generated.response).toMatchObject({ ok: true, requestId: "r1" });
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
   it("spawns an independent worker per model and streams binary audio for neutts and qwen3", async () => {
     const { pool, spawn, spawnModels } = makePool((message, server) => {
       const repo = (message.payload as { modelRepo?: string }).modelRepo ?? "R";

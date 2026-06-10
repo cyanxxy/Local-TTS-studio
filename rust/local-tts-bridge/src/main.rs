@@ -37,6 +37,11 @@ const QWEN3_DEFAULT_SPEAKER: &str = "ryan";
 const QWEN3_DEFAULT_LANGUAGE: &str = "English";
 const QWEN3_DEFAULT_MAX_NEW_TOKENS: usize = 1536;
 const QWEN3_CUSTOM_VOICE_MAX_UNIT_CHARS: usize = 420;
+// The Candle and one-shot tts paths synthesize units sequentially and stream
+// each unit as it completes, so the first unit's size bounds time-to-first-
+// audio. Keep it deliberately small (roughly one sentence) and let later units
+// use the full budget for throughput.
+const QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS: usize = 140;
 const QWEN3_MLX_API_SERVER_START_TIMEOUT_SEC: u64 = 180;
 const QWEN3_MLX_API_SERVER_HEALTH_REQUEST_TIMEOUT_SEC: u64 = 3;
 // Generous inactivity deadline for child-process output: first-run model
@@ -114,6 +119,12 @@ struct Qwen3Payload {
     top_k: Option<usize>,
     top_p: Option<f64>,
     max_new_tokens: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Qwen3WarmPayload {
+    base_model_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +292,17 @@ fn run_probe(cli: &Cli) -> Result<()> {
             "runtime": "rust",
             "package": "qwen_tts",
             "packageVersion": "0.1.1",
+            // Authoritative engine availability as the bridge itself resolves
+            // it (env vars + bundled siblings). The host surfaces this so a
+            // missing api_server can't silently degrade every generation to
+            // the per-unit one-shot tts fallback.
+            "mlxEngines": {
+                "apiServer": resolve_qwen3_mlx_api_server_path().is_ok(),
+                "tts": resolve_qwen3_mlx_tts_path().is_ok(),
+                "worker": std::env::var("OPEN_TTS_QWEN3_MLX_WORKER")
+                    .map(PathBuf::from)
+                    .is_ok_and(|path| path.exists()),
+            },
             "recommendedModelRepo": QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
             "recommendedBaseModelRepo": QWEN3_MLX_BASE_06B_MODEL,
             "recommendedDeviceMap": "auto",
@@ -396,6 +418,32 @@ fn serve_websocket_connection(
 
         let request_id = request.request_id.unwrap_or_default();
         let payload = request.payload.unwrap_or(Value::Null);
+
+        if request.command.as_deref() == Some("warm") {
+            // Best-effort warm-up: pre-load the resident engine so the first
+            // generation doesn't pay the model load. Uses the same heartbeat
+            // as generation because the load is one long blocking call.
+            let outcome = {
+                let _heartbeat = Heartbeat::start();
+                state.warm(payload)
+            };
+            match outcome {
+                Ok(result) => websocket.send_json(&json!({
+                    "type": "result",
+                    "requestId": request_id,
+                    "ok": true,
+                    "result": result,
+                }))?,
+                Err(err) => websocket.send_json(&json!({
+                    "type": "result",
+                    "requestId": request_id,
+                    "ok": false,
+                    "error": err.to_string(),
+                    "details": format!("{err:#}"),
+                }))?,
+            }
+            continue;
+        }
         // Model download and CPU inference are single blocking calls that emit no
         // intermediate frames. The host re-arms its inactivity watchdog on any
         // stdout/stderr from the child, so emit a lightweight stderr heartbeat for
@@ -425,6 +473,54 @@ fn serve_websocket_connection(
 }
 
 impl RuntimeState {
+    /// Pre-load a resident engine so the first generation skips the model
+    /// load. Unsupported configurations report `warmed: false` instead of
+    /// failing: warm-up is opportunistic and must never surface setup errors
+    /// the generation path would explain better.
+    fn warm(&mut self, payload: Value) -> Result<Value> {
+        match self.model {
+            LocalModel::Qwen3 => self.warm_qwen3(payload),
+            LocalModel::Neutts => Ok(json!({
+                "warmed": false,
+                "message": "NeuTTS has no resident engine warm-up.",
+            })),
+        }
+    }
+
+    fn warm_qwen3(&mut self, payload: Value) -> Result<Value> {
+        let payload: Qwen3WarmPayload = serde_json::from_value(payload).unwrap_or_default();
+        let api_server_path = match resolve_qwen3_mlx_api_server_path() {
+            Ok(path) => path,
+            Err(err) => {
+                return Ok(json!({
+                    "warmed": false,
+                    "message": format!("Qwen3 MLX api_server is unavailable: {err}"),
+                }));
+            }
+        };
+        let model_path = match resolve_qwen3_mlx_model_path(
+            payload.base_model_path.as_deref(),
+            "Qwen3 MLX warm-up",
+        ) {
+            Ok(path) => path,
+            Err(err) => {
+                return Ok(json!({
+                    "warmed": false,
+                    "message": format!("{err}"),
+                }));
+            }
+        };
+        let key = Qwen3MlxApiServerKey {
+            api_server_path,
+            model_path,
+        };
+        self.ensure_qwen3_mlx_api_server(key)?;
+        Ok(json!({
+            "warmed": true,
+            "message": "Qwen3 MLX api_server is loaded and resident.",
+        }))
+    }
+
     fn generate(
         &mut self,
         request_id: &str,
@@ -2004,9 +2100,14 @@ fn qwen3_custom_voice_units(text: &str) -> Vec<String> {
     let mut current_chars = 0_usize;
 
     for word in text.split_whitespace() {
+        let max_unit_chars = if units.is_empty() {
+            QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS
+        } else {
+            QWEN3_CUSTOM_VOICE_MAX_UNIT_CHARS
+        };
         let word_chars = word.chars().count();
         let pending_chars = current_chars + if current.is_empty() { 0 } else { 1 } + word_chars;
-        if !current.is_empty() && pending_chars > QWEN3_CUSTOM_VOICE_MAX_UNIT_CHARS {
+        if !current.is_empty() && pending_chars > max_unit_chars {
             units.push(std::mem::take(&mut current));
             current_chars = 0;
         }
@@ -2527,6 +2628,13 @@ mod tests {
             long_units
                 .iter()
                 .all(|unit| unit.chars().count() <= QWEN3_CUSTOM_VOICE_MAX_UNIT_CHARS)
+        );
+        // The first unit bounds time-to-first-audio, so it gets a tighter cap
+        // than the throughput-oriented later units.
+        assert!(long_units[0].chars().count() <= QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS);
+        assert!(
+            long_units[1].chars().count() > QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS,
+            "later units should use the full budget"
         );
     }
 

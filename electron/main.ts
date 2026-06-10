@@ -32,10 +32,12 @@ import {
   parseBridgeEnvelopeResult,
   parseBridgeProgressResult,
   parseBridgeResult,
+  parseBridgeWarmResult,
   parseRequestId,
   sanitizeCacheRequest,
   sanitizeCancelRequest,
   sanitizeGeneratePayload,
+  sanitizeWarmRequest,
   type BridgeAction,
   type LocalCacheInfo,
   type LocalModel,
@@ -95,6 +97,16 @@ const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
   rateWindowMs: GENERATE_RATE_WINDOW_MS,
 });
 let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
+
+// Best-effort engine warm-up (currently Qwen3 MLX api_server). At most one
+// warm-up runs per model; a generate request that arrives while one is in
+// flight waits for it (the warm-up is doing exactly the model load the
+// generation would otherwise pay) instead of failing with "already running".
+const pendingWarmups = new Map<LocalModel, { requestId: string; promise: Promise<void> }>();
+// Generate requests currently waiting on a warm-up, so cancel can reach them
+// before they are registered with the worker pool.
+const warmWaiters = new Map<string, LocalModel>();
+const cancelledWarmWaiters = new Set<string>();
 
 function getWebSocketBridgeWorkers(): WebSocketBridgeWorkerPool<LocalModel> {
   if (!webSocketBridgeWorkers) {
@@ -482,6 +494,19 @@ async function runRustBridge(
     await fs.mkdir(cacheDir, { recursive: true });
     const generateRequestId = requestId!; // generate always carries a requestId.
 
+    const pendingWarm = pendingWarmups.get(model);
+    if (pendingWarm) {
+      warmWaiters.set(generateRequestId, model);
+      try {
+        await pendingWarm.promise;
+      } finally {
+        warmWaiters.delete(generateRequestId);
+      }
+      if (cancelledWarmWaiters.delete(generateRequestId)) {
+        throw new Error("Generation cancelled.");
+      }
+    }
+
     const onProgress = (payload: unknown) => {
       if (!event) return;
       try {
@@ -710,8 +735,66 @@ async function handleClearCache(request: unknown): Promise<{ path: string; clear
   return { path: cachePath, cleared: true };
 }
 
+// Pre-load the resident engine (Qwen3 MLX api_server) on the model's
+// WebSocket worker so the first generation skips the model load. Failures
+// degrade to `warmed: false` — warm-up must never surface an error the
+// generation path would explain better.
+async function handleWarm(request: unknown): Promise<{ warmed: boolean; message?: string }> {
+  const { model, payload } = sanitizeWarmRequest(request);
+  if (pendingWarmups.has(model)) {
+    return { warmed: false, message: "A warm-up is already in flight." };
+  }
+
+  const cacheDir = getCacheDir(model);
+  const bridgeBinary = getRustBridgeBinaryPath();
+  try {
+    await fs.access(bridgeBinary);
+    await fs.mkdir(cacheDir, { recursive: true });
+  } catch (err) {
+    return { warmed: false, message: err instanceof Error ? err.message : String(err) };
+  }
+
+  const warmRequestId = `${model}-warm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const runPromise = getWebSocketBridgeWorkers().run(model, {
+    requestId: warmRequestId,
+    payload,
+    command: "warm",
+    spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
+    idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
+    maxStdoutBytes: RUST_BRIDGE_MAX_STDOUT_BYTES,
+    maxStderrBytes: RUST_BRIDGE_MAX_STDERR_BYTES,
+    onProgress: () => {},
+    onAudioChunk: () => {},
+  });
+  pendingWarmups.set(model, {
+    requestId: warmRequestId,
+    promise: runPromise.then(() => undefined, () => undefined),
+  });
+
+  try {
+    const { response } = await runPromise;
+    return parseBridgeWarmResult(response);
+  } catch (err) {
+    return { warmed: false, message: err instanceof Error ? err.message : String(err) };
+  } finally {
+    pendingWarmups.delete(model);
+  }
+}
+
 async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
   const { requestId } = sanitizeCancelRequest(request);
+
+  // A generate request waiting on a warm-up is not yet known to the worker
+  // pool; mark it cancelled and abort the warm-up so the wait ends promptly.
+  const warmModel = warmWaiters.get(requestId);
+  if (warmModel !== undefined) {
+    cancelledWarmWaiters.add(requestId);
+    const pendingWarm = pendingWarmups.get(warmModel);
+    if (pendingWarm) {
+      webSocketBridgeWorkers?.cancel(pendingWarm.requestId);
+    }
+    return { cancelled: true };
+  }
 
   // Generation always runs on the WebSocket worker pool, so killing the worker
   // is the only generation cancel path: its exit rejects the in-flight request
@@ -768,6 +851,11 @@ app.whenReady().then(() => {
   ipcMain.handle("local-tts:generate", (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
     return runRustBridge("generate", request, event);
+  });
+
+  ipcMain.handle("local-tts:warm", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return handleWarm(request);
   });
 
   ipcMain.handle("local-tts:cancel", (event, request: unknown) => {

@@ -70,7 +70,9 @@ export function buildQwen3SetupWarnings(setup: Qwen3MlxSetupState): string[] {
 
   if (mlxEngineAvailable && setup.modelDirLooksReady) {
     warnings.push(
-      "Qwen3 MLX CustomVoice (6-bit) is set up and used by default on this machine.",
+      setup.apiServerAvailable
+        ? "Qwen3 MLX CustomVoice (6-bit) is set up and used by default on this machine."
+        : "Qwen3 MLX CustomVoice (6-bit) is set up, but the resident api_server binary is missing — every chunk falls back to the one-shot tts binary, which reloads the model each time and is much slower. Rebuild with `npm run build:qwen3-mlx-worker && npm run build:rust` to restore the fast path.",
     );
   } else if (mlxEngineAvailable) {
     warnings.push(

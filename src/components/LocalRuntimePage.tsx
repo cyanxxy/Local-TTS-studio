@@ -410,6 +410,23 @@ export function LocalRuntimePage({
     void run();
   }, [electronAvailable, model, refreshCacheInfo, refreshQwen3MlxSetup, runProbe]);
 
+  // Pre-warm the resident Qwen3 MLX api_server as soon as the fast path is
+  // usable (binary found + model directory chosen), so the first generation
+  // skips the model load. Best-effort: failures are ignored and the bridge
+  // worker is reused by the next generation either way.
+  const warmedKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (model !== "qwen3" || !electronAvailable) return;
+    if (!qwen3MlxCustomVoice || generateBusy) return;
+    if (!(qwen3MlxSetup?.apiServerAvailable ?? false)) return;
+    const baseModelPath = qwen3BaseModelPath.trim();
+    if (!baseModelPath) return;
+    const warmKey = `${qwen3Model}:${baseModelPath}`;
+    if (warmedKeyRef.current === warmKey) return;
+    warmedKeyRef.current = warmKey;
+    void window.electron?.localTts?.warm?.({ model, baseModelPath }).catch(() => undefined);
+  }, [electronAvailable, generateBusy, model, qwen3BaseModelPath, qwen3MlxCustomVoice, qwen3MlxSetup, qwen3Model]);
+
   useEffect(() => {
     if (!electronAvailable || !window.electron?.localTts) return;
 

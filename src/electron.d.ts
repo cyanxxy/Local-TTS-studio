@@ -12,6 +12,16 @@ export interface LocalTtsProbeResult {
   recommendedDeviceMap?: string | null;
   recommendedDtype?: string | null;
   recommendedAttention?: string | null;
+  mlxEngines?: {
+    apiServer: boolean;
+    tts: boolean;
+    worker: boolean;
+  };
+}
+
+export interface LocalTtsWarmResult {
+  warmed: boolean;
+  message?: string;
 }
 
 export interface LocalTtsGenerateResult {
@@ -97,6 +107,10 @@ interface LocalTtsBridge {
     requestId: string;
     payload?: Record<string, unknown>;
   }) => Promise<LocalTtsGenerateResult>;
+  warm?: (request: {
+    model: LocalTtsModel;
+    baseModelPath?: string;
+  }) => Promise<LocalTtsWarmResult>;
   cancel: (request: {
     model: LocalTtsModel;
     requestId: string;

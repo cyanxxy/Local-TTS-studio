@@ -22,6 +22,9 @@ contextBridge.exposeInMainWorld("electron", {
   localTts: {
     probe: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:probe", request),
     generate: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:generate", request),
+    warm: (request: { model: LocalModel; baseModelPath?: string }) => (
+      ipcRenderer.invoke("local-tts:warm", request)
+    ),
     cancel: (request: CancelRequest) => ipcRenderer.invoke("local-tts:cancel", request),
     getCacheInfo: (request: CacheRequest) => ipcRenderer.invoke("local-tts:cache-info", request),
     clearCache: (request: CacheRequest) => ipcRenderer.invoke("local-tts:clear-cache", request),

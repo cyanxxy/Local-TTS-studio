@@ -12,6 +12,7 @@ import {
   parseBridgeProbeResult,
   parseBridgeProgressResult,
   parseBridgeResult,
+  parseBridgeWarmResult,
   parseOptionalInteger,
   parseOptionalNumber,
   parseOptionalString,
@@ -21,6 +22,7 @@ import {
   sanitizeCacheRequest,
   sanitizeCancelRequest,
   sanitizeGeneratePayload,
+  sanitizeWarmRequest,
 } from "./localTtsIpc";
 
 function makeEvent(url: string, frameUrl?: string) {
@@ -224,6 +226,19 @@ describe("localTtsIpc request sanitizers", () => {
     expect(() => sanitizeCacheRequest({ model: "kani" })).toThrow("Unsupported local model");
     expect(() => sanitizeCancelRequest({ model: "qwen3" })).toThrow("required");
   });
+
+  it("sanitizes warm-up requests", () => {
+    expect(sanitizeWarmRequest({ model: "qwen3", baseModelPath: "/models/qwen3" })).toEqual({
+      model: "qwen3",
+      payload: { baseModelPath: "/models/qwen3" },
+    });
+    expect(sanitizeWarmRequest({ model: "qwen3" })).toEqual({ model: "qwen3", payload: {} });
+    expect(sanitizeWarmRequest({ model: "qwen3", baseModelPath: "  " })).toEqual({ model: "qwen3", payload: {} });
+    expect(() => sanitizeWarmRequest({ model: "kani" })).toThrow("Unsupported local model");
+    expect(() => sanitizeWarmRequest({ model: "qwen3", baseModelPath: "a".repeat(1001) }))
+      .toThrow("exceeds 1000 characters");
+    expect(() => sanitizeWarmRequest(null)).toThrow("Invalid warm request payload");
+  });
 });
 
 describe("localTtsIpc bridge result parsing", () => {
@@ -262,6 +277,30 @@ describe("localTtsIpc bridge result parsing", () => {
     expect(() => parseBridgeProbeResult({ ...probeResult, ready: "yes" })).toThrow("ready");
     expect(() => parseBridgeProbeResult({ ...probeResult, package: 1 })).toThrow("package");
     expect(() => parseBridgeProbeResult({ ...probeResult, recommendedDeviceMap: 1 })).toThrow("recommendedDeviceMap");
+  });
+
+  it("parses optional probe mlxEngines availability", () => {
+    const mlxEngines = { apiServer: true, tts: true, worker: false };
+    expect(parseBridgeProbeResult({ ...probeResult, mlxEngines })).toEqual({ ...probeResult, mlxEngines });
+    expect(parseBridgeProbeResult(probeResult).mlxEngines).toBeUndefined();
+    expect(() => parseBridgeProbeResult({ ...probeResult, mlxEngines: { apiServer: "yes", tts: true, worker: false } }))
+      .toThrow("mlxEngines");
+    expect(() => parseBridgeProbeResult({ ...probeResult, mlxEngines: { apiServer: true } }))
+      .toThrow("mlxEngines");
+  });
+
+  it("parses warm-up envelopes without throwing", () => {
+    expect(parseBridgeWarmResult({
+      type: "result",
+      requestId: "qwen3-warm-1",
+      ok: true,
+      result: { warmed: true, message: "Qwen3 MLX api_server is loaded and resident." },
+    })).toEqual({ warmed: true, message: "Qwen3 MLX api_server is loaded and resident." });
+    expect(parseBridgeWarmResult({ ok: true, result: { warmed: false } })).toEqual({ warmed: false });
+    expect(parseBridgeWarmResult({ ok: false, error: "api_server missing" }))
+      .toEqual({ warmed: false, message: "api_server missing" });
+    expect(parseBridgeWarmResult({ ok: true, result: { warmed: "yes" } }).warmed).toBe(false);
+    expect(parseBridgeWarmResult(null).warmed).toBe(false);
   });
 
   it("parses progress and WebSocket generation responses", () => {
