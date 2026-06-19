@@ -1,3 +1,5 @@
+mod neucodec_encoder;
+
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -132,7 +134,8 @@ struct Qwen3WarmPayload {
 struct NeuttsPayload {
     text: String,
     reference_text: String,
-    reference_codes_base64: String,
+    reference_codes_base64: Option<String>,
+    reference_audio_base64: Option<String>,
     model_repo: Option<String>,
 }
 
@@ -193,6 +196,21 @@ struct NeuttsHost {
     model: neutts::NeuTTS,
 }
 
+impl RuntimeState {
+    fn ensure_neutts_encoder(
+        &mut self,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<&neucodec_encoder::NeuCodecRtenEncoder> {
+        if self.neutts_encoder.is_none() {
+            self.neutts_encoder = Some(neucodec_encoder::NeuCodecRtenEncoder::ensure(
+                &self.cache_dir,
+                progress,
+            )?);
+        }
+        Ok(self.neutts_encoder.as_ref().expect("encoder just set"))
+    }
+}
+
 struct RuntimeState {
     model: LocalModel,
     cache_dir: PathBuf,
@@ -200,6 +218,7 @@ struct RuntimeState {
     qwen3_mlx: Option<Qwen3MlxWorkerHost>,
     qwen3_mlx_api: Option<Qwen3MlxApiServerHost>,
     neutts: Option<NeuttsHost>,
+    neutts_encoder: Option<neucodec_encoder::NeuCodecRtenEncoder>,
 }
 
 struct GenerationOutput {
@@ -315,13 +334,13 @@ fn run_probe(cli: &Cli) -> Result<()> {
         }),
         LocalModel::Neutts => json!({
             "ready": true,
-            "message": "Rust NeuTTS runtime is ready. Upload pre-encoded NeuCodec .npy reference codes before generating.",
+            "message": "Rust NeuTTS runtime is ready. Upload a WAV reference clip or pre-encoded NeuCodec .npy codes before generating.",
             "runtime": "rust",
             "package": "neutts",
             "packageVersion": "0.1.1",
             "recommendedModelRepo": NEUTTS_DEFAULT_MODEL,
             "warnings": [
-                "WAV reference encoding is not available in the Rust NeuTTS crate; use pre-encoded .npy reference codes."
+                "The first WAV reference triggers a one-time NeuCodec encoder download (~1.8 GB)."
             ],
         }),
     };
@@ -366,6 +385,7 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         qwen3_mlx: None,
         qwen3_mlx_api: None,
         neutts: None,
+        neutts_encoder: None,
     };
 
     loop {
@@ -1320,7 +1340,42 @@ impl RuntimeState {
         );
 
         let reference_started = Instant::now();
-        let reference_codes = decode_neutts_reference_codes(&payload.reference_codes_base64)?;
+        let mut warnings = Vec::new();
+        let reference_codes = match (
+            payload
+                .reference_codes_base64
+                .as_deref()
+                .filter(|encoded| !encoded.trim().is_empty()),
+            payload
+                .reference_audio_base64
+                .as_deref()
+                .filter(|encoded| !encoded.trim().is_empty()),
+        ) {
+            (Some(encoded), _) => decode_neutts_reference_codes(encoded)?,
+            (None, Some(audio)) => {
+                let mut progress = |message: String| {
+                    let _ = websocket.send_progress(
+                        request_id,
+                        "reference_encoding",
+                        message,
+                        started,
+                    );
+                };
+                progress("Encoding WAV reference with NeuCodec...".to_string());
+                let (samples, truncated) = prepare_neutts_reference_samples(audio)?;
+                if truncated {
+                    warnings.push(
+                        "Reference audio is longer than 20 seconds; only the first 20 seconds were used."
+                            .to_string(),
+                    );
+                }
+                let encoder = self.ensure_neutts_encoder(&mut progress)?;
+                encoder.encode(&samples)?
+            }
+            (None, None) => bail!(
+                "Provide a reference: either pre-encoded .npy codes (referenceCodesBase64) or a WAV clip (referenceAudioBase64)."
+            ),
+        };
         phase_timings.insert(
             "referenceEncodingSec".to_string(),
             json!(round_secs(reference_started.elapsed().as_secs_f64())),
@@ -1355,7 +1410,7 @@ impl RuntimeState {
             sample_rate: neutts::SAMPLE_RATE as usize,
             model_repo,
             device: None,
-            warnings: Vec::new(),
+            warnings,
             streamed_audio: None,
             phase_timings,
         })
@@ -1993,12 +2048,19 @@ fn sanitize_request_id_for_path(request_id: &str) -> String {
 }
 
 fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, usize)> {
-    let mut reader = hound::WavReader::open(path)
+    let reader = hound::WavReader::open(path)
         .with_context(|| format!("Failed to open Qwen3 MLX output WAV {}", path.display()))?;
+    wav_reader_as_f32(reader, "Qwen3 MLX output WAV")
+}
+
+fn wav_reader_as_f32<R: Read>(
+    mut reader: hound::WavReader<R>,
+    what: &str,
+) -> Result<(Vec<f32>, usize)> {
     let spec = reader.spec();
     let channels = usize::from(spec.channels);
     if channels == 0 {
-        bail!("Qwen3 MLX output WAV has zero channels.");
+        bail!("{what} has zero channels.");
     }
     let sample_rate = usize::try_from(spec.sample_rate).context("Invalid WAV sample rate")?;
     let samples = match spec.sample_format {
@@ -2006,7 +2068,7 @@ fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, usize)> {
             let raw = reader
                 .samples::<f32>()
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .context("Failed reading float Qwen3 MLX output WAV samples")?;
+                .with_context(|| format!("Failed reading float {what} samples"))?;
             downmix_interleaved(raw, channels)
         }
         hound::SampleFormat::Int => {
@@ -2015,7 +2077,7 @@ fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, usize)> {
                     .samples::<i16>()
                     .map(|sample| sample.map(|value| value as f32 / 32768.0))
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .context("Failed reading int16 Qwen3 MLX output WAV samples")?;
+                    .with_context(|| format!("Failed reading int16 {what} samples"))?;
                 downmix_interleaved(raw, channels)
             } else {
                 let denom = 2_f32.powi(i32::from(spec.bits_per_sample.saturating_sub(1)));
@@ -2023,12 +2085,35 @@ fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, usize)> {
                     .samples::<i32>()
                     .map(|sample| sample.map(|value| value as f32 / denom))
                     .collect::<std::result::Result<Vec<_>, _>>()
-                    .context("Failed reading int32 Qwen3 MLX output WAV samples")?;
+                    .with_context(|| format!("Failed reading int32 {what} samples"))?;
                 downmix_interleaved(raw, channels)
             }
         }
     };
     Ok((samples, sample_rate))
+}
+
+/// Decode a base64 WAV reference clip to 16 kHz mono samples ready for the
+/// NeuCodec encoder. Returns the samples and whether the clip was truncated to
+/// the encoder's 20-second window.
+fn prepare_neutts_reference_samples(encoded: &str) -> Result<(Vec<f32>, bool)> {
+    let bytes = BASE64
+        .decode(encoded.trim())
+        .context("Failed to decode NeuTTS reference WAV")?;
+    let reader = hound::WavReader::new(std::io::Cursor::new(bytes))
+        .context("NeuTTS reference must be a valid WAV file")?;
+    let (samples, sample_rate) = wav_reader_as_f32(reader, "NeuTTS reference WAV")?;
+    if samples.is_empty() {
+        bail!("NeuTTS reference WAV contains no audio.");
+    }
+    let mut samples = neutts::codec::resample(
+        &samples,
+        u32::try_from(sample_rate).context("Invalid WAV sample rate")?,
+        neutts::ENCODER_SAMPLE_RATE,
+    );
+    let truncated = samples.len() > neucodec_encoder::ENCODER_WINDOW_SAMPLES;
+    samples.truncate(neucodec_encoder::ENCODER_WINDOW_SAMPLES);
+    Ok((samples, truncated))
 }
 
 fn downmix_interleaved(samples: Vec<f32>, channels: usize) -> Vec<f32> {
@@ -2582,6 +2667,51 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wav_base64(sample_rate: u32, samples: &[i16]) -> String {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+            for &sample in samples {
+                writer.write_sample(sample).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        BASE64.encode(cursor.into_inner())
+    }
+
+    #[test]
+    fn prepare_neutts_reference_samples_resamples_to_encoder_rate() {
+        // 1 second at 48 kHz must land at ~1 second at 16 kHz, untruncated.
+        let encoded = wav_base64(48_000, &vec![1000_i16; 48_000]);
+        let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
+        assert!(!truncated);
+        let expected = neutts::ENCODER_SAMPLE_RATE as usize;
+        assert!(samples.len().abs_diff(expected) <= 2, "got {}", samples.len());
+    }
+
+    #[test]
+    fn prepare_neutts_reference_samples_truncates_to_encoder_window() {
+        // 25 seconds at 16 kHz must clip to the 20-second encoder window.
+        let encoded = wav_base64(16_000, &vec![1000_i16; 16_000 * 25]);
+        let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
+        assert!(truncated);
+        assert_eq!(samples.len(), neucodec_encoder::ENCODER_WINDOW_SAMPLES);
+    }
+
+    #[test]
+    fn prepare_neutts_reference_samples_rejects_invalid_input() {
+        assert!(prepare_neutts_reference_samples("not base64!").is_err());
+        assert!(
+            prepare_neutts_reference_samples(&BASE64.encode(b"not a wav file")).is_err()
+        );
+    }
 
     #[test]
     fn speaker_id_lowercases_every_display_name() {

@@ -250,12 +250,14 @@ export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown>
   const text = parseRequiredText(payload.text, "text");
   const referenceText = parseRequiredText(payload.referenceText, "referenceText", MAX_REFERENCE_TEXT_LENGTH);
 
-  if (typeof payload.referenceCodesBase64 !== "string" || payload.referenceCodesBase64.trim().length === 0) {
-    throw new Error("`referenceCodesBase64` is required.");
-  }
-  const referenceCodesBase64 = payload.referenceCodesBase64.trim();
-  if (referenceCodesBase64.length > MAX_REFERENCE_CODES_BASE64_LENGTH) {
-    throw new Error("`referenceCodesBase64` is too large.");
+  const referenceCodesBase64 = parseOptionalString(payload.referenceCodesBase64, "referenceCodesBase64", {
+    maxLength: MAX_REFERENCE_CODES_BASE64_LENGTH,
+  });
+  const referenceAudioBase64 = parseOptionalString(payload.referenceAudioBase64, "referenceAudioBase64", {
+    maxLength: MAX_REFERENCE_AUDIO_BASE64_LENGTH,
+  });
+  if (!referenceCodesBase64 && !referenceAudioBase64) {
+    throw new Error("A `referenceCodesBase64` (.npy) or `referenceAudioBase64` (WAV) payload is required.");
   }
 
   const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
@@ -266,7 +268,8 @@ export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown>
   return {
     text,
     referenceText,
-    referenceCodesBase64,
+    ...(referenceCodesBase64 ? { referenceCodesBase64 } : {}),
+    ...(referenceAudioBase64 ? { referenceAudioBase64 } : {}),
     modelRepo,
   };
 }

@@ -155,6 +155,7 @@ export function LocalRuntimePage({
   const [referenceText, setReferenceText] = useState("");
   const [referenceAudioName, setReferenceAudioName] = useState("");
   const [referenceCodesBase64, setReferenceCodesBase64] = useState<string | null>(null);
+  const [referenceWavBase64, setReferenceWavBase64] = useState<string | null>(null);
   const [referenceAudioGuidance, setReferenceAudioGuidance] = useState<StatusMessage>(null);
 
   const [qwen3Model, setQwen3Model] = useState(() => getDefaultQwen3Model(window.electron?.platform));
@@ -548,7 +549,7 @@ export function LocalRuntimePage({
   const canGenerate = useMemo(() => {
     if (text.trim().length < 10) return false;
     if (model === "neutts") {
-      return referenceText.trim().length > 0 && !!referenceCodesBase64;
+      return referenceText.trim().length > 0 && (!!referenceCodesBase64 || !!referenceWavBase64);
     }
     if (model === "qwen3" && qwen3VoiceClone) {
       return qwen3BaseModelPath.trim().length > 0
@@ -570,6 +571,7 @@ export function LocalRuntimePage({
     qwen3ReferenceText,
     qwen3VoiceClone,
     referenceCodesBase64,
+    referenceWavBase64,
     referenceText,
     text,
   ]);
@@ -719,25 +721,36 @@ export function LocalRuntimePage({
       if (!isCurrentPageVersion(pageVersion)) return;
       setReferenceAudioName("");
       setReferenceCodesBase64(null);
+      setReferenceWavBase64(null);
       setReferenceAudioGuidance(null);
       return;
     }
 
     try {
       const buffer = await file.arrayBuffer();
-      if (!file.name.toLowerCase().endsWith(".npy")) {
-        throw new Error("NeuTTS Rust references must be pre-encoded .npy code files.");
+      const lowerName = file.name.toLowerCase();
+      if (!lowerName.endsWith(".npy") && !lowerName.endsWith(".wav")) {
+        throw new Error("NeuTTS references must be a WAV clip or pre-encoded .npy code file.");
       }
 
       if (!isCurrentPageVersion(pageVersion)) return;
-      setReferenceCodesBase64(arrayBufferToBase64(buffer));
+      if (lowerName.endsWith(".npy")) {
+        setReferenceCodesBase64(arrayBufferToBase64(buffer));
+        setReferenceWavBase64(null);
+        setReferenceAudioGuidance({ tone: "success", text: "Reference code file loaded." });
+        setStatus({ tone: "info", text: `Loaded reference codes: ${file.name}. Enter the matching transcript before generating.` });
+      } else {
+        setReferenceWavBase64(arrayBufferToBase64(buffer));
+        setReferenceCodesBase64(null);
+        setReferenceAudioGuidance({ tone: "success", text: "Reference WAV loaded." });
+        setStatus({ tone: "info", text: `Loaded reference WAV: ${file.name}. Enter the matching transcript before generating.` });
+      }
       setReferenceAudioName(file.name);
-      setReferenceAudioGuidance({ tone: "success", text: "Reference code file loaded." });
-      setStatus({ tone: "info", text: `Loaded reference codes: ${file.name}. Enter the matching transcript before generating.` });
     } catch (err) {
       if (!isCurrentPageVersion(pageVersion)) return;
       setReferenceAudioName("");
       setReferenceCodesBase64(null);
+      setReferenceWavBase64(null);
       setReferenceAudioGuidance(null);
       setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
     }
@@ -809,7 +822,11 @@ export function LocalRuntimePage({
       if (model === "neutts") {
         payload.modelRepo = neuttsModel;
         payload.referenceText = referenceText.trim();
-        payload.referenceCodesBase64 = referenceCodesBase64;
+        if (referenceCodesBase64) {
+          payload.referenceCodesBase64 = referenceCodesBase64;
+        } else if (referenceWavBase64) {
+          payload.referenceAudioBase64 = referenceWavBase64;
+        }
       } else if (model === "qwen3") {
         payload.modelRepo = qwen3Model;
         payload.mode = qwen3VoiceClone ? "voiceClone" : "customVoice";
@@ -911,6 +928,7 @@ export function LocalRuntimePage({
     qwen3TopP,
     qwen3VoiceClone,
     referenceCodesBase64,
+    referenceWavBase64,
     referenceText,
     refreshCacheInfo,
     setNewAudioUrl,

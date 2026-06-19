@@ -142,21 +142,21 @@ export function LocalRuntimeModelInputs({
           </label>
 
           <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
-            Reference Codes
+            Reference Voice
             <input
               type="file"
-              accept=".npy,application/octet-stream"
+              accept=".wav,.npy,audio/wav,audio/x-wav,application/octet-stream"
               onChange={(event) => onReferenceAudioChange(event.target.files?.[0] ?? null)}
               className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
             <span className="text-sm font-normal normal-case text-text-muted">
-              {referenceAudioName || "Upload pre-encoded NeuTTS .npy reference codes"}
+              {referenceAudioName || "Upload a WAV reference clip or pre-encoded NeuTTS .npy codes"}
             </span>
             <span className="text-sm font-normal normal-case text-text-muted">
-              The Rust runtime cannot encode a WAV clip itself. Produce the .npy
-              by encoding a 3–15s mono reference clip with NeuCodec from the
-              Neuphonic NeuTTS project (github.com/neuphonic/neutts-air), then
-              upload it here with its exact transcript below.
+              Upload a 3–15s mono WAV clip of the voice to clone — it is encoded
+              locally with NeuCodec (the first WAV triggers a one-time ~1.8 GB
+              encoder download). Pre-encoded .npy reference codes also work.
+              Enter the clip's exact transcript below.
             </span>
             {referenceAudioGuidance && (
               <span className={`text-sm font-normal normal-case ${statusClass(referenceAudioGuidance.tone)}`}>

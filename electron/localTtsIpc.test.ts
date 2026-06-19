@@ -103,6 +103,18 @@ describe("localTtsIpc request sanitizers", () => {
       modelRepo: "neuphonic/neutts-nano-q8-gguf",
     });
 
+    expect(sanitizeGeneratePayload("neutts", {
+      text: "Hello from NeuTTS.",
+      referenceText: "Reference transcript.",
+      referenceAudioBase64: " UklGRg== ",
+      modelRepo: "neuphonic/neutts-nano-q8-gguf",
+    })).toEqual({
+      text: "Hello from NeuTTS.",
+      referenceText: "Reference transcript.",
+      referenceAudioBase64: "UklGRg==",
+      modelRepo: "neuphonic/neutts-nano-q8-gguf",
+    });
+
     expect(() => sanitizeGeneratePayload("neutts", {
       text: "Hello",
       referenceText: "ref",
@@ -111,7 +123,12 @@ describe("localTtsIpc request sanitizers", () => {
       text: "Hello",
       referenceText: "ref",
       referenceCodesBase64: "x".repeat(25_000_001),
-    })).toThrow("too large");
+    })).toThrow("exceeds 25000000");
+    expect(() => sanitizeGeneratePayload("neutts", {
+      text: "Hello",
+      referenceText: "ref",
+      referenceAudioBase64: "x".repeat(60_000_001),
+    })).toThrow("exceeds 60000000");
     expect(() => sanitizeGeneratePayload("neutts", {
       text: "Hello",
       referenceText: "ref",

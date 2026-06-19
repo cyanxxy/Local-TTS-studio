@@ -441,19 +441,44 @@ describe("LocalRuntimePage", () => {
     expect(URL.createObjectURL).toHaveBeenCalled();
   });
 
-  it("rejects WAV NeuTTS references because the Rust path requires .npy codes", async () => {
+  it("loads a WAV NeuTTS reference and generates with referenceAudioBase64", async () => {
+    const generateDeferred = createDeferred<LocalTtsGenerateResult>();
+    generate.mockReturnValue(generateDeferred.promise);
+
     renderPage(getRuntimePageProps("neutts"));
 
     await screen.findByRole("button", { name: /re-check runtime/i });
-    const referenceInput = screen.getByLabelText(/reference codes/i);
+    const referenceInput = screen.getByLabelText(/reference voice/i);
     const wavFile = new File([new Uint8Array([1, 2, 3])], "reference.wav", { type: "audio/wav" });
     await act(async () => {
       fireEvent.change(referenceInput, { target: { files: [wavFile] } });
     });
 
-    expect(await screen.findByText("NeuTTS Rust references must be pre-encoded .npy code files."))
-      .toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^generate$/i })).toBeDisabled();
+    expect(await screen.findByText(/loaded reference wav: reference\.wav/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByPlaceholderText(/transcript that matches/i), {
+      target: { value: "This is the exact transcript." },
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled();
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+
+    await waitFor(() => {
+      expect(generate).toHaveBeenCalledTimes(1);
+    });
+
+    const request = generate.mock.calls[0][0] as {
+      model: "neutts";
+      requestId: string;
+      payload: Record<string, unknown>;
+    };
+    expect(request.payload).toMatchObject({
+      referenceText: "This is the exact transcript.",
+      referenceAudioBase64: "AQID",
+    });
+    expect(request.payload).not.toHaveProperty("referenceCodesBase64");
   });
 
   it("generates Qwen3 MLX CustomVoice without reference audio", async () => {
