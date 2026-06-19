@@ -789,4 +789,182 @@ describe("createWebSocketBridgeWorkerPool", () => {
     children[0].exit(null as unknown as number);
     await expect(run).rejects.toThrow(/cancelled/i);
   });
+
+  it("rejects a concurrent generate for a model whose worker is already mid-request", async () => {
+    // No onMessage, so the first request never receives a result and stays the
+    // worker's active request while the second generate arrives.
+    const { pool, spawn, servers } = makePool();
+    const first = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+    first.catch(() => {});
+
+    // Wait until the worker is fully connected (active set, startingModels
+    // cleared) so the second run trips the active-worker guard, not the
+    // still-spawning guard.
+    await waitFor(() => servers[0]?.messages.length === 1);
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r2",
+      payload: { text: "two" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/already running/i);
+    expect(spawn).toHaveBeenCalledTimes(1);
+
+    pool.cancel("r1");
+    servers[0].close();
+    await expect(first).rejects.toThrow();
+  });
+
+  it("rejects an audio chunk whose declared sample count exceeds the maximum", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 1,
+        sampleRate: 48000,
+        sampleCount: 48_000 * 600 + 1,
+        silenceAfterSamples: 0,
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "huge" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/maximum sample count/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects a frame stamped with a different request id", async () => {
+    const { pool, children, servers } = makePool((_message, server) => {
+      server.sendJson({ type: "progress", requestId: "someone-else", phase: "inference", message: "x" });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/unexpected request/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects a second audio chunk metadata frame before the pending binary frame", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 2,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+      });
+      // Second metadata frame with no binary in between.
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 1,
+        total: 2,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/metadata before the pending binary frame/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects a result frame that arrives before the pending audio binary frame", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 1,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+      });
+      // Result before the announced binary frame is delivered.
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: {
+          audioTransport: "websocket-binary",
+          audioChunkCount: 1,
+          sampleRate: 24000,
+          modelRepo: "R",
+          durationSec: 1,
+          elapsedSec: 1,
+          phaseTimingsSec: {},
+        },
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/result before the pending audio binary frame/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects a binary frame that arrives without preceding metadata", async () => {
+    const { pool, children, servers } = makePool((_message, server) => {
+      server.sendBinary(Buffer.alloc(2 * Float32Array.BYTES_PER_ELEMENT));
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/binary frame without metadata/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects a binary frame whose length does not match the declared sample count", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 1,
+        sampleRate: 24000,
+        sampleCount: 4,
+        silenceAfterSamples: 0,
+      });
+      // Declared 4 samples (16 bytes) but ship 12 bytes.
+      server.sendBinary(Buffer.alloc(12));
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/unexpected byte length/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
 });

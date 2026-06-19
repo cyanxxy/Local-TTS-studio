@@ -39,6 +39,8 @@ describe("buildContentSecurityPolicy", () => {
     expect(policy).toContain("ws://localhost:5173");
     expect(policy).toContain("'unsafe-eval'");
     expect(policy).toContain("'unsafe-inline'");
+    const imgDirective = policy.split("; ").find((directive) => directive.startsWith("img-src"));
+    expect(imgDirective?.split(/\s+/)).toContain("https:");
   });
 
   it("omits dev-only allowances in production mode", () => {
@@ -51,6 +53,13 @@ describe("buildContentSecurityPolicy", () => {
     expect(policy).toContain("style-src 'self' 'unsafe-inline'");
     expect(policy).toContain("script-src 'self' 'wasm-unsafe-eval'");
     expect(policy).toContain("https://huggingface.co");
+  });
+
+  it("does not allow arbitrary https image origins in production (no exfil beacon channel)", () => {
+    const policy = buildContentSecurityPolicy(false);
+    const imgDirective = policy.split("; ").find((directive) => directive.startsWith("img-src"));
+    expect(imgDirective).toBe("img-src 'self' data: blob:");
+    expect(imgDirective?.split(/\s+/)).not.toContain("https:");
   });
 
   it("denies renderer permission requests by default", () => {

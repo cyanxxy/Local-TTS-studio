@@ -119,10 +119,36 @@ export function encodeHuggingFacePath(filePath: string): string {
   return filePath.split("/").map((part) => encodeURIComponent(part)).join("/");
 }
 
+// Socket inactivity deadline for a single request. A server that accepts the
+// connection but never sends response headers would otherwise hang the awaited
+// `request(url)` forever; this turns that into a clean rejection.
+const REQUEST_IDLE_TIMEOUT_MS = 30_000;
+
+// Body-streaming inactivity deadline (re-armed on every received chunk). Guards
+// against a response whose body stalls or truncates without emitting a stream
+// terminal event. Generous so a slow-but-progressing transfer is never killed.
+export const IDLE_DOWNLOAD_TIMEOUT_MS = 120_000;
+
+// The Node-side downloader runs in the main process with unrestricted host
+// network access (loopback, link-local 169.254.0.0/16, RFC1918), and it is NOT
+// covered by the renderer CSP. A server-controlled 3xx `Location` is followed
+// verbatim, so without a destination check a redirect could point the main
+// process at an internal service or the cloud-metadata endpoint (SSRF). Mirror
+// the HuggingFace host posture from security.ts and only ever fetch HF hosts;
+// a bare IP literal never matches these suffixes, so metadata/loopback targets
+// are rejected too.
+export function isAllowedHuggingFaceDownloadHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return host === "huggingface.co"
+    || host === "hf.co"
+    || host.endsWith(".huggingface.co")
+    || host.endsWith(".hf.co");
+}
+
 // Remote content must only ever load over HTTPS (Electron security checklist
 // item 1), so plain-http URLs are rejected up front — including redirect
 // targets, which re-enter this function and could otherwise downgrade an
-// https download to http.
+// https download to http or redirect off the HuggingFace host allowlist.
 export function requestUrl(url: string, redirectCount = 0): Promise<IncomingMessage> {
   if (redirectCount > 8) {
     return Promise.reject(new Error(`Too many redirects while downloading ${url}`));
@@ -134,12 +160,17 @@ export function requestUrl(url: string, redirectCount = 0): Promise<IncomingMess
       reject(new Error(`Refusing to download over insecure protocol: ${url}`));
       return;
     }
+    if (!isAllowedHuggingFaceDownloadHost(parsed.hostname)) {
+      reject(new Error(`Refusing to download from non-HuggingFace host: ${parsed.host}`));
+      return;
+    }
     const request = httpsRequest(
       parsed,
       {
         headers: {
           "User-Agent": "Open-TTS/1.0",
         },
+        timeout: REQUEST_IDLE_TIMEOUT_MS,
       },
       (response) => {
         const location = response.headers.location;
@@ -156,6 +187,9 @@ export function requestUrl(url: string, redirectCount = 0): Promise<IncomingMess
         resolve(response);
       },
     );
+    // `timeout` only emits an event; the socket must be torn down explicitly so
+    // the awaiting caller sees a rejection rather than a silent stall.
+    request.on("timeout", () => request.destroy(new Error(`Timed out connecting to ${url}`)));
     request.on("error", reject);
     request.end();
   });
@@ -233,20 +267,67 @@ export async function downloadHuggingFaceFile(
   const output = createWriteStream(temporaryPath);
   let downloadedBytes = 0;
 
-  await new Promise<void>((resolve, reject) => {
-    const fail = (err: Error) => {
-      output.destroy();
-      reject(err);
-    };
-    response.on("data", (chunk: Buffer) => {
-      downloadedBytes += chunk.byteLength;
-      onProgress(downloadedBytes, totalBytes);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let idleTimer: ReturnType<typeof setTimeout> | null = null;
+      const clearIdle = () => {
+        if (idleTimer) {
+          clearTimeout(idleTimer);
+          idleTimer = null;
+        }
+      };
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        clearIdle();
+        if (err) {
+          response.destroy();
+          output.destroy();
+          reject(err);
+        } else {
+          resolve();
+        }
+      };
+      // A truncated body can leave the stream silent forever — a server that
+      // ends after fewer bytes than its Content-Length emits no 'end', 'error',
+      // or 'finish'. An inactivity deadline (re-armed on every chunk, so an
+      // actively-progressing transfer never trips it) turns that hang into a
+      // clean failure instead of permanently wedging the download coordinator.
+      const armIdle = () => {
+        clearIdle();
+        idleTimer = setTimeout(
+          () => settle(new Error(`Download stalled for ${IDLE_DOWNLOAD_TIMEOUT_MS / 1000}s: ${url}`)),
+          IDLE_DOWNLOAD_TIMEOUT_MS,
+        );
+        idleTimer.unref?.();
+      };
+      armIdle();
+      response.on("data", (chunk: Buffer) => {
+        downloadedBytes += chunk.byteLength;
+        armIdle();
+        onProgress(downloadedBytes, totalBytes);
+      });
+      response.on("aborted", () => settle(new Error(`Download connection closed early: ${url}`)));
+      response.on("error", settle);
+      output.on("error", settle);
+      output.on("finish", () => settle());
+      response.pipe(output);
     });
-    response.on("error", fail);
-    output.on("error", fail);
-    output.on("finish", resolve);
-    response.pipe(output);
-  });
+
+    // When the server declared a length, a short body is a truncated/corrupt
+    // download — reject it rather than promoting the partial file to the final
+    // destination where qwen3MlxModelDirLooksReady would treat it as complete.
+    if (typeof totalBytes === "number" && Number.isFinite(totalBytes) && downloadedBytes !== totalBytes) {
+      throw new Error(`Download incomplete for ${url}: received ${downloadedBytes} of ${totalBytes} bytes.`);
+    }
+  } catch (err) {
+    // Drop the partial temp file so an abandoned download leaves no clutter and
+    // a retry starts clean (rather than relying on the next attempt's pre-rm).
+    await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+
   await fs.rename(temporaryPath, destination);
   return true;
 }

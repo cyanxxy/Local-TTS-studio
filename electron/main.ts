@@ -163,11 +163,13 @@ function createMainWindow() {
     },
   });
 
-  if (isDev) {
-    win.loadURL(`${DEV_SERVER_URL}/desktop/studio`);
-  } else {
-    win.loadURL(getElectronAppUrl("/studio"));
-  }
+  const target = isDev ? `${DEV_SERVER_URL}/desktop/studio` : getElectronAppUrl("/studio");
+  // loadURL rejects on a navigation abort (e.g. the window is closed mid-load);
+  // attach a handler so it is logged rather than surfacing as an unhandled
+  // rejection on the main process.
+  win.loadURL(target).catch((err) => {
+    console.error(`Failed to load ${target}:`, err);
+  });
 }
 
 function registerRendererSecurityHeaders() {
@@ -234,9 +236,16 @@ function registerNavigationSecurityHandlers() {
 }
 
 function registerPermissionHandlers() {
+  // Deny every permission across all three gates: the async request flow, the
+  // synchronous check flow (navigator.permissions.query, capability checks),
+  // and device selection (WebUSB/Serial/HID). The Electron security checklist
+  // requires wiring all of them, not just the request handler, so synchronous
+  // checks don't fall through to permissive built-in defaults.
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
     callback(shouldGrantPermission());
   });
+  session.defaultSession.setPermissionCheckHandler(() => shouldGrantPermission());
+  session.defaultSession.setDevicePermissionHandler(() => shouldGrantPermission());
 }
 
 async function sanitizeLocalBridgeRequest(
@@ -695,15 +704,30 @@ async function runRustBridge(
 
 async function getDirectorySizeBytes(dirPath: string): Promise<number> {
   let total = 0;
-  const entries = await fs.readdir(dirPath, { withFileTypes: true });
+  // The cache tree is mutated concurrently (clear-cache, in-flight downloads,
+  // the Rust bridge's HF cache), so a file or subdir can vanish between the
+  // readdir snapshot and the per-entry stat/recurse. Treat such ENOENT races as
+  // a 0-byte contribution to keep the size query best-effort instead of failing
+  // the whole IPC call; surface any other error normally.
+  let entries: import("fs").Dirent[];
+  try {
+    entries = await fs.readdir(dirPath, { withFileTypes: true });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw err;
+  }
 
   await Promise.all(entries.map(async (entry) => {
     const fullPath = path.join(dirPath, entry.name);
-    if (entry.isDirectory()) {
-      total += await getDirectorySizeBytes(fullPath);
-    } else if (entry.isFile()) {
-      const stats = await fs.stat(fullPath);
-      total += stats.size;
+    try {
+      if (entry.isDirectory()) {
+        total += await getDirectorySizeBytes(fullPath);
+      } else if (entry.isFile()) {
+        const stats = await fs.stat(fullPath);
+        total += stats.size;
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
   }));
 
@@ -878,9 +902,12 @@ app.whenReady().then(() => {
     return handleQwen3MlxSetup();
   });
 
-  ipcMain.handle("local-tts:download-qwen3-mlx-model", (event, request: unknown) => (
-    handleDownloadQwen3MlxModel(request, event)
-  ));
+  ipcMain.handle("local-tts:download-qwen3-mlx-model", (event, request: unknown) => {
+    // Enforce the trusted-sender gate at the handler boundary like every other
+    // channel; handleDownloadQwen3MlxModel re-checks as defense-in-depth.
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return handleDownloadQwen3MlxModel(request, event);
+  });
 
   ipcMain.handle("local-tts:choose-qwen3-mlx-model-dir", (event) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });

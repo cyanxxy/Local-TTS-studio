@@ -99,6 +99,27 @@ interface Worker {
 
 const BRIDGE_PORT_PREFIX = "__PORT__";
 
+// Defensive ceiling on a single audio chunk's declared sample count. The
+// binary-frame handler accepts exactly `sampleCount * 4` bytes, so without a
+// cap a misbehaving bridge could dictate an unbounded (multi-GB) allocation
+// from one metadata field. The bridge streams audio in chunks and ships
+// 24kHz/44.1kHz output, so 10 minutes at 48kHz per chunk cannot reject a
+// legitimate frame.
+const MAX_AUDIO_CHUNK_SAMPLES = 48_000 * 600;
+
+// On the WebSocket path the bridge result and audio travel over the socket, so
+// the child's stdout/stderr are diagnostic-only and never read for the result.
+// Retain just a bounded tail (the over-limit byte counters still enforce the
+// hard cap) so a chatty/long generation can't hold tens of MB of dead string.
+const RETAINED_OUTPUT_TAIL_CHARS = 64 * 1024;
+
+function appendBoundedTail(existing: string, text: string): string {
+  const combined = existing + text;
+  return combined.length > RETAINED_OUTPUT_TAIL_CHARS
+    ? combined.slice(combined.length - RETAINED_OUTPUT_TAIL_CHARS)
+    : combined;
+}
+
 function spawnKeyOf(config: WebSocketWorkerSpawnConfig): string {
   const envPairs = Object.entries(config.env ?? {})
     .filter(([, value]) => value !== undefined)
@@ -237,6 +258,9 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
   if (sampleRate <= 0 || sampleCount <= 0) {
     throw new Error("WebSocket bridge returned an audio chunk with invalid sample metadata.");
   }
+  if (sampleCount > MAX_AUDIO_CHUNK_SAMPLES) {
+    throw new Error("WebSocket bridge returned an audio chunk exceeding the maximum sample count.");
+  }
   return {
     requestId,
     index,
@@ -329,10 +353,17 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   function armIdleTimer(model: TModel, worker: Worker, active: ActiveRequest): void {
     clearActiveIdleTimer(active);
     active.idleTimer = setTimeout(() => {
+      // A cancel can land in the same tick the deadline elapses (cancel records
+      // the id but settlement comes from the async exit/close). Mirror the
+      // other terminal paths so a deliberate Stop is reported as a cancellation
+      // rather than a misleading "process may be stuck" error.
+      const cancelled = cancelledRequests.has(active.requestId);
       settleActive(model, worker, {
         ok: false,
         error: new Error(
-          `Rust local bridge produced no output for ${active.idleTimeoutMs / 1000}s and was stopped (the process may be stuck).`,
+          cancelled
+            ? "Generation cancelled."
+            : `Rust local bridge produced no output for ${active.idleTimeoutMs / 1000}s and was stopped (the process may be stuck).`,
         ),
       });
       killWorker(model, worker);
@@ -387,7 +418,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         killWorker(model, worker);
         return;
       }
-      active.stdout += text;
+      active.stdout = appendBoundedTail(active.stdout, text);
     } else {
       active.stderrBytes += bytes;
       if (active.stderrBytes > active.maxStderrBytes) {
@@ -398,7 +429,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         killWorker(model, worker);
         return;
       }
-      active.stderr += text;
+      active.stderr = appendBoundedTail(active.stderr, text);
     }
   }
 

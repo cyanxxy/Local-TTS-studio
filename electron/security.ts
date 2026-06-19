@@ -50,17 +50,23 @@ export function isSafeExternalUrl(rawUrl: string): boolean {
 export function buildContentSecurityPolicy(isDev: boolean): string {
   const scriptSources = ["'self'", "'wasm-unsafe-eval'"];
   const connectSources = ["'self'", ...HUGGING_FACE_CONNECT_SOURCES];
+  // Production renders only local (app://) and data:/blob: images, so the open
+  // `https:` token would just be a CSP-bypassing exfiltration channel (an
+  // injected <img src> beacons data via the URL, unconstrained by connect-src).
+  // Keep the wildcard for dev tooling only.
+  const imgSources = ["'self'", "data:", "blob:"];
 
   if (isDev) {
     scriptSources.push("'unsafe-eval'", "'unsafe-inline'", DEV_SERVER_URL);
     connectSources.push("https:", DEV_SERVER_URL, DEV_SERVER_WS_URL);
+    imgSources.push("https:");
   }
 
   return [
     "default-src 'self'",
     `script-src ${scriptSources.join(" ")}`,
     "style-src 'self' 'unsafe-inline'",
-    "img-src 'self' data: blob: https:",
+    `img-src ${imgSources.join(" ")}`,
     "font-src 'self' data:",
     "media-src 'self' blob: data:",
     `connect-src ${connectSources.join(" ")}`,

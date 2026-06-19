@@ -10,7 +10,10 @@ import {
   buildQwen3SetupWarnings,
   createQwen3MlxDownloadCoordinator,
   createSafeProgressSender,
+  downloadHuggingFaceFile,
   downloadQwen3MlxModel,
+  IDLE_DOWNLOAD_TIMEOUT_MS,
+  isAllowedHuggingFaceDownloadHost,
   isSafeHuggingFaceFileName,
   listHuggingFaceModelFiles,
   requestUrl,
@@ -114,6 +117,24 @@ describe("isSafeHuggingFaceFileName", () => {
   });
 });
 
+describe("isAllowedHuggingFaceDownloadHost", () => {
+  it("accepts HuggingFace hosts and their CDN subdomains", () => {
+    expect(isAllowedHuggingFaceDownloadHost("huggingface.co")).toBe(true);
+    expect(isAllowedHuggingFaceDownloadHost("hf.co")).toBe(true);
+    expect(isAllowedHuggingFaceDownloadHost("cdn-lfs.huggingface.co")).toBe(true);
+    expect(isAllowedHuggingFaceDownloadHost("cdn-lfs-us-1.hf.co")).toBe(true);
+    expect(isAllowedHuggingFaceDownloadHost("HUGGINGFACE.CO")).toBe(true);
+  });
+
+  it("rejects internal/metadata IPs and lookalike or foreign hosts", () => {
+    expect(isAllowedHuggingFaceDownloadHost("169.254.169.254")).toBe(false);
+    expect(isAllowedHuggingFaceDownloadHost("127.0.0.1")).toBe(false);
+    expect(isAllowedHuggingFaceDownloadHost("attacker.example")).toBe(false);
+    expect(isAllowedHuggingFaceDownloadHost("huggingface.co.evil.com")).toBe(false);
+    expect(isAllowedHuggingFaceDownloadHost("evilhuggingface.co")).toBe(false);
+  });
+});
+
 describe("requestUrl", () => {
   it("rejects plain-http URLs before issuing any request", async () => {
     await expect(requestUrl("http://huggingface.co/api/models/x")).rejects.toThrow(/insecure protocol/);
@@ -122,6 +143,12 @@ describe("requestUrl", () => {
   it("rejects non-http(s) protocols before issuing any request", async () => {
     await expect(requestUrl("file:///etc/passwd")).rejects.toThrow(/insecure protocol/);
     await expect(requestUrl("ftp://example.com/file")).rejects.toThrow(/insecure protocol/);
+  });
+
+  it("rejects https requests to non-HuggingFace hosts (redirect SSRF guard)", async () => {
+    await expect(requestUrl("https://169.254.169.254/latest/meta-data/")).rejects.toThrow(/non-HuggingFace host/);
+    await expect(requestUrl("https://127.0.0.1:8080/internal")).rejects.toThrow(/non-HuggingFace host/);
+    await expect(requestUrl("https://attacker.example/payload")).rejects.toThrow(/non-HuggingFace host/);
   });
 });
 
@@ -196,6 +223,65 @@ describe("downloadQwen3MlxModel", () => {
     const second = await downloadQwen3MlxModel("mlx-community/example", modelDir, () => {}, request);
 
     expect(second).toMatchObject({ downloadedFiles: 0, skippedFiles: 2 });
+  });
+});
+
+describe("downloadHuggingFaceFile resilience", () => {
+  const FILE_URL = "https://huggingface.co/x/resolve/main/model.safetensors";
+
+  it("rejects and removes the temp file when the body is shorter than its declared length", async () => {
+    const dir = makeTempDir();
+    const dest = path.join(dir, "model.safetensors");
+    const request: UrlRequest = () =>
+      Promise.resolve(fakeResponse("0123456789", { headers: { "content-length": "100" } }));
+
+    await expect(downloadHuggingFaceFile(FILE_URL, dest, () => {}, request)).rejects.toThrow(/incomplete/);
+    // The truncated body must never be promoted to the final path, and no
+    // partial temp file should be left behind.
+    expect(fs.existsSync(dest)).toBe(false);
+    expect(fs.existsSync(`${dest}.download`)).toBe(false);
+  });
+
+  it("removes the partial temp file when the download stream errors", async () => {
+    const dir = makeTempDir();
+    const dest = path.join(dir, "model.safetensors");
+    const request: UrlRequest = () => {
+      const response = new Readable({
+        read() {
+          this.destroy(new Error("connection reset"));
+        },
+      }) as unknown as IncomingMessage;
+      Object.assign(response, { statusCode: 200, headers: { "content-length": "100" } });
+      return Promise.resolve(response);
+    };
+
+    await expect(downloadHuggingFaceFile(FILE_URL, dest, () => {}, request)).rejects.toThrow(/connection reset/);
+    expect(fs.existsSync(`${dest}.download`)).toBe(false);
+  });
+
+  it("fails a stalled download after the inactivity deadline instead of hanging forever", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const dir = makeTempDir();
+      const dest = path.join(dir, "model.safetensors");
+      // A response that delivers nothing and never ends (no 'end'/'error'),
+      // which without the watchdog would wedge the download forever.
+      const stalled = new Readable({ read() {} }) as unknown as IncomingMessage;
+      Object.assign(stalled, { statusCode: 200, headers: {} });
+      const request: UrlRequest = () => Promise.resolve(stalled);
+
+      const promise = downloadHuggingFaceFile(FILE_URL, dest, () => {}, request);
+      promise.catch(() => {});
+      // Let the real pre-stream fs setup run and arm the idle timer
+      // (setImmediate is not faked) before advancing the faked deadline.
+      for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      await vi.advanceTimersByTimeAsync(IDLE_DOWNLOAD_TIMEOUT_MS + 1_000);
+
+      await expect(promise).rejects.toThrow(/stalled/);
+      expect(fs.existsSync(`${dest}.download`)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
