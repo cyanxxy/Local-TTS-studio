@@ -79,6 +79,8 @@ const mock = vi.hoisted(() => {
       download: vi.fn(async () => {}),
       downloadCaptions: vi.fn(),
       replaceSegment: vi.fn(),
+      beginStream: vi.fn(),
+      endStream: vi.fn(),
       reset: vi.fn(),
       stopAll: vi.fn(),
     },
@@ -146,6 +148,14 @@ const mock = vi.hoisted(() => {
       clearCache: vi.fn(async () => {}),
       redownloadActiveModel: vi.fn(async () => {}),
       retryActiveModelLoad: vi.fn(),
+    },
+    localTts: {
+      probe: vi.fn(),
+      generate: vi.fn(),
+      cancel: vi.fn(),
+      getQwen3MlxSetup: vi.fn(),
+      subscribeProgress: vi.fn(),
+      subscribeAudioChunk: vi.fn(),
     },
     persistAppState: vi.fn(),
     persistCreatorState: vi.fn(),
@@ -216,8 +226,21 @@ vi.mock("../components/TextInput", () => ({
 }));
 
 vi.mock("../components/ModelToggle", () => ({
-  ModelToggle: ({ onModelChange }: { onModelChange: (model: "kokoro" | "supertonic") => void }) => (
-    <button type="button" onClick={() => onModelChange("supertonic")}>switch-supertonic</button>
+  ModelToggle: ({
+    onModelChange,
+    desktopModelOptions = [],
+  }: {
+    onModelChange: (model: "kokoro" | "supertonic") => void;
+    desktopModelOptions?: Array<{ key: string; selected?: boolean; onSelect: () => void }>;
+  }) => (
+    <div>
+      <button type="button" onClick={() => onModelChange("supertonic")}>switch-supertonic</button>
+      {desktopModelOptions.map((option) => (
+        <button key={option.key} type="button" onClick={option.onSelect}>
+          studio-desktop-{option.key}{option.selected ? "-selected" : ""}
+        </button>
+      ))}
+    </div>
   ),
 }));
 
@@ -309,6 +332,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onDownload,
     onRetakeSegment,
     onJumpToSegment,
+    desktopModelOptions = [],
   }: {
     onTextChange: (value: string) => void;
     onModelChange: (model: "kokoro" | "supertonic") => void;
@@ -320,6 +344,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onDownload: () => void;
     onRetakeSegment: (segmentId: string) => void;
     onJumpToSegment: (segmentId: string) => void;
+    desktopModelOptions?: Array<{ key: string; label: string; selected?: boolean; onSelect: () => void }>;
   }) => (
     <div>
       <button type="button" onClick={() => onTextChange("Reader text with enough length.")}>reader-text</button>
@@ -333,6 +358,11 @@ vi.mock("../components/AdvancedReaderPage", () => ({
       <button type="button" onClick={() => onRetakeSegment("seg-1")}>reader-retake</button>
       <button type="button" onClick={() => onJumpToSegment("seg-1")}>reader-jump</button>
       <button type="button" onClick={() => onJumpToSegment("")}>reader-empty-jump</button>
+      {desktopModelOptions.map((option) => (
+        <button key={option.key} type="button" onClick={option.onSelect}>
+          reader-desktop-{option.key}{option.selected ? "-selected" : ""}
+        </button>
+      ))}
     </div>
   ),
 }));
@@ -393,6 +423,8 @@ function resetMockState() {
     jumpToSegment: vi.fn(),
     download: vi.fn(async () => {}),
     downloadCaptions: vi.fn(),
+    beginStream: vi.fn(),
+    endStream: vi.fn(),
   };
   mock.tts = {
     ...mock.tts,
@@ -417,6 +449,41 @@ function resetMockState() {
     redownloadActiveModel: vi.fn(async () => {}),
     retryActiveModelLoad: vi.fn(),
   };
+  mock.localTts = {
+    probe: vi.fn(),
+    generate: vi.fn(),
+    cancel: vi.fn(),
+    getQwen3MlxSetup: vi.fn(),
+    subscribeProgress: vi.fn(),
+    subscribeAudioChunk: vi.fn(),
+  };
+  mock.localTts.probe.mockResolvedValue({
+    ready: true,
+    message: "Rust Qwen3-TTS runtime is ready.",
+    runtime: "rust",
+  });
+  mock.localTts.generate.mockResolvedValue({
+    sampleRate: 24_000,
+    modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+    durationSec: 1,
+    elapsedSec: 2,
+    audioTransport: "websocket-binary",
+    audioChunkCount: 0,
+    phaseTimingsSec: {},
+  });
+  mock.localTts.getQwen3MlxSetup.mockResolvedValue({
+    workerAvailable: false,
+    ttsAvailable: true,
+    apiServerAvailable: true,
+    recommendedModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+    recommendedModelDir: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+    modelDirExists: true,
+    modelDirLooksReady: true,
+    workerBuildCommand: "",
+    modelDownloadCommand: "",
+  });
+  mock.localTts.subscribeProgress.mockReturnValue(() => undefined);
+  mock.localTts.subscribeAudioChunk.mockReturnValue(() => undefined);
   mock.getWebGPUStatus.mockResolvedValue({ available: false, message: "No GPU available" });
 }
 
@@ -524,6 +591,98 @@ describe("SynthesisApp", () => {
     expect(mock.generation.handleRetakeSegment).toHaveBeenCalledWith("seg-1");
     expect(mock.player.jumpToSegment).toHaveBeenCalledWith("seg-1");
     expect(mock.player.jumpToSegment).not.toHaveBeenCalledWith("");
+  });
+
+  it("runs Qwen3 from the reader model option without leaving the reader tab", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    Object.defineProperty(window, "electron", {
+      value: {
+        isElectron: true,
+        platform: "darwin",
+        localTts: mock.localTts,
+      },
+      configurable: true,
+    });
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+        { key: "qwen3", label: "Qwen3-TTS" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-qwen3" }));
+    expect(screen.getByRole("button", { name: "reader-desktop-qwen3-selected" })).toBeInTheDocument();
+    await waitFor(() => expect(mock.localTts.getQwen3MlxSetup).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
+
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+    expect(mock.generation.resetGeneratedAudio).toHaveBeenCalled();
+    expect(mock.routing.navigateToPage).not.toHaveBeenCalledWith("qwen3");
+    await waitFor(() => {
+      expect(mock.localTts.generate).toHaveBeenCalledWith(expect.objectContaining({
+        model: "qwen3",
+        payload: expect.objectContaining({
+          text: "Initial script with enough text.",
+          modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+          mode: "customVoice",
+        }),
+      }));
+    });
+  });
+
+  it("runs Qwen3 from the studio model option only in Electron without leaving Studio", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    expect(screen.queryByRole("button", { name: "studio-desktop-qwen3" })).not.toBeInTheDocument();
+
+    Object.defineProperty(window, "electron", {
+      value: {
+        isElectron: true,
+        platform: "darwin",
+        localTts: mock.localTts,
+      },
+      configurable: true,
+    });
+    mock.routing = {
+      activePage: "studio",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+        { key: "qwen3", label: "Qwen3-TTS" },
+      ],
+      isReaderPage: false,
+      isStudioPage: true,
+      navigateToPage: vi.fn(),
+    };
+
+    rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
+    expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+    await waitFor(() => expect(mock.localTts.getQwen3MlxSetup).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("button", { name: "generate" }));
+
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+    expect(mock.generation.resetGeneratedAudio).toHaveBeenCalled();
+    expect(mock.routing.navigateToPage).not.toHaveBeenCalled();
+    expect(mock.generation.handleGenerate).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(mock.localTts.generate).toHaveBeenCalledWith(expect.objectContaining({
+        model: "qwen3",
+        payload: expect.objectContaining({
+          text: "Initial script with enough text.",
+          modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+          mode: "customVoice",
+        }),
+      }));
+    });
   });
 
   it("renders local runtime routes", () => {

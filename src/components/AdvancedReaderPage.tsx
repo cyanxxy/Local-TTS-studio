@@ -35,6 +35,7 @@ interface AdvancedReaderPageProps {
   onTextChange: (text: string) => void;
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
+  desktopModelOptions?: ReaderDesktopModelOption[];
   kokoroState: ModelState;
   supertonicState: ModelState;
   unavailableModels?: Partial<Record<ModelType, string>>;
@@ -67,7 +68,17 @@ interface AdvancedReaderPageProps {
   onDownload: () => void;
   isRetaking: boolean;
   onRetakeSegment: (segmentId: string) => void;
+  canRetakeSegments?: boolean;
   onJumpToSegment: (segmentId: string) => void;
+}
+
+interface ReaderDesktopModelOption {
+  key: string;
+  label: string;
+  badge: string;
+  detail: string;
+  selected?: boolean;
+  onSelect: () => void;
 }
 
 interface OverlayPart {
@@ -182,6 +193,7 @@ export function AdvancedReaderPage({
   onTextChange,
   activeModel,
   onModelChange,
+  desktopModelOptions = [],
   kokoroState,
   supertonicState,
   unavailableModels,
@@ -214,12 +226,23 @@ export function AdvancedReaderPage({
   onDownload,
   isRetaking,
   onRetakeSegment,
+  canRetakeSegments = true,
   onJumpToSegment,
 }: AdvancedReaderPageProps) {
   const runtimeBackend = activeModel === "kokoro"
     ? kokoroState.backend
     : supertonicState.backend;
-  const activeModelState = activeModel === "kokoro" ? kokoroState : supertonicState;
+  const selectedDesktopModel = desktopModelOptions.find((option) => option.selected);
+  const activeModelState = selectedDesktopModel
+    ? {
+        ready: modelReady,
+        loading: !modelReady && !modelError,
+        downloadProgress: loadingProgress,
+        error: modelError,
+        backend: null,
+      }
+    : activeModel === "kokoro" ? kokoroState : supertonicState;
+  const activeModelLabel = selectedDesktopModel?.label ?? MODELS[activeModel].label;
   const overlayRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const readingTextId = useId();
@@ -533,7 +556,7 @@ export function AdvancedReaderPage({
               style={activeModelState.ready ? { boxShadow: "0 0 6px color-mix(in srgb, var(--color-success) 60%, transparent)" } : undefined}
             />
             <span className="hidden font-medium sm:inline">{formatVoiceName(voice)}</span>
-            <span className="hidden text-xs text-text-muted md:inline">{MODELS[activeModel].label}</span>
+            <span className="hidden text-xs text-text-muted md:inline">{activeModelLabel}</span>
             <SlidersHorizontal size={13} className="text-text-muted sm:hidden" />
             <ChevronDown
               size={13}
@@ -552,14 +575,51 @@ export function AdvancedReaderPage({
                   unavailableModels={unavailableModels}
                 />
 
-                <VoiceSelector
-                  activeModel={activeModel}
-                  voice={voice}
-                  onVoiceChange={onVoiceChange}
-                  kokoroVoices={kokoroVoices}
-                />
+                {desktopModelOptions.length > 0 && (
+                  <div className="flex flex-col gap-1.5">
+                    <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+                      Desktop runtime
+                    </span>
+                    <div className="grid grid-cols-1 gap-1.5">
+                      {desktopModelOptions.map((option) => (
+                        <button
+                          key={option.key}
+                          type="button"
+                          onClick={() => {
+                            option.onSelect();
+                            setSettingsOpen(false);
+                          }}
+                          className={`flex min-w-0 items-start justify-between gap-3 rounded-2xl border px-3 py-2.5 text-left text-lg font-semibold backdrop-blur-md transition-all duration-200 active:translate-y-0 active:scale-[0.98] ${
+                            option.selected
+                              ? "border-accent/40 bg-accent/[0.10] text-accent shadow-accent-sm ring-1 ring-accent/15"
+                              : "border-white/50 bg-white/35 text-text-muted shadow-glass-sm hover:-translate-y-0.5 hover:bg-white/55 hover:text-text-primary"
+                          }`}
+                        >
+                          <span className="min-w-0">
+                            <span className={option.selected ? "block text-accent" : "block text-text-primary"}>{option.label}</span>
+                            <span className="mt-0.5 block text-xs font-medium leading-4 text-text-muted">
+                              {option.detail}
+                            </span>
+                          </span>
+                          <span className="shrink-0 rounded-full border border-accent/25 bg-accent-light px-2 py-0.5 font-mono text-2xs uppercase tracking-[0.12em] text-accent">
+                            {option.badge}
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
-                {activeModel === "supertonic" && (
+                {!selectedDesktopModel && (
+                  <VoiceSelector
+                    activeModel={activeModel}
+                    voice={voice}
+                    onVoiceChange={onVoiceChange}
+                    kokoroVoices={kokoroVoices}
+                  />
+                )}
+
+                {!selectedDesktopModel && activeModel === "supertonic" && (
                   <div>
                     <div className="mb-2 flex items-baseline justify-between">
                       <label
@@ -833,7 +893,7 @@ export function AdvancedReaderPage({
                   <Sparkles size={14} />
                 </button>
               )}
-              {hasGeneratedSegments && (
+              {hasGeneratedSegments && canRetakeSegments && (
                 <button
                   type="button"
                   onClick={() => {

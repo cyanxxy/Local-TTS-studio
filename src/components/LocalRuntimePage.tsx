@@ -44,9 +44,12 @@ interface LocalRuntimePageProps {
   params: string;
   highlights: string[];
   links: Array<{ label: string; href: string }>;
+  initialText?: string;
 }
 
 type StatusMessage = { tone: StatusTone; text: string } | null;
+
+const DEFAULT_LOCAL_RUNTIME_TEXT = "Everything you hear is generated right here on this machine.";
 
 interface ReceivedAudioChunk {
   audio: ArrayBuffer;
@@ -141,15 +144,16 @@ export function LocalRuntimePage({
   params,
   highlights,
   links,
+  initialText,
 }: LocalRuntimePageProps) {
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
   const [cacheInfo, setCacheInfo] = useState<LocalTtsCacheInfo | null>(null);
   const [cacheBusy, setCacheBusy] = useState(false);
   const [status, setStatus] = useState<StatusMessage>(null);
-  const [text, setText] = useState(
-    "Everything you hear is generated right here on this machine.",
-  );
+  const [text, setText] = useState(() => (
+    initialText && initialText.trim().length > 0 ? initialText : DEFAULT_LOCAL_RUNTIME_TEXT
+  ));
 
   const [neuttsModel, setNeuttsModel] = useState(NEUTTS_OPTIONS[0].value);
   const [referenceText, setReferenceText] = useState("");

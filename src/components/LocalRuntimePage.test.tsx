@@ -353,6 +353,15 @@ describe("LocalRuntimePage", () => {
     delete window.electron;
   });
 
+  it("seeds the synthesis text from the provided initial text", async () => {
+    renderPage({ initialText: "Reader text should carry into Qwen3." });
+
+    expect(screen.getByPlaceholderText("Type or paste text to synthesize…")).toHaveValue(
+      "Reader text should carry into Qwen3.",
+    );
+    expect(await screen.findAllByText("Runtime: rust")).toHaveLength(2);
+  });
+
   it("probes the Rust runtime and renders runtime metadata", async () => {
     renderPage();
 

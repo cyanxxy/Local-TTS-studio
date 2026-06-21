@@ -8,6 +8,7 @@ import { useAppRouting } from "../hooks/useAppRouting";
 import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelCacheControls } from "../hooks/useModelCacheControls";
+import { useQwen3LocalRuntime } from "../hooks/useQwen3LocalRuntime";
 import { TextInput } from "../components/TextInput";
 import { ModelToggle } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
@@ -38,6 +39,7 @@ import { resolveKokoroVoice } from "../lib/voices";
 import { hasMinimumSynthesisText } from "../lib/textValidation";
 
 type LocalRuntimePageKey = Extract<AppPage, "neutts" | "qwen3">;
+type InlineDesktopModelKey = Extract<LocalRuntimePageKey, "qwen3">;
 
 interface SynthesisAppProps {
   enableDesktopRuntimes: boolean;
@@ -133,6 +135,8 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const [showPlayer, setShowPlayer] = useState(false);
   const [webgpuStatus, setWebgpuStatus] = useState<WebGPUStatus | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [studioDesktopModel, setStudioDesktopModel] = useState<InlineDesktopModelKey | null>(null);
+  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(null);
   const [visitedLocalRuntimePages, setVisitedLocalRuntimePages] = useState<Set<LocalRuntimePageKey>>(
     () => (enableDesktopRuntimes && isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
   );
@@ -153,6 +157,15 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   });
 
   const player = useAudioPlayer();
+  const isReaderUsingQwen3 = readerDesktopModel === "qwen3";
+  const isStudioUsingQwen3 = studioDesktopModel === "qwen3";
+  const isUsingQwen3Inline = isReaderUsingQwen3 || isStudioUsingQwen3;
+  const qwen3LocalRuntime = useQwen3LocalRuntime({
+    enabled: enableDesktopRuntimes && isElectronRuntime && isUsingQwen3Inline,
+    text,
+    player,
+    setShowPlayer,
+  });
 
   const onAudioChunk = useCallback(
     (chunk: {
@@ -258,28 +271,67 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     return () => window.clearTimeout(timeoutId);
   }, [creator.persistedState]);
 
-  const handleModelChange = useCallback((model: ModelType) => {
-    if (model === activeModel) return;
+  const selectBrowserModel = useCallback((
+    model: ModelType,
+    currentDesktopModel: InlineDesktopModelKey | null,
+    clearDesktopModel: () => void,
+  ) => {
     if (!isModelSupportedInBrowser(model, browserSupport)) return;
+    if (model === activeModel && currentDesktopModel === null) return;
     cancelActiveGeneration();
+    qwen3LocalRuntime.cancelActiveGeneration();
     resetGeneratedAudio();
-    setActiveModel(model);
-    loadModel(model);
+    qwen3LocalRuntime.resetGeneratedAudio();
+    clearDesktopModel();
+    if (model !== activeModel) {
+      setActiveModel(model);
+      loadModel(model);
+    }
     setExportError(null);
-  }, [activeModel, browserSupport, cancelActiveGeneration, loadModel, resetGeneratedAudio]);
+  }, [
+    activeModel,
+    browserSupport,
+    cancelActiveGeneration,
+    loadModel,
+    qwen3LocalRuntime,
+    resetGeneratedAudio,
+  ]);
+
+  const handleStudioModelChange = useCallback((model: ModelType) => {
+    selectBrowserModel(model, studioDesktopModel, () => setStudioDesktopModel(null));
+  }, [selectBrowserModel, studioDesktopModel]);
+
+  const handleReaderModelChange = useCallback((model: ModelType) => {
+    selectBrowserModel(model, readerDesktopModel, () => setReaderDesktopModel(null));
+  }, [readerDesktopModel, selectBrowserModel]);
 
   const handleTextChange = useCallback((nextText: string) => {
     if (nextText === text) return;
 
-    const hasActiveAudioState = tts.isGenerating || isRetakingSegment || player.segments.length > 0 || player.totalDuration > 0;
+    const hasActiveAudioState = tts.isGenerating
+      || qwen3LocalRuntime.isGenerating
+      || isRetakingSegment
+      || player.segments.length > 0
+      || player.totalDuration > 0;
     if (hasActiveAudioState) {
       cancelActiveGeneration(true);
+      qwen3LocalRuntime.cancelActiveGeneration();
       resetGeneratedAudio();
+      qwen3LocalRuntime.resetGeneratedAudio();
     }
 
     setText(nextText);
     setExportError(null);
-  }, [cancelActiveGeneration, isRetakingSegment, player.segments.length, player.totalDuration, resetGeneratedAudio, text, tts.isGenerating]);
+  }, [
+    cancelActiveGeneration,
+    isRetakingSegment,
+    player.segments.length,
+    player.totalDuration,
+    qwen3LocalRuntime,
+    resetGeneratedAudio,
+    text,
+    tts.isGenerating,
+  ]);
 
   const handleVoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === voice) return;
@@ -335,6 +387,57 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     navigateToPage(page);
   }, [activePage, enableDesktopRuntimes, navigateToPage, rememberLocalRuntimePage]);
 
+  const selectInlineDesktopModel = useCallback((
+    page: InlineDesktopModelKey,
+    currentDesktopModel: InlineDesktopModelKey | null,
+    setDesktopModel: (model: InlineDesktopModelKey) => void,
+  ) => {
+    if (currentDesktopModel === page) return;
+    cancelActiveGeneration();
+    resetGeneratedAudio();
+    qwen3LocalRuntime.resetGeneratedAudio();
+    setDesktopModel(page);
+    setExportError(null);
+  }, [
+    cancelActiveGeneration,
+    qwen3LocalRuntime,
+    resetGeneratedAudio,
+  ]);
+
+  const handleStudioDesktopModelSelect = useCallback((page: InlineDesktopModelKey) => {
+    selectInlineDesktopModel(page, studioDesktopModel, setStudioDesktopModel);
+  }, [selectInlineDesktopModel, studioDesktopModel]);
+
+  const handleReaderDesktopModelSelect = useCallback((page: InlineDesktopModelKey) => {
+    selectInlineDesktopModel(page, readerDesktopModel, setReaderDesktopModel);
+  }, [readerDesktopModel, selectInlineDesktopModel]);
+
+  const studioDesktopModelOptions = useMemo(() => (
+    enableDesktopRuntimes && isElectronRuntime
+      ? [{
+          key: "qwen3",
+          label: "Qwen3-TTS",
+          badge: "Electron",
+          detail: "0.6B CustomVoice MLX / local runtime",
+          selected: studioDesktopModel === "qwen3",
+          onSelect: () => handleStudioDesktopModelSelect("qwen3"),
+        }]
+      : []
+  ), [enableDesktopRuntimes, handleStudioDesktopModelSelect, isElectronRuntime, studioDesktopModel]);
+
+  const readerDesktopModelOptions = useMemo(() => (
+    enableDesktopRuntimes && isElectronRuntime
+      ? [{
+          key: "qwen3",
+          label: "Qwen3-TTS",
+          badge: "Electron",
+          detail: "0.6B CustomVoice MLX / local runtime",
+          selected: readerDesktopModel === "qwen3",
+          onSelect: () => handleReaderDesktopModelSelect("qwen3"),
+        }]
+      : []
+  ), [enableDesktopRuntimes, handleReaderDesktopModelSelect, isElectronRuntime, readerDesktopModel]);
+
   const mountedLocalRuntimePages = useMemo(() => {
     if (!enableDesktopRuntimes) return [];
 
@@ -355,8 +458,53 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
   const handleGenerate = useCallback(() => {
     setExportError(null);
+    if (isStudioUsingQwen3) {
+      qwen3LocalRuntime.handleGenerate();
+      return;
+    }
     runBrowserGeneration();
-  }, [runBrowserGeneration]);
+  }, [isStudioUsingQwen3, qwen3LocalRuntime, runBrowserGeneration]);
+
+  const handleStudioStop = useCallback(() => {
+    if (isStudioUsingQwen3) {
+      qwen3LocalRuntime.handleStop();
+      return;
+    }
+    handleStop();
+  }, [handleStop, isStudioUsingQwen3, qwen3LocalRuntime]);
+
+  const handleStudioRetryLoad = useCallback(() => {
+    if (isStudioUsingQwen3) {
+      qwen3LocalRuntime.retryLoad();
+      return;
+    }
+    handleRetryActiveModelLoad();
+  }, [handleRetryActiveModelLoad, isStudioUsingQwen3, qwen3LocalRuntime]);
+
+  const handleReaderGenerate = useCallback(() => {
+    setExportError(null);
+    if (isReaderUsingQwen3) {
+      qwen3LocalRuntime.handleGenerate();
+      return;
+    }
+    runBrowserGeneration();
+  }, [isReaderUsingQwen3, qwen3LocalRuntime, runBrowserGeneration]);
+
+  const handleReaderStop = useCallback(() => {
+    if (isReaderUsingQwen3) {
+      qwen3LocalRuntime.handleStop();
+      return;
+    }
+    handleStop();
+  }, [handleStop, isReaderUsingQwen3, qwen3LocalRuntime]);
+
+  const handleReaderRetryLoad = useCallback(() => {
+    if (isReaderUsingQwen3) {
+      qwen3LocalRuntime.retryLoad();
+      return;
+    }
+    handleRetryActiveModelLoad();
+  }, [handleRetryActiveModelLoad, isReaderUsingQwen3, qwen3LocalRuntime]);
 
   const handleDownloadAudio = useCallback(() => {
     setExportError(null);
@@ -396,13 +544,36 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
   const showWasmBadge = localInferenceSupported
     && (isStudioPage || isReaderPage)
+    && !isReaderUsingQwen3
     && ((webgpuStatus !== null && !webgpuStatus.available) || isUsingWasmFallback);
   const webgpuModeNote = showWasmBadge
     ? webgpuStatus?.message ?? null
     : null;
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
   const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
-  const visibleError = tts.error ?? retakeError ?? currentModelState.error ?? exportError ?? player.error;
+  const studioModelState = isStudioUsingQwen3 ? qwen3LocalRuntime.modelState : currentModelState;
+  const studioCanGenerate = isStudioUsingQwen3 ? qwen3LocalRuntime.canGenerate : canGenerate;
+  const studioGenerationBusy = isStudioUsingQwen3 ? qwen3LocalRuntime.isGenerating : isGenerationBusy;
+  const studioGenerationProgress = isStudioUsingQwen3 ? qwen3LocalRuntime.generationProgress : tts.generationProgress;
+  const studioStats = isStudioUsingQwen3 ? qwen3LocalRuntime.stats : tts.stats;
+  const studioVisibleError = isStudioUsingQwen3 ? qwen3LocalRuntime.error : (tts.error ?? retakeError);
+  const readerModelState = isReaderUsingQwen3 ? qwen3LocalRuntime.modelState : currentModelState;
+  const readerCanGenerate = isReaderUsingQwen3 ? qwen3LocalRuntime.canGenerate : canGenerate;
+  const readerGenerationBusy = isReaderUsingQwen3 ? qwen3LocalRuntime.isGenerating : isGenerationBusy;
+  const readerGenerationProgress = isReaderUsingQwen3 ? qwen3LocalRuntime.generationProgress : tts.generationProgress;
+  const readerStats = isReaderUsingQwen3 ? qwen3LocalRuntime.stats : tts.stats;
+  const readerVisibleError = isReaderUsingQwen3 ? qwen3LocalRuntime.error : (tts.error ?? retakeError);
+  const visibleModelError = isReaderPage
+    ? readerModelState.error
+    : isStudioPage
+    ? studioModelState.error
+    : currentModelState.error;
+  const visibleGenerationError = isReaderPage
+    ? readerVisibleError
+    : isStudioPage
+    ? studioVisibleError
+    : (tts.error ?? retakeError);
+  const visibleError = visibleGenerationError ?? visibleModelError ?? exportError ?? player.error;
   const activeSegmentIndex = player.activeSegmentId
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
     : -1;
@@ -515,33 +686,36 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                 <div className="flex flex-col gap-5 border-t border-border/40 p-4 sm:gap-6 sm:p-6 lg:col-span-2 lg:border-t-0">
                   <ModelToggle
                     activeModel={activeModel}
-                    onModelChange={handleModelChange}
+                    onModelChange={handleStudioModelChange}
+                    desktopModelOptions={studioDesktopModelOptions}
                     kokoroState={kokoroState}
                     supertonicState={supertonicState}
                     unavailableModels={unavailableModels}
                   />
 
-                  <VoiceSelector
-                    activeModel={activeModel}
-                    voice={voice}
-                    onVoiceChange={handleVoiceChange}
-                    kokoroVoices={kokoroVoices}
-                  />
+                  {!isStudioUsingQwen3 && (
+                    <VoiceSelector
+                      activeModel={activeModel}
+                      voice={voice}
+                      onVoiceChange={handleVoiceChange}
+                      kokoroVoices={kokoroVoices}
+                    />
+                  )}
 
                   <ControlsProvider
                     value={{
-                      activeModel,
+                      activeModel: isStudioUsingQwen3 ? "kokoro" : activeModel,
                       quality,
                       onQualityChange: handleQualityChange,
                       onGenerate: handleGenerate,
-                      onRetryLoad: handleRetryActiveModelLoad,
-                      onStop: handleStop,
-                      isGenerating: isGenerationBusy,
-                      canGenerate,
-                      modelReady: currentModelState.ready,
-                      modelError: currentModelState.error,
-                      loadingProgress: currentModelState.downloadProgress,
-                      generationProgress: tts.generationProgress,
+                      onRetryLoad: handleStudioRetryLoad,
+                      onStop: handleStudioStop,
+                      isGenerating: studioGenerationBusy,
+                      canGenerate: studioCanGenerate,
+                      modelReady: studioModelState.ready,
+                      modelError: studioModelState.error,
+                      loadingProgress: studioModelState.downloadProgress,
+                      generationProgress: studioGenerationProgress,
                     }}
                   >
                     <Controls />
@@ -558,28 +732,30 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                     totalDuration={player.totalDuration}
                     segmentCount={player.segments.length}
                     activeSegmentNumber={activeSegmentNumber}
-                    stats={tts.stats}
-                    isGenerating={tts.isGenerating}
+                    stats={studioStats}
+                    isGenerating={studioGenerationBusy}
                     onTogglePlay={player.togglePlay}
                     onSeek={player.seek}
                     onSkipBackward={() => player.skip(-10)}
                     onSkipForward={() => player.skip(10)}
                     onDownload={handleDownloadAudio}
-                    onStop={handleStop}
+                    onStop={handleStudioStop}
                   />
                 </div>
               )}
             </div>
 
-            <div className="mt-4">
-              <SettingsPanel
-                activeModel={activeModel}
-                busy={cacheBusy || currentModelState.loading}
-                status={cacheStatus}
-                onClearCache={handleClearCache}
-                onRedownloadActive={handleRedownloadActiveModel}
-              />
-            </div>
+            {!isStudioUsingQwen3 && (
+              <div className="mt-4">
+                <SettingsPanel
+                  activeModel={activeModel}
+                  busy={cacheBusy || currentModelState.loading}
+                  status={cacheStatus}
+                  onClearCache={handleClearCache}
+                  onRedownloadActive={handleRedownloadActiveModel}
+                />
+              </div>
+            )}
 
             <div className="mt-4">
               {creatorPanel}
@@ -593,7 +769,8 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               text={text}
               onTextChange={handleTextChange}
               activeModel={activeModel}
-              onModelChange={handleModelChange}
+              onModelChange={handleReaderModelChange}
+              desktopModelOptions={readerDesktopModelOptions}
               kokoroState={kokoroState}
               supertonicState={supertonicState}
               unavailableModels={unavailableModels}
@@ -602,16 +779,16 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               onVoiceChange={handleVoiceChange}
               quality={quality}
               onQualityChange={handleQualityChange}
-              canGenerate={canGenerate}
-              modelReady={currentModelState.ready}
-              modelError={currentModelState.error}
-              loadingProgress={currentModelState.downloadProgress}
-              generationProgress={tts.generationProgress}
-              isGenerating={isGenerationBusy}
-              onGenerate={handleGenerate}
-              onRetryLoad={handleRetryActiveModelLoad}
-              onStop={handleStop}
-              stats={tts.stats}
+              canGenerate={readerCanGenerate}
+              modelReady={readerModelState.ready}
+              modelError={readerModelState.error}
+              loadingProgress={readerModelState.downloadProgress}
+              generationProgress={readerGenerationProgress}
+              isGenerating={readerGenerationBusy}
+              onGenerate={handleReaderGenerate}
+              onRetryLoad={handleReaderRetryLoad}
+              onStop={handleReaderStop}
+              stats={readerStats}
               isPlaying={player.isPlaying}
               currentTime={player.currentTime}
               totalDuration={player.totalDuration}
@@ -624,8 +801,9 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               onSkipBackward={() => player.skip(-10)}
               onSkipForward={() => player.skip(10)}
               onDownload={handleDownloadAudio}
-              isRetaking={isRetakingSegment}
+              isRetaking={isReaderUsingQwen3 ? false : isRetakingSegment}
               onRetakeSegment={handleRetakeSegment}
+              canRetakeSegments={!isReaderUsingQwen3}
               onJumpToSegment={handleJumpToSegment}
             />
           ) : browserSupportPanel
@@ -648,6 +826,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                 params={config.params}
                 highlights={config.highlights}
                 links={config.links}
+                initialText={text}
               />
             </section>
           );

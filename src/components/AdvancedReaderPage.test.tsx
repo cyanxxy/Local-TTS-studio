@@ -159,4 +159,22 @@ describe("AdvancedReaderPage", () => {
     expect(screen.getByRole("button", { name: "Previous section" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Next section" })).toBeEnabled();
   });
+
+  it("offers Electron desktop model options from the reader settings", () => {
+    const onSelectQwen3 = vi.fn();
+    renderReader({
+      desktopModelOptions: [{
+        key: "qwen3",
+        label: "Qwen3-TTS",
+        badge: "Electron",
+        detail: "0.6B CustomVoice MLX",
+        onSelect: onSelectQwen3,
+      }],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Voice settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /Qwen3-TTS/i }));
+
+    expect(onSelectQwen3).toHaveBeenCalledTimes(1);
+  });
 });
