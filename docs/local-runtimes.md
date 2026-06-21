@@ -1,6 +1,6 @@
 # Desktop Local Runtimes
 
-Electron exposes optional Rust-only local-runtime integrations for NeuTTS Nano and Qwen3-TTS. The desktop package includes the Electron app and the `open-tts-local-bridge` binary. It does not include model weights; browser models and Candle fallback models download assets into app caches, while Qwen3 MLX profiles use user-selected local model directories.
+Electron exposes optional Rust-only local-runtime integrations for NeuTTS Nano and Qwen3-TTS. The desktop package includes the Electron app, the `open-tts-local-bridge` binary, and optional native runtime tools. It does not include model weights. Browser models and Candle fallback models download assets into app caches, while Qwen3 MLX profiles use user-selected local model directories or a per-user Electron app cache.
 
 There is no Electron-facing one-shot generation action, interpreter discovery, adapter script, or managed virtual environment. The local runtime path is Rust from Electron process launch through the authenticated WebSocket bridge; Qwen3 MLX CustomVoice may call the upstream native `tts` binary inside that resident bridge process.
 
@@ -41,7 +41,7 @@ Base voice cloning remains available as explicit advanced MLX profiles:
 - `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit`
 - `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit`
 
-The page shows MLX setup status from Electron: whether the required `tts` or `pibot-tts-worker` binary is available, the recommended app-cache model directory, and shell commands to build the tools or download the recommended Hugging Face model. The MLX model directory can be typed manually or selected through a native Electron directory picker.
+The page shows MLX setup status from Electron: whether the required `tts` or `pibot-tts-worker` binary is available on the current machine, the recommended per-user app-cache model directory, and shell commands to build the tools or download the recommended Hugging Face model. The MLX model directory can be typed manually or selected through a native Electron directory picker.
 
 Candle CustomVoice remains available through the Rust `qwen_tts` crate:
 
@@ -70,7 +70,7 @@ npm run build:qwen3-mlx-worker
 npm run build:rust
 ```
 
-`npm run build:qwen3-mlx-worker` clones `badlogic/qwen3_tts_rs` into `rust/qwen3_tts_rs/`, initializes its `mlx-c` submodule, and builds both `tts` and `pibot-tts-worker` with `--no-default-features --features mlx`. `scripts/build-rust-bridge.mjs` then copies those tools into `dist-rust/`.
+`npm run build:qwen3-mlx-worker` clones `badlogic/qwen3_tts_rs` into `rust/qwen3_tts_rs/`, initializes its `mlx-c` submodule, applies the bundled MLX compatibility patches from `patches/qwen3_tts_rs/`, and builds `tts`, `pibot-tts-worker`, and `api_server` with `--no-default-features --features mlx`. `scripts/build-rust-bridge.mjs` then copies those tools into `dist-rust/`.
 
 To fetch/build every upstream MLX binary defined by that checkout's Cargo manifest:
 
@@ -78,7 +78,7 @@ To fetch/build every upstream MLX binary defined by that checkout's Cargo manife
 npm run build:qwen3-mlx-tools
 ```
 
-That builds the default tools plus the voice-clone CLI, OpenAI-compatible API server, and trace/vocoder tools when those targets exist. For a single command that builds all upstream MLX tools and then packages the bridge resources, run:
+That builds the default tools plus the voice-clone CLI, OpenAI-compatible API server, and trace/vocoder tools when those targets exist. The API server patch keeps MLX work on a current-thread runtime and binds MLX's thread-local default stream on each generation path, which avoids `There is no Stream(gpu, 0) in current thread` failures in both non-streaming and SSE generation. For a single command that builds all upstream MLX tools and then packages the bridge resources, run:
 
 ```sh
 npm run build:rust:all
@@ -88,7 +88,27 @@ npm run build:rust:all
 
 Speaker names are shown capitalized in the UI (`Ryan`, `Vivian`, `Serena`, `Uncle_Fu`, `Dylan`, `Eric`, `Aiden`, `Ono_Anna`, `Sohee`), but the model's `talker_config.spk_id` keys are lowercase and `qwen_tts` speaker validation is case-sensitive. The Rust bridge lowercases the speaker (e.g. `Ryan` → `ryan`, `Uncle_Fu` → `uncle_fu`) before generation; the UI/IPC keep the capitalized display names.
 
-First generation downloads the model (roughly 1–2 GB) and CPU fallback inference can run for minutes. These are single blocking calls, so the bridge emits a periodic stderr heartbeat for the duration of each request to keep the host's inactivity watchdog armed; the watchdog only fires when the worker goes fully silent. Inside the bridge, reads from the resident MLX worker/api_server carry a 10-minute output-inactivity deadline, so a wedged child surfaces an error instead of hanging behind the heartbeat.
+Model weights are never checked into the open-source repository and are not bundled into Electron packages. The repository ignores local caches such as `.model-cache/`, `reports/`, and generated `dist*` outputs. On an end-user machine, model assets live under the user's app data cache unless the user selects a different local model directory.
+
+First browser/Candle generation may download model assets into that user's cache, and CPU fallback inference can run for minutes. Qwen3 MLX generation requires the user to download the MLX model from the app, run the shown `hf download` command, or choose an existing local model directory. These are single blocking calls, so the bridge emits a periodic stderr heartbeat for the duration of each request to keep the host's inactivity watchdog armed; the watchdog only fires when the worker goes fully silent. Inside the bridge, reads from the resident MLX worker/api_server carry a 10-minute output-inactivity deadline, so a wedged child surfaces an error instead of hanging behind the heartbeat.
+
+## Qwen3 Profiling
+
+Use the profiling CLI before changing Qwen kernels, model backends, or bridge transport behavior. It runs the same authenticated `serve-ws` path as Electron for local bridge targets, records per-run phase timings, and writes a JSON report under `reports/qwen3-profile/`.
+
+```sh
+npm run profile:qwen3 -- --target=candle,mlx-api --base-model-path /path/to/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit
+```
+
+The report records target/backend, model repo, device, text length, generated audio duration, wall-clock seconds, bridge elapsed seconds, wall-clock RTF, bridge RTF, audio chunk count, and phase timings such as `modelLoadSec`, `firstAudioSec`, `inferenceSec`, `outputEncodingSec`, and `transportEncodingSec`. Warmup runs are included in `runs` but excluded from `summary`, so `--warmups=0` captures cold-start behavior and the default `--warmups=1` emphasizes resident-model throughput.
+
+SGLang-Omni can be included as an external comparison target when a compatible server is already running:
+
+```sh
+npm run profile:qwen3 -- --target=candle,mlx-api,sglang --base-model-path /path/to/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit --sglang-url http://127.0.0.1:8000/v1/audio/speech
+```
+
+Use `npm run profile:qwen3 -- --help` for the full option list, including prompt text, speaker, language, instruction prompt, decoding settings, output path, and cache directory overrides.
 
 ## Bridge Protocol
 

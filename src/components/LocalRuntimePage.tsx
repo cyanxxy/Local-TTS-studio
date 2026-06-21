@@ -630,7 +630,7 @@ export function LocalRuntimePage({
     invalidateGeneration();
     setQwen3MlxDownloadBusy(true);
     setQwen3MlxDownloadProgress(null);
-    setStatus({ tone: "info", text: `Downloading ${qwen3Model} into the app model cache…` });
+    setStatus({ tone: "info", text: `Downloading ${qwen3Model} into this user's app model cache…` });
     try {
       const result = await window.electron.localTts.downloadQwen3MlxModel({ modelRepo: qwen3Model });
       if (!isCurrentPageVersion(pageVersion)) return;

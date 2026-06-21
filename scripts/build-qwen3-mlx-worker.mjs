@@ -7,8 +7,18 @@ import { fileURLToPath } from "node:url";
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultSourceDir = path.join(rootDir, "rust", "qwen3_tts_rs");
 const defaultRepoUrl = "https://github.com/badlogic/qwen3_tts_rs.git";
+const defaultPatchDir = path.join(rootDir, "patches", "qwen3_tts_rs");
+const upstreamPatches = [path.join(defaultPatchDir, "mlx-api-current-thread.patch")];
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
-const knownMlxBinBaseNames = ["tts", "voice_clone", "api_server", "pibot-tts-worker", "qwen3-tts", "trace_vocoder"];
+const knownMlxBinBaseNames = [
+  "tts",
+  "voice_clone",
+  "api_server",
+  "pibot-tts-worker",
+  "qwen3-tts",
+  "trace_vocoder",
+  "trace_rust",
+];
 const workerBaseName = "pibot-tts-worker";
 const customVoiceTtsBaseName = "tts";
 
@@ -45,6 +55,12 @@ if (!fs.existsSync(mlxCmake)) {
     throw new Error(`mlx-c submodule is missing under ${sourceDir} and --no-network was set.`);
   }
   run("git", ["submodule", "update", "--init", "--recursive"], { cwd: sourceDir });
+}
+
+if (!options.skipPatches) {
+  for (const patchPath of upstreamPatches) {
+    applyPatchIfNeeded(sourceDir, patchPath);
+  }
 }
 
 const buildBinBaseNames = options.allBins
@@ -96,8 +112,25 @@ function executableName(baseName) {
 function readCargoBinNames(cargoTomlPath) {
   if (!fs.existsSync(cargoTomlPath)) return null;
   const cargoToml = fs.readFileSync(cargoTomlPath, "utf8");
-  const names = [...cargoToml.matchAll(/\[\[bin\]\][\s\S]*?name\s*=\s*"([^"]+)"/g)].map((match) => match[1]);
-  return names.length > 0 ? names : null;
+  const names = new Set();
+  const explicitPaths = new Set();
+  for (const sectionMatch of cargoToml.matchAll(/\[\[bin\]\]([\s\S]*?)(?=\n\[|$)/g)) {
+    const section = sectionMatch[1];
+    const name = section.match(/name\s*=\s*"([^"]+)"/)?.[1];
+    const explicitPath = section.match(/path\s*=\s*"([^"]+)"/)?.[1];
+    if (name) names.add(name);
+    if (explicitPath) explicitPaths.add(path.normalize(explicitPath));
+  }
+  const srcBinDir = path.join(path.dirname(cargoTomlPath), "src", "bin");
+  if (fs.existsSync(srcBinDir)) {
+    for (const entry of fs.readdirSync(srcBinDir, { withFileTypes: true })) {
+      const relativePath = path.normalize(path.join("src", "bin", entry.name));
+      if (entry.isFile() && entry.name.endsWith(".rs") && !explicitPaths.has(relativePath)) {
+        names.add(path.basename(entry.name, ".rs"));
+      }
+    }
+  }
+  return names.size > 0 ? [...names] : null;
 }
 
 function run(command, args, { cwd, env = process.env }) {
@@ -107,6 +140,39 @@ function run(command, args, { cwd, env = process.env }) {
     return;
   }
   execFileSync(command, args, { cwd, env, stdio: "inherit" });
+}
+
+function applyPatchIfNeeded(sourceDir, patchPath) {
+  if (!fs.existsSync(patchPath)) return;
+
+  if (options.dryRun) {
+    console.log(`[dry-run] (${sourceDir}) git apply --check ${patchPath}`);
+    console.log(`[dry-run] (${sourceDir}) git apply ${patchPath}`);
+    return;
+  }
+
+  if (canRun("git", ["apply", "--check", patchPath], sourceDir)) {
+    run("git", ["apply", patchPath], { cwd: sourceDir });
+    return;
+  }
+
+  if (canRun("git", ["apply", "--reverse", "--check", patchPath], sourceDir)) {
+    console.log(`Qwen3 MLX patch already applied: ${patchPath}`);
+    return;
+  }
+
+  throw new Error(
+    `Could not apply Qwen3 MLX patch ${patchPath}. The upstream checkout may have changed; inspect ${sourceDir}.`,
+  );
+}
+
+function canRun(command, args, cwd) {
+  try {
+    execFileSync(command, args, { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function resolveCargoTargetDir(sourceDir) {
@@ -130,6 +196,7 @@ function parseArgs(args) {
     help: false,
     noNetwork: false,
     repoUrl: undefined,
+    skipPatches: false,
     skipClone: false,
     sourceDir: undefined,
   };
@@ -153,6 +220,9 @@ function parseArgs(args) {
         break;
       case "--repo-url":
         parsed.repoUrl = requireValue(args, ++index, arg);
+        break;
+      case "--skip-patches":
+        parsed.skipPatches = true;
         break;
       case "--skip-clone":
         parsed.skipClone = true;
@@ -186,6 +256,7 @@ Options:
   --source-dir <path>  Source checkout directory (default: rust/qwen3_tts_rs)
   --repo-url <url>     Git repository URL (default: ${defaultRepoUrl})
   --skip-clone         Require --source-dir to already exist
+  --skip-patches       Do not apply bundled compatibility patches
   --no-network         Do not clone or update submodules
   --dry-run            Print commands without running them
   --help               Show this help

@@ -263,6 +263,10 @@ export function LocalRuntimeModelInputs({
                       ? " Required MLX binary found."
                       : " Build or bundle the required MLX binary before generating."}
                   </p>
+                  <p>
+                    Model weights are not bundled with the app; download them into this user's app cache
+                    or choose an existing local model directory for this machine.
+                  </p>
                   {qwen3MlxSetup && (
                     <div className="space-y-1 break-all text-xs text-text-muted">
                       <p>

@@ -34,6 +34,22 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 
 ---
 
+## Screenshots
+
+### Studio
+
+![Open TTS Studio](./docs/screenshots/studio.png)
+
+### Reader
+
+![Open TTS Reader](./docs/screenshots/reader.png)
+
+### Qwen3-TTS MLX Runtime
+
+![Open TTS Qwen3-TTS MLX runtime](./docs/screenshots/qwen3-mlx.png)
+
+---
+
 ## Models
 
 | Model / runtime | Source | Routes | Web | Desktop | Notes |

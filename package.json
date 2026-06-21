@@ -29,7 +29,8 @@
     "test:rust": "cargo test --manifest-path rust/local-tts-bridge/Cargo.toml",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "eval:inference": "node scripts/inference-speed-eval.mjs"
+    "eval:inference": "node scripts/inference-speed-eval.mjs",
+    "profile:qwen3": "tsc -p tsconfig.electron.json && node dist-electron/qwen3ProfileCli.js"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
