@@ -114,7 +114,7 @@ describe("ModelToggle", () => {
   });
 
   it("renders optional Electron desktop model options alongside browser models", () => {
-    render(
+    const { container } = render(
       <ModelToggle
         activeModel="kokoro"
         onModelChange={() => {}}
@@ -135,6 +135,10 @@ describe("ModelToggle", () => {
     expect(screen.getByText("Qwen3-TTS")).toBeInTheDocument();
     expect(screen.getByText("Electron")).toBeInTheDocument();
     expect(screen.getByText("0.6B CustomVoice MLX / local runtime")).toBeInTheDocument();
+    expect(container.querySelector("[data-testid='model-toggle-grid']")).toHaveClass(
+      "grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))]",
+      "items-start",
+    );
   });
 
   it("calls the desktop model callback when clicking an Electron option", () => {

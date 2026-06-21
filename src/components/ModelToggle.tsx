@@ -60,7 +60,16 @@ export function ModelToggle({
       <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
         Model
       </span>
-      <div className={`grid grid-cols-1 gap-1.5 ${desktopModelOptions.length > 0 ? "sm:grid-cols-3" : "sm:grid-cols-2"}`}>
+      <div
+        data-testid="model-toggle-grid"
+        className={`
+          grid items-start gap-1.5
+          ${desktopModelOptions.length > 0
+            ? "grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))]"
+            : "grid-cols-1 sm:grid-cols-2"
+          }
+        `}
+      >
         {models.map(({ key, label, state }) => {
           const isActive = !hasSelectedDesktopModel && activeModel === key;
           const unavailableReason = unavailableModels?.[key];
@@ -74,7 +83,7 @@ export function ModelToggle({
               aria-pressed={isActive}
               title={unavailableReason}
               className={`
-                flex min-w-0 items-start justify-between gap-3 rounded-2xl border px-3 py-2.5 text-left text-lg font-semibold backdrop-blur-md transition-all duration-200 sm:items-center
+                flex min-h-[5.5rem] min-w-0 flex-col items-start justify-between gap-2 rounded-2xl border px-3 py-2.5 text-left text-lg font-semibold backdrop-blur-md transition-all duration-200
                 ${isUnavailable
                   ? "border-border bg-surface/40 text-text-muted cursor-not-allowed opacity-70"
                   : isActive
@@ -83,8 +92,8 @@ export function ModelToggle({
                 }
               `}
             >
-              <span className="flex min-w-0 flex-wrap items-center gap-2">
-                <span>{label}</span>
+              <span className="flex min-w-0 flex-wrap items-center gap-2 leading-tight">
+                <span className="min-w-0 break-words">{label}</span>
                 {isUnavailable && (
                   <span className="rounded-full border border-border px-2 py-0.5 text-2xs uppercase tracking-[0.12em]">
                     unavailable
@@ -107,26 +116,26 @@ export function ModelToggle({
               onClick={option.onSelect}
               aria-pressed={isSelected}
               className={`
-                flex min-w-0 items-start justify-between gap-3 rounded-2xl border px-3 py-2.5 text-left text-lg font-semibold backdrop-blur-md transition-all duration-200
+                flex min-h-[5.5rem] min-w-0 flex-col items-start gap-2 rounded-2xl border px-3 py-2.5 text-left text-lg font-semibold backdrop-blur-md transition-all duration-200
                 ${isSelected
                   ? "border-accent/40 bg-accent/[0.10] text-accent shadow-accent-sm ring-1 ring-accent/15"
                   : "border-white/50 bg-white/35 text-text-muted shadow-glass-sm hover:-translate-y-0.5 hover:bg-white/55 hover:text-text-primary"
                 }
               `}
             >
-              <span className="min-w-0">
-                <span className={isSelected ? "block text-accent" : "block text-text-primary"}>
+              <span className="flex min-w-0 flex-wrap items-center gap-2 leading-tight">
+                <span className={isSelected ? "min-w-0 break-words text-accent" : "min-w-0 break-words text-text-primary"}>
                   {option.label}
                 </span>
-                {option.detail && (
-                  <span className="mt-0.5 block text-xs font-medium leading-4 text-text-muted">
-                    {option.detail}
+                {option.badge && (
+                  <span className="shrink-0 rounded-full border border-accent/25 bg-accent-light px-2 py-0.5 font-mono text-2xs uppercase tracking-[0.12em] text-accent">
+                    {option.badge}
                   </span>
                 )}
               </span>
-              {option.badge && (
-                <span className="shrink-0 rounded-full border border-accent/25 bg-accent-light px-2 py-0.5 font-mono text-2xs uppercase tracking-[0.12em] text-accent">
-                  {option.badge}
+              {option.detail && (
+                <span className="block min-w-0 text-xs font-medium leading-4 text-text-muted">
+                  {option.detail}
                 </span>
               )}
             </button>
