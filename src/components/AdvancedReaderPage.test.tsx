@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ComponentProps, ReactNode } from "react";
 import { AdvancedReaderPage } from "./AdvancedReaderPage";
@@ -21,8 +21,13 @@ vi.mock("./Controls", () => ({
   Controls: () => <div data-testid="controls" />,
 }));
 
+const audioPlayerMock = vi.hoisted(() => vi.fn());
+
 vi.mock("./AudioPlayer", () => ({
-  AudioPlayer: () => <div data-testid="audio-player" />,
+  AudioPlayer: (props: Record<string, unknown>) => {
+    audioPlayerMock(props);
+    return <div data-testid="audio-player" />;
+  },
 }));
 
 const readyState: ModelState = {
@@ -99,6 +104,10 @@ function renderReader(overrides: Partial<ComponentProps<typeof AdvancedReaderPag
 }
 
 describe("AdvancedReaderPage", () => {
+  beforeEach(() => {
+    audioPlayerMock.mockClear();
+  });
+
   it("associates the reading label with the editor textarea", () => {
     renderReader();
 
@@ -125,13 +134,20 @@ describe("AdvancedReaderPage", () => {
       segments: [createSegment()],
     });
 
-    const pause = screen.getByRole("button", { name: "Pause" });
-    expect(pause).toBeEnabled();
-    fireEvent.click(pause);
+    expect(screen.getByTestId("audio-player")).toBeInTheDocument();
+    const props = audioPlayerMock.mock.lastCall?.[0] as {
+      allowPlaybackDuringGeneration?: boolean;
+      isGenerating?: boolean;
+      onTogglePlay?: () => void;
+    };
+
+    expect(props.allowPlaybackDuringGeneration).toBe(true);
+    expect(props.isGenerating).toBe(true);
+    props.onTogglePlay?.();
     expect(onTogglePlay).toHaveBeenCalledTimes(1);
   });
 
-  it("cycles playback speed through the dock control", () => {
+  it("passes playback speed through the shared audio player", () => {
     const onPlaybackRateChange = vi.fn();
     renderReader({
       totalDuration: 4,
@@ -140,11 +156,18 @@ describe("AdvancedReaderPage", () => {
       segments: [createSegment()],
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Playback speed 1×" }));
+    const props = audioPlayerMock.mock.lastCall?.[0] as {
+      playbackRate?: number;
+      onPlaybackRateChange?: (rate: number) => void;
+    };
+
+    expect(props.playbackRate).toBe(1);
+    props.onPlaybackRateChange?.(1.25);
     expect(onPlaybackRateChange).toHaveBeenCalledWith(1.25);
   });
 
-  it("exposes accessible names for reader segment navigation", () => {
+  it("passes reader segment navigation to the shared audio player", () => {
+    const onJumpToSegment = vi.fn();
     renderReader({
       segments: [createSegment(), createSegment({
         id: "segment-2",
@@ -154,10 +177,19 @@ describe("AdvancedReaderPage", () => {
         textEnd: 29,
       })],
       activeSegmentId: "segment-1",
+      onJumpToSegment,
     });
 
-    expect(screen.getByRole("button", { name: "Previous section" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Next section" })).toBeEnabled();
+    const props = audioPlayerMock.mock.lastCall?.[0] as {
+      canPreviousSegment?: boolean;
+      canNextSegment?: boolean;
+      onNextSegment?: () => void;
+    };
+
+    expect(props.canPreviousSegment).toBe(false);
+    expect(props.canNextSegment).toBe(true);
+    props.onNextSegment?.();
+    expect(onJumpToSegment).toHaveBeenCalledWith("segment-2");
   });
 
   it("offers Electron desktop model options from the reader settings", () => {

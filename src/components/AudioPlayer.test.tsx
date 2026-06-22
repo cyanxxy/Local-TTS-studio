@@ -44,6 +44,71 @@ describe("AudioPlayer", () => {
     expect(screen.queryByRole("button", { name: "2×" })).not.toBeInTheDocument();
   });
 
+  it("renders reader dock actions from the shared player", () => {
+    const onPlaybackRateChange = vi.fn();
+    const onNextSegment = vi.fn();
+    const onRetakeSegment = vi.fn();
+    const onRegenerate = vi.fn();
+    const onTogglePlay = vi.fn();
+
+    renderPlayer({
+      variant: "dock",
+      isPlaying: true,
+      isGenerating: true,
+      allowPlaybackDuringGeneration: true,
+      currentTime: 2,
+      totalDuration: 10,
+      segmentCount: 3,
+      activeSegmentNumber: 2,
+      playbackRate: 1,
+      onPlaybackRateChange,
+      canPreviousSegment: false,
+      canNextSegment: true,
+      onNextSegment,
+      canRegenerate: true,
+      onRegenerate,
+      canRetakeSegment: true,
+      onRetakeSegment,
+      onTogglePlay,
+    });
+
+    const pause = screen.getByRole("button", { name: "Pause" });
+    expect(pause).toBeEnabled();
+    fireEvent.click(pause);
+
+    expect(screen.getByRole("button", { name: "Previous section" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Next section" }));
+    fireEvent.click(screen.getByRole("button", { name: "Playback speed 1×" }));
+    fireEvent.click(screen.getByRole("button", { name: "Regenerate speech" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retake section" }));
+
+    expect(onTogglePlay).toHaveBeenCalledOnce();
+    expect(onNextSegment).toHaveBeenCalledOnce();
+    expect(onPlaybackRateChange).toHaveBeenCalledWith(1.25);
+    expect(onRegenerate).toHaveBeenCalledOnce();
+    expect(onRetakeSegment).toHaveBeenCalledOnce();
+  });
+
+  it("uses the shared player primary action before audio exists", () => {
+    const onGenerate = vi.fn();
+
+    renderPlayer({
+      variant: "dock",
+      primaryAction: {
+        label: "Generate speech",
+        onClick: onGenerate,
+        icon: "generate",
+      },
+      segmentCount: 0,
+      sectionPreviewCount: 2,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Generate speech" }));
+
+    expect(onGenerate).toHaveBeenCalledOnce();
+    expect(screen.getByText("2 sections")).toBeInTheDocument();
+  });
+
   it("renders disabled empty state controls", () => {
     renderPlayer();
 

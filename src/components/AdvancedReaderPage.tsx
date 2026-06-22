@@ -2,18 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import {
   BookOpen,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  Download,
-  Loader2,
-  Pause,
-  Play,
-  RefreshCw,
-  RotateCcw,
-  RotateCw,
   SlidersHorizontal,
-  Sparkles,
-  Square,
 } from "lucide-react";
 import {
   MIN_TEXT_LENGTH,
@@ -26,6 +15,7 @@ import { getMeaningfulTextLength } from "../lib/textValidation";
 import type { ModelState, ModelType, GenerationStats } from "../types";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
+import { AudioPlayer, type AudioPlayerPrimaryAction } from "./AudioPlayer";
 import { ModelToggle } from "./ModelToggle";
 import { VoiceSelector } from "./VoiceSelector";
 
@@ -95,23 +85,6 @@ interface SectionBoundary {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
-}
-
-const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 1.75, 2] as const;
-
-function nextPlaybackRate(current: number): number {
-  const index = PLAYBACK_RATES.findIndex((rate) => Math.abs(rate - current) < 0.001);
-  return PLAYBACK_RATES[(index + 1) % PLAYBACK_RATES.length] ?? 1;
-}
-
-function formatPlaybackRate(rate: number): string {
-  return `${rate.toFixed(2).replace(/\.?0+$/, "")}×`;
-}
-
-function formatTime(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = (secs % 60).toFixed(1);
-  return `${m}:${s.padStart(4, "0")}`;
 }
 
 /** "af_heart" → "Heart" */
@@ -361,88 +334,10 @@ export function AdvancedReaderPage({
     textareaRef.current.scrollTop = nextTop;
   }, [activeRange, isPlaying]);
 
-  /* ── Seek slider (pointer + keyboard) ─────────────────────── */
-  const barRef = useRef<HTMLDivElement>(null);
-  const isDragging = useRef(false);
-  const onSeekRef = useRef(onSeek);
-  const currentTimeRef = useRef(currentTime);
-  const totalDurationRef = useRef(totalDuration);
-
-  useEffect(() => { onSeekRef.current = onSeek; }, [onSeek]);
-  useEffect(() => { currentTimeRef.current = currentTime; }, [currentTime]);
-  useEffect(() => { totalDurationRef.current = totalDuration; }, [totalDuration]);
-
-  const progress = hasAudio ? Math.min(100, (currentTime / totalDuration) * 100) : 0;
-
-  const getSeekPct = useCallback((clientX: number): number => {
-    if (!barRef.current) return 0;
-    const rect = barRef.current.getBoundingClientRect();
-    return clamp((clientX - rect.left) / rect.width, 0, 1);
-  }, []);
-
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!hasAudio) return;
-      e.preventDefault();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      isDragging.current = true;
-      onSeekRef.current(getSeekPct(e.clientX));
-    },
-    [getSeekPct, hasAudio],
-  );
-
-  const handlePointerMove = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!isDragging.current) return;
-      onSeekRef.current(getSeekPct(e.clientX));
-    },
-    [getSeekPct],
-  );
-
-  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
-    isDragging.current = false;
-  }, []);
-
-  const handlePointerCancel = useCallback(() => {
-    isDragging.current = false;
-  }, []);
-
-  const handleSeekKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      const dur = totalDurationRef.current;
-      if (dur === 0) return;
-      const cur = currentTimeRef.current;
-      const step = 5 / dur;
-      if (e.key === "ArrowRight" || e.key === "ArrowUp") {
-        e.preventDefault();
-        onSeekRef.current(Math.min(1, cur / dur + step));
-      } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-        e.preventDefault();
-        onSeekRef.current(Math.max(0, cur / dur - step));
-      } else if (e.key === "Home") {
-        e.preventDefault();
-        onSeekRef.current(0);
-      } else if (e.key === "End") {
-        e.preventDefault();
-        onSeekRef.current(1);
-      }
-    },
-    [],
-  );
-
-  /* ── Primary action state ─────────────────────────────────── */
+  /* ── Player dock actions ──────────────────────────────────── */
   const showRetry = !modelReady && !!modelError;
   const isPreparing = !modelReady && !modelError;
   const displayProgress = clamp(generationProgress, 0, 100);
-  const canStop = isGenerating || hasAudio || isPlaying || currentTime > 0;
-  const hasStats =
-    stats.firstLatency !== null ||
-    stats.processingTime > 0 ||
-    stats.charsPerSec > 0 ||
-    stats.rtf > 0;
 
   const statusLabel = isGenerating
     ? displayProgress > 0 ? `Generating ${Math.round(displayProgress)}%` : "Generating…"
@@ -458,67 +353,56 @@ export function AdvancedReaderPage({
               ? `Need ${charsRemaining.toLocaleString()} more character${charsRemaining !== 1 ? "s" : ""}`
               : "Ready";
 
-  // Play/pause wins as soon as any audio exists — including while later
-  // chunks are still streaming in, so listening is never locked out.
-  const ctaDisabled = !showRetry && !hasAudio && (isGenerating || isPreparing || !canGenerate);
-
-  const handleCtaClick = () => {
+  const primaryActionDisabled = !showRetry && (isGenerating || isPreparing || !canGenerate);
+  const handlePrimaryAction = useCallback(() => {
     if (showRetry) {
       onRetryLoad();
       return;
     }
-    if (hasAudio) {
-      onTogglePlay();
-      return;
-    }
     if (isGenerating || isPreparing) return;
     if (canGenerate) onGenerate();
-  };
+  }, [canGenerate, isGenerating, isPreparing, onGenerate, onRetryLoad, showRetry]);
 
-  const ctaLabel = showRetry
-    ? "Retry model load"
-    : hasAudio
-      ? isPlaying ? "Pause" : "Play"
-      : isGenerating
-        ? "Generating"
-        : "Generate speech";
+  const primaryAction: AudioPlayerPrimaryAction | undefined = hasAudio
+    ? undefined
+    : {
+        label: showRetry
+          ? "Retry model load"
+          : isGenerating
+            ? "Generating"
+            : isPreparing
+              ? loadingProgress > 0 ? `Preparing ${Math.round(loadingProgress)}%` : "Preparing"
+              : "Generate speech",
+        onClick: handlePrimaryAction,
+        disabled: primaryActionDisabled,
+        busy: isGenerating || isPreparing,
+        progress: isGenerating ? displayProgress : isPreparing ? loadingProgress : undefined,
+        icon: showRetry ? "retry" : isGenerating || isPreparing ? "loading" : "generate",
+        tone: showRetry ? "danger" : primaryActionDisabled ? "neutral" : "accent",
+      };
 
-  const ctaIcon = showRetry ? (
-    <RefreshCw size={18} />
-  ) : hasAudio ? (
-    isPlaying
-      ? <Pause size={19} fill="currentColor" />
-      : <Play size={19} fill="currentColor" className="translate-x-px" />
-  ) : isGenerating ? (
-    <span className="flex flex-col items-center justify-center gap-0.5">
-      <Loader2 size={18} className="animate-spin" />
-      {displayProgress > 0 && (
-        <span className="font-mono text-2xs tabular-nums leading-none">
-          {Math.round(displayProgress)}%
-        </span>
-      )}
-    </span>
-  ) : isPreparing ? (
-    <Loader2 size={18} className="animate-spin" />
-  ) : (
-    <Sparkles size={19} />
-  );
+  const canPreviousSegment = activeSegmentIndex > 0;
+  const canNextSegment = activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1;
+  const activeSegmentNumber = activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null;
+  const canRetakeCurrentSegment = hasGeneratedSegments && canRetakeSegments && activeSegmentIndex >= 0 && !isRetaking;
 
-  const ctaIsAccent = !ctaDisabled || isGenerating;
+  const handlePreviousSegment = useCallback(() => {
+    if (activeSegmentIndex > 0) {
+      onJumpToSegment(segments[activeSegmentIndex - 1].id);
+    }
+  }, [activeSegmentIndex, onJumpToSegment, segments]);
 
-  const smallTransportButton = (enabled: boolean) =>
-    `flex h-9 w-9 items-center justify-center rounded-full border transition-all duration-200 ${
-      enabled
-        ? "border-white/55 bg-white/45 backdrop-blur-md text-text-secondary shadow-glass-sm hover:-translate-y-0.5 hover:bg-white/65 hover:text-accent"
-        : "border-border/60 text-text-muted/60 cursor-not-allowed"
-    }`;
+  const handleNextSegment = useCallback(() => {
+    if (activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1) {
+      onJumpToSegment(segments[activeSegmentIndex + 1].id);
+    }
+  }, [activeSegmentIndex, onJumpToSegment, segments]);
 
-  const dockUtilityButton = (enabled: boolean) =>
-    `flex h-8 w-8 items-center justify-center rounded-full transition-all duration-200 ${
-      enabled
-        ? "text-text-muted hover:bg-white/55 hover:text-accent"
-        : "text-text-muted/50 cursor-not-allowed"
-    }`;
+  const handleRetakeCurrentSegment = useCallback(() => {
+    if (activeSegmentIndex >= 0) {
+      onRetakeSegment(segments[activeSegmentIndex].id);
+    }
+  }, [activeSegmentIndex, onRetakeSegment, segments]);
 
   return (
     <div className={`flex w-full flex-col gap-3 sm:gap-4 ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : "mt-6"}`}>
@@ -716,223 +600,38 @@ export function AdvancedReaderPage({
             : "w-full"
         }
       >
-        {hasStats && (
-          <div className="mb-2 flex flex-wrap items-center justify-center gap-1.5">
-            {stats.firstLatency !== null && (
-              <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md">
-                first audio {stats.firstLatency.toFixed(2)}s
-              </span>
-            )}
-            {stats.processingTime > 0 && (
-              <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md">
-                total {stats.processingTime.toFixed(2)}s
-              </span>
-            )}
-            {stats.charsPerSec > 0 && (
-              <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md">
-                {stats.charsPerSec.toFixed(0)} chars/s
-              </span>
-            )}
-            {stats.rtf > 0 && (
-              <span
-                title="Real-time factor — generation time ÷ audio duration (lower is faster)"
-                className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs tabular-nums text-text-muted shadow-glass-sm backdrop-blur-md"
-              >
-                RTF {stats.rtf.toFixed(3)}×
-              </span>
-            )}
-          </div>
-        )}
-
-        <div className="glass-pop rounded-[26px] px-4 pt-3 pb-2.5 sm:px-5">
-          {/* Seek row */}
-          <div className="flex items-center gap-3">
-            <span className="w-11 shrink-0 text-right font-mono text-xs tabular-nums text-text-muted">
-              {formatTime(currentTime)}
-            </span>
-            <div
-              ref={barRef}
-              className={`group relative h-1.5 flex-1 select-none rounded-full ${
-                hasAudio ? "cursor-pointer bg-border-strong" : "bg-border"
-              }`}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerCancel={handlePointerCancel}
-              onLostPointerCapture={handlePointerCancel}
-              onKeyDown={handleSeekKeyDown}
-              role="slider"
-              tabIndex={hasAudio ? 0 : -1}
-              aria-label="Seek"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={Math.round(progress)}
-              aria-valuetext={`${formatTime(currentTime)} of ${formatTime(totalDuration)}`}
-            >
-              <div
-                className="absolute top-0 left-0 h-full rounded-full bg-accent"
-                style={{ width: `${progress}%` }}
-              />
-              <div
-                className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-accent opacity-0 transition-opacity group-hover:opacity-100"
-                style={{
-                  left: `calc(${progress}% - 6px)`,
-                  boxShadow: "var(--shadow-accent-lg)",
-                }}
-              />
-            </div>
-            <span className="w-11 shrink-0 font-mono text-xs tabular-nums text-text-muted">
-              {formatTime(totalDuration)}
-            </span>
-          </div>
-
-          {/* Transport row */}
-          <div className="mt-2 flex items-center justify-between gap-2">
-            {/* Sections */}
-            <div className="flex min-w-0 flex-1 basis-0 items-center gap-0.5">
-              {hasGeneratedSegments ? (
-                <>
-                  <button
-                    type="button"
-                    aria-label="Previous section"
-                    onClick={() => {
-                      if (activeSegmentIndex > 0) {
-                        onJumpToSegment(segments[activeSegmentIndex - 1].id);
-                      }
-                    }}
-                    disabled={activeSegmentIndex <= 0}
-                    className={dockUtilityButton(activeSegmentIndex > 0)}
-                  >
-                    <ChevronLeft size={14} />
-                  </button>
-                  <span className="min-w-9 text-center font-mono text-xs tabular-nums whitespace-nowrap text-text-muted">
-                    {activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : "–"}/{segments.length}
-                  </span>
-                  <button
-                    type="button"
-                    aria-label="Next section"
-                    onClick={() => {
-                      if (activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1) {
-                        onJumpToSegment(segments[activeSegmentIndex + 1].id);
-                      }
-                    }}
-                    disabled={activeSegmentIndex < 0 || activeSegmentIndex >= segments.length - 1}
-                    className={dockUtilityButton(activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1)}
-                  >
-                    <ChevronRight size={14} />
-                  </button>
-                </>
-              ) : (
-                <span className="font-mono text-2xs text-text-muted/70">
-                  {previewChunks.length > 0 ? `${previewChunks.length} sections` : ""}
-                </span>
-              )}
-            </div>
-
-            {/* Center transport */}
-            <div className="flex items-center gap-2.5 sm:gap-3">
-              <button
-                onClick={onSkipBackward}
-                disabled={!hasAudio}
-                aria-label="Back 10 seconds"
-                className={smallTransportButton(hasAudio)}
-              >
-                <RotateCcw size={14} />
-              </button>
-
-              <button
-                onClick={handleCtaClick}
-                disabled={ctaDisabled}
-                aria-label={ctaLabel}
-                title={ctaLabel}
-                className={`flex h-13 w-13 items-center justify-center rounded-full transition-all duration-300 ${
-                  isGenerating && !hasAudio
-                    ? "glass-accent cursor-wait text-white"
-                    : showRetry
-                      ? "border border-danger/30 bg-danger-light text-danger shadow-glass-sm backdrop-blur-md hover:bg-danger hover:text-white"
-                      : ctaIsAccent
-                        ? "glass-accent text-white"
-                        : "border border-border/70 bg-white/35 text-text-muted/70 cursor-not-allowed backdrop-blur-md"
-                }`}
-              >
-                {ctaIcon}
-              </button>
-
-              <button
-                onClick={onSkipForward}
-                disabled={!hasAudio}
-                aria-label="Forward 10 seconds"
-                className={smallTransportButton(hasAudio)}
-              >
-                <RotateCw size={14} />
-              </button>
-            </div>
-
-            {/* Utilities */}
-            <div className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-0.5">
-              {hasAudio && onPlaybackRateChange && (
-                <button
-                  type="button"
-                  onClick={() => onPlaybackRateChange(nextPlaybackRate(playbackRate))}
-                  aria-label={`Playback speed ${formatPlaybackRate(playbackRate)}`}
-                  title="Playback speed"
-                  className="flex h-8 min-w-8 items-center justify-center rounded-full px-1 font-mono text-xs tabular-nums text-text-muted transition-all duration-200 hover:bg-white/55 hover:text-accent"
-                >
-                  {formatPlaybackRate(playbackRate)}
-                </button>
-              )}
-              {hasAudio && !isGenerating && (
-                <button
-                  type="button"
-                  onClick={onGenerate}
-                  disabled={!canGenerate}
-                  aria-label="Regenerate speech"
-                  title="Regenerate speech"
-                  className={dockUtilityButton(canGenerate)}
-                >
-                  <Sparkles size={14} />
-                </button>
-              )}
-              {hasGeneratedSegments && canRetakeSegments && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (activeSegmentIndex >= 0) {
-                      onRetakeSegment(segments[activeSegmentIndex].id);
-                    }
-                  }}
-                  disabled={activeSegmentIndex < 0 || isRetaking}
-                  aria-label={isRetaking ? "Retaking section" : "Retake section"}
-                  title="Retake current section"
-                  className={dockUtilityButton(activeSegmentIndex >= 0 && !isRetaking)}
-                >
-                  <RefreshCw size={14} className={isRetaking ? "animate-spin" : undefined} />
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onDownload}
-                disabled={!hasAudio}
-                aria-label="Download audio"
-                title="Download audio"
-                className={dockUtilityButton(hasAudio)}
-              >
-                <Download size={14} />
-              </button>
-              {canStop && (
-                <button
-                  type="button"
-                  onClick={onStop}
-                  aria-label={isGenerating ? "Stop generation" : "Stop playback"}
-                  title={isGenerating ? "Stop generation" : "Stop playback"}
-                  className="flex h-8 w-8 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger hover:text-white"
-                >
-                  <Square size={12} />
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+        <AudioPlayer
+          variant="dock"
+          embedded
+          isPlaying={isPlaying}
+          currentTime={currentTime}
+          totalDuration={totalDuration}
+          segmentCount={segments.length}
+          activeSegmentNumber={activeSegmentNumber}
+          sectionPreviewCount={previewChunks.length}
+          statusLabel={statusLabel}
+          stats={stats}
+          isGenerating={isGenerating}
+          allowPlaybackDuringGeneration
+          playbackRate={playbackRate}
+          onPlaybackRateChange={onPlaybackRateChange}
+          canPreviousSegment={canPreviousSegment}
+          canNextSegment={canNextSegment}
+          onPreviousSegment={handlePreviousSegment}
+          onNextSegment={handleNextSegment}
+          canRegenerate={hasAudio && !isGenerating && canGenerate}
+          onRegenerate={onGenerate}
+          canRetakeSegment={canRetakeCurrentSegment}
+          onRetakeSegment={canRetakeSegments ? handleRetakeCurrentSegment : undefined}
+          isRetaking={isRetaking}
+          primaryAction={primaryAction}
+          onTogglePlay={onTogglePlay}
+          onSeek={onSeek}
+          onSkipBackward={onSkipBackward}
+          onSkipForward={onSkipForward}
+          onDownload={onDownload}
+          onStop={onStop}
+        />
       </div>
     </div>
   );
