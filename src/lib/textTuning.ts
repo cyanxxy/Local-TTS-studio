@@ -23,7 +23,7 @@ function applySingleRule(text: string, rule: PronunciationRule): string {
   const escaped = escapeRegExp(from);
   const alnumBoundary = /^[A-Za-z0-9]/.test(from) && /[A-Za-z0-9]$/.test(from);
   const source = alnumBoundary ? `\\b${escaped}\\b` : escaped;
-  return text.replace(new RegExp(source, "gi"), to);
+  return text.replace(new RegExp(source, "gi"), () => to);
 }
 
 export function applyPronunciationRules(text: string, rules: PronunciationRule[]): string {

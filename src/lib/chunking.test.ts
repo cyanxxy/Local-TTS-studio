@@ -169,6 +169,34 @@ describe("adaptive limits", () => {
     const defaultWebgpu = getAdaptiveChunkLimits({ backend: "webgpu", quality: 5 });
     expect(mediumQuality.maxCharacters).toBeLessThan(defaultWebgpu.maxCharacters);
   });
+
+  it("honors one-sided min and max overrides without replacing them with runtime defaults", () => {
+    expect(getAdaptiveChunkLimits({ backend: "wasm", quality: 5 }, { minCharacters: 100 }).minCharacters).toBe(100);
+    expect(getAdaptiveChunkLimits({ backend: "webgpu", quality: 14 }, { maxCharacters: 200 }).maxCharacters).toBe(200);
+  });
+
+  it("does not hard-split UTF-16 surrogate pairs", () => {
+    const text = `${"a".repeat(79)}💡${"b".repeat(40)}`;
+    const chunks = chunkWithConstraintsDetailed(text, { minCharacters: 40, maxCharacters: 80 });
+
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      const first = chunk.text.charCodeAt(0);
+      const last = chunk.text.charCodeAt(chunk.text.length - 1);
+      expect(first >= 0xDC00 && first <= 0xDFFF).toBe(false);
+      expect(last >= 0xD800 && last <= 0xDBFF).toBe(false);
+      expect(chunk.text).toBe(text.slice(chunk.start, chunk.end));
+    }
+  });
+
+  it("does not hard-split a final combining-mark grapheme", () => {
+    const text = `${"a".repeat(79)}e\u0301`;
+    const chunks = chunkWithConstraintsDetailed(text, { minCharacters: 40, maxCharacters: 80 });
+
+    expect(chunks).toHaveLength(2);
+    expect(chunks[0].text.endsWith("e")).toBe(false);
+    expect(chunks[1].text).toBe("e\u0301");
+  });
 });
 
 describe("kokoro inference units", () => {

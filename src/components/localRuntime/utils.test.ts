@@ -55,4 +55,16 @@ describe("localRuntime utils", () => {
     expect(view.getInt16(44, true)).toBe(32767);
     expect(view.getInt16(46, true)).toBe(-32767);
   });
+
+  it("rejects oversized WAV output before allocating the destination buffer", () => {
+    expect(() => float32ChunksToWavBytes([
+      { audio: new ArrayBuffer(0), sampleCount: 0, silenceAfterSamples: 0x80000000 },
+    ], 24_000)).toThrow(/too large/i);
+  });
+
+  it("rejects sample rates that would overflow RIFF byte-rate fields", () => {
+    expect(() => float32ChunksToWavBytes([
+      { audio: new Float32Array([0]).buffer, sampleCount: 1, silenceAfterSamples: 0 },
+    ], 0xFFFFFFFF)).toThrow(/byte rate/i);
+  });
 });

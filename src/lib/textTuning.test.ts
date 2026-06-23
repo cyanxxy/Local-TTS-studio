@@ -22,6 +22,12 @@ describe("textTuning", () => {
     ])).toContain("see plus plus");
   });
 
+  it("treats replacement dollar tokens as literal pronunciation text", () => {
+    expect(applyPronunciationRules("Say GIF then GIF.", [
+      { from: "GIF", to: "$& literally $1" },
+    ])).toBe("Say $& literally $1 then $& literally $1.");
+  });
+
   it("normalizes and applies emphasis markup by strength", () => {
     expect(applyEmphasisMarkup("This is *key* and [[urgent]].", 0)).toBe("This is key and urgent.");
     expect(applyEmphasisMarkup("This is **key**.", 0.5)).toBe("This is key, key.");

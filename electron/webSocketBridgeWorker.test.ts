@@ -620,6 +620,82 @@ describe("createWebSocketBridgeWorkerPool", () => {
     servers[0].close();
   });
 
+  it("rejects audio chunks that change sample rate mid-stream", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      sendAudioChunk(server, message.requestId, { index: 0, total: 2, sampleRate: 24000 });
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 1,
+        total: 2,
+        sampleRate: 44100,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "bad rate" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/sample rate/i);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects a final result whose sample rate does not match streamed audio", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      sendAudioChunk(server, message.requestId, { sampleRate: 24000 });
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: {
+          audioTransport: "websocket-binary",
+          audioChunkCount: 1,
+          sampleRate: 44100,
+          modelRepo: "R",
+          durationSec: 1,
+          elapsedSec: 1,
+          phaseTimingsSec: {},
+        },
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "bad final rate" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/sample rate/i);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects audio chunk metadata with excessive trailing silence", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 1,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 48_000 * 60 + 1,
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "bad silence" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/silence/i);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
   it("cancels a request while its worker is still spawning", async () => {
     // The bridge never announces its port, so the run stays in the spawn phase.
     const children: FakeChild[] = [];
@@ -853,6 +929,33 @@ describe("createWebSocketBridgeWorkerPool", () => {
       payload: { text: "x" },
       spawnConfig: SPAWN_CONFIG,
     })).rejects.toThrow(/unexpected request/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects request-scoped frames that omit the request id", async () => {
+    const { pool, children, servers } = makePool((_message, server) => {
+      server.sendJson({
+        type: "result",
+        ok: true,
+        result: {
+          audioTransport: "websocket-binary",
+          audioChunkCount: 1,
+          sampleRate: 24000,
+          modelRepo: "R",
+          durationSec: 1,
+          elapsedSec: 1,
+          phaseTimingsSec: {},
+        },
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/request id/i);
     expect(children[0].killed).toBe(true);
     servers[0].close();
   });

@@ -30,7 +30,7 @@ Open TTS is two applications built from a single codebase:
 - **Desktop** — an Electron shell that serves the same Studio and Reader under `/desktop/*`, adds Qwen3-TTS as an in-place Studio/Reader model option, and exposes optional local-runtime setup pages through a Rust bridge.
 - **Shared core** — model loading, generation, playback, export, and routing live in shared React/TypeScript modules used by both shells.
 
-Browser models prefer WebGPU, fall back to WASM where supported, and cache their weights after first load for offline reuse. Electron local runtimes run through `open-tts-local-bridge`, a compiled Rust binary that Electron probes and keeps warm as an authenticated loopback WebSocket worker. Nothing you type or generate leaves the machine.
+Browser models prefer WebGPU, fall back to WASM where supported, and cache their weights after first load for repeat use. Electron local runtimes run through `open-tts-local-bridge`, a compiled Rust binary that Electron probes and keeps warm as a token-authenticated loopback WebSocket worker. Synthesis runs locally; first-run model/runtime downloads still contact upstream hosts for asset retrieval, and cached browser assets remain subject to browser storage policy.
 
 ---
 
@@ -67,14 +67,14 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 
 | | |
 |---|---|
-| **Local & private** | All synthesis runs on-device — no server, account, API key, or usage cap. |
+| **Local & private** | Built-in synthesis paths run on-device — no hosted inference server, account, API key, or usage cap. First-run model/runtime downloads contact upstream hosts for asset retrieval. |
 | **Two browser models** | Kokoro-82M and Supertonic, accelerated by WebGPU with an automatic WASM fallback. |
 | **Studio & Reader** | A focused synthesis workspace, plus a long-form reading mode with sentence-aware chunking. |
-| **Studio-grade export** | WAV (32-bit float, 24-bit, 16-bit PCM) and MP3, with optional loudness mastering (−14 LUFS / −1 dBTP) and resampling. |
-| **Timed captions** | Export aligned SRT, VTT, or JSON alongside the audio. |
+| **Studio-grade export** | WAV (32-bit float, 24-bit, 16-bit PCM) and MP3, with optional loudness normalization, sample-peak limiting, and resampling. |
+| **Estimated captions** | Export estimated SRT, VTT, or JSON timings alongside the audio. |
 | **Creator presets** | One-click TikTok Voiceover, YouTube Shorts, and YouTube Long-form profiles. |
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
-| **Offline-ready** | Model weights cache in-browser (IndexedDB + Cache API) for repeat, network-free use. |
+| **Offline reuse** | Model weights cache in-browser (IndexedDB + Cache API) for repeat use, subject to browser quota, persistence, and eviction behavior. |
 | **Desktop runtimes** | Electron adds Qwen3-TTS to Studio/Reader and exposes NeuTTS Nano and Qwen3 setup pages through a resident Rust WebSocket bridge. |
 
 ---
@@ -136,7 +136,7 @@ Packaged desktop builds bundle the Electron shell and the Rust local bridge bina
 
 ## Runtime Notes
 
-- Browser model assets download on first use and cache locally for offline reuse.
+- Browser model assets download on first use and cache locally for repeat use. Network-free operation depends on the required app/model assets still being present in browser storage.
 - WebGPU is preferred where available; the WASM fallback is expected behavior.
 - iPhone and iPad browsers expose Supertonic only — Kokoro is intentionally disabled on iOS pending further validation.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.

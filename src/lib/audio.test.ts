@@ -83,6 +83,12 @@ describe("buildWavHeader", () => {
     expect(() => buildWavHeader(5, 24000, "float32", 0)).toThrow("channel count");
     expect(() => buildWavHeader(5, 24000, "float32", 1.5)).toThrow("channel count");
   });
+
+  it("rejects WAV headers whose RIFF size would overflow 32-bit fields", () => {
+    const tooManyFloat32Frames = Math.floor((0xFFFFFFFF - 36) / 4) + 1;
+
+    expect(() => buildWavHeader(tooManyFloat32Frames, 24000)).toThrow(/RIFF/i);
+  });
 });
 
 describe("createWavBlob", () => {

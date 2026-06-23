@@ -41,6 +41,13 @@ export interface Float32AudioChunk {
   silenceAfterSamples: number;
 }
 
+const PCM16_BYTES_PER_SAMPLE = 2;
+const FLOAT32_BYTES_PER_SAMPLE = 4;
+const WAV_HEADER_BYTES = 44;
+const RIFF_SIZE_FIELD_MAX = 0xFFFFFFFF;
+const RIFF_DATA_SIZE_MAX = RIFF_SIZE_FIELD_MAX - 36;
+const MAX_RENDERER_WAV_BYTES = 0x7FFFFFFF;
+
 export function float32ChunksToWavUrl(chunks: Float32AudioChunk[], sampleRate: number): string {
   const wavBytes = float32ChunksToWavBytes(chunks, sampleRate);
   const wavBuffer = new ArrayBuffer(wavBytes.byteLength);
@@ -48,12 +55,51 @@ export function float32ChunksToWavUrl(chunks: Float32AudioChunk[], sampleRate: n
   return URL.createObjectURL(new Blob([wavBuffer], { type: "audio/wav" }));
 }
 
+function assertNonNegativeInteger(value: number, field: string): void {
+  if (!Number.isInteger(value) || value < 0 || !Number.isSafeInteger(value)) {
+    throw new Error(`${field} must be a safe non-negative integer.`);
+  }
+}
+
+function assertValidSampleRate(sampleRate: number): void {
+  if (!Number.isInteger(sampleRate) || sampleRate <= 0 || sampleRate > RIFF_SIZE_FIELD_MAX) {
+    throw new Error("WAV sample rate must be a positive integer.");
+  }
+}
+
+function assertUint32Field(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 0 || value > RIFF_SIZE_FIELD_MAX) {
+    throw new Error(`${label} exceeds WAV 32-bit field limits.`);
+  }
+}
+
 export function float32ChunksToWavBytes(chunks: Float32AudioChunk[], sampleRate: number): Uint8Array {
-  const totalSamples = chunks.reduce((sum, chunk) => (
-    sum + chunk.sampleCount + chunk.silenceAfterSamples
-  ), 0);
-  const dataBytes = totalSamples * 2;
-  const wav = new Uint8Array(44 + dataBytes);
+  assertValidSampleRate(sampleRate);
+  const byteRate = sampleRate * PCM16_BYTES_PER_SAMPLE;
+  assertUint32Field(byteRate, "WAV byte rate");
+  const totalSamples = chunks.reduce((sum, chunk) => {
+    assertNonNegativeInteger(chunk.sampleCount, "Audio chunk sample count");
+    assertNonNegativeInteger(chunk.silenceAfterSamples, "Audio chunk silence sample count");
+    const requiredBytes = chunk.sampleCount * FLOAT32_BYTES_PER_SAMPLE;
+    if (!Number.isSafeInteger(requiredBytes) || requiredBytes > chunk.audio.byteLength) {
+      throw new Error("Audio chunk sample count exceeds its Float32 payload.");
+    }
+    const next = sum + chunk.sampleCount + chunk.silenceAfterSamples;
+    if (!Number.isSafeInteger(next)) {
+      throw new Error("Local-runtime WAV output is too large.");
+    }
+    return next;
+  }, 0);
+  const dataBytes = totalSamples * PCM16_BYTES_PER_SAMPLE;
+  if (
+    !Number.isSafeInteger(dataBytes)
+    || dataBytes > RIFF_DATA_SIZE_MAX
+    || WAV_HEADER_BYTES + dataBytes > MAX_RENDERER_WAV_BYTES
+  ) {
+    throw new Error("Local-runtime WAV output is too large.");
+  }
+
+  const wav = new Uint8Array(WAV_HEADER_BYTES + dataBytes);
   const view = new DataView(wav.buffer);
   writeAscii(wav, 0, "RIFF");
   view.setUint32(4, 36 + dataBytes, true);
@@ -63,7 +109,7 @@ export function float32ChunksToWavBytes(chunks: Float32AudioChunk[], sampleRate:
   view.setUint16(20, 1, true);
   view.setUint16(22, 1, true);
   view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true);
+  view.setUint32(28, byteRate, true);
   view.setUint16(32, 2, true);
   view.setUint16(34, 16, true);
   writeAscii(wav, 36, "data");
@@ -85,9 +131,9 @@ export function float32ChunksToWavBytes(chunks: Float32AudioChunk[], sampleRate:
     for (let index = 0; index < samples.length; index += 1) {
       const sample = Math.max(-1, Math.min(1, (Number.isFinite(samples[index]) ? samples[index] : 0) / scale));
       view.setInt16(outputOffset, Math.round(sample * 32767), true);
-      outputOffset += 2;
+      outputOffset += PCM16_BYTES_PER_SAMPLE;
     }
-    outputOffset += chunk.silenceAfterSamples * 2;
+    outputOffset += chunk.silenceAfterSamples * PCM16_BYTES_PER_SAMPLE;
   }
 
   return wav;

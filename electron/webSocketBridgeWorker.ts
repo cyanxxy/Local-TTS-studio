@@ -80,6 +80,7 @@ interface ActiveRequest {
   stderrBytes: number;
   pendingAudioChunk: Omit<WebSocketAudioChunk, "audio"> | null;
   audioChunkTotal: number | null;
+  audioSampleRate: number | null;
   receivedAudioChunkIndexes: Set<number>;
   idleTimer: ReturnType<typeof setTimeout> | null;
   settled: boolean;
@@ -106,6 +107,9 @@ const BRIDGE_PORT_PREFIX = "__PORT__";
 // 24kHz/44.1kHz output, so 10 minutes at 48kHz per chunk cannot reject a
 // legitimate frame.
 const MAX_AUDIO_CHUNK_SAMPLES = 48_000 * 600;
+const MAX_AUDIO_SILENCE_SAMPLES = 48_000 * 60;
+const MIN_AUDIO_SAMPLE_RATE = 8_000;
+const MAX_AUDIO_SAMPLE_RATE = 192_000;
 
 // On the WebSocket path the bridge result and audio travel over the socket, so
 // the child's stdout/stderr are diagnostic-only and never read for the result.
@@ -255,11 +259,18 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
   if (total > 0 && index >= total) {
     throw new Error("WebSocket bridge returned an audio chunk index outside the declared total.");
   }
-  if (sampleRate <= 0 || sampleCount <= 0) {
+  if (
+    sampleRate < MIN_AUDIO_SAMPLE_RATE
+    || sampleRate > MAX_AUDIO_SAMPLE_RATE
+    || sampleCount <= 0
+  ) {
     throw new Error("WebSocket bridge returned an audio chunk with invalid sample metadata.");
   }
   if (sampleCount > MAX_AUDIO_CHUNK_SAMPLES) {
     throw new Error("WebSocket bridge returned an audio chunk exceeding the maximum sample count.");
+  }
+  if (silenceAfterSamples > MAX_AUDIO_SILENCE_SAMPLES) {
+    throw new Error("WebSocket bridge returned an audio chunk with excessive trailing silence.");
   }
   return {
     requestId,
@@ -271,7 +282,7 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
   };
 }
 
-function parseResultAudioChunkCount(parsed: Record<string, unknown>): number | null {
+function parseResultAudioMetadata(parsed: Record<string, unknown>): { audioChunkCount: number; sampleRate: number } | null {
   if (parsed.ok !== true) return null;
   if (!isRecord(parsed.result)) {
     throw new Error("WebSocket bridge returned a successful result without a result object.");
@@ -284,7 +295,16 @@ function parseResultAudioChunkCount(parsed: Record<string, unknown>): number | n
   ) {
     throw new Error("WebSocket bridge returned a successful result with an invalid audio chunk count.");
   }
-  return audioChunkCount;
+  const sampleRate = parsed.result.sampleRate;
+  if (
+    typeof sampleRate !== "number"
+    || !Number.isInteger(sampleRate)
+    || sampleRate < MIN_AUDIO_SAMPLE_RATE
+    || sampleRate > MAX_AUDIO_SAMPLE_RATE
+  ) {
+    throw new Error("WebSocket bridge returned a successful result with an invalid sample rate.");
+  }
+  return { audioChunkCount, sampleRate };
 }
 
 export function createWebSocketBridgeWorkerPool<TModel extends string>({
@@ -491,7 +511,16 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       return;
     }
 
-    if (typeof parsed.requestId === "string" && parsed.requestId !== active.requestId) {
+    if (typeof parsed.requestId !== "string") {
+      settleActive(model, worker, {
+        ok: false,
+        error: new Error("WebSocket bridge returned a request-scoped message without a request id."),
+      });
+      killWorker(model, worker);
+      return;
+    }
+
+    if (parsed.requestId !== active.requestId) {
       settleActive(model, worker, {
         ok: false,
         error: new Error(`WebSocket bridge returned a message for unexpected request ${parsed.requestId}.`),
@@ -524,6 +553,11 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         if (metadata.index !== active.receivedAudioChunkIndexes.size) {
           throw new Error("WebSocket bridge returned audio chunks out of sequence.");
         }
+        if (active.audioSampleRate == null) {
+          active.audioSampleRate = metadata.sampleRate;
+        } else if (metadata.sampleRate !== active.audioSampleRate) {
+          throw new Error("WebSocket bridge changed the audio sample rate mid-stream.");
+        }
         if (metadata.total > 0) {
           active.audioChunkTotal = metadata.total;
         }
@@ -548,16 +582,24 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         return;
       }
       try {
-        const expectedAudioChunkCount = active.expectAudio ? parseResultAudioChunkCount(parsed) : null;
-        if (expectedAudioChunkCount != null) {
+        const expectedAudioMetadata = active.expectAudio ? parseResultAudioMetadata(parsed) : null;
+        if (expectedAudioMetadata != null) {
           const receivedAudioChunkCount = active.receivedAudioChunkIndexes.size;
           if (
-            expectedAudioChunkCount !== receivedAudioChunkCount
-            || (active.audioChunkTotal != null && expectedAudioChunkCount !== active.audioChunkTotal)
+            expectedAudioMetadata.audioChunkCount !== receivedAudioChunkCount
+            || (active.audioChunkTotal != null && expectedAudioMetadata.audioChunkCount !== active.audioChunkTotal)
           ) {
             settleActive(model, worker, {
               ok: false,
               error: new Error("WebSocket bridge result did not match the streamed audio chunk count."),
+            });
+            killWorker(model, worker);
+            return;
+          }
+          if (active.audioSampleRate != null && expectedAudioMetadata.sampleRate !== active.audioSampleRate) {
+            settleActive(model, worker, {
+              ok: false,
+              error: new Error("WebSocket bridge result did not match the streamed audio sample rate."),
             });
             killWorker(model, worker);
             return;
@@ -808,6 +850,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
           stderrBytes: 0,
           pendingAudioChunk: null,
           audioChunkTotal: null,
+          audioSampleRate: null,
           receivedAudioChunkIndexes: new Set<number>(),
           idleTimer: null,
           settled: false,

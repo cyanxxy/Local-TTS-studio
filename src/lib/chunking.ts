@@ -49,6 +49,19 @@ interface RetryOptions {
   attempt?: number;
 }
 
+interface GraphemeSegment {
+  index: number;
+  segment: string;
+}
+
+interface GraphemeSegmenter {
+  segment(input: string): Iterable<GraphemeSegment>;
+}
+
+type IntlWithSegmenter = typeof Intl & {
+  Segmenter?: new (locale?: string, options?: { granularity: "grapheme" }) => GraphemeSegmenter;
+};
+
 const PAUSE_SECONDS: Record<ChunkPauseKind, number> = {
   none: 0.08,
   comma: 0.14,
@@ -70,6 +83,44 @@ function isParagraphBreakAt(text: string, index: number): boolean {
   i += 1;
   if (text[i] === "\r") i += 1;
   return text[i] === "\n";
+}
+
+function isHighSurrogateAt(text: string, index: number): boolean {
+  const code = text.charCodeAt(index);
+  return code >= 0xD800 && code <= 0xDBFF;
+}
+
+function isLowSurrogateAt(text: string, index: number): boolean {
+  const code = text.charCodeAt(index);
+  return code >= 0xDC00 && code <= 0xDFFF;
+}
+
+function adjustSplitToTextBoundary(text: string, cursor: number, splitAt: number, end: number): number {
+  if (splitAt <= cursor || splitAt >= end) return splitAt;
+
+  const Segmenter = (Intl as IntlWithSegmenter).Segmenter;
+  if (Segmenter) {
+    const segmenter = new Segmenter(undefined, { granularity: "grapheme" });
+    let previousBoundary = cursor;
+
+    for (const segment of segmenter.segment(text.slice(cursor, end))) {
+      const boundary = cursor + segment.index;
+      if (boundary === splitAt) return splitAt;
+      if (boundary > splitAt) {
+        return previousBoundary > cursor ? previousBoundary : boundary;
+      }
+      previousBoundary = boundary;
+    }
+    if (previousBoundary > cursor && previousBoundary < splitAt) {
+      return previousBoundary;
+    }
+  }
+
+  if (isHighSurrogateAt(text, splitAt - 1) && isLowSurrogateAt(text, splitAt)) {
+    return splitAt - 1 > cursor ? splitAt - 1 : splitAt + 1;
+  }
+
+  return splitAt;
 }
 
 function getTextBetween(text: string, start: number | undefined, end: number | undefined, fallback: string): string {
@@ -265,6 +316,7 @@ function splitOversizedRange(text: string, start: number, end: number, maxCharac
     if (splitAt === -1 || splitAt <= cursor) {
       splitAt = idealEnd;
     }
+    splitAt = adjustSplitToTextBoundary(text, cursor, splitAt, end);
 
     const trimmed = trimRangeToContent(text, cursor, splitAt);
     if (trimmed) ranges.push(trimmed);
@@ -330,34 +382,44 @@ export function getAdaptiveChunkLimits(
   runtime?: ChunkingRuntimeProfile,
   overrides?: Pick<ChunkingOptions, "minCharacters" | "maxCharacters">,
 ): ChunkingLimits {
-  let minCharacters = overrides?.minCharacters ?? SUPERTONIC_MIN_CHUNK_LENGTH;
-  let maxCharacters = overrides?.maxCharacters ?? MAX_CHUNK_LENGTH;
+  const hasMinOverride = typeof overrides?.minCharacters === "number";
+  const hasMaxOverride = typeof overrides?.maxCharacters === "number";
+  let minCharacters = SUPERTONIC_MIN_CHUNK_LENGTH;
+  let maxCharacters = MAX_CHUNK_LENGTH;
   let targetCharacters = Math.floor((minCharacters + maxCharacters) / 2);
 
-  if (!overrides?.maxCharacters || !overrides?.minCharacters) {
-    if (runtime?.backend === "wasm") {
-      minCharacters = 60;
-      maxCharacters = 280;
-      targetCharacters = 200;
-    } else if (runtime?.backend === "webgpu") {
-      minCharacters = 120;
-      maxCharacters = MAX_CHUNK_LENGTH;
-      targetCharacters = 320;
-    }
+  if (runtime?.backend === "wasm") {
+    minCharacters = 60;
+    maxCharacters = 280;
+    targetCharacters = 200;
+  } else if (runtime?.backend === "webgpu") {
+    minCharacters = 120;
+    maxCharacters = MAX_CHUNK_LENGTH;
+    targetCharacters = 320;
+  }
 
-    const quality = runtime?.quality ?? 5;
-    if (quality >= 14) {
-      minCharacters = Math.floor(minCharacters * 0.72);
-      maxCharacters = Math.floor(maxCharacters * 0.55);
-      targetCharacters = Math.floor(targetCharacters * 0.6);
-    } else if (quality >= 10) {
-      minCharacters = Math.floor(minCharacters * 0.85);
-      maxCharacters = Math.floor(maxCharacters * 0.72);
-      targetCharacters = Math.floor(targetCharacters * 0.78);
-    } else if (quality <= 3 && runtime?.backend === "webgpu") {
-      maxCharacters = Math.floor(maxCharacters * 1.05);
-      targetCharacters = Math.floor(targetCharacters * 1.08);
-    }
+  const quality = runtime?.quality ?? 5;
+  if (quality >= 14) {
+    minCharacters = Math.floor(minCharacters * 0.72);
+    maxCharacters = Math.floor(maxCharacters * 0.55);
+    targetCharacters = Math.floor(targetCharacters * 0.6);
+  } else if (quality >= 10) {
+    minCharacters = Math.floor(minCharacters * 0.85);
+    maxCharacters = Math.floor(maxCharacters * 0.72);
+    targetCharacters = Math.floor(targetCharacters * 0.78);
+  } else if (quality <= 3 && runtime?.backend === "webgpu") {
+    maxCharacters = Math.floor(maxCharacters * 1.05);
+    targetCharacters = Math.floor(targetCharacters * 1.08);
+  }
+
+  if (hasMinOverride) {
+    minCharacters = overrides.minCharacters!;
+  }
+  if (hasMaxOverride) {
+    maxCharacters = overrides.maxCharacters!;
+  }
+  if (hasMinOverride && hasMaxOverride) {
+    targetCharacters = Math.floor((minCharacters + maxCharacters) / 2);
   }
 
   maxCharacters = clamp(maxCharacters, 80, MAX_CHUNK_LENGTH);

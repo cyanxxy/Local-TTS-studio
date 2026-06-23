@@ -18,6 +18,10 @@ interface WavEncodingDetails {
   bytesPerSample: number;
 }
 
+const WAV_HEADER_BYTES = 44;
+const RIFF_SIZE_FIELD_MAX = 0xFFFFFFFF;
+const RIFF_DATA_SIZE_MAX = RIFF_SIZE_FIELD_MAX - 36;
+
 function getEncodingDetails(encoding: WavEncoding): WavEncodingDetails {
   switch (encoding) {
     case "pcm16":
@@ -58,6 +62,32 @@ function assertValidChannelCount(channelCount: number): void {
   }
 }
 
+function assertValidSampleRate(samplingRate: number): void {
+  if (!Number.isInteger(samplingRate) || samplingRate <= 0 || samplingRate > RIFF_SIZE_FIELD_MAX) {
+    throw new Error("WAV sample rate must be a positive integer.");
+  }
+}
+
+function assertValidFrameCount(totalFrames: number): void {
+  if (!Number.isInteger(totalFrames) || totalFrames < 0 || !Number.isSafeInteger(totalFrames)) {
+    throw new Error("WAV frame count must be a safe non-negative integer.");
+  }
+}
+
+function checkedProduct(values: number[], label: string): number {
+  const result = values.reduce((acc, value) => acc * value, 1);
+  if (!Number.isSafeInteger(result)) {
+    throw new Error(`${label} exceeds JavaScript safe integer limits.`);
+  }
+  return result;
+}
+
+function assertUint32Field(value: number, label: string): void {
+  if (!Number.isInteger(value) || value < 0 || value > RIFF_SIZE_FIELD_MAX) {
+    throw new Error(`${label} exceeds WAV 32-bit field limits.`);
+  }
+}
+
 /**
  * Build a 44-byte WAV header. `totalFrames` is the per-channel frame count;
  * interleaved sample data must contain `totalFrames * channelCount` samples.
@@ -70,10 +100,20 @@ export function buildWavHeader(
   channelCount: number = 1,
 ): ArrayBuffer {
   assertValidChannelCount(channelCount);
+  assertValidSampleRate(samplingRate);
+  assertValidFrameCount(totalFrames);
   const details = getEncodingDetails(encoding);
-  const buffer = new ArrayBuffer(44);
+  const dataSize = checkedProduct([totalFrames, channelCount, details.bytesPerSample], "WAV data size");
+  if (dataSize > RIFF_DATA_SIZE_MAX) {
+    throw new Error("WAV data is too large for standard RIFF output.");
+  }
+  const byteRate = checkedProduct([samplingRate, channelCount, details.bytesPerSample], "WAV byte rate");
+  const blockAlign = checkedProduct([channelCount, details.bytesPerSample], "WAV block align");
+  assertUint32Field(byteRate, "WAV byte rate");
+  assertUint32Field(blockAlign, "WAV block align");
+
+  const buffer = new ArrayBuffer(WAV_HEADER_BYTES);
   const view = new DataView(buffer);
-  const dataSize = totalFrames * channelCount * details.bytesPerSample;
 
   // RIFF chunk descriptor
   writeString(view, 0, "RIFF");
@@ -86,8 +126,8 @@ export function buildWavHeader(
   view.setUint16(20, details.formatCode, true);
   view.setUint16(22, channelCount, true);
   view.setUint32(24, samplingRate, true);
-  view.setUint32(28, samplingRate * channelCount * details.bytesPerSample, true);
-  view.setUint16(32, channelCount * details.bytesPerSample, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
   view.setUint16(34, details.bitsPerSample, true);
 
   // data sub-chunk
@@ -151,7 +191,13 @@ export function createSilence(durationSec: number, samplingRate: number): Float3
  * Concatenate multiple Float32Arrays into one.
  */
 export function concatFloat32Arrays(arrays: Float32Array[]): Float32Array {
-  const totalLength = arrays.reduce((acc, arr) => acc + arr.length, 0);
+  const totalLength = arrays.reduce((acc, arr) => {
+    const next = acc + arr.length;
+    if (!Number.isSafeInteger(next)) {
+      throw new Error("Audio sample count exceeds JavaScript safe integer limits.");
+    }
+    return next;
+  }, 0);
   const result = new Float32Array(totalLength);
   let offset = 0;
   for (const arr of arrays) {
