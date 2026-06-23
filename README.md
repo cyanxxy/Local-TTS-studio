@@ -88,7 +88,7 @@ The bridge has two actions:
 - `probe` — a one-shot readiness check that reports Rust runtime metadata.
 - `serve-ws` — a resident per-model worker used for generation.
 
-For generation, Electron starts the bridge with `--host 127.0.0.1 --port 0 --auth-token <token>`. Rust binds the loopback socket, prints `__PORT__<actual-port>` on stdout, and accepts WebSocket traffic only on `/<token>`. Metadata travels as JSON frames, while audio streams as raw Float32 binary chunks. The renderer schedules those chunks with Web Audio and owns WAV normalization/export.
+For generation, Electron starts the bridge with `--host 127.0.0.1 --port 0 --auth-token <token>`. Rust binds the loopback socket, prints `__PORT__<actual-port>` on stdout, and accepts WebSocket traffic only on `/<token>` through the maintained `tungstenite` protocol stack. Metadata travels as JSON frames, while audio streams as raw Float32 binary chunks. The renderer schedules those chunks with Web Audio and owns WAV normalization/export.
 
 `npm run build:rust` builds the release bridge and copies the binary plus native runtime libraries into `dist-rust/` for Electron packaging.
 

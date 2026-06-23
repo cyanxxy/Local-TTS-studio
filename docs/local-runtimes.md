@@ -129,7 +129,7 @@ Electron launches generation workers as:
 open-tts-local-bridge --action serve-ws --model <neutts|qwen3> --cache-dir <dir> --host 127.0.0.1 --port 0 --auth-token <token>
 ```
 
-`serve-ws` binds the requested loopback host, prints `__PORT__<actual-port>` on stdout, and accepts a WebSocket connection only on `/<token>`. Electron uses `--port 0` so Rust owns the final port selection and there is no host-side reserve/bind race.
+`serve-ws` binds the requested loopback host, prints `__PORT__<actual-port>` on stdout, and accepts a WebSocket connection only on `/<token>` using `tungstenite` for upgrade validation and frame handling. Electron uses `--port 0` so Rust owns the final port selection and there is no host-side reserve/bind race.
 
 Once connected, `serve-ws` reads WebSocket requests shaped like `{"requestId","payload"}` or `{"command":"shutdown"}`. Per generation request it emits zero or more `progress` JSON frames, then one or more `audio_chunk` JSON frames. Each `audio_chunk` is immediately followed by one binary Float32 frame. MLX CustomVoice, Candle CustomVoice sentence-unit chunks, and NeuTTS chunks include a known `total`; upstream MLX voice-clone chunks may use `total: 0` while streaming and rely on the final result's `audioChunkCount`. A final `result` JSON frame closes the request.
 
@@ -151,7 +151,7 @@ Successful results include:
 
 Generation uses a resident WebSocket worker pool in `electron/webSocketBridgeWorker.ts`. The bridge process serves repeated requests for that model until it is idle-evicted or cancelled. Qwen3 Candle CustomVoice keeps the Candle model resident by repository/device/dtype/attention. Qwen3 MLX CustomVoice invokes upstream `tts` per request inside that resident bridge process. Qwen3 Base voice cloning keeps the upstream MLX `pibot-tts-worker` resident by model/reference/settings, so repeat text generations with the same voice clone avoid a full worker restart. Requests are serialized per model by `generateRateLimiter`, so a resident model is never entered concurrently.
 
-The bridge uses the literal `127.0.0.1` and sets `TCP_NODELAY` on accepted loopback sockets best-effort. Inbound WebSocket requests must be masked and stay within the bridge's frame size cap. Audio bytes are raw Float32 with only NaN/Inf cleanup in Rust; renderer-side playback uses Web Audio, and renderer-side WAV encoding owns peak normalization.
+The bridge uses the literal `127.0.0.1` and sets `TCP_NODELAY` on accepted loopback sockets best-effort. WebSocket upgrade validation and frame parsing/writing are handled by `tungstenite`; inbound requests must be masked and stay within the bridge's frame size cap. Audio bytes are raw Float32 with only NaN/Inf cleanup in Rust; renderer-side playback uses Web Audio, and renderer-side WAV encoding owns peak normalization.
 
 ## Packaging (macOS)
 

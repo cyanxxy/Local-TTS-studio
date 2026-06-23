@@ -19,11 +19,16 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tungstenite::handshake::machine::TryParse;
+use tungstenite::handshake::server::{Request, Response, create_response, write_response};
+use tungstenite::http::StatusCode;
+use tungstenite::protocol::{Role, WebSocketConfig};
+use tungstenite::{Message, WebSocket};
 
 const RESULT_PREFIX: &str = "__RESULT__";
 const PORT_PREFIX: &str = "__PORT__";
-const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const MAX_WEBSOCKET_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
+const MAX_WEBSOCKET_HANDSHAKE_BYTES: usize = 64 * 1024;
 const MAX_AUDIO_CHUNK_SAMPLES: usize = 262_144;
 const QWEN3_AUTO_MODEL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 const QWEN3_MLX_CUSTOMVOICE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
@@ -51,7 +56,7 @@ const QWEN3_MLX_API_SERVER_HEALTH_REQUEST_TIMEOUT_SEC: u64 = 3;
 // wedged child must eventually surface an error instead of hanging forever
 // (the stderr heartbeat would otherwise re-arm the host watchdog indefinitely).
 const CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC: u64 = 600;
-const WEBSOCKET_HANDSHAKE_READ_TIMEOUT_SEC: u64 = 10;
+const WEBSOCKET_READ_TIMEOUT_SEC: u64 = 10;
 const QWEN3_CUSTOM_VOICE_MIN_SENTENCE_CHARS: usize = 40;
 const NEUTTS_DEFAULT_MODEL: &str = "neuphonic/neutts-nano-q4-gguf";
 const WORKER_FRAME_HEADER_BYTES: usize = 9;
@@ -393,19 +398,14 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
             .accept()
             .context("Failed accepting WebSocket client")?;
         let _ = stream.set_nodelay(true);
-        let mut websocket = WebSocketConnection::new(stream);
-        let should_shutdown = match websocket.handshake(auth_token) {
-            Ok(()) => serve_websocket_connection(&mut websocket, &mut state)?,
+        let mut websocket = match WebSocketConnection::accept(stream, auth_token) {
+            Ok(connection) => connection,
             Err(err) => {
-                let _ = websocket.send_json(&json!({
-                    "type": "error",
-                    "ok": false,
-                    "error": "WebSocket bridge failed.",
-                    "details": err.to_string(),
-                }));
-                false
+                eprintln!("WebSocket bridge rejected connection: {err}");
+                continue;
             }
         };
+        let should_shutdown = serve_websocket_connection(&mut websocket, &mut state)?;
         let _ = websocket.close();
         if should_shutdown {
             break;
@@ -2412,193 +2412,60 @@ impl Drop for Heartbeat {
     }
 }
 
-fn validate_websocket_request_path(first_line: &str, auth_token: &str) -> Result<()> {
-    let mut parts = first_line.split_whitespace();
-    let method = parts.next().unwrap_or_default();
-    let path = parts.next().unwrap_or_default();
-    let version = parts.next().unwrap_or_default();
-    if method != "GET" || !version.starts_with("HTTP/") || parts.next().is_some() {
-        bail!("WebSocket handshake was not a valid HTTP GET request.");
-    }
-    if path != format!("/{auth_token}") {
-        bail!("WebSocket handshake used an unauthorized path.");
-    }
-    Ok(())
-}
-
 struct WebSocketConnection {
-    stream: TcpStream,
+    socket: WebSocket<TcpStream>,
 }
 
 impl WebSocketConnection {
-    fn new(stream: TcpStream) -> Self {
-        Self { stream }
-    }
+    fn accept(mut stream: TcpStream, auth_token: &str) -> Result<Self> {
+        // Bound the HTTP upgrade read so a client that connects and sends
+        // nothing cannot park the single-threaded accept loop. The timeout is
+        // cleared after a successful upgrade so resident model hosts stay warm
+        // across long idle periods.
+        stream
+            .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_READ_TIMEOUT_SEC)))
+            .context("Failed to set WebSocket read timeout")?;
 
-    fn handshake(&mut self, auth_token: &str) -> Result<()> {
-        // Bound the pre-upgrade read so a client that connects and sends
-        // nothing cannot park the single-threaded accept loop. Cleared after a
-        // successful upgrade so long-idle WebSocket connections keep their
-        // blocking read semantics.
-        self.stream
-            .set_read_timeout(Some(Duration::from_secs(
-                WEBSOCKET_HANDSHAKE_READ_TIMEOUT_SEC,
-            )))
-            .context("Failed to set WebSocket handshake read timeout")?;
-        let mut request = Vec::new();
-        let mut buffer = [0_u8; 1024];
-        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-            let read = self.stream.read(&mut buffer)?;
-            if read == 0 {
-                bail!("WebSocket client disconnected during handshake.");
-            }
-            request.extend_from_slice(&buffer[..read]);
-            if request.len() > 64_000 {
-                bail!("WebSocket handshake exceeded the maximum header size.");
-            }
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_WEBSOCKET_TEXT_FRAME_BYTES))
+            .max_frame_size(Some(MAX_WEBSOCKET_TEXT_FRAME_BYTES))
+            .accept_unmasked_frames(false);
+
+        let (request, tail) = read_websocket_upgrade(&mut stream)?;
+        if !websocket_request_path_is_authorized(&request, auth_token) {
+            let _ = write_websocket_error_response(&mut stream, StatusCode::UNAUTHORIZED);
+            bail!("Unauthorized WebSocket path.");
         }
 
-        let header_text = String::from_utf8_lossy(&request);
-        let mut lines = header_text.split("\r\n");
-        let first = lines.next().unwrap_or_default();
-        validate_websocket_request_path(first, auth_token)?;
-
-        let mut upgrade = String::new();
-        let mut connection = String::new();
-        let mut websocket_key = String::new();
-        for line in lines {
-            let Some((key, value)) = line.split_once(':') else {
-                continue;
-            };
-            match key.trim().to_ascii_lowercase().as_str() {
-                "upgrade" => upgrade = value.trim().to_string(),
-                "connection" => connection = value.trim().to_string(),
-                "sec-websocket-key" => websocket_key = value.trim().to_string(),
-                _ => {}
-            }
-        }
-
-        if !upgrade.eq_ignore_ascii_case("websocket") {
-            bail!("WebSocket handshake missing Upgrade: websocket.");
-        }
-        if !connection.to_ascii_lowercase().contains("upgrade") {
-            bail!("WebSocket handshake missing Connection: Upgrade.");
-        }
-        if websocket_key.is_empty() {
-            bail!("WebSocket handshake missing Sec-WebSocket-Key.");
-        }
-
-        let mut sha1 = Sha1::new();
-        sha1.update(format!("{websocket_key}{WEBSOCKET_GUID}").as_bytes());
-        let accept = BASE64.encode(sha1.finalize());
-        let response = format!(
-            "HTTP/1.1 101 Switching Protocols\r\n\
-             Upgrade: websocket\r\n\
-             Connection: Upgrade\r\n\
-             Sec-WebSocket-Accept: {accept}\r\n\
-             \r\n"
-        );
-        self.stream.write_all(response.as_bytes())?;
-        self.stream.flush()?;
-        self.stream
+        let response = create_response(&request).context("Invalid WebSocket upgrade request")?;
+        write_response(&mut stream, &response)
+            .context("Failed writing WebSocket upgrade response")?;
+        stream
+            .flush()
+            .context("Failed flushing WebSocket upgrade response")?;
+        stream
             .set_read_timeout(None)
             .context("Failed to clear WebSocket handshake read timeout")?;
-        Ok(())
+        let socket = WebSocket::from_partially_read(stream, tail, Role::Server, Some(config));
+
+        Ok(Self { socket })
     }
 
     fn recv_text(&mut self) -> Result<Option<String>> {
-        let mut fragments: Vec<u8> = Vec::new();
-        let mut fragment_opcode: Option<u8> = None;
-
         loop {
-            let mut header = [0_u8; 2];
-            if !read_exact_or_eof(&mut self.stream, &mut header)? {
-                return Ok(None);
-            }
-            let fin = (header[0] & 0x80) != 0;
-            let opcode = header[0] & 0x0f;
-            let masked = (header[1] & 0x80) != 0;
-            let mut length = u64::from(header[1] & 0x7f);
-            if !masked {
-                bail!("Client WebSocket frames must be masked.");
-            }
-
-            if length == 126 {
-                let mut extended = [0_u8; 2];
-                self.stream.read_exact(&mut extended)?;
-                length = u64::from(u16::from_be_bytes(extended));
-            } else if length == 127 {
-                let mut extended = [0_u8; 8];
-                self.stream.read_exact(&mut extended)?;
-                length = u64::from_be_bytes(extended);
-            }
-            let length = usize::try_from(length).context("WebSocket frame too large")?;
-            if length > MAX_WEBSOCKET_TEXT_FRAME_BYTES {
-                bail!("WebSocket request frame exceeded the maximum supported size.");
-            }
-
-            let mut mask = [0_u8; 4];
-            self.stream.read_exact(&mut mask)?;
-            let mut payload = vec![0_u8; length];
-            self.stream.read_exact(&mut payload)?;
-            for (index, byte) in payload.iter_mut().enumerate() {
-                *byte ^= mask[index % 4];
-            }
-
-            match opcode {
-                0x8 => return Ok(None),
-                0x9 => {
-                    if !fin || payload.len() > 125 {
-                        bail!("Invalid WebSocket ping frame.");
-                    }
-                    self.send_frame(0xA, &payload)?;
-                    continue;
+            match self.socket.read() {
+                Ok(Message::Text(text)) => return Ok(Some(text.to_string())),
+                Ok(Message::Binary(_)) => bail!("Binary WebSocket requests are not supported."),
+                Ok(Message::Close(_)) => return Ok(None),
+                Ok(Message::Ping(payload)) => {
+                    self.socket.send(Message::Pong(payload))?;
                 }
-                0xA => {
-                    if !fin || payload.len() > 125 {
-                        bail!("Invalid WebSocket pong frame.");
-                    }
-                    continue;
+                Ok(Message::Pong(_)) => {}
+                Ok(Message::Frame(_)) => {}
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    return Ok(None);
                 }
-                0x1 | 0x2 => {
-                    if fragment_opcode.is_some() {
-                        bail!(
-                            "Received a new WebSocket message before the fragmented message completed."
-                        );
-                    }
-                    if opcode == 0x2 {
-                        bail!("Binary WebSocket requests are not supported.");
-                    }
-                    if fin {
-                        return Ok(Some(
-                            String::from_utf8(payload).context("WebSocket text was not UTF-8")?,
-                        ));
-                    }
-                    fragment_opcode = Some(opcode);
-                    fragments = payload;
-                }
-                0x0 => {
-                    let Some(start_opcode) = fragment_opcode else {
-                        bail!("Unexpected WebSocket continuation frame.");
-                    };
-                    if start_opcode != 0x1 {
-                        bail!("Binary WebSocket requests are not supported.");
-                    }
-                    let new_len = fragments
-                        .len()
-                        .checked_add(payload.len())
-                        .context("WebSocket request frame exceeded the maximum supported size.")?;
-                    if new_len > MAX_WEBSOCKET_TEXT_FRAME_BYTES {
-                        bail!("WebSocket request frame exceeded the maximum supported size.");
-                    }
-                    fragments.extend_from_slice(&payload);
-                    if fin {
-                        let text = String::from_utf8(std::mem::take(&mut fragments))
-                            .context("WebSocket text was not UTF-8")?;
-                        return Ok(Some(text));
-                    }
-                }
-                other => bail!("Unsupported WebSocket opcode: {other}"),
+                Err(err) => return Err(err).context("Failed reading WebSocket request"),
             }
         }
     }
@@ -2621,35 +2488,59 @@ impl WebSocketConnection {
 
     fn send_json(&mut self, payload: &Value) -> Result<()> {
         let body = serde_json::to_vec(payload)?;
-        self.send_frame(0x1, &body)
+        let text = String::from_utf8(body).context("WebSocket JSON payload was not UTF-8")?;
+        self.socket.send(Message::Text(text.into()))?;
+        Ok(())
     }
 
     fn send_binary(&mut self, payload: &[u8]) -> Result<()> {
-        self.send_frame(0x2, payload)
+        self.socket.send(Message::Binary(payload.to_vec().into()))?;
+        Ok(())
     }
 
     fn close(&mut self) -> Result<()> {
-        self.send_frame(0x8, &[])
-    }
-
-    fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<()> {
-        let mut header = vec![0x80 | opcode];
-        match payload.len() {
-            0..=125 => header.push(payload.len() as u8),
-            126..=65_535 => {
-                header.push(126);
-                header.extend_from_slice(&(payload.len() as u16).to_be_bytes());
-            }
-            _ => {
-                header.push(127);
-                header.extend_from_slice(&(payload.len() as u64).to_be_bytes());
-            }
-        }
-        self.stream.write_all(&header)?;
-        self.stream.write_all(payload)?;
-        self.stream.flush()?;
+        self.socket.close(None)?;
         Ok(())
     }
+}
+
+fn websocket_request_path_is_authorized(request: &Request, auth_token: &str) -> bool {
+    let expected_path = format!("/{auth_token}");
+    let uri = request.uri();
+    uri.path() == expected_path && uri.query().is_none()
+}
+
+fn read_websocket_upgrade(stream: &mut TcpStream) -> Result<(Request, Vec<u8>)> {
+    let mut request = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        let read = stream.read(&mut buffer)?;
+        if read == 0 {
+            bail!("WebSocket client disconnected during handshake.");
+        }
+        request.extend_from_slice(&buffer[..read]);
+        if request.len() > MAX_WEBSOCKET_HANDSHAKE_BYTES {
+            let _ = write_websocket_error_response(stream, StatusCode::PAYLOAD_TOO_LARGE);
+            bail!("WebSocket handshake exceeded the maximum header size.");
+        }
+
+        if let Some((header_len, parsed)) =
+            Request::try_parse(&request).context("Invalid WebSocket handshake request")?
+        {
+            let tail = request.split_off(header_len);
+            return Ok((parsed, tail));
+        }
+    }
+}
+
+fn write_websocket_error_response(stream: &mut TcpStream, status: StatusCode) -> Result<()> {
+    let response = Response::builder()
+        .status(status)
+        .header("Connection", "close")
+        .body(())?;
+    write_response(&mut *stream, &response)?;
+    stream.flush()?;
+    Ok(())
 }
 
 fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool> {
@@ -2908,9 +2799,11 @@ mod tests {
 
     #[test]
     fn websocket_request_path_requires_auth_token() {
-        assert!(validate_websocket_request_path("GET /secret HTTP/1.1", "secret").is_ok());
-        assert!(validate_websocket_request_path("POST /secret HTTP/1.1", "secret").is_err());
-        assert!(validate_websocket_request_path("GET /wrong HTTP/1.1", "secret").is_err());
-        assert!(validate_websocket_request_path("GET /secret?x=1 HTTP/1.1", "secret").is_err());
+        let allowed = Request::builder().uri("/secret").body(()).unwrap();
+        let wrong_path = Request::builder().uri("/wrong").body(()).unwrap();
+        let query = Request::builder().uri("/secret?x=1").body(()).unwrap();
+        assert!(websocket_request_path_is_authorized(&allowed, "secret"));
+        assert!(!websocket_request_path_is_authorized(&wrong_path, "secret"));
+        assert!(!websocket_request_path_is_authorized(&query, "secret"));
     }
 }
