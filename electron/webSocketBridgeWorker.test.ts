@@ -323,6 +323,28 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(second.response).toMatchObject({ ok: true, requestId: "r2" });
   });
 
+  it("sends a graceful shutdown WebSocket command when cancelling an in-flight request", async () => {
+    const { pool, servers, children } = makePool(() => {
+      // Stall so cancel hits a connected worker with an open socket.
+    });
+
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+    await waitFor(() => servers[0].messages.some((message) => message.requestId === "r1"));
+
+    // Keep the fake server alive long enough to read the graceful shutdown frame.
+    children[0].onKill = null;
+    expect(pool.cancel("r1")).toBe(true);
+    await waitFor(() => servers[0].messages.some((message) => message.command === "shutdown"));
+    servers[0].close();
+    children[0].exit(null as unknown as number);
+    await expect(run).rejects.toThrow(/cancelled/i);
+  });
+
   it("runs warm commands whose results carry no streamed audio and reuses the worker for generation", async () => {
     const { pool, spawn } = makePool((message, server) => {
       if (message.command === "warm") {

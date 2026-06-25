@@ -353,6 +353,13 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   }
 
   function killWorker(model: TModel, worker: Worker): void {
+    try {
+      if (isOpen(worker.socket)) {
+        worker.socket.send(JSON.stringify({ command: "shutdown" }));
+      }
+    } catch {
+      // Best-effort graceful shutdown before hard kill.
+    }
     disposeWorker(model, worker);
     try {
       worker.socket?.close();

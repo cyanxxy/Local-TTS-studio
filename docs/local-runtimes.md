@@ -23,9 +23,9 @@ Open TTS uses the Rust `neutts` crate with Neuphonic GGUF model repositories:
 - `neuphonic/neutts-nano-q8-gguf`
 - German, French, and Spanish Q4/Q8 variants
 
-The Rust crate consumes pre-encoded reference code arrays. Upload a `.npy` file containing those codes, then provide the matching reference transcript. WAV reference upload is not part of the Rust-only path because the crate does not implement a pure Rust WAV-to-code encoder. Produce the `.npy` externally by encoding a 3–15s mono reference clip with NeuCodec from the upstream Neuphonic NeuTTS project (`github.com/neuphonic/neutts-air`).
+The Rust crate accepts pre-encoded reference code arrays (`.npy`) or a mono WAV reference clip. Upload a `.npy` file containing NeuCodec codes, or a WAV clip that the bridge encodes on first use via its bundled NeuCodec encoder (~1.8 GB one-time download). Provide the matching reference transcript for either path.
 
-Generation is whole-text and streams as one binary Float32 audio chunk.
+Generation is whole-text. Short outputs arrive as one binary Float32 audio chunk; very long outputs may be split at transport time when the buffered sample count exceeds the bridge chunk cap.
 
 ## Qwen3-TTS MLX First
 
@@ -34,7 +34,7 @@ Open TTS defaults Qwen3 on macOS to the upstream MLX CustomVoice 6-bit profiles:
 - `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit`
 - `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit`
 
-These are the built-in-speaker CustomVoice models converted for MLX. They do not require reference audio or reference transcripts. The bridge calls the upstream `tts` binary inside the resident Rust `serve-ws` worker, reads the generated `output.wav`, converts it to Float32, and relays it through the app's normal WebSocket binary audio transport.
+These are the built-in-speaker CustomVoice models converted for MLX. They do not require reference audio or reference transcripts. When `OPEN_TTS_QWEN3_MLX_API_SERVER` is available (bundled in `dist-rust/` or set explicitly), the bridge keeps that server resident and streams SSE PCM deltas as multiple WebSocket audio chunks (`total: 0` until the final `audioChunkCount`). When `api_server` is missing, the bridge falls back to the upstream `tts` CLI per text unit, reads each generated `output.wav`, converts it to Float32, and relays it through the app's normal WebSocket binary transport (one chunk per unit with a known `total`).
 
 Base voice cloning remains available as explicit advanced MLX profiles:
 
@@ -53,13 +53,12 @@ The Candle CustomVoice path uses eager attention and supports `float32` and `bfl
 
 Supported UI languages are Auto, Chinese, English, Japanese, Korean, German, French, and Spanish. The page also exposes speaker, optional instruction prompt, temperature, top-k, top-p, and max token controls. The default max-token cap is 1536 to keep short local generations practical; users can raise it for longer or more exploratory runs.
 
-MLX CustomVoice generation uses the upstream `tts` CLI path. It is not voice cloning and does not need reference audio. Because the upstream normal CustomVoice interface is currently a one-shot CLI rather than the resident `pibot-tts-worker` protocol, Open TTS receives one WAV per request and streams that WAV as a single app-level Float32 audio chunk.
-
-Candle CustomVoice generation stays on the `qwen_tts` backend. The bridge splits longer text into sentence-sized units, generates each unit with `generate_custom_voice_from_text()`, and sends each unit as a WebSocket audio chunk as soon as that unit finishes. This improves time-to-first-audio for longer Candle fallback requests, but it is not token-level autoregressive streaming from inside `qwen_tts`; a single short unit still arrives after that unit's inference completes.
+MLX CustomVoice generation prefers the resident `api_server` path when installed; the one-shot `tts` CLI is the fallback. Neither path is voice cloning and neither needs reference audio. Candle CustomVoice generation stays on the `qwen_tts` backend. The bridge splits longer text into sentence-sized units, generates each unit with `generate_custom_voice_from_text()`, and sends each unit as a WebSocket audio chunk as soon as that unit finishes (0.2s trailing silence between units). This improves time-to-first-audio for longer Candle fallback requests, but it is not token-level autoregressive streaming from inside `qwen_tts`; a single short unit still arrives after that unit's inference completes.
 
 Base voice cloning is a separate upstream-compatible MLX backend integration inside `open-tts-local-bridge`. The adapter keeps a matching `pibot-tts-worker` resident, sends target text through its binary frame protocol, converts streamed PCM i16 chunks to Float32, and relays them through the app's authenticated WebSocket transport. The worker is reused while model directory, reference WAV bytes, reference transcript, language, output sample rate, block size, streaming chunk size, top-k, temperature, and max-new-token settings match. Configure it with:
 
-- `OPEN_TTS_QWEN3_MLX_TTS`: path to a `tts` binary built from `badlogic/qwen3_tts_rs` with `--no-default-features --features mlx` for MLX CustomVoice.
+- `OPEN_TTS_QWEN3_MLX_API_SERVER`: path to an `api_server` binary built from `badlogic/qwen3_tts_rs` with `--no-default-features --features mlx` for resident MLX CustomVoice (preferred fast path).
+- `OPEN_TTS_QWEN3_MLX_TTS`: path to a `tts` binary built from `badlogic/qwen3_tts_rs` with `--no-default-features --features mlx` for MLX CustomVoice one-shot fallback.
 - `OPEN_TTS_QWEN3_MLX_WORKER`: path to a `pibot-tts-worker` binary built from the same checkout for Base voice cloning.
 - `baseModelPath` from the UI, or `OPEN_TTS_QWEN3_MLX_MODEL_DIR`: local MLX model directory for the selected CustomVoice or Base 6-bit model.
 
@@ -131,7 +130,7 @@ open-tts-local-bridge --action serve-ws --model <neutts|qwen3> --cache-dir <dir>
 
 `serve-ws` binds the requested loopback host, prints `__PORT__<actual-port>` on stdout, and accepts a WebSocket connection only on `/<token>` using `tungstenite` for upgrade validation and frame handling. Electron uses `--port 0` so Rust owns the final port selection and there is no host-side reserve/bind race.
 
-Once connected, `serve-ws` reads WebSocket requests shaped like `{"requestId","payload"}` or `{"command":"shutdown"}`. Per generation request it emits zero or more `progress` JSON frames, then one or more `audio_chunk` JSON frames. Each `audio_chunk` is immediately followed by one binary Float32 frame. MLX CustomVoice, Candle CustomVoice sentence-unit chunks, and NeuTTS chunks include a known `total`; upstream MLX voice-clone chunks may use `total: 0` while streaming and rely on the final result's `audioChunkCount`. A final `result` JSON frame closes the request.
+Once connected, `serve-ws` reads WebSocket requests shaped like `{"requestId","payload"}`, `{"command":"warm","requestId","payload"}`, or `{"command":"shutdown"}`. Per generation request it emits zero or more `progress` JSON frames, then one or more `audio_chunk` JSON frames. Each `audio_chunk` is immediately followed by one binary Float32 frame. MLX `api_server` CustomVoice, MLX Base voice-clone streaming, and other open-ended streams may use `total: 0` while chunks arrive and rely on the final result's `audioChunkCount`. Candle CustomVoice sentence units, MLX `tts` fallback units, and NeuTTS outputs include a known `total` (NeuTTS may split only when buffered audio exceeds the transport chunk cap). A final `result` JSON frame closes the request. Invalid request JSON is logged and ignored without tearing down the server. Client disconnect during send closes that connection only.
 
 Successful results include:
 
@@ -149,7 +148,7 @@ Successful results include:
 
 ## Resident Worker
 
-Generation uses a resident WebSocket worker pool in `electron/webSocketBridgeWorker.ts`. The bridge process serves repeated requests for that model until it is idle-evicted or cancelled. Qwen3 Candle CustomVoice keeps the Candle model resident by repository/device/dtype/attention. Qwen3 MLX CustomVoice invokes upstream `tts` per request inside that resident bridge process. Qwen3 Base voice cloning keeps the upstream MLX `pibot-tts-worker` resident by model/reference/settings, so repeat text generations with the same voice clone avoid a full worker restart. Requests are serialized per model by `generateRateLimiter`, so a resident model is never entered concurrently.
+Generation uses a resident WebSocket worker pool in `electron/webSocketBridgeWorker.ts`. The bridge process serves repeated requests for that model until it is idle-evicted or cancelled. Before killing the bridge child, the host sends `{"command":"shutdown"}` on the open WebSocket when possible so resident MLX children are dropped cleanly. Qwen3 Candle CustomVoice keeps the Candle model resident by repository/device/dtype/attention. Qwen3 MLX CustomVoice keeps the upstream `api_server` resident when available; otherwise it invokes `tts` per text unit inside the bridge. Qwen3 Base voice cloning keeps the upstream MLX `pibot-tts-worker` resident by model/reference/settings, so repeat text generations with the same voice clone avoid a full worker restart. Requests are serialized per model by `generateRateLimiter`, so a resident model is never entered concurrently.
 
 The bridge uses the literal `127.0.0.1` and sets `TCP_NODELAY` on accepted loopback sockets best-effort. WebSocket upgrade validation and frame parsing/writing are handled by `tungstenite`; inbound requests must be masked and stay within the bridge's frame size cap. Audio bytes are raw Float32 with only NaN/Inf cleanup in Rust; renderer-side playback uses Web Audio, and renderer-side WAV encoding owns peak normalization.
 

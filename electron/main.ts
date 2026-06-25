@@ -53,8 +53,10 @@ const RUST_BRIDGE_TIMEOUT_MS = 5 * 60 * 1000;
 // re-arms this timer, so it only fires when the worker goes fully silent (i.e. is
 // genuinely stuck) rather than during a slow first-run download or CPU inference.
 const RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
-const RUST_BRIDGE_MAX_STDOUT_BYTES = 125_000_000;
-const RUST_BRIDGE_MAX_STDERR_BYTES = 1_000_000;
+// On the WebSocket path stdout/stderr are diagnostic-only (results travel over
+// the socket), so keep modest caps that still tolerate MLX startup logs.
+const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES = 2 * 1024 * 1024;
+const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES = 16 * 1024 * 1024;
 const RUST_CANCEL_KILL_AFTER_MS = 2_000;
 const GENERATE_RATE_WINDOW_MS = 500;
 // Generation reuses a resident WebSocket worker (load once, serve many). The
@@ -546,8 +548,8 @@ async function runRustBridge(
       payload: sanitized.payload,
       spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
       idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
-      maxStdoutBytes: RUST_BRIDGE_MAX_STDOUT_BYTES,
-      maxStderrBytes: RUST_BRIDGE_MAX_STDERR_BYTES,
+      maxStdoutBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES,
+      maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
       onProgress,
       onAudioChunk,
     });
@@ -624,8 +626,8 @@ async function runRustBridge(
 
       child.stdout.on("data", (chunk: Buffer) => {
         stdoutBytes += chunk.byteLength;
-        if (stdoutBytes > RUST_BRIDGE_MAX_STDOUT_BYTES) {
-          rejectForOutputLimit("stdout", RUST_BRIDGE_MAX_STDOUT_BYTES);
+        if (stdoutBytes > RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES) {
+          rejectForOutputLimit("stdout", RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES);
           return;
         }
         const text = chunk.toString("utf-8");
@@ -656,8 +658,8 @@ async function runRustBridge(
 
       child.stderr.on("data", (chunk: Buffer) => {
         stderrBytes += chunk.byteLength;
-        if (stderrBytes > RUST_BRIDGE_MAX_STDERR_BYTES) {
-          rejectForOutputLimit("stderr", RUST_BRIDGE_MAX_STDERR_BYTES);
+        if (stderrBytes > RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES) {
+          rejectForOutputLimit("stderr", RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES);
           return;
         }
         stderr += chunk.toString("utf-8");
@@ -785,8 +787,8 @@ async function handleWarm(request: unknown): Promise<{ warmed: boolean; message?
     command: "warm",
     spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
     idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
-    maxStdoutBytes: RUST_BRIDGE_MAX_STDOUT_BYTES,
-    maxStderrBytes: RUST_BRIDGE_MAX_STDERR_BYTES,
+    maxStdoutBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES,
+    maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
     onProgress: () => {},
     onAudioChunk: () => {},
   });

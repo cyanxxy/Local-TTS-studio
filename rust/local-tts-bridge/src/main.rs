@@ -17,6 +17,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tungstenite::handshake::machine::TryParse;
@@ -30,6 +31,8 @@ const PORT_PREFIX: &str = "__PORT__";
 const MAX_WEBSOCKET_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WEBSOCKET_HANDSHAKE_BYTES: usize = 64 * 1024;
 const MAX_AUDIO_CHUNK_SAMPLES: usize = 262_144;
+// Cap MLX worker stdout frames before allocating (i16 PCM; ~10 min at 48 kHz).
+const MAX_WORKER_FRAME_PAYLOAD_BYTES: usize = 48_000 * 600 * 2;
 const QWEN3_AUTO_MODEL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
 const QWEN3_MLX_CUSTOMVOICE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const QWEN3_MLX_CUSTOMVOICE_17B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit";
@@ -175,6 +178,8 @@ struct Qwen3MlxKey {
 struct Qwen3MlxWorkerHost {
     key: Qwen3MlxKey,
     child: Child,
+    child_pid: u32,
+    resident_shutdown: Arc<ResidentProcessShutdown>,
     stdin: ChildStdin,
     /// Frames parsed from the worker's stdout on a dedicated reader thread, so
     /// receives can carry an inactivity deadline (`recv_worker_frame`). The
@@ -192,6 +197,8 @@ struct Qwen3MlxApiServerKey {
 struct Qwen3MlxApiServerHost {
     key: Qwen3MlxApiServerKey,
     child: Child,
+    child_pid: u32,
+    resident_shutdown: Arc<ResidentProcessShutdown>,
     host: String,
     port: u16,
 }
@@ -224,6 +231,42 @@ struct RuntimeState {
     qwen3_mlx_api: Option<Qwen3MlxApiServerHost>,
     neutts: Option<NeuttsHost>,
     neutts_encoder: Option<neucodec_encoder::NeuCodecRtenEncoder>,
+    resident_shutdown: Arc<ResidentProcessShutdown>,
+}
+
+/// Tracks MLX child process groups so SIGTERM/SIGINT can reap grandchildren
+/// before exit (Drop does not run on signal termination).
+#[derive(Default)]
+struct ResidentProcessShutdown {
+    pids: Mutex<Vec<u32>>,
+}
+
+impl ResidentProcessShutdown {
+    fn register(&self, pid: u32) {
+        if pid > 0 {
+            self.pids
+                .lock()
+                .expect("resident shutdown mutex poisoned")
+                .push(pid);
+        }
+    }
+
+    fn unregister(&self, pid: u32) {
+        if pid > 0 {
+            self.pids
+                .lock()
+                .expect("resident shutdown mutex poisoned")
+                .retain(|registered| *registered != pid);
+        }
+    }
+
+    fn shutdown_all(&self) {
+        let pids: Vec<u32> =
+            std::mem::take(&mut *self.pids.lock().expect("resident shutdown mutex poisoned"));
+        for pid in pids {
+            kill_process_group(pid);
+        }
+    }
 }
 
 struct GenerationOutput {
@@ -276,6 +319,79 @@ struct Qwen3MlxStreamResult {
     sample_rate: usize,
     sample_count: usize,
     audio_chunk_count: usize,
+}
+
+fn is_client_disconnect(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(ws_err) = cause.downcast_ref::<tungstenite::Error>() {
+            match ws_err {
+                tungstenite::Error::ConnectionClosed
+                | tungstenite::Error::AlreadyClosed
+                | tungstenite::Error::Io(_) => return true,
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn spawn_in_own_process_group(command: &mut Command) -> Result<Child> {
+    use std::os::unix::process::CommandExt;
+
+    unsafe {
+        command.pre_exec(|| {
+            // SAFETY: pre_exec runs in the child between fork and exec; only async-signal-safe
+            // calls are allowed. setpgid is async-signal-safe.
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    command.spawn().map_err(|err| err.into())
+}
+
+#[cfg(not(unix))]
+fn spawn_in_own_process_group(command: &mut Command) -> Result<Child> {
+    command.spawn().map_err(|err| err.into())
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    // SAFETY: kill with a negative pid targets the process group; best-effort cleanup.
+    unsafe {
+        let pgid = -(pid as libc::pid_t);
+        let _ = libc::kill(pgid, libc::SIGTERM);
+        thread::sleep(Duration::from_millis(200));
+        let _ = libc::kill(pgid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+    let mut child = Command::new("cmd")
+        .args(["/C", &format!("taskkill /PID {pid} /T /F")])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if let Ok(mut child) = child {
+        let _ = child.wait();
+    }
+}
+
+fn install_resident_shutdown_handler(resident_shutdown: Arc<ResidentProcessShutdown>) {
+    let _ = ctrlc::set_handler(move || {
+        resident_shutdown.shutdown_all();
+        std::process::exit(0);
+    });
 }
 
 fn main() {
@@ -383,6 +499,9 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         .flush()
         .context("Failed announcing WebSocket bridge port")?;
 
+    let resident_shutdown = Arc::new(ResidentProcessShutdown::default());
+    install_resident_shutdown_handler(Arc::clone(&resident_shutdown));
+
     let mut state = RuntimeState {
         model: cli.model,
         cache_dir: cli.cache_dir.clone(),
@@ -391,6 +510,7 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         qwen3_mlx_api: None,
         neutts: None,
         neutts_encoder: None,
+        resident_shutdown,
     };
 
     loop {
@@ -405,7 +525,14 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
                 continue;
             }
         };
-        let should_shutdown = serve_websocket_connection(&mut websocket, &mut state)?;
+        let should_shutdown = match serve_websocket_connection(&mut websocket, &mut state) {
+            Ok(should_shutdown) => should_shutdown,
+            Err(err) if is_client_disconnect(&err) => {
+                eprintln!("WebSocket bridge client disconnected: {err:#}");
+                false
+            }
+            Err(err) => return Err(err),
+        };
         let _ = websocket.close();
         if should_shutdown {
             break;
@@ -419,15 +546,17 @@ fn serve_websocket_connection(
     websocket: &mut WebSocketConnection,
     state: &mut RuntimeState,
 ) -> Result<bool> {
-    while let Some(raw_message) = websocket.recv_text()? {
+    loop {
+        let raw_message = match websocket.recv_text() {
+            Ok(Some(message)) => message,
+            Ok(None) => return Ok(false),
+            Err(err) if is_client_disconnect(&err) => return Ok(false),
+            Err(err) => return Err(err).context("Failed reading WebSocket request"),
+        };
         let request: WebSocketRequest = match serde_json::from_str(&raw_message) {
             Ok(value) => value,
-            Err(_) => {
-                websocket.send_json(&json!({
-                    "type": "error",
-                    "ok": false,
-                    "error": "Invalid WebSocket request JSON.",
-                }))?;
+            Err(err) => {
+                eprintln!("WebSocket bridge rejected invalid request JSON: {err}");
                 continue;
             }
         };
@@ -448,19 +577,33 @@ fn serve_websocket_connection(
                 state.warm(payload)
             };
             match outcome {
-                Ok(result) => websocket.send_json(&json!({
-                    "type": "result",
-                    "requestId": request_id,
-                    "ok": true,
-                    "result": result,
-                }))?,
-                Err(err) => websocket.send_json(&json!({
-                    "type": "result",
-                    "requestId": request_id,
-                    "ok": false,
-                    "error": err.to_string(),
-                    "details": format!("{err:#}"),
-                }))?,
+                Ok(result) => {
+                    if let Err(err) = websocket.send_json(&json!({
+                        "type": "result",
+                        "requestId": request_id,
+                        "ok": true,
+                        "result": result,
+                    })) {
+                        if is_client_disconnect(&err) {
+                            return Ok(false);
+                        }
+                        return Err(err);
+                    }
+                }
+                Err(err) => {
+                    if let Err(send_err) = websocket.send_json(&json!({
+                        "type": "result",
+                        "requestId": request_id,
+                        "ok": false,
+                        "error": err.to_string(),
+                        "details": format!("{err:#}"),
+                    })) {
+                        if is_client_disconnect(&send_err) {
+                            return Ok(false);
+                        }
+                        return Err(send_err);
+                    }
+                }
             }
             continue;
         }
@@ -476,20 +619,33 @@ fn serve_websocket_connection(
             state.generate(&request_id, payload, websocket)
         };
         match outcome {
-            Ok(output) => send_generation_result(websocket, &request_id, output)?,
+            Ok(output) => {
+                if let Err(err) = send_generation_result(websocket, &request_id, output) {
+                    if is_client_disconnect(&err) {
+                        return Ok(false);
+                    }
+                    return Err(err);
+                }
+            }
             Err(err) => {
-                websocket.send_json(&json!({
+                if is_client_disconnect(&err) {
+                    return Ok(false);
+                }
+                if let Err(send_err) = websocket.send_json(&json!({
                     "type": "result",
                     "requestId": request_id,
                     "ok": false,
                     "error": err.to_string(),
                     "details": format!("{err:#}"),
-                }))?;
+                })) {
+                    if is_client_disconnect(&send_err) {
+                        return Ok(false);
+                    }
+                    return Err(send_err);
+                }
             }
         }
     }
-
-    Ok(false)
 }
 
 impl RuntimeState {
@@ -571,6 +727,11 @@ impl RuntimeState {
         if is_qwen3_mlx_custom_voice_model(&model_repo) {
             return self
                 .generate_qwen3_mlx_custom_voice(request_id, payload, model_repo, websocket);
+        }
+        if model_repo.contains("-Base-") {
+            bail!(
+                "Qwen3 Base models require mode \"voiceClone\" with reference audio and transcript."
+            );
         }
         let started = Instant::now();
         let mut phase_timings = serde_json::Map::new();
@@ -1169,7 +1330,8 @@ impl RuntimeState {
         }
 
         self.qwen3_mlx.take();
-        let mut child = Command::new(config.worker_path)
+        let mut command = Command::new(config.worker_path);
+        command
             .arg("--serve")
             .arg("--model-name")
             .arg(config.model_path)
@@ -1193,14 +1355,15 @@ impl RuntimeState {
             .arg(config.streaming_chunk_size.to_string())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "Failed to start Qwen3 MLX worker {}",
-                    config.worker_path.display()
-                )
-            })?;
+            .stderr(Stdio::piped());
+        let mut child = spawn_in_own_process_group(&mut command).with_context(|| {
+            format!(
+                "Failed to start Qwen3 MLX worker {}",
+                config.worker_path.display()
+            )
+        })?;
+        let child_pid = child.id();
+        self.resident_shutdown.register(child_pid);
 
         if let Some(mut stderr) = child.stderr.take() {
             thread::spawn(move || {
@@ -1229,7 +1392,8 @@ impl RuntimeState {
             });
         if let Err(err) = startup {
             // Don't leak the spawned worker when startup fails.
-            let _ = child.kill();
+            self.resident_shutdown.unregister(child_pid);
+            kill_process_group(child_pid);
             let _ = child.wait();
             return Err(err);
         }
@@ -1237,6 +1401,8 @@ impl RuntimeState {
         self.qwen3_mlx = Some(Qwen3MlxWorkerHost {
             key,
             child,
+            child_pid,
+            resident_shutdown: Arc::clone(&self.resident_shutdown),
             stdin,
             frames,
             next_request_id: 1,
@@ -1257,10 +1423,12 @@ impl RuntimeState {
         // Dropping the previous host kills and reaps its child.
         self.qwen3_mlx_api.take();
 
-        let (child, port) = start_qwen3_mlx_api_server(&key)?;
+        let (child, port, child_pid) = start_qwen3_mlx_api_server(&key, &self.resident_shutdown)?;
         self.qwen3_mlx_api = Some(Qwen3MlxApiServerHost {
             key,
             child,
+            child_pid,
+            resident_shutdown: Arc::clone(&self.resident_shutdown),
             host: "127.0.0.1".to_string(),
             port,
         });
@@ -1354,12 +1522,8 @@ impl RuntimeState {
             (Some(encoded), _) => decode_neutts_reference_codes(encoded)?,
             (None, Some(audio)) => {
                 let mut progress = |message: String| {
-                    let _ = websocket.send_progress(
-                        request_id,
-                        "reference_encoding",
-                        message,
-                        started,
-                    );
+                    let _ =
+                        websocket.send_progress(request_id, "reference_encoding", message, started);
                 };
                 progress("Encoding WAV reference with NeuCodec...".to_string());
                 let (samples, truncated) = prepare_neutts_reference_samples(audio)?;
@@ -1560,6 +1724,9 @@ fn read_worker_frame(stdout: &mut ChildStdout) -> Result<Option<WorkerFrame>> {
     let frame_type = header[0];
     let request_id = u32::from_le_bytes(header[1..5].try_into()?);
     let payload_len = u32::from_le_bytes(header[5..9].try_into()?) as usize;
+    if payload_len > MAX_WORKER_FRAME_PAYLOAD_BYTES {
+        bail!("Qwen3 MLX worker frame payload exceeds {MAX_WORKER_FRAME_PAYLOAD_BYTES} bytes.");
+    }
     let mut payload = vec![0_u8; payload_len];
     if payload_len > 0 {
         stdout
@@ -1788,52 +1955,62 @@ enum ApiServerHealth {
 }
 
 fn spawn_qwen3_mlx_api_server(key: &Qwen3MlxApiServerKey, port: u16) -> Result<Child> {
-    let mut child = Command::new(&key.api_server_path)
+    let mut command = Command::new(&key.api_server_path);
+    command
         .arg(&key.model_path)
         .arg("--host")
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "Failed to start Qwen3 MLX api_server {}",
-                key.api_server_path.display()
-            )
-        })?;
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    let mut child = spawn_in_own_process_group(&mut command).with_context(|| {
+        format!(
+            "Failed to start Qwen3 MLX api_server {}",
+            key.api_server_path.display()
+        )
+    })?;
 
     if let Some(mut stderr) = child.stderr.take() {
         thread::spawn(move || {
             let _ = std::io::copy(&mut stderr, &mut std::io::stderr());
         });
     }
-    if let Some(mut stdout) = child.stdout.take() {
-        thread::spawn(move || {
-            let _ = std::io::copy(&mut stdout, &mut std::io::stderr());
-        });
-    }
     Ok(child)
 }
 
-fn start_qwen3_mlx_api_server(key: &Qwen3MlxApiServerKey) -> Result<(Child, u16)> {
+fn start_qwen3_mlx_api_server(
+    key: &Qwen3MlxApiServerKey,
+    resident_shutdown: &ResidentProcessShutdown,
+) -> Result<(Child, u16, u32)> {
+    start_qwen3_mlx_api_server_with_timeout(
+        key,
+        resident_shutdown,
+        Duration::from_secs(QWEN3_MLX_API_SERVER_START_TIMEOUT_SEC),
+    )
+}
+
+fn start_qwen3_mlx_api_server_with_timeout(
+    key: &Qwen3MlxApiServerKey,
+    resident_shutdown: &ResidentProcessShutdown,
+    timeout: Duration,
+) -> Result<(Child, u16, u32)> {
     // `pick_loopback_port` releases its probe socket before the api_server binds
     // the port (an unavoidable TOCTOU), so an early child exit can be a bind
     // race with another process. Retry once with a fresh port in that case.
     for attempt in 0..2 {
         let port = pick_loopback_port()?;
         let mut child = spawn_qwen3_mlx_api_server(key, port)?;
-        match wait_for_http_health(
-            "127.0.0.1",
-            port,
-            Duration::from_secs(QWEN3_MLX_API_SERVER_START_TIMEOUT_SEC),
-            &mut child,
-        ) {
-            Ok(ApiServerHealth::Ready) => return Ok((child, port)),
+        let child_pid = child.id();
+        resident_shutdown.register(child_pid);
+        match wait_for_http_health("127.0.0.1", port, timeout, &mut child) {
+            Ok(ApiServerHealth::Ready) => return Ok((child, port, child_pid)),
             Ok(ApiServerHealth::ChildExited(status)) => {
-                // try_wait already reaped the child; nothing to kill.
+                resident_shutdown.unregister(child_pid);
+                // try_wait already reaped the direct child, but it may have
+                // spawned descendants into the same process group before exit.
+                kill_process_group(child_pid);
                 if attempt == 0 {
                     eprintln!(
                         "Qwen3 MLX api_server exited during startup with status {status}; retrying once with a fresh port."
@@ -1843,7 +2020,8 @@ fn start_qwen3_mlx_api_server(key: &Qwen3MlxApiServerKey) -> Result<(Child, u16)
                 bail!("Qwen3 MLX api_server exited during startup with status {status}.");
             }
             Err(err) => {
-                let _ = child.kill();
+                resident_shutdown.unregister(child_pid);
+                kill_process_group(child_pid);
                 let _ = child.wait();
                 return Err(err.context(format!(
                     "Qwen3 MLX api_server did not become ready on 127.0.0.1:{port}"
@@ -1952,8 +2130,9 @@ fn stream_qwen3_mlx_api_speech(
                 line.clear();
                 continue;
             }
-            let parsed: Value = serde_json::from_str(data)
-                .with_context(|| format!("Failed to parse Qwen3 MLX api_server SSE payload: {data}"))?;
+            let parsed: Value = serde_json::from_str(data).with_context(|| {
+                format!("Failed to parse Qwen3 MLX api_server SSE payload: {data}")
+            })?;
             if let Some(rate) = parsed
                 .get("sample_rate")
                 .and_then(Value::as_u64)
@@ -2141,19 +2320,27 @@ impl Drop for Qwen3MlxWorkerHost {
         let _ = write_worker_frame(&mut self.stdin, WORKER_INPUT_SHUTDOWN, 0, &[]);
         for _ in 0..20 {
             match self.child.try_wait() {
-                Ok(Some(_)) => return,
+                Ok(Some(_)) => {
+                    self.resident_shutdown.unregister(self.child_pid);
+                    return;
+                }
                 Ok(None) => thread::sleep(Duration::from_millis(10)),
-                Err(_) => return,
+                Err(_) => {
+                    self.resident_shutdown.unregister(self.child_pid);
+                    return;
+                }
             }
         }
-        let _ = self.child.kill();
+        self.resident_shutdown.unregister(self.child_pid);
+        kill_process_group(self.child_pid);
         let _ = self.child.wait();
     }
 }
 
 impl Drop for Qwen3MlxApiServerHost {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.resident_shutdown.unregister(self.child_pid);
+        kill_process_group(self.child_pid);
         let _ = self.child.wait();
     }
 }
@@ -2559,6 +2746,9 @@ fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool>
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     fn wav_base64(sample_rate: u32, samples: &[i16]) -> String {
         let spec = hound::WavSpec {
             channels: 1,
@@ -2578,13 +2768,90 @@ mod tests {
     }
 
     #[test]
+    fn cargo_manifest_enables_ctrlc_termination_signal_feature() {
+        let manifest =
+            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
+                .unwrap();
+        let ctrlc_line = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("ctrlc"))
+            .expect("manifest should declare ctrlc");
+
+        assert!(
+            ctrlc_line.contains("termination"),
+            "ctrlc must enable the termination feature so SIGTERM reaps resident child process groups"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn api_server_startup_timeout_kills_spawned_process_group() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "open-tts-api-server-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let script_path = temp_dir.join("fake-api-server.sh");
+        let heartbeat_path = temp_dir.join("heartbeat.log");
+        let model_path = temp_dir.join("model");
+        std::fs::create_dir_all(&model_path).unwrap();
+        std::fs::write(
+            &script_path,
+            format!(
+                "#!/bin/sh\n\
+                 while true; do printf x >> '{}'; sleep 0.05; done &\n\
+                 sleep 30\n",
+                heartbeat_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script_path, permissions).unwrap();
+
+        let key = Qwen3MlxApiServerKey {
+            api_server_path: script_path,
+            model_path,
+        };
+        let resident_shutdown = ResidentProcessShutdown::default();
+        let result = start_qwen3_mlx_api_server_with_timeout(
+            &key,
+            &resident_shutdown,
+            Duration::from_millis(150),
+        );
+        assert!(result.is_err());
+
+        let first_len = std::fs::metadata(&heartbeat_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        thread::sleep(Duration::from_millis(250));
+        let second_len = std::fs::metadata(&heartbeat_path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert_eq!(
+            second_len, first_len,
+            "api_server startup failure must kill the whole spawned process group"
+        );
+    }
+
+    #[test]
     fn prepare_neutts_reference_samples_resamples_to_encoder_rate() {
         // 1 second at 48 kHz must land at ~1 second at 16 kHz, untruncated.
         let encoded = wav_base64(48_000, &vec![1000_i16; 48_000]);
         let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
         assert!(!truncated);
         let expected = neutts::ENCODER_SAMPLE_RATE as usize;
-        assert!(samples.len().abs_diff(expected) <= 2, "got {}", samples.len());
+        assert!(
+            samples.len().abs_diff(expected) <= 2,
+            "got {}",
+            samples.len()
+        );
     }
 
     #[test]
@@ -2599,9 +2866,7 @@ mod tests {
     #[test]
     fn prepare_neutts_reference_samples_rejects_invalid_input() {
         assert!(prepare_neutts_reference_samples("not base64!").is_err());
-        assert!(
-            prepare_neutts_reference_samples(&BASE64.encode(b"not a wav file")).is_err()
-        );
+        assert!(prepare_neutts_reference_samples(&BASE64.encode(b"not a wav file")).is_err());
     }
 
     #[test]
