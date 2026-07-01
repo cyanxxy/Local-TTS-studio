@@ -60,6 +60,23 @@ const QWEN3_MLX_API_SERVER_HEALTH_REQUEST_TIMEOUT_SEC: u64 = 3;
 // (the stderr heartbeat would otherwise re-arm the host watchdog indefinitely).
 const CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC: u64 = 600;
 const WEBSOCKET_READ_TIMEOUT_SEC: u64 = 10;
+// Total wall-clock budget for the HTTP upgrade: the per-read timeout alone
+// would let a client trickle one byte every <10s and hold the single-threaded
+// accept loop hostage indefinitely (slow-loris).
+const WEBSOCKET_HANDSHAKE_DEADLINE_SEC: u64 = 10;
+// Generous idle read timeout after upgrade. The main recv loop is idle for the
+// whole duration of a generation (the bridge only writes then), so this must be
+// far longer than any legitimate generation; on timeout the loop sends a Ping
+// and keeps waiting, so an idle-but-alive host is never disconnected. Combined
+// with SO_KEEPALIVE this ensures a host that dies without FIN cannot wedge the
+// bridge forever.
+const WEBSOCKET_IDLE_READ_TIMEOUT_SEC: u64 = 30 * 60;
+// Cap a single SSE line from the Qwen3 MLX api_server before buffering it.
+// Base64 PCM deltas are far smaller than this; an unbounded read_line would
+// let a misbehaving server grow memory without limit.
+const MAX_SSE_LINE_BYTES: u64 = 32 * 1024 * 1024;
+// Keep the newest N cached voice-clone reference WAVs; older ones are swept.
+const QWEN3_REFERENCE_CACHE_MAX_ENTRIES: usize = 32;
 const QWEN3_CUSTOM_VOICE_MIN_SENTENCE_CHARS: usize = 40;
 const NEUTTS_DEFAULT_MODEL: &str = "neuphonic/neutts-nano-q4-gguf";
 const WORKER_FRAME_HEADER_BYTES: usize = 9;
@@ -1043,12 +1060,18 @@ impl RuntimeState {
                 command.arg(instruct);
             }
 
-            let output = command.output().with_context(|| {
-                format!(
-                    "Failed to run Qwen3 MLX CustomVoice tts binary {}",
-                    tts_path.display()
-                )
-            })?;
+            let output = match command.output() {
+                Ok(output) => output,
+                Err(err) => {
+                    let _ = std::fs::remove_dir_all(&run_dir);
+                    return Err(err).with_context(|| {
+                        format!(
+                            "Failed to run Qwen3 MLX CustomVoice tts binary {}",
+                            tts_path.display()
+                        )
+                    });
+                }
+            };
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1292,6 +1315,7 @@ impl RuntimeState {
         let refs_dir = self.cache_dir.join("qwen3-voice-clone-refs");
         std::fs::create_dir_all(&refs_dir)
             .with_context(|| format!("Failed to create {}", refs_dir.display()))?;
+        cleanup_qwen3_reference_cache(&refs_dir);
         // Hash the base64 payload (not the decoded bytes) so repeat requests
         // with an already-cached reference skip the decode entirely.
         let mut hasher = Sha1::new();
@@ -2058,7 +2082,21 @@ fn wait_for_http_health(
             ))
             .call()
         {
-            Ok(response) if response.status() == 200 => return Ok(ApiServerHealth::Ready),
+            Ok(response) if response.status() == 200 => {
+                // Guard against binding to an unrelated process that answers
+                // /health 200 on a raced port: only treat the check as passed
+                // while our child is still alive. This narrows — but cannot
+                // fully close — the TOCTOU between picking the port and the
+                // child binding it; the retry loop in the caller handles the
+                // remaining early-exit race.
+                if let Some(status) = child
+                    .try_wait()
+                    .context("Failed checking Qwen3 MLX api_server liveness")?
+                {
+                    return Ok(ApiServerHealth::ChildExited(status));
+                }
+                return Ok(ApiServerHealth::Ready);
+            }
             _ => thread::sleep(Duration::from_millis(250)),
         }
     }
@@ -2117,13 +2155,16 @@ fn stream_qwen3_mlx_api_speech(
         .and_then(|value| value.trim().parse::<usize>().ok())
         .filter(|rate| *rate > 0)
         .unwrap_or(24_000_usize);
+    // Latch the rate at the first audio chunk: a late SSE `sample_rate` field
+    // must not change the rate mid-stream after chunks were already sent.
+    let mut sample_rate_latched = false;
     let mut chunk_index = 0_usize;
     let mut sample_count = 0_usize;
     let mut recorded_first_audio = false;
     let mut reader = BufReader::new(response.into_reader());
     let mut line = String::new();
 
-    while reader.read_line(&mut line)? != 0 {
+    while read_sse_line_capped(&mut reader, &mut line)? != 0 {
         let trimmed = line.trim();
         if let Some(data) = trimmed.strip_prefix("data: ") {
             if data.is_empty() {
@@ -2133,12 +2174,14 @@ fn stream_qwen3_mlx_api_speech(
             let parsed: Value = serde_json::from_str(data).with_context(|| {
                 format!("Failed to parse Qwen3 MLX api_server SSE payload: {data}")
             })?;
-            if let Some(rate) = parsed
-                .get("sample_rate")
-                .and_then(Value::as_u64)
-                .filter(|rate| *rate > 0)
-            {
-                sample_rate = rate as usize;
+            if !sample_rate_latched {
+                if let Some(rate) = parsed
+                    .get("sample_rate")
+                    .and_then(Value::as_u64)
+                    .filter(|rate| *rate > 0)
+                {
+                    sample_rate = rate as usize;
+                }
             }
             match parsed.get("type").and_then(Value::as_str) {
                 Some("speech.audio.delta") => {
@@ -2161,18 +2204,23 @@ fn stream_qwen3_mlx_api_speech(
                         );
                         recorded_first_audio = true;
                     }
-                    sample_count += samples.len();
-                    websocket.send_json(&json!({
-                        "type": "audio_chunk",
-                        "requestId": request_id,
-                        "index": chunk_index,
-                        "total": 0,
-                        "sampleRate": sample_rate,
-                        "sampleCount": samples.len(),
-                        "silenceAfterSamples": 0,
-                    }))?;
-                    websocket.send_binary(&float32_to_le_bytes(&samples))?;
-                    chunk_index += 1;
+                    sample_rate_latched = true;
+                    // Bound each binary WebSocket message the same way the
+                    // buffered path does in `send_generation_result`.
+                    for chunk in samples.chunks(MAX_AUDIO_CHUNK_SAMPLES) {
+                        sample_count += chunk.len();
+                        websocket.send_json(&json!({
+                            "type": "audio_chunk",
+                            "requestId": request_id,
+                            "index": chunk_index,
+                            "total": 0,
+                            "sampleRate": sample_rate,
+                            "sampleCount": chunk.len(),
+                            "silenceAfterSamples": 0,
+                        }))?;
+                        websocket.send_binary(&float32_to_le_bytes(chunk))?;
+                        chunk_index += 1;
+                    }
                 }
                 Some("error") => {
                     let message = parsed
@@ -2199,6 +2247,19 @@ fn stream_qwen3_mlx_api_speech(
     })
 }
 
+/// `read_line` with a hard size cap so a misbehaving SSE stream cannot grow an
+/// unbounded line buffer. Errors out cleanly when the cap is exceeded.
+fn read_sse_line_capped<R: BufRead>(reader: &mut R, line: &mut String) -> Result<usize> {
+    let read = reader
+        .by_ref()
+        .take(MAX_SSE_LINE_BYTES + 1)
+        .read_line(line)?;
+    if line.len() as u64 > MAX_SSE_LINE_BYTES {
+        bail!("Qwen3 MLX api_server SSE line exceeded {MAX_SSE_LINE_BYTES} bytes.");
+    }
+    Ok(read)
+}
+
 fn create_qwen3_mlx_run_dir(cache_dir: &Path, request_id: &str) -> Result<PathBuf> {
     let safe_request_id = sanitize_request_id_for_path(request_id);
     let millis = SystemTime::now()
@@ -2211,6 +2272,46 @@ fn create_qwen3_mlx_run_dir(cache_dir: &Path, request_id: &str) -> Result<PathBu
     std::fs::create_dir_all(&run_dir)
         .with_context(|| format!("Failed to create Qwen3 MLX run dir {}", run_dir.display()))?;
     Ok(run_dir)
+}
+
+/// Best-effort hygiene for the voice-clone reference cache: drop stale
+/// `*.wav.tmp-*` files left behind by a crash mid-write (skipping ones newer
+/// than a minute so a concurrent write is never raced), then keep only the
+/// newest [`QWEN3_REFERENCE_CACHE_MAX_ENTRIES`] cached references by mtime.
+fn cleanup_qwen3_reference_cache(refs_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(refs_dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    let mut refs: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(UNIX_EPOCH);
+        let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+        if is_qwen3_reference_temp_file(name) {
+            if age > Duration::from_secs(60) {
+                let _ = std::fs::remove_file(&path);
+            }
+        } else if name.starts_with("ref-") && name.ends_with(".wav") {
+            refs.push((modified, path));
+        }
+    }
+    if refs.len() > QWEN3_REFERENCE_CACHE_MAX_ENTRIES {
+        refs.sort_by_key(|(modified, _)| *modified);
+        for (_, path) in refs.iter().take(refs.len() - QWEN3_REFERENCE_CACHE_MAX_ENTRIES) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn is_qwen3_reference_temp_file(name: &str) -> bool {
+    name.starts_with("ref-") && name.contains(".wav.tmp-")
 }
 
 fn sanitize_request_id_for_path(request_id: &str) -> String {
@@ -2607,11 +2708,14 @@ impl WebSocketConnection {
     fn accept(mut stream: TcpStream, auth_token: &str) -> Result<Self> {
         // Bound the HTTP upgrade read so a client that connects and sends
         // nothing cannot park the single-threaded accept loop. The timeout is
-        // cleared after a successful upgrade so resident model hosts stay warm
+        // relaxed after a successful upgrade so resident model hosts stay warm
         // across long idle periods.
         stream
             .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_READ_TIMEOUT_SEC)))
             .context("Failed to set WebSocket read timeout")?;
+        // Detect a peer that dies without FIN (host crash/power loss); without
+        // keepalive the post-upgrade blocking read would wedge forever.
+        enable_tcp_keepalive(&stream);
 
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_WEBSOCKET_TEXT_FRAME_BYTES))
@@ -2631,8 +2735,8 @@ impl WebSocketConnection {
             .flush()
             .context("Failed flushing WebSocket upgrade response")?;
         stream
-            .set_read_timeout(None)
-            .context("Failed to clear WebSocket handshake read timeout")?;
+            .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_IDLE_READ_TIMEOUT_SEC)))
+            .context("Failed to set WebSocket idle read timeout")?;
         let socket = WebSocket::from_partially_read(stream, tail, Role::Server, Some(config));
 
         Ok(Self { socket })
@@ -2651,6 +2755,20 @@ impl WebSocketConnection {
                 Ok(Message::Frame(_)) => {}
                 Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                     return Ok(None);
+                }
+                // Idle read timeout: the connection legitimately sits quiet
+                // between requests, so probe with a Ping and keep waiting. A
+                // dead peer fails the Ping write (or a keepalive-reset read)
+                // instead of blocking forever.
+                Err(tungstenite::Error::Io(err))
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    self.socket
+                        .send(Message::Ping(Vec::new().into()))
+                        .context("Failed pinging idle WebSocket peer")?;
                 }
                 Err(err) => return Err(err).context("Failed reading WebSocket request"),
             }
@@ -2692,15 +2810,66 @@ impl WebSocketConnection {
 }
 
 fn websocket_request_path_is_authorized(request: &Request, auth_token: &str) -> bool {
-    let expected_path = format!("/{auth_token}");
     let uri = request.uri();
-    uri.path() == expected_path && uri.query().is_none()
+    let Some(path_token) = uri.path().strip_prefix('/') else {
+        return false;
+    };
+    constant_time_eq(path_token.as_bytes(), auth_token.as_bytes()) && uri.query().is_none()
+}
+
+/// Constant-time byte comparison so the auth-token path check does not leak
+/// matching-prefix length through timing. Length inequality returns early,
+/// which only leaks the token length (not its contents).
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Best-effort SO_KEEPALIVE on the accepted loopback socket so a peer that
+/// vanishes without FIN eventually resets the connection instead of leaving
+/// the bridge blocked on a half-open read.
+fn enable_tcp_keepalive(stream: &TcpStream) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let enabled: libc::c_int = 1;
+        let rc = unsafe {
+            libc::setsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_KEEPALIVE,
+                std::ptr::from_ref(&enabled).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            eprintln!(
+                "Failed to enable SO_KEEPALIVE on WebSocket connection: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = stream;
 }
 
 fn read_websocket_upgrade(stream: &mut TcpStream) -> Result<(Request, Vec<u8>)> {
     let mut request = Vec::new();
     let mut buffer = [0_u8; 1024];
+    // Total handshake deadline: the per-read socket timeout alone would let a
+    // slow-loris client trickle bytes forever and park the accept loop.
+    let deadline = Instant::now() + Duration::from_secs(WEBSOCKET_HANDSHAKE_DEADLINE_SEC);
     loop {
+        if Instant::now() > deadline {
+            let _ = write_websocket_error_response(stream, StatusCode::REQUEST_TIMEOUT);
+            bail!("WebSocket handshake exceeded the total handshake deadline.");
+        }
         let read = stream.read(&mut buffer)?;
         if read == 0 {
             bail!("WebSocket client disconnected during handshake.");
@@ -3070,5 +3239,63 @@ mod tests {
         assert!(websocket_request_path_is_authorized(&allowed, "secret"));
         assert!(!websocket_request_path_is_authorized(&wrong_path, "secret"));
         assert!(!websocket_request_path_is_authorized(&query, "secret"));
+    }
+
+    #[test]
+    fn constant_time_eq_compares_bytes() {
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreT"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn read_sse_line_capped_reads_lines_and_rejects_oversized() {
+        let mut reader = BufReader::new(std::io::Cursor::new(b"data: ok\nnext\n".to_vec()));
+        let mut line = String::new();
+        assert_eq!(read_sse_line_capped(&mut reader, &mut line).unwrap(), 9);
+        assert_eq!(line, "data: ok\n");
+
+        let huge = vec![b'a'; (MAX_SSE_LINE_BYTES + 10) as usize];
+        let mut reader = BufReader::new(std::io::Cursor::new(huge));
+        let mut line = String::new();
+        assert!(read_sse_line_capped(&mut reader, &mut line).is_err());
+    }
+
+    #[test]
+    fn reference_cache_cleanup_removes_stale_temps_and_sweeps_old_refs() {
+        let refs_dir = std::env::temp_dir().join(format!(
+            "open-tts-ref-cache-cleanup-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&refs_dir).unwrap();
+        assert!(is_qwen3_reference_temp_file("ref-abc.wav.tmp-123"));
+        assert!(!is_qwen3_reference_temp_file("ref-abc.wav"));
+
+        // Fresh temp files are skipped (a concurrent write must not be raced).
+        let fresh_temp = refs_dir.join("ref-fresh.wav.tmp-1");
+        std::fs::write(&fresh_temp, b"x").unwrap();
+        for index in 0..(QWEN3_REFERENCE_CACHE_MAX_ENTRIES + 3) {
+            std::fs::write(refs_dir.join(format!("ref-{index}.wav")), b"x").unwrap();
+        }
+        cleanup_qwen3_reference_cache(&refs_dir);
+
+        assert!(fresh_temp.exists());
+        let ref_count = std::fs::read_dir(&refs_dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with("ref-") && name.ends_with(".wav")
+            })
+            .count();
+        assert_eq!(ref_count, QWEN3_REFERENCE_CACHE_MAX_ENTRIES);
+        let _ = std::fs::remove_dir_all(&refs_dir);
     }
 }

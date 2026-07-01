@@ -135,7 +135,7 @@ function spawnKeyOf(config: WebSocketWorkerSpawnConfig): string {
   ]);
 }
 
-function isOpen(socket: WebSocket | null): boolean {
+function isOpen(socket: WebSocket | null): socket is WebSocket {
   return socket !== null && socket.readyState === WebSocket.OPEN;
 }
 
@@ -778,6 +778,13 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     }
 
     worker.socket = socket;
+    if (!isOpen(socket)) {
+      // The socket closed between connect resolving and listeners attaching;
+      // fail fast instead of letting a later send() on CLOSED silently drop.
+      disposeWorker(model, worker);
+      hardKill(child);
+      throw new Error("Rust local bridge connection closed during startup.");
+    }
     socket.addEventListener("message", (event) => handleWebSocketMessage(model, worker, event.data));
     socket.addEventListener("close", () => {
       handleTransportFailure(model, worker, "Rust local bridge closed before returning a result.");
@@ -866,7 +873,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         armIdleTimer(model, worker, active);
 
         try {
-          if (!worker.socket) {
+          if (!isOpen(worker.socket)) {
             throw new Error("worker socket is not connected");
           }
           worker.socket.send(JSON.stringify({
@@ -904,9 +911,15 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     },
 
     async shutdownAll() {
+      // Mark every in-flight request cancelled before killing so a slow worker
+      // that settles after the bounded wait (via handleWorkerExit) reports the
+      // deliberate shutdown as a cancellation rather than a crash. The settle
+      // paths delete each request's entries themselves, so no unconditional
+      // clear here — that would erase the state a late settlement consults.
+      for (const requestId of requestModel.keys()) {
+        cancelledRequests.add(requestId);
+      }
       await Promise.all([...workers.entries()].map(([model, worker]) => killWorkerAndWait(model, worker)));
-      requestModel.clear();
-      cancelledRequests.clear();
       startingModels.clear();
     },
 

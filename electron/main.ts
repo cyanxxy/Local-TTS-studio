@@ -501,22 +501,25 @@ async function runRustBridge(
   const useWebSocketWorker = action === "generate" && WEBSOCKET_WORKER_MODELS.has(model);
 
   const runWebSocketGenerate = async (): Promise<unknown> => {
-    await fs.access(bridgeBinary);
-    await fs.mkdir(cacheDir, { recursive: true });
     const generateRequestId = requestId!; // generate always carries a requestId.
 
-    const pendingWarm = pendingWarmups.get(model);
-    if (pendingWarm) {
-      warmWaiters.set(generateRequestId, model);
-      try {
+    // Until the request registers with the worker pool (synchronously inside
+    // run()), a cancel can only find it here. Keep the entry alive across the
+    // whole pre-pool window (fs waits, warm-up handoff) so a cancel in that
+    // window records intent instead of returning { cancelled: false }.
+    warmWaiters.set(generateRequestId, model);
+    let runPromise: Promise<{ response: unknown }>;
+    try {
+      await fs.access(bridgeBinary);
+      await fs.mkdir(cacheDir, { recursive: true });
+
+      const pendingWarm = pendingWarmups.get(model);
+      if (pendingWarm) {
         await pendingWarm.promise;
-      } finally {
-        warmWaiters.delete(generateRequestId);
       }
-      if (cancelledWarmWaiters.delete(generateRequestId)) {
+      if (cancelledWarmWaiters.has(generateRequestId)) {
         throw new Error("Generation cancelled.");
       }
-    }
 
     const onProgress = (payload: unknown) => {
       if (!event) return;
@@ -543,16 +546,23 @@ async function runRustBridge(
       event.sender.send("local-tts:audio-chunk", { model, ...payload });
     };
 
-    const { response } = await getWebSocketBridgeWorkers().run(model, {
-      requestId: generateRequestId,
-      payload: sanitized.payload,
-      spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
-      idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
-      maxStdoutBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES,
-      maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
-      onProgress,
-      onAudioChunk,
-    });
+      // run() registers the request with the pool synchronously, so once it
+      // returns cancel is routed there; the warm-waiter entry can be dropped.
+      runPromise = getWebSocketBridgeWorkers().run(model, {
+        requestId: generateRequestId,
+        payload: sanitized.payload,
+        spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
+        idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
+        maxStdoutBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES,
+        maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
+        onProgress,
+        onAudioChunk,
+      });
+    } finally {
+      warmWaiters.delete(generateRequestId);
+      cancelledWarmWaiters.delete(generateRequestId);
+    }
+    const { response } = await runPromise;
     return parseBridgeEnvelopeResult(response, "generate");
   };
 
@@ -919,22 +929,31 @@ app.whenReady().then(() => {
 
 let bridgeShutdownStarted = false;
 app.on("before-quit", (event) => {
-  for (const child of activeBridgeProcesses.values()) {
+  const probeChildren = [...activeBridgeProcesses.values()];
+  for (const child of probeChildren) {
     terminateBridgeChild(child);
   }
   activeBridgeProcesses.clear();
 
-  // Hold the quit until the worker pool shutdown (SIGTERM + SIGKILL
-  // escalation) has a bounded window to run; otherwise the unref'd kill
-  // timers die with the process and a SIGTERM-ignoring child survives.
-  if (bridgeShutdownStarted || !webSocketBridgeWorkers) return;
+  // Hold the quit until the worker pool shutdown and any one-shot probe
+  // children (SIGTERM + SIGKILL escalation) have a bounded window to run;
+  // otherwise the unref'd kill timers die with the process and a
+  // SIGTERM-ignoring child survives.
+  if (bridgeShutdownStarted || (!webSocketBridgeWorkers && probeChildren.length === 0)) return;
   bridgeShutdownStarted = true;
   event.preventDefault();
+  const probeExits = probeChildren.map((child) =>
+    child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve()
+      : new Promise<void>((resolve) => child.once("exit", () => resolve())),
+  );
   const timeout = new Promise<void>((resolve) => {
     setTimeout(resolve, RUST_CANCEL_KILL_AFTER_MS + 500);
   });
-  void Promise.race([webSocketBridgeWorkers.shutdownAll(), timeout])
-    .then(() => app.quit(), () => app.quit());
+  void Promise.race([
+    Promise.all([webSocketBridgeWorkers?.shutdownAll() ?? Promise.resolve(), ...probeExits]),
+    timeout,
+  ]).then(() => app.quit(), () => app.quit());
 });
 
 app.on("window-all-closed", () => {

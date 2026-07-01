@@ -814,7 +814,9 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(children[0].killed).toBe(true);
     children[0].exit(null as unknown as number);
     await shutdown;
-    await expect(run).rejects.toThrow(/Failed to start Rust local bridge worker/);
+    // shutdownAll marks in-flight requests cancelled so the deliberate
+    // shutdown is not reported as a spawn failure.
+    await expect(run).rejects.toThrow(/Generation cancelled/);
   });
 
   it("kills a single model's spawning worker via shutdown(model)", async () => {

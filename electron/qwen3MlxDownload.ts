@@ -217,7 +217,10 @@ export async function listHuggingFaceModelFiles(
   modelRepo: string,
   request: UrlRequest = requestUrl,
 ): Promise<string[]> {
-  const info = await readUrlJson(`https://huggingface.co/api/models/${modelRepo}`, request) as HuggingFaceModelInfo;
+  // Repos are validated upstream, but encode each path segment defensively so
+  // an unexpected character can never restructure the request URL.
+  const encodedRepo = modelRepo.split("/").map(encodeURIComponent).join("/");
+  const info = await readUrlJson(`https://huggingface.co/api/models/${encodedRepo}`, request) as HuggingFaceModelInfo;
   if (!Array.isArray(info.siblings)) {
     throw new Error("Hugging Face model metadata did not include file listings.");
   }
@@ -396,21 +399,30 @@ export interface Qwen3MlxDownloadCoordinator {
 
 // Two concurrent downloads into the same directory would race the same
 // `.download` temp files and renames, so invokes are deduplicated per model
-// directory: a second invoke while one is in flight awaits the same promise
-// (progress keeps streaming to the original sender; the result is identical).
+// directory: a second invoke while one is in flight awaits the same promise,
+// and progress fans out to every registered caller (the result is identical).
 export function createQwen3MlxDownloadCoordinator(
   download: typeof downloadQwen3MlxModel = downloadQwen3MlxModel,
 ): Qwen3MlxDownloadCoordinator {
-  const inFlight = new Map<string, Promise<Qwen3MlxDownloadResult>>();
+  const inFlight = new Map<string, {
+    promise: Promise<Qwen3MlxDownloadResult>;
+    listeners: Set<(progress: Qwen3MlxDownloadProgress) => void>;
+  }>();
   return {
     download(modelRepo, modelDir, onProgress) {
       const existing = inFlight.get(modelDir);
-      if (existing) return existing;
-      const pending = download(modelRepo, modelDir, onProgress).finally(() => {
+      if (existing) {
+        existing.listeners.add(onProgress);
+        return existing.promise;
+      }
+      const listeners = new Set([onProgress]);
+      const promise = download(modelRepo, modelDir, (progress) => {
+        for (const listener of listeners) listener(progress);
+      }).finally(() => {
         inFlight.delete(modelDir);
       });
-      inFlight.set(modelDir, pending);
-      return pending;
+      inFlight.set(modelDir, { promise, listeners });
+      return promise;
     },
   };
 }
