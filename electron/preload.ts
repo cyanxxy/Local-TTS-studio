@@ -22,7 +22,7 @@ contextBridge.exposeInMainWorld("electron", {
   localTts: {
     probe: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:probe", request),
     generate: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:generate", request),
-    warm: (request: { model: LocalModel; baseModelPath?: string }) => (
+    warm: (request: { model: LocalModel; baseModelPath?: string; modelRepo?: string }) => (
       ipcRenderer.invoke("local-tts:warm", request)
     ),
     cancel: (request: CancelRequest) => ipcRenderer.invoke("local-tts:cancel", request),

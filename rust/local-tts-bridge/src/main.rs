@@ -59,6 +59,11 @@ const QWEN3_MLX_API_SERVER_HEALTH_REQUEST_TIMEOUT_SEC: u64 = 3;
 // wedged child must eventually surface an error instead of hanging forever
 // (the stderr heartbeat would otherwise re-arm the host watchdog indefinitely).
 const CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC: u64 = 600;
+// Once the api_server has produced its first audio delta, deltas arrive at
+// token rate; a much shorter inactivity deadline lets a wedged mid-stream
+// server fail in minutes instead of the 10-minute pre-first-audio budget
+// (which must stay long enough to cover a first-run model download/load).
+const QWEN3_MLX_API_STREAM_INACTIVITY_TIMEOUT_SEC: u64 = 120;
 const WEBSOCKET_READ_TIMEOUT_SEC: u64 = 10;
 // Total wall-clock budget for the HTTP upgrade: the per-read timeout alone
 // would let a client trickle one byte every <10s and hold the single-threaded
@@ -152,6 +157,10 @@ struct Qwen3Payload {
 #[serde(rename_all = "camelCase")]
 struct Qwen3WarmPayload {
     base_model_path: Option<String>,
+    model_repo: Option<String>,
+    device_map: Option<String>,
+    dtype: Option<String>,
+    attn_implementation: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -682,6 +691,20 @@ impl RuntimeState {
 
     fn warm_qwen3(&mut self, payload: Value) -> Result<Value> {
         let payload: Qwen3WarmPayload = serde_json::from_value(payload).unwrap_or_default();
+        // Route by the requested repo when the caller names one. Without a
+        // repo, keep the historical behavior: warm the MLX api_server.
+        if let Some(repo) = payload.model_repo.as_deref() {
+            let model_repo = normalize_qwen3_model(Some(repo))?;
+            if model_repo.contains("-Base-") {
+                return Ok(json!({
+                    "warmed": false,
+                    "message": "Qwen3 Base voice cloning cannot be warmed without reference audio.",
+                }));
+            }
+            if !is_qwen3_mlx_custom_voice_model(&model_repo) {
+                return self.warm_qwen3_candle(&model_repo, &payload);
+            }
+        }
         let api_server_path = match resolve_qwen3_mlx_api_server_path() {
             Ok(path) => path,
             Err(err) => {
@@ -711,6 +734,36 @@ impl RuntimeState {
         Ok(json!({
             "warmed": true,
             "message": "Qwen3 MLX api_server is loaded and resident.",
+        }))
+    }
+
+    /// Pre-load the in-process Candle model so the first generation skips the
+    /// weight load. Only warms from already-downloaded files: warm-up is
+    /// best-effort and must never kick off a multi-GB HuggingFace download.
+    fn warm_qwen3_candle(&mut self, model_repo: &str, payload: &Qwen3WarmPayload) -> Result<Value> {
+        let cached = hf_hub::Cache::from_env()
+            .model(model_repo.to_string())
+            .get("model.safetensors")
+            .is_some();
+        if !cached {
+            return Ok(json!({
+                "warmed": false,
+                "message": format!("Qwen3 model {model_repo} is not downloaded yet; skipping warm-up."),
+            }));
+        }
+        let selected_device = select_qwen3_device(payload.device_map.as_deref())?;
+        let dtype = normalize_qwen3_dtype(payload.dtype.as_deref(), &selected_device.resolved)?;
+        let attention = normalize_qwen3_attention(payload.attn_implementation.as_deref())?;
+        let key = Qwen3Key {
+            model_repo: model_repo.to_string(),
+            dtype,
+            device: selected_device.resolved,
+            attention,
+        };
+        self.ensure_qwen3_model(&key, &selected_device.device)?;
+        Ok(json!({
+            "warmed": true,
+            "message": format!("Qwen3 Candle model {model_repo} is loaded and resident."),
         }))
     }
 
@@ -938,7 +991,7 @@ impl RuntimeState {
                 started,
             )?;
             let model_load_started = Instant::now();
-            self.ensure_qwen3_mlx_api_server(key)?;
+            self.ensure_qwen3_mlx_api_server(key.clone())?;
             phase_timings.insert(
                 "modelLoadSec".to_string(),
                 json!(round_secs(model_load_started.elapsed().as_secs_f64())),
@@ -951,32 +1004,52 @@ impl RuntimeState {
                 started,
             )?;
             let inference_started = Instant::now();
-            let (host, port) = {
-                let host = self
-                    .qwen3_mlx_api
-                    .as_ref()
-                    .context("Qwen3 MLX api_server host missing after startup.")?;
-                (host.host.clone(), host.port)
+            let mut audio_sent = false;
+            let mut retried = false;
+            let stream_result = loop {
+                // Re-ensure inside the loop so a retry after eviction respawns
+                // the server instead of failing on a missing host.
+                self.ensure_qwen3_mlx_api_server(key.clone())?;
+                let (host, port) = {
+                    let host = self
+                        .qwen3_mlx_api
+                        .as_ref()
+                        .context("Qwen3 MLX api_server host missing after startup.")?;
+                    (host.host.clone(), host.port)
+                };
+                match stream_qwen3_mlx_api_speech(
+                    &host,
+                    port,
+                    payload.text.trim(),
+                    &speaker,
+                    &language,
+                    instruct,
+                    websocket,
+                    request_id,
+                    started,
+                    &mut phase_timings,
+                    &mut audio_sent,
+                ) {
+                    Ok(result) => break result,
+                    Err(err) => {
+                        // A failed request can leave the resident api_server
+                        // dead or in a bad state; evict it (Drop kills the
+                        // child) so the next attempt respawns a fresh server.
+                        self.qwen3_mlx_api.take();
+                        // Retry once for transient failures, but only if no
+                        // audio reached the client yet — a retry after partial
+                        // audio would duplicate the stream prefix.
+                        if !retried && !audio_sent && !is_client_disconnect(&err) {
+                            retried = true;
+                            eprintln!(
+                                "Qwen3 MLX api_server request failed before any audio ({err:#}); retrying once with a fresh server."
+                            );
+                            continue;
+                        }
+                        return Err(err);
+                    }
+                }
             };
-            let stream_result = stream_qwen3_mlx_api_speech(
-                &host,
-                port,
-                payload.text.trim(),
-                &speaker,
-                &language,
-                instruct,
-                websocket,
-                request_id,
-                started,
-                &mut phase_timings,
-            );
-            if stream_result.is_err() {
-                // A failed request can leave the resident api_server dead or in
-                // a bad state; evict it (Drop kills the child) so the next
-                // request respawns a fresh server.
-                self.qwen3_mlx_api.take();
-            }
-            let stream_result = stream_result?;
             phase_timings.insert(
                 "inferenceSec".to_string(),
                 json!(round_secs(inference_started.elapsed().as_secs_f64())),
@@ -1815,13 +1888,6 @@ fn write_worker_frame<W: Write>(
     Ok(())
 }
 
-fn pcm_i16_le_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(2)
-        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0)
-        .collect()
-}
-
 fn stream_qwen3_mlx_request(
     host: &mut Qwen3MlxWorkerHost,
     request_id: &str,
@@ -1860,19 +1926,28 @@ fn stream_qwen3_mlx_request(
                 if frame.payload.len() % 2 != 0 {
                     bail!("Qwen3 MLX worker returned malformed PCM chunk.");
                 }
-                let samples = pcm_i16_le_to_f32(&frame.payload);
-                sample_count += samples.len();
-                websocket.send_json(&json!({
-                    "type": "audio_chunk",
-                    "requestId": request_id,
-                    "index": chunk_index,
-                    "total": 0,
-                    "sampleRate": sample_rate,
-                    "sampleCount": samples.len(),
-                    "silenceAfterSamples": 0,
-                }))?;
-                websocket.send_binary(&float32_to_le_bytes(&samples))?;
-                chunk_index += 1;
+                if frame.payload.is_empty() {
+                    continue;
+                }
+                // Relay the worker's Int16 PCM bytes as-is ("pcm16") instead of
+                // widening to Float32 — half the WebSocket bytes, no fidelity
+                // loss. Bound each binary message like the buffered path.
+                for chunk in frame.payload.chunks(MAX_AUDIO_CHUNK_SAMPLES * 2) {
+                    let chunk_samples = chunk.len() / 2;
+                    sample_count += chunk_samples;
+                    websocket.send_json(&json!({
+                        "type": "audio_chunk",
+                        "requestId": request_id,
+                        "index": chunk_index,
+                        "total": 0,
+                        "sampleRate": sample_rate,
+                        "sampleCount": chunk_samples,
+                        "silenceAfterSamples": 0,
+                        "encoding": "pcm16",
+                    }))?;
+                    websocket.send_binary(chunk)?;
+                    chunk_index += 1;
+                }
             }
             WORKER_OUTPUT_AUDIO_DONE => break,
             WORKER_OUTPUT_ERROR => bail!(
@@ -2113,6 +2188,7 @@ fn stream_qwen3_mlx_api_speech(
     request_id: &str,
     started: Instant,
     phase_timings: &mut serde_json::Map<String, Value>,
+    audio_sent: &mut bool,
 ) -> Result<Qwen3MlxStreamResult> {
     let mut body = json!({
         "input": text,
@@ -2161,14 +2237,29 @@ fn stream_qwen3_mlx_api_speech(
     let mut chunk_index = 0_usize;
     let mut sample_count = 0_usize;
     let mut recorded_first_audio = false;
-    let mut reader = BufReader::new(response.into_reader());
-    let mut line = String::new();
+    // Read SSE lines on a dedicated thread so receives can carry a two-phase
+    // inactivity deadline: generous before the first audio delta (model load
+    // may still be in flight), short once the stream is producing.
+    let lines = spawn_sse_line_reader(response.into_reader());
 
-    while read_sse_line_capped(&mut reader, &mut line)? != 0 {
+    loop {
+        let deadline = if recorded_first_audio {
+            QWEN3_MLX_API_STREAM_INACTIVITY_TIMEOUT_SEC
+        } else {
+            CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC
+        };
+        let line = match lines.recv_timeout(Duration::from_secs(deadline)) {
+            Ok(Ok(Some(line))) => line,
+            Ok(Ok(None)) => break,
+            Ok(Err(err)) => return Err(err),
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => bail!(
+                "Qwen3 MLX api_server produced no output for {deadline}s; treating it as wedged."
+            ),
+        };
         let trimmed = line.trim();
         if let Some(data) = trimmed.strip_prefix("data: ") {
             if data.is_empty() {
-                line.clear();
                 continue;
             }
             let parsed: Value = serde_json::from_str(data).with_context(|| {
@@ -2192,9 +2283,10 @@ fn stream_qwen3_mlx_api_speech(
                     let pcm = BASE64
                         .decode(delta)
                         .context("Failed to decode Qwen3 MLX api_server PCM delta")?;
-                    let samples = pcm_i16_le_to_f32(&pcm);
-                    if samples.is_empty() {
-                        line.clear();
+                    if pcm.len() % 2 != 0 {
+                        bail!("Qwen3 MLX api_server returned a malformed PCM delta.");
+                    }
+                    if pcm.is_empty() {
                         continue;
                     }
                     if !recorded_first_audio {
@@ -2205,20 +2297,26 @@ fn stream_qwen3_mlx_api_speech(
                         recorded_first_audio = true;
                     }
                     sample_rate_latched = true;
-                    // Bound each binary WebSocket message the same way the
-                    // buffered path does in `send_generation_result`.
-                    for chunk in samples.chunks(MAX_AUDIO_CHUNK_SAMPLES) {
-                        sample_count += chunk.len();
+                    // Relay the server's Int16 PCM bytes as-is ("pcm16") —
+                    // converting to Float32 here would double the WebSocket
+                    // payload for no fidelity gain. Bound each binary message
+                    // the same way the buffered path does in
+                    // `send_generation_result`.
+                    for chunk in pcm.chunks(MAX_AUDIO_CHUNK_SAMPLES * 2) {
+                        let chunk_samples = chunk.len() / 2;
+                        sample_count += chunk_samples;
                         websocket.send_json(&json!({
                             "type": "audio_chunk",
                             "requestId": request_id,
                             "index": chunk_index,
                             "total": 0,
                             "sampleRate": sample_rate,
-                            "sampleCount": chunk.len(),
+                            "sampleCount": chunk_samples,
                             "silenceAfterSamples": 0,
+                            "encoding": "pcm16",
                         }))?;
-                        websocket.send_binary(&float32_to_le_bytes(chunk))?;
+                        *audio_sent = true;
+                        websocket.send_binary(chunk)?;
                         chunk_index += 1;
                     }
                 }
@@ -2233,7 +2331,6 @@ fn stream_qwen3_mlx_api_speech(
                 _ => {}
             }
         }
-        line.clear();
     }
 
     if chunk_index == 0 {
@@ -2245,6 +2342,37 @@ fn stream_qwen3_mlx_api_speech(
         sample_count,
         audio_chunk_count: chunk_index,
     })
+}
+
+/// Parse SSE lines on a dedicated thread so the consumer can receive with an
+/// inactivity deadline. Sends `Ok(Some(line))` per line, `Ok(None)` on EOF,
+/// and forwards a read error once before exiting.
+fn spawn_sse_line_reader(
+    reader: impl Read + Send + 'static,
+) -> mpsc::Receiver<Result<Option<String>>> {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut reader = BufReader::new(reader);
+        loop {
+            let mut line = String::new();
+            match read_sse_line_capped(&mut reader, &mut line) {
+                Ok(0) => {
+                    let _ = sender.send(Ok(None));
+                    return;
+                }
+                Ok(_) => {
+                    if sender.send(Ok(Some(line))).is_err() {
+                        return;
+                    }
+                }
+                Err(err) => {
+                    let _ = sender.send(Err(err));
+                    return;
+                }
+            }
+        }
+    });
+    receiver
 }
 
 /// `read_line` with a hard size cap so a misbehaving SSE stream cannot grow an
@@ -3167,12 +3295,35 @@ mod tests {
     }
 
     #[test]
-    fn pcm_i16_le_to_f32_converts_worker_audio() {
-        let bytes = [0_u8, 0, 0xff, 0x7f, 0x00, 0x80];
-        let samples = pcm_i16_le_to_f32(&bytes);
-        assert_eq!(samples[0], 0.0);
-        assert!((samples[1] - 0.9999695).abs() < 0.00001);
-        assert_eq!(samples[2], -1.0);
+    fn sse_line_reader_streams_lines_then_eof() {
+        let lines = spawn_sse_line_reader(std::io::Cursor::new(b"data: a\ndata: b\n".to_vec()));
+        assert_eq!(
+            lines.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
+            Some("data: a\n".to_string())
+        );
+        assert_eq!(
+            lines.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
+            Some("data: b\n".to_string())
+        );
+        assert_eq!(
+            lines.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn warm_payload_accepts_model_repo_fields() {
+        let payload: Qwen3WarmPayload = serde_json::from_value(json!({
+            "modelRepo": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+            "deviceMap": "auto",
+        }))
+        .unwrap();
+        assert_eq!(
+            payload.model_repo.as_deref(),
+            Some("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
+        );
+        assert_eq!(payload.device_map.as_deref(), Some("auto"));
+        assert!(payload.dtype.is_none());
     }
 
     fn output_with(

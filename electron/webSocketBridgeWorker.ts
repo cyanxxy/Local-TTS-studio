@@ -78,7 +78,7 @@ interface ActiveRequest {
   stderr: string;
   stdoutBytes: number;
   stderrBytes: number;
-  pendingAudioChunk: Omit<WebSocketAudioChunk, "audio"> | null;
+  pendingAudioChunk: PendingAudioChunkMetadata | null;
   audioChunkTotal: number | null;
   audioSampleRate: number | null;
   receivedAudioChunkIndexes: Set<number>;
@@ -101,7 +101,8 @@ interface Worker {
 const BRIDGE_PORT_PREFIX = "__PORT__";
 
 // Defensive ceiling on a single audio chunk's declared sample count. The
-// binary-frame handler accepts exactly `sampleCount * 4` bytes, so without a
+// binary-frame handler accepts exactly `sampleCount * bytesPerSample` bytes
+// (4 for Float32, 2 for pcm16), so without a
 // cap a misbehaving bridge could dictate an unbounded (multi-GB) allocation
 // from one metadata field. The bridge streams audio in chunks and ships
 // 24kHz/44.1kHz output, so 10 minutes at 48kHz per chunk cannot reject a
@@ -241,7 +242,22 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: string): Omit<WebSocketAudioChunk, "audio"> {
+function pcm16ToFloat32Buffer(pcm: ArrayBuffer): ArrayBuffer {
+  const source = new Int16Array(pcm);
+  const target = new Float32Array(source.length);
+  for (let i = 0; i < source.length; i += 1) {
+    target[i] = source[i] / 32768;
+  }
+  return target.buffer;
+}
+
+// Internal metadata for a chunk whose binary frame has not arrived yet. The
+// bridge sends `encoding: "pcm16"` when the binary frame carries Int16 PCM
+// (half the bytes of Float32); the worker converts before delivery so
+// consumers always see Float32 audio.
+type PendingAudioChunkMetadata = Omit<WebSocketAudioChunk, "audio"> & { pcm16: boolean };
+
+function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: string): PendingAudioChunkMetadata {
   const fields = ["index", "total", "sampleRate", "sampleCount", "silenceAfterSamples"] as const;
   for (const field of fields) {
     if (typeof parsed[field] !== "number" || !Number.isInteger(parsed[field]) || parsed[field] < 0) {
@@ -272,6 +288,9 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
   if (silenceAfterSamples > MAX_AUDIO_SILENCE_SAMPLES) {
     throw new Error("WebSocket bridge returned an audio chunk with excessive trailing silence.");
   }
+  if (parsed.encoding !== undefined && parsed.encoding !== "pcm16") {
+    throw new Error("WebSocket bridge returned an audio chunk with an unsupported encoding.");
+  }
   return {
     requestId,
     index,
@@ -279,6 +298,7 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
     sampleRate,
     sampleCount,
     silenceAfterSamples,
+    pcm16: parsed.encoding === "pcm16",
   };
 }
 
@@ -477,7 +497,8 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         killWorker(model, worker);
         return;
       }
-      if (binaryData.byteLength !== metadata.sampleCount * Float32Array.BYTES_PER_ELEMENT) {
+      const bytesPerSample = metadata.pcm16 ? Int16Array.BYTES_PER_ELEMENT : Float32Array.BYTES_PER_ELEMENT;
+      if (binaryData.byteLength !== metadata.sampleCount * bytesPerSample) {
         settleActive(model, worker, {
           ok: false,
           error: new Error("WebSocket bridge returned an audio binary frame with an unexpected byte length."),
@@ -489,8 +510,10 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         active.audioChunkTotal = metadata.total;
       }
       active.receivedAudioChunkIndexes.add(metadata.index);
+      const { pcm16, ...chunkMetadata } = metadata;
+      const audio = pcm16 ? pcm16ToFloat32Buffer(binaryData) : binaryData;
       try {
-        active.onAudioChunk({ ...metadata, audio: binaryData });
+        active.onAudioChunk({ ...chunkMetadata, audio });
       } catch {
         // An audio chunk consumer must never break request handling.
       }

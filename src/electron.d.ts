@@ -110,6 +110,7 @@ interface LocalTtsBridge {
   warm?: (request: {
     model: LocalTtsModel;
     baseModelPath?: string;
+    modelRepo?: string;
   }) => Promise<LocalTtsWarmResult>;
   cancel: (request: {
     model: LocalTtsModel;

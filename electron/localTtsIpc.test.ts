@@ -255,6 +255,12 @@ describe("localTtsIpc request sanitizers", () => {
     expect(() => sanitizeWarmRequest({ model: "qwen3", baseModelPath: "a".repeat(1001) }))
       .toThrow("exceeds 1000 characters");
     expect(() => sanitizeWarmRequest(null)).toThrow("Invalid warm request payload");
+    expect(sanitizeWarmRequest({ model: "qwen3", modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" })).toEqual({
+      model: "qwen3",
+      payload: { modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" },
+    });
+    expect(() => sanitizeWarmRequest({ model: "qwen3", modelRepo: "evil/repo" }))
+      .toThrow("Unsupported Qwen3-TTS model repository");
   });
 });
 

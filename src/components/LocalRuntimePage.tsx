@@ -421,15 +421,22 @@ export function LocalRuntimePage({
   // worker is reused by the next generation either way.
   const warmedKeyRef = useRef<string | null>(null);
   useEffect(() => {
-    if (model !== "qwen3" || !electronAvailable) return;
-    if (!qwen3MlxCustomVoice || generateBusy) return;
-    if (!(qwen3MlxSetup?.apiServerAvailable ?? false)) return;
+    if (model !== "qwen3" || !electronAvailable || generateBusy) return;
     const baseModelPath = qwen3BaseModelPath.trim();
-    if (!baseModelPath) return;
+    if (qwen3MlxCustomVoice) {
+      if (!(qwen3MlxSetup?.apiServerAvailable ?? false)) return;
+      if (!baseModelPath) return;
+    }
     const warmKey = `${qwen3Model}:${baseModelPath}`;
     if (warmedKeyRef.current === warmKey) return;
     warmedKeyRef.current = warmKey;
-    void window.electron?.localTts?.warm?.({ model, baseModelPath }).catch(() => undefined);
+    // Candle repos warm too: the bridge only pre-loads already-downloaded
+    // weights, so this never kicks off a download.
+    void window.electron?.localTts?.warm?.({
+      model,
+      modelRepo: qwen3Model,
+      ...(qwen3MlxCustomVoice && baseModelPath ? { baseModelPath } : {}),
+    }).catch(() => undefined);
   }, [electronAvailable, generateBusy, model, qwen3BaseModelPath, qwen3MlxCustomVoice, qwen3MlxSetup, qwen3Model]);
 
   useEffect(() => {

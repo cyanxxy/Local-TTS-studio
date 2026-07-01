@@ -386,9 +386,16 @@ export function sanitizeWarmRequest(request: unknown): WarmRequest {
     maxLength: 1000,
     pattern: /^[^\0]+$/,
   });
+  const modelRepo = parseOptionalString(request.modelRepo, "modelRepo", { maxLength: 128 });
+  if (modelRepo && !ALLOWED_QWEN3_MODELS.has(modelRepo)) {
+    throw new Error("Unsupported Qwen3-TTS model repository.");
+  }
   return {
     model,
-    payload: baseModelPath ? { baseModelPath } : {},
+    payload: {
+      ...(baseModelPath ? { baseModelPath } : {}),
+      ...(modelRepo ? { modelRepo } : {}),
+    },
   };
 }
 

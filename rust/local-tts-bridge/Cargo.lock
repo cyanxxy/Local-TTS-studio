@@ -2444,6 +2444,7 @@ dependencies = [
  "candle-core",
  "clap",
  "ctrlc",
+ "hf-hub 0.4.3",
  "hound",
  "libc",
  "neutts",

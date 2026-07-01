@@ -323,6 +323,99 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(second.response).toMatchObject({ ok: true, requestId: "r2" });
   });
 
+  it("converts pcm16-encoded audio chunks to Float32 before delivery", async () => {
+    const { pool } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 0,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+        encoding: "pcm16",
+      });
+      const audio = Buffer.alloc(2 * Int16Array.BYTES_PER_ELEMENT);
+      audio.writeInt16LE(16384, 0);
+      audio.writeInt16LE(-32768, 2);
+      server.sendBinary(audio);
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: {
+          audioTransport: "websocket-binary",
+          audioChunkCount: 1,
+          sampleRate: 24000,
+          modelRepo: "R",
+          durationSec: 1,
+          elapsedSec: 2,
+          phaseTimingsSec: {},
+        },
+      });
+    });
+    const audioChunks: { sampleCount: number; audio: ArrayBuffer }[] = [];
+
+    const run = await pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+      onAudioChunk: (payload) => audioChunks.push(payload),
+    });
+
+    expect(run.response).toMatchObject({ ok: true, requestId: "r1" });
+    expect(audioChunks).toHaveLength(1);
+    expect(audioChunks[0].sampleCount).toBe(2);
+    const samples = new Float32Array(audioChunks[0].audio);
+    expect(Array.from(samples)).toEqual([0.5, -1]);
+  });
+
+  it("rejects a pcm16 audio chunk whose binary frame has a Float32 byte length", async () => {
+    const { pool } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 0,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+        encoding: "pcm16",
+      });
+      server.sendBinary(Buffer.alloc(2 * Float32Array.BYTES_PER_ELEMENT));
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/unexpected byte length/);
+  });
+
+  it("rejects an audio chunk with an unsupported encoding", async () => {
+    const { pool } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 0,
+        sampleRate: 24000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+        encoding: "opus",
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/unsupported encoding/);
+  });
+
   it("sends a graceful shutdown WebSocket command when cancelling an in-flight request", async () => {
     const { pool, servers, children } = makePool(() => {
       // Stall so cancel hits a connected worker with an open socket.
