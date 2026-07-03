@@ -1,7 +1,7 @@
 {
   "name": "offline-voice-studio",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -39,6 +39,7 @@
     "@fontsource-variable/literata": "^5.2.8",
     "@fontsource-variable/outfit": "^5.2.8",
     "@huggingface/transformers": "4.2.0",
+    "@llamaindex/liteparse": "^2.4.0",
     "@tailwindcss/vite": "^4.1.17",
     "kokoro-js": "1.2.1",
     "lucide-react": "^1.7.0",
@@ -89,6 +90,9 @@
       "dist/**/*",
       "dist-electron/**/*",
       "!dist-electron/**/*.test.js"
+    ],
+    "asarUnpack": [
+      "**/node_modules/@llamaindex/**"
     ],
     "extraResources": [
       {

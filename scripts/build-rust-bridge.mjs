@@ -82,6 +82,9 @@ if (process.platform !== "win32") {
 }
 
 const copiedQwen3MlxTools = copyQwen3MlxTools();
+if (copiedQwen3MlxTools.length > 0) {
+  copyQwen3MlxMetallib();
+}
 
 if (process.platform === "darwin") {
   for (const executablePath of copiedExecutablePaths) {
@@ -108,6 +111,33 @@ function copyQwen3MlxTools() {
     console.log(`Copied Qwen3 MLX ${kind} to ${copiedPath}`);
   }
   return copied;
+}
+
+// The MLX binaries bake in an absolute compile-time path to mlx.metallib
+// (inside the build machine's cargo target dir), so on any other machine the
+// GPU kernels only load via MLX's colocated-file fallback: mlx.metallib sitting
+// next to the executable. Ship it in dist-rust or Qwen3 MLX fails on user Macs
+// with "Failed to load the default metallib".
+function copyQwen3MlxMetallib() {
+  if (process.platform !== "darwin") return;
+  const metallibName = "mlx.metallib";
+  for (const releaseDir of qwen3MlxReleaseDirs()) {
+    const buildDir = path.join(releaseDir, "build");
+    if (!fs.existsSync(buildDir)) continue;
+    for (const entry of fs.readdirSync(buildDir)) {
+      const candidate = path.join(buildDir, entry, "out", "lib", metallibName);
+      if (fs.existsSync(candidate)) {
+        const copiedPath = path.join(outDir, metallibName);
+        fs.copyFileSync(candidate, copiedPath);
+        console.log(`Copied Qwen3 MLX metallib to ${copiedPath}`);
+        return;
+      }
+    }
+  }
+  throw new Error(
+    "Qwen3 MLX binaries were copied but mlx.metallib was not found in any cargo build dir; " +
+    "the shipped binaries would fail to load Metal kernels on other machines.",
+  );
 }
 
 function resolveQwen3MlxToolSources() {

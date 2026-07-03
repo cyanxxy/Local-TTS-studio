@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef } from "react";
 import type { ChunkPauseKind, ModelType } from "../types";
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useModelLoader } from "../hooks/useModelLoader";
@@ -135,6 +135,8 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const [showPlayer, setShowPlayer] = useState(false);
   const [webgpuStatus, setWebgpuStatus] = useState<WebGPUStatus | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [isImportingDocument, setIsImportingDocument] = useState(false);
   const [studioDesktopModel, setStudioDesktopModel] = useState<InlineDesktopModelKey | null>(null);
   const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(null);
   const [visitedLocalRuntimePages, setVisitedLocalRuntimePages] = useState<Set<LocalRuntimePageKey>>(
@@ -322,6 +324,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
     setText(nextText);
     setExportError(null);
+    setImportError(null);
   }, [
     cancelActiveGeneration,
     isRetakingSegment,
@@ -332,6 +335,41 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     text,
     tts.isGenerating,
   ]);
+
+  const documentsBridge = enableDesktopRuntimes && isElectronRuntime
+    ? window.electron?.documents
+    : undefined;
+
+  // An import can take minutes (OCR); by then the click-time handleTextChange
+  // closure is stale and would read audio/generation state from before the
+  // import started, skipping the cancel-and-reset it exists to guarantee.
+  // Always apply the result through the latest closure.
+  const handleTextChangeRef = useRef(handleTextChange);
+  useEffect(() => {
+    handleTextChangeRef.current = handleTextChange;
+  }, [handleTextChange]);
+  const importInFlightRef = useRef(false);
+
+  const handleImportDocument = useCallback(async () => {
+    if (!documentsBridge || importInFlightRef.current) return;
+    importInFlightRef.current = true;
+    setImportError(null);
+    setIsImportingDocument(true);
+    try {
+      const result = await documentsBridge.importDocument();
+      if (!result.canceled) {
+        handleTextChangeRef.current(result.text);
+      }
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      // ipcRenderer.invoke wraps main-process errors in a remote-method prefix;
+      // strip it so users see only the actionable message.
+      setImportError(raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
+    } finally {
+      importInFlightRef.current = false;
+      setIsImportingDocument(false);
+    }
+  }, [documentsBridge]);
 
   const handleVoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === voice) return;
@@ -573,7 +611,7 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     : isStudioPage
     ? studioVisibleError
     : (tts.error ?? retakeError);
-  const visibleError = visibleGenerationError ?? visibleModelError ?? exportError ?? player.error;
+  const visibleError = visibleGenerationError ?? visibleModelError ?? importError ?? exportError ?? player.error;
   const activeSegmentIndex = player.activeSegmentId
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
     : -1;
@@ -678,7 +716,12 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                 <div className="flex min-h-[320px] flex-col border-border/40 p-4 sm:min-h-[360px] sm:p-6 lg:col-span-3 lg:border-r">
                   <span className="text-xs font-semibold uppercase tracking-widest text-text-muted mb-3 flex-shrink-0">Script</span>
                   <div className="flex-1 min-h-0">
-                    <TextInput text={text} onTextChange={handleTextChange} />
+                    <TextInput
+                      text={text}
+                      onTextChange={handleTextChange}
+                      onImportDocument={documentsBridge ? handleImportDocument : undefined}
+                      isImportingDocument={isImportingDocument}
+                    />
                   </div>
                 </div>
 
@@ -768,6 +811,8 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               fullScreen
               text={text}
               onTextChange={handleTextChange}
+              onImportDocument={documentsBridge ? handleImportDocument : undefined}
+              isImportingDocument={isImportingDocument}
               activeModel={activeModel}
               onModelChange={handleReaderModelChange}
               desktopModelOptions={readerDesktopModelOptions}

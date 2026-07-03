@@ -19,6 +19,9 @@ interface CancelRequest extends CacheRequest {
 contextBridge.exposeInMainWorld("electron", {
   isElectron: true,
   platform: process.platform,
+  documents: {
+    importDocument: () => ipcRenderer.invoke("document:import"),
+  },
   localTts: {
     probe: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:probe", request),
     generate: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:generate", request),

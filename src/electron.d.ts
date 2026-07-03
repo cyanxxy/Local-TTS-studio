@@ -96,6 +96,14 @@ export interface LocalTtsAudioChunkEvent {
   audio: ArrayBuffer;
 }
 
+export type DocumentImportResult =
+  | { canceled: true }
+  | { canceled: false; fileName: string; text: string; pageCount?: number };
+
+interface DocumentsBridge {
+  importDocument: () => Promise<DocumentImportResult>;
+}
+
 interface LocalTtsBridge {
   probe: (request: {
     model: LocalTtsModel;
@@ -133,6 +141,7 @@ declare global {
     electron?: {
       isElectron: boolean;
       platform?: string;
+      documents?: DocumentsBridge;
       localTts?: LocalTtsBridge;
     };
   }

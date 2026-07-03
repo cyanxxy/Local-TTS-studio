@@ -76,6 +76,7 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
 | **Offline reuse** | Model weights cache in-browser (IndexedDB + Cache API) for repeat use, subject to browser quota, persistence, and eviction behavior. |
 | **Desktop runtimes** | Electron adds Qwen3-TTS to Studio/Reader and exposes NeuTTS Nano and Qwen3 setup pages through a resident Rust WebSocket bridge. |
+| **Document import (desktop)** | Import PDFs (with OCR for scans), `.txt`/`.md`, Office documents, and images straight into Studio/Reader — parsed on-device via [LiteParse](https://www.llamaindex.ai/liteparse), no parsing cloud API. First OCR use downloads Tesseract language data once (like model downloads); Office formats need LibreOffice, images need ImageMagick. |
 
 ---
 

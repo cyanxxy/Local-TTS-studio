@@ -322,7 +322,10 @@ vi.mock("../components/AudioPlayer", () => ({
 
 vi.mock("../components/AdvancedReaderPage", () => ({
   AdvancedReaderPage: ({
+    text,
     onTextChange,
+    onImportDocument,
+    isImportingDocument,
     onModelChange,
     onVoiceChange,
     onQualityChange,
@@ -334,7 +337,10 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onJumpToSegment,
     desktopModelOptions = [],
   }: {
+    text: string;
     onTextChange: (value: string) => void;
+    onImportDocument?: () => void;
+    isImportingDocument?: boolean;
     onModelChange: (model: "kokoro" | "supertonic") => void;
     onVoiceChange: (voice: string) => void;
     onQualityChange: (value: number) => void;
@@ -347,6 +353,12 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     desktopModelOptions?: Array<{ key: string; label: string; selected?: boolean; onSelect: () => void }>;
   }) => (
     <div>
+      <div data-testid="reader-text-value">{text}</div>
+      {onImportDocument && (
+        <button type="button" onClick={onImportDocument}>
+          reader-import{isImportingDocument ? "-busy" : ""}
+        </button>
+      )}
       <button type="button" onClick={() => onTextChange("Reader text with enough length.")}>reader-text</button>
       <button type="button" onClick={() => onModelChange("supertonic")}>reader-model</button>
       <button type="button" onClick={() => onVoiceChange("af_bella")}>reader-voice</button>
@@ -634,6 +646,96 @@ describe("SynthesisApp", () => {
           mode: "customVoice",
         }),
       }));
+    });
+  });
+
+  it("hides document import on web builds", () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+
+    render(<WebApp />);
+
+    expect(screen.queryByRole("button", { name: /reader-import/ })).not.toBeInTheDocument();
+  });
+
+  it("imports a document on desktop and routes its text through handleTextChange", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    const importDocument = vi.fn().mockResolvedValue({
+      canceled: false,
+      fileName: "chapter.pdf",
+      text: "Imported chapter text with enough length.",
+      pageCount: 2,
+    });
+    Object.defineProperty(window, "electron", {
+      value: {
+        isElectron: true,
+        platform: "darwin",
+        documents: { importDocument },
+        localTts: mock.localTts,
+      },
+      configurable: true,
+    });
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "reader-import" }));
+    expect(importDocument).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(screen.getByTestId("reader-text-value")).toHaveTextContent(
+        "Imported chapter text with enough length.",
+      );
+    });
+  });
+
+  it("shows a stripped import error when the desktop import fails", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    const importDocument = vi.fn().mockRejectedValue(new Error(
+      "Error invoking remote method 'document:import': Error: No readable text found in \"scan.pdf\".",
+    ));
+    Object.defineProperty(window, "electron", {
+      value: {
+        isElectron: true,
+        platform: "darwin",
+        documents: { importDocument },
+        localTts: mock.localTts,
+      },
+      configurable: true,
+    });
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "reader-import" }));
+    await waitFor(() => {
+      expect(screen.getByText('No readable text found in "scan.pdf".')).toBeInTheDocument();
     });
   });
 

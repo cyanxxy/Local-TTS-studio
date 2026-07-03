@@ -2,6 +2,8 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import {
   BookOpen,
   ChevronDown,
+  FileUp,
+  Loader2,
   SlidersHorizontal,
 } from "lucide-react";
 import {
@@ -23,6 +25,9 @@ interface AdvancedReaderPageProps {
   fullScreen?: boolean;
   text: string;
   onTextChange: (text: string) => void;
+  /** Desktop-only document import (PDF/DOCX/images via LiteParse); absent on web builds. */
+  onImportDocument?: () => void;
+  isImportingDocument?: boolean;
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
@@ -164,6 +169,8 @@ export function AdvancedReaderPage({
   fullScreen = false,
   text,
   onTextChange,
+  onImportDocument,
+  isImportingDocument = false,
   activeModel,
   onModelChange,
   desktopModelOptions = [],
@@ -424,8 +431,27 @@ export function AdvancedReaderPage({
           </div>
         </div>
 
+        <div className="flex shrink-0 items-center gap-2">
+        {onImportDocument && (
+          <button
+            type="button"
+            onClick={onImportDocument}
+            disabled={isImportingDocument}
+            aria-label="Import document"
+            title="Import a document (PDF, text, Office, images)"
+            className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98] disabled:cursor-default disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:bg-white/40"
+          >
+            {isImportingDocument
+              ? <Loader2 size={14} className="animate-spin text-text-muted" />
+              : <FileUp size={14} className="text-text-muted" />}
+            <span className="hidden font-medium sm:inline">
+              {isImportingDocument ? "Importing…" : "Import"}
+            </span>
+          </button>
+        )}
+
         {/* Voice & model settings popover */}
-        <div ref={settingsRef} className="relative shrink-0">
+        <div ref={settingsRef} className="relative">
           <button
             type="button"
             onClick={() => setSettingsOpen((o) => !o)}
@@ -534,6 +560,7 @@ export function AdvancedReaderPage({
               </div>
             </div>
           )}
+        </div>
         </div>
       </div>
 

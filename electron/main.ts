@@ -5,6 +5,11 @@ import { promises as fs } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
+import {
+  MAX_IMPORT_PAGES,
+  importDocumentFromDialog,
+  type DocumentParser,
+} from "./documentImport";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import {
   buildQwen3SetupWarnings,
@@ -470,6 +475,67 @@ async function handleChooseQwen3MlxModelDir(): Promise<{ path: string | null }> 
   return { path: result.filePaths[0] };
 }
 
+// LiteParse ships ESM-only exports (no "require" condition), so the CommonJS
+// main process must load it through a real dynamic import. A literal import()
+// here would be transpiled to require() by the CJS TypeScript build, hence the
+// Function-constructor indirection. Loaded lazily so app startup never pays the
+// native-addon load cost, and cached because the module keeps no per-parse state.
+const dynamicImport = new Function("specifier", "return import(specifier)") as (
+  specifier: string,
+) => Promise<{ LiteParse: new (config?: Record<string, unknown>) => LiteParseInstance }>;
+
+interface LiteParseInstance {
+  parse: (input: string) => Promise<{ text: string; pages: unknown[] }>;
+}
+
+let liteParseDocumentParser: Promise<DocumentParser> | null = null;
+
+// OCR of a large scanned document is unbounded CPU work in the parser's native
+// thread pool; without a deadline the renderer's Import button would spin
+// forever on a wedged parse. The native work is not cancellable — the deadline
+// only unblocks the UI.
+const IMPORT_PARSE_TIMEOUT_MS = 5 * 60 * 1000;
+
+function withImportDeadline<T>(work: Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error("Import timed out after 5 minutes."));
+    }, IMPORT_PARSE_TIMEOUT_MS);
+    timer.unref();
+    work.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error instanceof Error ? error : new Error(String(error))); },
+    );
+  });
+}
+
+function getLiteParseDocumentParser(): Promise<DocumentParser> {
+  if (!liteParseDocumentParser) {
+    const pending = dynamicImport("@llamaindex/liteparse").then(({ LiteParse }) => {
+      const parser = new LiteParse({
+        outputFormat: "text",
+        quiet: true,
+        maxPages: MAX_IMPORT_PAGES,
+      });
+      return {
+        parse: async (filePath: string) => {
+          const result = await withImportDeadline(parser.parse(filePath));
+          return { text: result.text, pageCount: result.pages.length };
+        },
+      };
+    });
+    pending.catch(() => {
+      // Reset so a transient load failure (e.g. missing platform addon) can
+      // retry on the next import instead of caching the rejection forever.
+      if (liteParseDocumentParser === pending) {
+        liteParseDocumentParser = null;
+      }
+    });
+    liteParseDocumentParser = pending;
+  }
+  return liteParseDocumentParser;
+}
+
 function terminateBridgeChild(child: ChildProcessWithoutNullStreams): void {
   try {
     child.kill();
@@ -924,6 +990,19 @@ app.whenReady().then(() => {
   ipcMain.handle("local-tts:choose-qwen3-mlx-model-dir", (event) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
     return handleChooseQwen3MlxModelDir();
+  });
+
+  ipcMain.handle("document:import", (event) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    // Attach the dialog to the requesting window (macOS modal sheet), which
+    // also blocks mid-import text edits behind the dialog.
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const ownedDialog = {
+      showOpenDialog: (options: Parameters<typeof dialog.showOpenDialog>[0]) => (
+        owner ? dialog.showOpenDialog(owner, options) : dialog.showOpenDialog(options)
+      ),
+    };
+    return importDocumentFromDialog(ownedDialog, getLiteParseDocumentParser);
   });
 });
 
