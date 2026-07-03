@@ -6,17 +6,19 @@
 
 Browser-native neural speech synthesis through WebGPU, plus optional Electron desktop runtimes through a local Rust bridge — no server, no account, no API key, no usage cap.
 
+[![Release](https://img.shields.io/github/v/release/cyanxxy/Local-TTS-studio?style=flat-square&color=0071E3&label=Release)](https://github.com/cyanxxy/Local-TTS-studio/releases/latest)
+[![Local first](https://img.shields.io/badge/Inference-100%25%20Local-1D1D1F?style=flat-square)](#capabilities)
+[![WebGPU](https://img.shields.io/badge/WebGPU-Preferred-FF6F00?style=flat-square)](https://www.w3.org/TR/webgpu/)
+[![License](https://img.shields.io/badge/License-Apache%202.0-1D1D1F?style=flat-square)](./LICENSE)
+
 [![React 19](https://img.shields.io/badge/React-19-149ECA?style=flat-square&logo=react&logoColor=white)](https://react.dev)
 [![TypeScript 5.9](https://img.shields.io/badge/TypeScript-5.9-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![Vite 7](https://img.shields.io/badge/Vite-7-646CFF?style=flat-square&logo=vite&logoColor=white)](https://vite.dev)
 [![Tailwind 4](https://img.shields.io/badge/Tailwind-4-06B6D4?style=flat-square&logo=tailwindcss&logoColor=white)](https://tailwindcss.com)
 [![Electron 42](https://img.shields.io/badge/Electron-42-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
 [![Rust](https://img.shields.io/badge/Rust-local%20bridge-B7410E?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
-[![WebGPU](https://img.shields.io/badge/WebGPU-Preferred-FF6F00?style=flat-square)](https://www.w3.org/TR/webgpu/)
-[![Local first](https://img.shields.io/badge/Inference-100%25%20Local-1D1D1F?style=flat-square)](#capabilities)
-[![License](https://img.shields.io/badge/License-Apache%202.0-1D1D1F?style=flat-square)](./LICENSE)
 
-[Quick Start](#quick-start) · [Models](#models) · [Capabilities](#capabilities) · [Docs](#documentation)
+[Quick Start](#quick-start) · [Models](#models) · [Capabilities](#capabilities) · [Document Import](#document-import-desktop) · [Docs](#documentation)
 
 </div>
 
@@ -36,17 +38,21 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 
 ## Screenshots
 
+<div align="center">
+
 ### Studio
 
-![Open TTS Studio](./docs/screenshots/studio.png)
+<img src="./docs/screenshots/studio.png" alt="Open TTS Studio" width="900">
 
 ### Reader
 
-![Open TTS Reader](./docs/screenshots/reader.png)
+<img src="./docs/screenshots/reader.png" alt="Open TTS Reader" width="900">
 
 ### Qwen3-TTS MLX Runtime
 
-![Open TTS Qwen3-TTS MLX runtime](./docs/screenshots/qwen3-mlx.png)
+<img src="./docs/screenshots/qwen3-mlx.png" alt="Open TTS Qwen3-TTS MLX runtime" width="900">
+
+</div>
 
 ---
 
@@ -65,7 +71,7 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 
 ## Capabilities
 
-| | |
+| Capability | Details |
 |---|---|
 | **Local & private** | Built-in synthesis paths run on-device — no hosted inference server, account, API key, or usage cap. First-run model/runtime downloads contact upstream hosts for asset retrieval. |
 | **Two browser models** | Kokoro-82M and Supertonic, accelerated by WebGPU with an automatic WASM fallback. |
@@ -76,7 +82,22 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
 | **Offline reuse** | Model weights cache in-browser (IndexedDB + Cache API) for repeat use, subject to browser quota, persistence, and eviction behavior. |
 | **Desktop runtimes** | Electron adds Qwen3-TTS to Studio/Reader and exposes NeuTTS Nano and Qwen3 setup pages through a resident Rust WebSocket bridge. |
-| **Document import (desktop)** | Import PDFs (with OCR for scans), `.txt`/`.md`, Office documents, and images straight into Studio/Reader — parsed on-device via [LiteParse](https://www.llamaindex.ai/liteparse), no parsing cloud API. First OCR use downloads Tesseract language data once (like model downloads); Office formats need LibreOffice, images need ImageMagick. |
+| **Document import (desktop)** | Bring PDFs, scans, Office documents, and images straight into Studio/Reader — parsed on-device, no parsing cloud API. See [Document Import](#document-import-desktop). |
+
+---
+
+## Document Import (Desktop)
+
+The desktop app adds an **Import** button to Studio and Reader. Files are parsed entirely on-device by [LiteParse](https://www.llamaindex.ai/liteparse) in the Electron main process — text lands in the editor ready to synthesize.
+
+| Format | Extensions | Works out of the box | Notes |
+|---|---|:---:|---|
+| PDF | `.pdf` | Yes | Scanned pages are recovered with built-in OCR |
+| Plain text | `.txt` `.md` | Yes | Read directly, no parser involved |
+| Office / OpenDocument | `.docx` `.pptx` `.odt` | Needs LibreOffice | Converted through a local LibreOffice install |
+| Images | `.png` `.jpg` `.jpeg` `.tif` `.tiff` `.webp` | Needs ImageMagick | OCR after local ImageMagick conversion |
+
+Guard rails keep imports predictable: an extension allowlist, a 100 MB file cap, an 800-page cap, a 1.5 million character cap, a five-minute parse deadline, and actionable error messages when an external tool is missing. The first OCR use downloads Tesseract language data once — the same first-run posture as model weights; everything after that is offline.
 
 ---
 
