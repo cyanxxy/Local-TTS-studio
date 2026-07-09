@@ -2,7 +2,7 @@
 
 ## Summary
 
-Replace the current Qwen3 implementation—which combines an in-process Candle path with three nested MLX subprocess paths—with one Electron-facing Rust backend. `open-tts-local-bridge` remains the only process and protocol endpoint used by Electron. It integrates a pinned revision of `qwen3_tts_rs` directly as a Rust library and compiles that library with the fastest platform provider:
+Replace the current Qwen3 implementation—which combines an in-process Candle path with three nested MLX subprocess paths—with one Electron-facing Rust backend. `open-tts-local-bridge` remains the only process and protocol endpoint used by Electron. It integrates `badlogic/qwen3_tts_rs` revision `288a716ce38a91c826dd67968c75d1dd4b0f07bc` directly as a Rust library and compiles that library with the fastest platform provider:
 
 - Apple Silicon macOS: MLX with Metal acceleration and 6-bit MLX model profiles.
 - Windows: LibTorch with CUDA when available and CPU fallback from the same Windows runtime.
@@ -16,7 +16,7 @@ Replace the current Qwen3 implementation—which combines an in-process Candle p
 - Preserve Apple Silicon MLX performance.
 - Support Windows NVIDIA CUDA and Windows CPU fallback.
 - Support CustomVoice and Base voice cloning through the same Rust runtime abstraction.
-- Support all ten Qwen3 languages advertised by the model configuration: Auto, Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.
+- Support all ten Qwen3 languages advertised by the model configuration—Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian—plus the model's Auto selection mode.
 - Preserve Float32 renderer audio, model-provided sample rates, WebSocket binary transport, cancellation, warm-up, and resident model reuse.
 - Make long and multilingual text splitting Unicode-safe.
 - Ensure every displayed generation control changes generation behavior.
@@ -30,6 +30,7 @@ Replace the current Qwen3 implementation—which combines an in-process Candle p
 - Loading two Qwen3 models concurrently.
 - Token-level CustomVoice streaming if the selected Rust library API only returns complete text-unit audio.
 - Supporting arbitrary user-supplied Hugging Face repositories outside the approved Qwen3 model profiles.
+- Supporting sharded model weights; every approved profile in this design currently publishes one root `model.safetensors`.
 - Keeping compatibility with the internal MLX API-server, `tts`, or `pibot-tts-worker` protocols.
 
 ## Architecture
@@ -64,17 +65,19 @@ The bridge continues to serialize generation per model. A Qwen3 host owns at mos
 ### Windows
 
 - Build the same pinned `qwen3_tts_rs` revision with its `tch-backend` feature.
+- Use the MSVC Rust target `x86_64-pc-windows-msvc`, `tch` 0.20 from the pinned dependency graph, and release LibTorch 2.7.1 with CUDA 12.6. Debug LibTorch is not ABI-compatible with release builds on Windows and is not a supported packaging input.
 - Select `Device::Gpu(0)` only when LibTorch reports CUDA available; otherwise select `Device::Cpu`.
 - Default to the official `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` profile.
 - Use official Base model weights for voice cloning.
 - Bundle the required LibTorch native DLLs. A CUDA-enabled distribution may use CPU fallback, accepting a larger Windows package to avoid separate product backends.
 - Report the resolved `cuda` or `cpu` provider in probe and generation results.
+- Treat Windows support as unproven until a native release build loads both approved 0.6B model types, generates CustomVoice audio on CUDA, and generates audio on a machine without an NVIDIA GPU using the same packaged runtime. Do not delete the old implementation solely on the strength of a cross-compile.
 
 Unsupported operating systems return an explicit Qwen3-unavailable probe result until a platform package is designed and tested. Existing browser Kokoro and Supertonic behavior is unchanged.
 
 ## Dependency Ownership
 
-- Pin `qwen3_tts_rs` to an exact Git revision in Cargo metadata. Floating branches are forbidden.
+- Pin `qwen3_tts_rs` to `https://github.com/badlogic/qwen3_tts_rs.git` revision `288a716ce38a91c826dd67968c75d1dd4b0f07bc` in Cargo metadata and `Cargo.lock`. Floating branches are forbidden.
 - Use the same revision for macOS and Windows builds.
 - Remove the ignored `rust/qwen3_tts_rs` build checkout from the normal product build.
 - Delete `scripts/build-qwen3-mlx-worker.mjs` and `patches/qwen3_tts_rs/mlx-api-current-thread.patch` after the in-process integration passes platform tests.
@@ -125,16 +128,29 @@ Each approved profile declares:
 - required `speech_tokenizer` files;
 - default speaker/language/control values.
 
-The downloader writes a manifest containing repository ID, resolved Hub revision, file names, and expected sizes. A directory is ready only when:
+Initial profiles are pinned to these Hugging Face revisions; downloads use `/resolve/<revision>/...`, never `/resolve/main/...`:
+
+| Platform | Profile | Repository | Revision |
+| --- | --- | --- | --- |
+| macOS | 0.6B CustomVoice 6-bit | `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit` | `7dc92af14613355896fcab13b268c19ede233139` |
+| macOS | 1.7B CustomVoice 6-bit | `mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit` | `1c6c0ff58c43afa8df571facde2efa077efd85e2` |
+| macOS | 0.6B Base 6-bit | `mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit` | `4e44ed4bcee28a0f89a493e07bde16e6dccd43eb` |
+| macOS | 1.7B Base 6-bit | `mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit` | `34ff5318365b59cba9c03ff729f2eee0814caf72` |
+| Windows | 0.6B CustomVoice | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | `85e237c12c027371202489a0ec509ded67b5e4b5` |
+| Windows | 1.7B CustomVoice | `Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice` | `0c0e3051f131929182e2c023b9537f8b1c68adfe` |
+| Windows | 0.6B Base | `Qwen/Qwen3-TTS-12Hz-0.6B-Base` | `5d83992436eae1d760afd27aff78a71d676296fc` |
+| Windows | 1.7B Base | `Qwen/Qwen3-TTS-12Hz-1.7B-Base` | `fd4b254389122332181a7c3db7f27e918eec64e3` |
+
+The downloader writes a manifest containing repository ID, pinned Hub revision, file names, expected sizes, and any SHA-256/LFS object IDs published by the Hub metadata. A directory is ready only when:
 
 - `config.json` parses;
 - `tts_model_type` matches the selected profile;
 - tokenizer/config files required by the runtime exist;
-- the main weight file or every shard referenced by its index exists and is non-empty;
+- the required root `model.safetensors` exists, is non-empty, and matches its recorded size and published digest when available;
 - required `speech_tokenizer` weights/config exist and are non-empty;
 - the downloaded manifest matches the selected repository and all expected sizes.
 
-Manually chosen directories receive the same structural and model-type validation, without requiring an app-generated download manifest.
+Manually chosen directories receive the same structural and model-type validation, without requiring an app-generated download manifest. Because a manual directory has no trusted download manifest, the UI labels it as structurally validated rather than revision-verified.
 
 Changing model profiles clears an incompatible directory. A directory is retained only if validation proves it matches the new profile.
 
@@ -210,20 +226,21 @@ A failing generation returns one `ok:false` result when the bridge remains healt
 
 - `build:rust` builds the single `open-tts-local-bridge` executable for the target platform.
 - macOS packages the executable plus the one required `mlx.metallib` and only transitive native libraries referenced by the executable.
-- Windows packages the executable and required LibTorch/CUDA DLL closure.
+- Windows packages the release executable and the required LibTorch 2.7.1/CUDA 12.6 DLL closure. A clean Windows VM test verifies that no build-machine PATH entries are required.
 - No Qwen development CLIs, trace tools, API server, or worker executables are copied.
 - Desktop packaging fails if the target Qwen provider or required native resources are missing.
-- The web production build still compiles, but does not contain or expose Qwen runtime controls.
+- The web production build still compiles, but does not expose or invoke Qwen runtime controls.
 
 ## Migration
 
-1. Introduce the pinned in-process runtime and contract tests while the old paths still compile.
-2. Add the single renderer controller and platform-aware model profiles.
-3. Switch generation and warm-up to the in-process host.
-4. Validate CustomVoice and Base generation on Apple Silicon MLX.
-5. Add Windows LibTorch build and device-selection coverage.
-6. Remove the Candle `qwen_tts` dependency, internal MLX process hosts, environment variables, API/CLI/worker protocols, build script, compatibility patch, and extra-resource copying.
-7. Update product copy and project documentation to describe the single Rust backend.
+1. Prove the pinned library can be consumed in-process by the bridge on Apple Silicon and in a native Windows MSVC release build. The Windows spike must load the approved 0.6B CustomVoice and Base model formats before migration proceeds.
+2. Introduce the pinned in-process runtime and contract tests while the old paths still compile.
+3. Add the single renderer controller and platform-aware model profiles.
+4. Switch generation and warm-up to the in-process host.
+5. Validate CustomVoice and Base generation on Apple Silicon MLX.
+6. Validate a packaged Windows CUDA run and the same package's CPU fallback on a GPU-less Windows machine.
+7. Remove the Candle `qwen_tts` dependency, internal MLX process hosts, environment variables, API/CLI/worker protocols, build script, compatibility patch, and extra-resource copying only after both platform gates pass.
+8. Update product copy and project documentation to describe the single Rust backend.
 
 The worker protocol between Electron and `open-tts-local-bridge` remains unchanged except for removal of obsolete Qwen payload fields. Audio stays WebSocket-binary only.
 
@@ -233,10 +250,10 @@ The worker protocol between Electron and `open-tts-local-bridge` remains unchang
 
 - Unicode-safe CJK, emoji, combining-character, long-word, URL, and punctuation splitting.
 - Every text unit respects its character budget and round-trips all non-whitespace content.
-- Ten-language normalization and model-derived validation.
+- Ten-language plus Auto normalization and model-derived validation.
 - Speaker normalization.
 - Platform profile/model-type validation.
-- Complete, sharded, incomplete, mismatched, and wrong-type model directories.
+- Complete, incomplete, mismatched, and wrong-type single-weight model directories.
 - Generation-control propagation into the runtime adapter.
 - Float32/PCM framing, sample-rate consistency, empty audio rejection, and phase timing.
 - Reference WAV validation and cache bounds.
@@ -258,6 +275,8 @@ The worker protocol between Electron and `open-tts-local-bridge` remains unchang
 - `npm run build`.
 - `npm run build:desktop` on Apple Silicon.
 - Windows cross-platform compile in CI, plus native Windows CUDA and CPU smoke jobs.
+- Windows release build uses MSVC and the pinned LibTorch 2.7.1/CUDA 12.6 runtime; debug/release mixing fails the build validation.
+- Packaged Windows bridge starts on a clean VM without `LIBTORCH`, Python, Rust, or build-machine PATH configuration.
 - Live Apple Silicon MLX CustomVoice generation with English and long Chinese input.
 - Live Apple Silicon MLX Base voice cloning with a short reference WAV.
 - Native Windows CUDA CustomVoice smoke test and Windows CPU fallback probe/generation smoke test.
@@ -270,7 +289,7 @@ The worker protocol between Electron and `open-tts-local-bridge` remains unchang
 - Windows uses CUDA when available and CPU otherwise.
 - CustomVoice and Base voice cloning generate playable audio through the existing WebSocket binary protocol.
 - Long CJK input no longer crashes and produces all expected text units.
-- All ten official languages are selectable and validated against the loaded model.
+- All ten official languages plus Auto are selectable and validated against the loaded model.
 - Every displayed generation control affects inference; unsupported controls are absent.
 - Model readiness rejects incomplete and mismatched directories.
 - Studio, Reader, and settings cannot drift to different Qwen configurations.
@@ -280,8 +299,17 @@ The worker protocol between Electron and `open-tts-local-bridge` remains unchang
 ## Risks and Mitigations
 
 - **Windows package size:** CUDA-enabled LibTorch is large. Keep 0.6B as default, copy only the DLL dependency closure, and measure the packaged result before release.
+- **Windows path is not yet proven in this repository:** upstream describes LibTorch as cross-platform, but its detailed build recipe is Linux-focused. Require native Windows MSVC compile, model-load, CUDA, CPU-fallback, and clean-VM packaging evidence before claiming Windows support or removing the old implementation.
 - **Upstream instability:** pin an exact revision and gate upgrades behind contract and smoke suites.
 - **MLX thread affinity:** initialize and execute MLX on the same resident bridge thread; do not move inference through an async worker pool.
 - **Blocking cancellation:** retain process-level cancellation and transparent bridge restart.
 - **Cross-provider output differences:** use provider-specific golden tolerances for structure/performance, not byte-identical audio.
 - **Windows hardware diversity:** expose the resolved provider and retain CPU fallback; do not claim AMD/Intel GPU acceleration.
+
+## Upstream Basis
+
+- [Official Qwen3-TTS repository](https://github.com/QwenLM/Qwen3-TTS): supported model families, speakers, languages, and generation concepts.
+- [Pinned Rust runtime fork](https://github.com/badlogic/qwen3_tts_rs/tree/288a716ce38a91c826dd67968c75d1dd4b0f07bc): the exact MLX/LibTorch library source proposed for both platform builds.
+- [Parent Rust runtime documentation](https://github.com/second-state/qwen3_tts_rs): LibTorch and MLX setup and backend scope; its detailed LibTorch recipe is Linux-oriented, which is why native Windows proof remains a release gate.
+- [`tch-rs` setup documentation](https://github.com/LaurentMazare/tch-rs/blob/main/README.md): LibTorch version matching, Windows MSVC, and runtime-library requirements.
+- Hugging Face repository revisions in the model table were resolved from each repository's Git `HEAD` on 2026-07-09 and are intentionally immutable build inputs.
