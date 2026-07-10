@@ -58,8 +58,12 @@ impl NativeQwenHost {
     fn load(key: HostKey) -> Result<Self> {
         validate_model_dir(&key.model_path, key.model_type)?;
         let device = inference_device();
-        let inference = TTSInference::new(&key.model_path, device)
-            .with_context(|| format!("Failed to load Qwen3 model from {}", key.model_path.display()))?;
+        let inference = TTSInference::new(&key.model_path, device).with_context(|| {
+            format!(
+                "Failed to load Qwen3 model from {}",
+                key.model_path.display()
+            )
+        })?;
         let (speaker_encoder, audio_encoder) = if key.model_type == ExpectedModelType::Base {
             let speaker_encoder = SpeakerEncoder::load(
                 inference.weights(),
@@ -93,11 +97,8 @@ impl NativeQwenHost {
         language: &str,
     ) -> Result<ReferenceFeatures> {
         let sample_rate = self.inference.config().speaker_encoder_config.sample_rate;
-        let prepared = prepare_reference_wav(
-            wav_bytes,
-            sample_rate,
-            REFERENCE_MAX_DURATION_SECONDS,
-        )?;
+        let prepared =
+            prepare_reference_wav(wav_bytes, sample_rate, REFERENCE_MAX_DURATION_SECONDS)?;
         let key = ReferenceCacheKey {
             digest: prepared.digest,
             transcript: transcript.to_owned(),
@@ -108,7 +109,10 @@ impl NativeQwenHost {
             .iter()
             .position(|(cached_key, _)| cached_key == &key)
         {
-            let entry = self.reference_cache.remove(index).expect("cache index exists");
+            let entry = self
+                .reference_cache
+                .remove(index)
+                .expect("cache index exists");
             let features = entry.1.clone();
             self.reference_cache.push_back(entry);
             return Ok(features);
@@ -180,7 +184,10 @@ impl Qwen3Runtime {
         model_type: ExpectedModelType,
     ) -> Result<&mut NativeQwenHost> {
         let canonical_path = fs::canonicalize(model_path).with_context(|| {
-            format!("Failed to resolve Qwen3 model directory {}", model_path.display())
+            format!(
+                "Failed to resolve Qwen3 model directory {}",
+                model_path.display()
+            )
         })?;
         let key = HostKey::new(canonical_path, model_type);
         if self.host.as_ref().is_none_or(|host| host.key != key) {
@@ -210,18 +217,18 @@ impl Qwen3Runtime {
         sink: &mut dyn AudioSink,
     ) -> Result<GenerationSummary> {
         let language = normalize_language(request.language)?;
-        ensure!(!request.text.trim().is_empty(), "Qwen3 voice-clone text is empty.");
+        ensure!(
+            !request.text.trim().is_empty(),
+            "Qwen3 voice-clone text is empty."
+        );
         ensure!(
             !request.reference_text.trim().is_empty(),
             "Qwen3 reference transcript is empty."
         );
         let host = self.ensure_host(model_path, ExpectedModelType::Base)?;
         sink.progress("reference_encoding", "Encoding Qwen3 voice reference.")?;
-        let reference = host.prepare_reference(
-            request.reference_wav,
-            request.reference_text,
-            &language,
-        )?;
+        let reference =
+            host.prepare_reference(request.reference_wav, request.reference_text, &language)?;
         sink.progress("inference", "Running Qwen3 voice-clone inference.")?;
 
         let mut sample_rate = None;
@@ -256,13 +263,9 @@ impl Qwen3Runtime {
                         return false;
                     }
                     sample_rate = Some(current_sample_rate);
-                    if let Err(error) = sink.audio_chunk(
-                        &cleaned,
-                        current_sample_rate,
-                        audio_chunk_count,
-                        0,
-                        0,
-                    ) {
+                    if let Err(error) =
+                        sink.audio_chunk(&cleaned, current_sample_rate, audio_chunk_count, 0, 0)
+                    {
                         sink_error = Some(error);
                         return false;
                     }
@@ -275,7 +278,10 @@ impl Qwen3Runtime {
         if let Some(error) = sink_error {
             return Err(error);
         }
-        ensure!(audio_chunk_count > 0, "Qwen3 voice clone returned no audio.");
+        ensure!(
+            audio_chunk_count > 0,
+            "Qwen3 voice clone returned no audio."
+        );
         Ok(GenerationSummary {
             sample_rate: sample_rate.unwrap_or_default(),
             sample_count,
@@ -402,7 +408,10 @@ pub fn generate_custom_voice_units(
             request.instruct,
             request.controls,
         )?;
-        ensure!(generated.sample_rate > 0, "Qwen3 returned an invalid sample rate.");
+        ensure!(
+            generated.sample_rate > 0,
+            "Qwen3 returned an invalid sample rate."
+        );
         if let Some(expected) = sample_rate {
             ensure!(
                 generated.sample_rate == expected,
@@ -545,22 +554,37 @@ mod tests {
 
         assert!(engine.calls.len() >= 3);
         assert_eq!(
-            engine.calls.iter().map(|call| call.text.as_str()).collect::<String>(),
+            engine
+                .calls
+                .iter()
+                .map(|call| call.text.as_str())
+                .collect::<String>(),
             text
         );
         assert!(engine.calls.iter().all(|call| call.speaker == "uncle_fu"));
         assert!(engine.calls.iter().all(|call| call.language == "italian"));
-        assert!(engine.calls.iter().all(|call| call.instruct == "Speak warmly"));
+        assert!(
+            engine
+                .calls
+                .iter()
+                .all(|call| call.instruct == "Speak warmly")
+        );
         assert!(engine.calls.iter().all(|call| call.controls == controls));
         assert_eq!(summary.audio_chunk_count, engine.calls.len());
         assert_eq!(summary.sample_rate, 24_000);
         assert_eq!(sink.chunks.len(), engine.calls.len());
         assert!(sink.chunks.iter().all(|chunk| chunk.0 == [0.0, 0.5]));
-        assert!(sink.chunks.iter().all(|chunk| chunk.3 == engine.calls.len()));
+        assert!(
+            sink.chunks
+                .iter()
+                .all(|chunk| chunk.3 == engine.calls.len())
+        );
         assert_eq!(sink.chunks.last().unwrap().4, 0);
-        assert!(sink.chunks[..sink.chunks.len() - 1]
-            .iter()
-            .all(|chunk| chunk.4 == 4_800));
+        assert!(
+            sink.chunks[..sink.chunks.len() - 1]
+                .iter()
+                .all(|chunk| chunk.4 == 4_800)
+        );
     }
 
     #[test]

@@ -16,13 +16,22 @@ pub fn prepare_reference_wav(
     target_sample_rate: u32,
     max_duration_seconds: u32,
 ) -> Result<PreparedReferenceWav> {
-    ensure!(target_sample_rate > 0, "Qwen3 reference target sample rate must be positive.");
-    ensure!(max_duration_seconds > 0, "Qwen3 reference duration limit must be positive.");
+    ensure!(
+        target_sample_rate > 0,
+        "Qwen3 reference target sample rate must be positive."
+    );
+    ensure!(
+        max_duration_seconds > 0,
+        "Qwen3 reference duration limit must be positive."
+    );
 
     let mut reader = hound::WavReader::new(Cursor::new(bytes))
         .context("Qwen3 reference must be a valid WAV file.")?;
     let spec = reader.spec();
-    ensure!(spec.sample_rate > 0, "Qwen3 reference WAV has an invalid sample rate.");
+    ensure!(
+        spec.sample_rate > 0,
+        "Qwen3 reference WAV has an invalid sample rate."
+    );
     ensure!(
         matches!(spec.channels, 1 | 2),
         "Qwen3 reference WAV must be mono or stereo."
@@ -70,12 +79,9 @@ pub fn prepare_reference_wav(
     } else {
         let expected_len = ((mono.len() as u128 * u128::from(target_sample_rate))
             .div_ceil(u128::from(spec.sample_rate))) as usize;
-        let mut resampled = qwen3_tts_rs::audio::resample(
-            &mono,
-            spec.sample_rate,
-            target_sample_rate,
-        )
-        .context("Failed to resample Qwen3 reference audio.")?;
+        let mut resampled =
+            qwen3_tts_rs::audio::resample(&mono, spec.sample_rate, target_sample_rate)
+                .context("Failed to resample Qwen3 reference audio.")?;
         resampled.truncate(expected_len);
         resampled
     };
@@ -85,10 +91,9 @@ pub fn prepare_reference_wav(
         }
     }
 
-    let max_samples = usize::try_from(
-        u64::from(target_sample_rate) * u64::from(max_duration_seconds),
-    )
-    .context("Qwen3 reference duration limit is too large.")?;
+    let max_samples =
+        usize::try_from(u64::from(target_sample_rate) * u64::from(max_duration_seconds))
+            .context("Qwen3 reference duration limit is too large.")?;
     let truncated = samples.len() > max_samples;
     samples.truncate(max_samples);
     if samples.is_empty() {

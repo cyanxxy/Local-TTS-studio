@@ -4,18 +4,20 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "child_process";
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { fileURLToPath } from "url";
 import net from "net";
 import { beforeAll, describe, expect, it } from "vitest";
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST_PATH = path.join(ROOT_DIR, "rust", "local-tts-bridge", "Cargo.toml");
+const RUST_TARGET_DIR = process.env.CARGO_TARGET_DIR ?? path.join(
+  os.tmpdir(),
+  "open-tts-rust-target",
+  createHash("sha256").update(ROOT_DIR).digest("hex").slice(0, 12),
+);
 const BRIDGE_BINARY = path.join(
-  ROOT_DIR,
-  "rust",
-  "local-tts-bridge",
-  "target",
+  RUST_TARGET_DIR,
   "debug",
   process.platform === "win32" ? "open-tts-local-bridge.exe" : "open-tts-local-bridge",
 );
@@ -213,6 +215,7 @@ beforeAll(() => {
   const completed = spawnSync("cargo", ["build", "--quiet", "--manifest-path", MANIFEST_PATH], {
     cwd: ROOT_DIR,
     encoding: "utf-8",
+    env: { ...process.env, CARGO_TARGET_DIR: RUST_TARGET_DIR },
   });
   expect(completed.status, completed.stderr || completed.stdout).toBe(0);
 
@@ -247,15 +250,28 @@ describe("open-tts-local-bridge", () => {
         result: {
           ready: true,
           runtime: "rust",
-          package: "qwen_tts",
-          packageVersion: "0.1.1",
-          recommendedDeviceMap: "auto",
-          recommendedDtype: "auto",
-          recommendedAttention: "eager",
+          package: "qwen3-tts-rs",
+          packageVersion: "0.2.2",
+          upstreamRevision: "288a716ce38a91c826dd67968c75d1dd4b0f07bc",
+          provider: process.platform === "darwin" ? "mlx" : expect.stringMatching(/^(cuda|cpu)$/),
         },
       });
     } finally {
       fs.rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it("contains no nested Qwen process or HTTP implementation", () => {
+    const source = fs.readFileSync(path.join(ROOT_DIR, "rust", "local-tts-bridge", "src", "main.rs"), "utf-8");
+    for (const obsolete of [
+      "OPEN_TTS_QWEN3_MLX",
+      "Qwen3MlxWorkerHost",
+      "Qwen3MlxApiServerHost",
+      "stream_qwen3_mlx_api_speech",
+      "resolve_qwen3_mlx_tts_path",
+      "qwen_tts::",
+    ]) {
+      expect(source).not.toContain(obsolete);
     }
   });
 

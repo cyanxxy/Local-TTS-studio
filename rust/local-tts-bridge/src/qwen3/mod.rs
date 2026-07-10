@@ -9,14 +9,11 @@ mod reference;
     all(target_os = "macos", target_arch = "aarch64"),
     target_os = "windows"
 ))]
-#[allow(dead_code)] // Removed when the bridge cutover wires the runtime in Task 5.
 mod runtime;
 mod text;
 
-#[allow(dead_code)] // Removed when probe metadata uses the revision in Task 5.
 pub const UPSTREAM_REVISION: &str = "288a716ce38a91c826dd67968c75d1dd4b0f07bc";
 
-#[allow(dead_code)] // Removed when probe metadata uses the provider in Task 5.
 pub const fn compiled_provider() -> &'static str {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -34,6 +31,17 @@ pub const fn compiled_provider() -> &'static str {
         "unsupported"
     }
 }
+
+pub(super) use config::GenerationControls;
+pub(super) use model_files::ExpectedModelType;
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+))]
+pub(super) use runtime::{
+    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneRequest,
+    resolved_provider,
+};
 
 #[cfg(test)]
 mod tests {

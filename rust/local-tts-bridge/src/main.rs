@@ -1,98 +1,47 @@
 mod neucodec_encoder;
 mod qwen3;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use candle_core::{DType, Device};
 use clap::{Parser, ValueEnum};
-use qwen_tts::io::ModelArgs;
-use qwen_tts::model::loader::{LoaderConfig, ModelLoader};
-use qwen_tts::model::options::CustomVoiceOptions;
-use qwen_tts::synthesis::detect_mode::DetectedMode;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha1::{Digest, Sha1};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use tungstenite::handshake::machine::TryParse;
 use tungstenite::handshake::server::{Request, Response, create_response, write_response};
 use tungstenite::http::StatusCode;
 use tungstenite::protocol::{Role, WebSocketConfig};
 use tungstenite::{Message, WebSocket};
 
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+))]
+use qwen3::{
+    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneRequest,
+    resolved_provider,
+};
+use qwen3::{ExpectedModelType, GenerationControls};
+
 const RESULT_PREFIX: &str = "__RESULT__";
 const PORT_PREFIX: &str = "__PORT__";
 const MAX_WEBSOCKET_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WEBSOCKET_HANDSHAKE_BYTES: usize = 64 * 1024;
 const MAX_AUDIO_CHUNK_SAMPLES: usize = 262_144;
-// Cap MLX worker stdout frames before allocating (i16 PCM; ~10 min at 48 kHz).
-const MAX_WORKER_FRAME_PAYLOAD_BYTES: usize = 48_000 * 600 * 2;
-const QWEN3_AUTO_MODEL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
-const QWEN3_MLX_CUSTOMVOICE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
-const QWEN3_MLX_CUSTOMVOICE_17B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit";
-const QWEN3_MLX_BASE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
-const QWEN3_MLX_BASE_17B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit";
-// The model's `talker_config.spk_id` keys are lowercase (ryan, vivian, serena,
-// uncle_fu, aiden, ono_anna, sohee, eric, dylan) and `validate_speaker_value`
-// is case-sensitive. The UI/IPC keep capitalized display names; the bridge
-// lowercases before generation (see `qwen3_speaker_id`). Keep this default
-// lowercase so the no-speaker fallback also matches a real spk_id key.
-const QWEN3_DEFAULT_SPEAKER: &str = "ryan";
-const QWEN3_DEFAULT_LANGUAGE: &str = "English";
-const QWEN3_DEFAULT_MAX_NEW_TOKENS: usize = 1536;
-const QWEN3_CUSTOM_VOICE_MAX_UNIT_CHARS: usize = 420;
-// The Candle and one-shot tts paths synthesize units sequentially and stream
-// each unit as it completes, so the first unit's size bounds time-to-first-
-// audio. Keep it deliberately small (roughly one sentence) and let later units
-// use the full budget for throughput.
-const QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS: usize = 140;
-const QWEN3_MLX_API_SERVER_START_TIMEOUT_SEC: u64 = 180;
-const QWEN3_MLX_API_SERVER_HEALTH_REQUEST_TIMEOUT_SEC: u64 = 3;
-// Generous inactivity deadline for child-process output: first-run model
-// downloads and slow CPU inference legitimately go quiet for a long time, but a
-// wedged child must eventually surface an error instead of hanging forever
-// (the stderr heartbeat would otherwise re-arm the host watchdog indefinitely).
-const CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC: u64 = 600;
-// Once the api_server has produced its first audio delta, deltas arrive at
-// token rate; a much shorter inactivity deadline lets a wedged mid-stream
-// server fail in minutes instead of the 10-minute pre-first-audio budget
-// (which must stay long enough to cover a first-run model download/load).
-const QWEN3_MLX_API_STREAM_INACTIVITY_TIMEOUT_SEC: u64 = 120;
 const WEBSOCKET_READ_TIMEOUT_SEC: u64 = 10;
-// Total wall-clock budget for the HTTP upgrade: the per-read timeout alone
-// would let a client trickle one byte every <10s and hold the single-threaded
-// accept loop hostage indefinitely (slow-loris).
 const WEBSOCKET_HANDSHAKE_DEADLINE_SEC: u64 = 10;
-// Generous idle read timeout after upgrade. The main recv loop is idle for the
-// whole duration of a generation (the bridge only writes then), so this must be
-// far longer than any legitimate generation; on timeout the loop sends a Ping
-// and keeps waiting, so an idle-but-alive host is never disconnected. Combined
-// with SO_KEEPALIVE this ensures a host that dies without FIN cannot wedge the
-// bridge forever.
 const WEBSOCKET_IDLE_READ_TIMEOUT_SEC: u64 = 30 * 60;
-// Cap a single SSE line from the Qwen3 MLX api_server before buffering it.
-// Base64 PCM deltas are far smaller than this; an unbounded read_line would
-// let a misbehaving server grow memory without limit.
-const MAX_SSE_LINE_BYTES: u64 = 32 * 1024 * 1024;
-// Keep the newest N cached voice-clone reference WAVs; older ones are swept.
-const QWEN3_REFERENCE_CACHE_MAX_ENTRIES: usize = 32;
-const QWEN3_CUSTOM_VOICE_MIN_SENTENCE_CHARS: usize = 40;
 const NEUTTS_DEFAULT_MODEL: &str = "neuphonic/neutts-nano-q4-gguf";
-const WORKER_FRAME_HEADER_BYTES: usize = 9;
-const WORKER_INPUT_SPEAK: u8 = 1;
-const WORKER_INPUT_SHUTDOWN: u8 = 3;
-const WORKER_OUTPUT_READY: u8 = 1;
-const WORKER_OUTPUT_AUDIO_START: u8 = 2;
-const WORKER_OUTPUT_AUDIO_CHUNK: u8 = 3;
-const WORKER_OUTPUT_AUDIO_DONE: u8 = 4;
-const WORKER_OUTPUT_ERROR: u8 = 5;
+const QWEN3_MLX_CUSTOMVOICE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
+const QWEN3_MLX_BASE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
+const QWEN3_LIBTORCH_CUSTOMVOICE_06B_MODEL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice";
+const QWEN3_LIBTORCH_BASE_06B_MODEL: &str = "Qwen/Qwen3-TTS-12Hz-0.6B-Base";
 
 #[derive(Debug, Parser)]
 #[command(about = "Open TTS local runtime bridge")]
@@ -134,34 +83,27 @@ struct WebSocketRequest {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Qwen3Payload {
     text: String,
     mode: Option<String>,
-    model_repo: Option<String>,
-    base_model_path: Option<String>,
+    model_repo: String,
+    model_path: String,
     reference_audio_base64: Option<String>,
     reference_text: Option<String>,
     speaker: Option<String>,
     language: Option<String>,
     instruct: Option<String>,
-    device_map: Option<String>,
-    dtype: Option<String>,
-    attn_implementation: Option<String>,
     temperature: Option<f64>,
-    top_k: Option<usize>,
-    top_p: Option<f64>,
-    max_new_tokens: Option<usize>,
+    top_k: Option<i64>,
+    max_new_tokens: Option<i64>,
 }
 
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Qwen3WarmPayload {
-    base_model_path: Option<String>,
-    model_repo: Option<String>,
-    device_map: Option<String>,
-    dtype: Option<String>,
-    attn_implementation: Option<String>,
+    mode: String,
+    model_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,126 +116,21 @@ struct NeuttsPayload {
     model_repo: Option<String>,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-struct Qwen3Key {
-    model_repo: String,
-    dtype: String,
-    device: String,
-    attention: String,
-}
-
-struct Qwen3Host {
-    key: Qwen3Key,
-    model: qwen_tts::model::Model,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Qwen3MlxKey {
-    worker_path: PathBuf,
-    model_path: PathBuf,
-    reference_audio_digest: String,
-    reference_text: String,
-    language: String,
-    output_sample_rate: u32,
-    block_size: usize,
-    streaming_chunk_size: usize,
-    top_k: usize,
-    max_new_tokens: usize,
-    temperature: String,
-}
-
-struct Qwen3MlxWorkerHost {
-    key: Qwen3MlxKey,
-    child: Child,
-    child_pid: u32,
-    resident_shutdown: Arc<ResidentProcessShutdown>,
-    stdin: ChildStdin,
-    /// Frames parsed from the worker's stdout on a dedicated reader thread, so
-    /// receives can carry an inactivity deadline (`recv_worker_frame`). The
-    /// channel disconnects on stdout EOF; the thread exits with it.
-    frames: mpsc::Receiver<Result<WorkerFrame>>,
-    next_request_id: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Qwen3MlxApiServerKey {
-    api_server_path: PathBuf,
-    model_path: PathBuf,
-}
-
-struct Qwen3MlxApiServerHost {
-    key: Qwen3MlxApiServerKey,
-    child: Child,
-    child_pid: u32,
-    resident_shutdown: Arc<ResidentProcessShutdown>,
-    host: String,
-    port: u16,
-}
-
 struct NeuttsHost {
     model_repo: String,
     model: neutts::NeuTTS,
 }
 
-impl RuntimeState {
-    fn ensure_neutts_encoder(
-        &mut self,
-        progress: &mut dyn FnMut(String),
-    ) -> Result<&neucodec_encoder::NeuCodecRtenEncoder> {
-        if self.neutts_encoder.is_none() {
-            self.neutts_encoder = Some(neucodec_encoder::NeuCodecRtenEncoder::ensure(
-                &self.cache_dir,
-                progress,
-            )?);
-        }
-        Ok(self.neutts_encoder.as_ref().expect("encoder just set"))
-    }
-}
-
 struct RuntimeState {
     model: LocalModel,
     cache_dir: PathBuf,
-    qwen3: Option<Qwen3Host>,
-    qwen3_mlx: Option<Qwen3MlxWorkerHost>,
-    qwen3_mlx_api: Option<Qwen3MlxApiServerHost>,
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        target_os = "windows"
+    ))]
+    qwen3: Qwen3Runtime,
     neutts: Option<NeuttsHost>,
     neutts_encoder: Option<neucodec_encoder::NeuCodecRtenEncoder>,
-    resident_shutdown: Arc<ResidentProcessShutdown>,
-}
-
-/// Tracks MLX child process groups so SIGTERM/SIGINT can reap grandchildren
-/// before exit (Drop does not run on signal termination).
-#[derive(Default)]
-struct ResidentProcessShutdown {
-    pids: Mutex<Vec<u32>>,
-}
-
-impl ResidentProcessShutdown {
-    fn register(&self, pid: u32) {
-        if pid > 0 {
-            self.pids
-                .lock()
-                .expect("resident shutdown mutex poisoned")
-                .push(pid);
-        }
-    }
-
-    fn unregister(&self, pid: u32) {
-        if pid > 0 {
-            self.pids
-                .lock()
-                .expect("resident shutdown mutex poisoned")
-                .retain(|registered| *registered != pid);
-        }
-    }
-
-    fn shutdown_all(&self) {
-        let pids: Vec<u32> =
-            std::mem::take(&mut *self.pids.lock().expect("resident shutdown mutex poisoned"));
-        for pid in pids {
-            kill_process_group(pid);
-        }
-    }
 }
 
 struct GenerationOutput {
@@ -306,119 +143,9 @@ struct GenerationOutput {
     phase_timings: serde_json::Map<String, Value>,
 }
 
-struct SelectedQwen3Device {
-    resolved: String,
-    device: Device,
-    warnings: Vec<String>,
-}
-
 struct StreamedAudioSummary {
     sample_count: usize,
     audio_chunk_count: usize,
-}
-
-struct WorkerFrame {
-    frame_type: u8,
-    request_id: u32,
-    payload: Vec<u8>,
-}
-
-struct Qwen3ReferenceAudio {
-    path: PathBuf,
-    digest: String,
-}
-
-struct Qwen3MlxWorkerConfig<'a> {
-    worker_path: &'a PathBuf,
-    model_path: &'a PathBuf,
-    reference_audio_path: &'a PathBuf,
-    reference_text: &'a str,
-    language: &'a str,
-    output_sample_rate: u32,
-    block_size: usize,
-    streaming_chunk_size: usize,
-    top_k: usize,
-    max_new_tokens: usize,
-    temperature: f64,
-}
-
-struct Qwen3MlxStreamResult {
-    sample_rate: usize,
-    sample_count: usize,
-    audio_chunk_count: usize,
-}
-
-fn is_client_disconnect(err: &anyhow::Error) -> bool {
-    for cause in err.chain() {
-        if let Some(ws_err) = cause.downcast_ref::<tungstenite::Error>() {
-            match ws_err {
-                tungstenite::Error::ConnectionClosed
-                | tungstenite::Error::AlreadyClosed
-                | tungstenite::Error::Io(_) => return true,
-                _ => {}
-            }
-        }
-    }
-    false
-}
-
-#[cfg(unix)]
-fn spawn_in_own_process_group(command: &mut Command) -> Result<Child> {
-    use std::os::unix::process::CommandExt;
-
-    unsafe {
-        command.pre_exec(|| {
-            // SAFETY: pre_exec runs in the child between fork and exec; only async-signal-safe
-            // calls are allowed. setpgid is async-signal-safe.
-            if libc::setpgid(0, 0) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
-    command.spawn().map_err(|err| err.into())
-}
-
-#[cfg(not(unix))]
-fn spawn_in_own_process_group(command: &mut Command) -> Result<Child> {
-    command.spawn().map_err(|err| err.into())
-}
-
-#[cfg(unix)]
-fn kill_process_group(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    // SAFETY: kill with a negative pid targets the process group; best-effort cleanup.
-    unsafe {
-        let pgid = -(pid as libc::pid_t);
-        let _ = libc::kill(pgid, libc::SIGTERM);
-        thread::sleep(Duration::from_millis(200));
-        let _ = libc::kill(pgid, libc::SIGKILL);
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(pid: u32) {
-    if pid == 0 {
-        return;
-    }
-    let mut child = Command::new("cmd")
-        .args(["/C", &format!("taskkill /PID {pid} /T /F")])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
-    if let Ok(mut child) = child {
-        let _ = child.wait();
-    }
-}
-
-fn install_resident_shutdown_handler(resident_shutdown: Arc<ResidentProcessShutdown>) {
-    let _ = ctrlc::set_handler(move || {
-        resident_shutdown.shutdown_all();
-        std::process::exit(0);
-    });
 }
 
 fn main() {
@@ -429,11 +156,10 @@ fn main() {
     };
 
     if let Err(err) = result {
-        let details = format!("{err:#}");
         let _ = emit_result(&json!({
             "ok": false,
             "error": err.to_string(),
-            "details": details,
+            "details": format!("{err:#}"),
         }));
         std::process::exit(1);
     }
@@ -453,33 +179,7 @@ fn run_probe(cli: &Cli) -> Result<()> {
     })?;
 
     let result = match cli.model {
-        LocalModel::Qwen3 => json!({
-            "ready": true,
-            "message": "Rust Qwen3-TTS runtime is ready. Model files download on first generation.",
-            "runtime": "rust",
-            "package": "qwen_tts",
-            "packageVersion": "0.1.1",
-            // Authoritative engine availability as the bridge itself resolves
-            // it (env vars + bundled siblings). The host surfaces this so a
-            // missing api_server can't silently degrade every generation to
-            // the per-unit one-shot tts fallback.
-            "mlxEngines": {
-                "apiServer": resolve_qwen3_mlx_api_server_path().is_ok(),
-                "tts": resolve_qwen3_mlx_tts_path().is_ok(),
-                "worker": std::env::var("OPEN_TTS_QWEN3_MLX_WORKER")
-                    .map(PathBuf::from)
-                    .is_ok_and(|path| path.exists()),
-            },
-            "recommendedModelRepo": QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
-            "recommendedBaseModelRepo": QWEN3_MLX_BASE_06B_MODEL,
-            "recommendedDeviceMap": "auto",
-            "recommendedDtype": "auto",
-            "recommendedAttention": "eager",
-            "warnings": [
-                "Qwen3 defaults to the upstream MLX CustomVoice 6-bit profile on Apple Silicon when OPEN_TTS_QWEN3_MLX_API_SERVER (or OPEN_TTS_QWEN3_MLX_TTS) and a local MLX model directory are configured.",
-                "Candle CustomVoice remains available as a fallback, and Base voice cloning uses pibot-tts-worker when explicitly selected."
-            ],
-        }),
+        LocalModel::Qwen3 => qwen3_probe_result(),
         LocalModel::Neutts => json!({
             "ready": true,
             "message": "Rust NeuTTS runtime is ready. Upload a WAV reference clip or pre-encoded NeuCodec .npy codes before generating.",
@@ -493,8 +193,51 @@ fn run_probe(cli: &Cli) -> Result<()> {
         }),
     };
 
-    emit_result(&json!({ "ok": true, "result": result }))?;
-    Ok(())
+    emit_result(&json!({ "ok": true, "result": result }))
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+))]
+fn qwen3_probe_result() -> Value {
+    let (recommended_model, recommended_base_model) = if cfg!(target_os = "macos") {
+        (QWEN3_MLX_CUSTOMVOICE_06B_MODEL, QWEN3_MLX_BASE_06B_MODEL)
+    } else {
+        (
+            QWEN3_LIBTORCH_CUSTOMVOICE_06B_MODEL,
+            QWEN3_LIBTORCH_BASE_06B_MODEL,
+        )
+    };
+    json!({
+        "ready": true,
+        "message": "Native Qwen3-TTS runtime is ready. Download or select a validated model directory before generation.",
+        "runtime": "rust",
+        "package": "qwen3-tts-rs",
+        "packageVersion": "0.2.2",
+        "upstreamRevision": qwen3::UPSTREAM_REVISION,
+        "provider": resolved_provider(),
+        "recommendedModelRepo": recommended_model,
+        "recommendedBaseModelRepo": recommended_base_model,
+        "warnings": [],
+    })
+}
+
+#[cfg(not(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+)))]
+fn qwen3_probe_result() -> Value {
+    json!({
+        "ready": false,
+        "message": "Qwen3-TTS is supported only on Apple Silicon macOS and Windows.",
+        "runtime": "rust",
+        "package": "qwen3-tts-rs",
+        "packageVersion": "0.2.2",
+        "upstreamRevision": qwen3::UPSTREAM_REVISION,
+        "provider": qwen3::compiled_provider(),
+        "warnings": ["This platform has no packaged Qwen3 tensor provider."],
+    })
 }
 
 fn run_websocket_server(cli: &Cli) -> Result<()> {
@@ -503,7 +246,6 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         .as_deref()
         .filter(|token| !token.is_empty())
         .context("WebSocket bridge requires a non-empty --auth-token.")?;
-
     std::fs::create_dir_all(&cli.cache_dir).with_context(|| {
         format!(
             "Failed to create cache directory {}",
@@ -526,18 +268,16 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         .flush()
         .context("Failed announcing WebSocket bridge port")?;
 
-    let resident_shutdown = Arc::new(ResidentProcessShutdown::default());
-    install_resident_shutdown_handler(Arc::clone(&resident_shutdown));
-
     let mut state = RuntimeState {
         model: cli.model,
         cache_dir: cli.cache_dir.clone(),
-        qwen3: None,
-        qwen3_mlx: None,
-        qwen3_mlx_api: None,
+        #[cfg(any(
+            all(target_os = "macos", target_arch = "aarch64"),
+            target_os = "windows"
+        ))]
+        qwen3: Qwen3Runtime::new(),
         neutts: None,
         neutts_encoder: None,
-        resident_shutdown,
     };
 
     loop {
@@ -562,11 +302,9 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         };
         let _ = websocket.close();
         if should_shutdown {
-            break;
+            return Ok(());
         }
     }
-
-    Ok(())
 }
 
 fn serve_websocket_connection(
@@ -587,99 +325,81 @@ fn serve_websocket_connection(
                 continue;
             }
         };
-
         if request.command.as_deref() == Some("shutdown") {
             return Ok(true);
         }
 
         let request_id = request.request_id.unwrap_or_default();
         let payload = request.payload.unwrap_or(Value::Null);
-
         if request.command.as_deref() == Some("warm") {
-            // Best-effort warm-up: pre-load the resident engine so the first
-            // generation doesn't pay the model load. Uses the same heartbeat
-            // as generation because the load is one long blocking call.
             let outcome = {
                 let _heartbeat = Heartbeat::start();
                 state.warm(payload)
             };
-            match outcome {
-                Ok(result) => {
-                    if let Err(err) = websocket.send_json(&json!({
-                        "type": "result",
-                        "requestId": request_id,
-                        "ok": true,
-                        "result": result,
-                    })) {
-                        if is_client_disconnect(&err) {
-                            return Ok(false);
-                        }
-                        return Err(err);
-                    }
-                }
-                Err(err) => {
-                    if let Err(send_err) = websocket.send_json(&json!({
-                        "type": "result",
-                        "requestId": request_id,
-                        "ok": false,
-                        "error": err.to_string(),
-                        "details": format!("{err:#}"),
-                    })) {
-                        if is_client_disconnect(&send_err) {
-                            return Ok(false);
-                        }
-                        return Err(send_err);
-                    }
-                }
-            }
+            send_request_outcome(websocket, &request_id, outcome)?;
             continue;
         }
-        // Model download and CPU inference are single blocking calls that emit no
-        // intermediate frames. The host re-arms its inactivity watchdog on any
-        // stdout/stderr from the child, so emit a lightweight stderr heartbeat for
-        // the duration of the blocking work to keep legitimate long-running
-        // generations (multi-GB first-run download, slow CPU inference) alive.
-        // The heartbeat stops before any result/audio frame is written, so it
-        // never interleaves with the WebSocket stream.
+
         let outcome = {
             let _heartbeat = Heartbeat::start();
             state.generate(&request_id, payload, websocket)
         };
         match outcome {
-            Ok(output) => {
-                if let Err(err) = send_generation_result(websocket, &request_id, output) {
-                    if is_client_disconnect(&err) {
-                        return Ok(false);
-                    }
-                    return Err(err);
-                }
-            }
+            Ok(output) => send_generation_result(websocket, &request_id, output)?,
             Err(err) => {
                 if is_client_disconnect(&err) {
                     return Ok(false);
                 }
-                if let Err(send_err) = websocket.send_json(&json!({
-                    "type": "result",
-                    "requestId": request_id,
-                    "ok": false,
-                    "error": err.to_string(),
-                    "details": format!("{err:#}"),
-                })) {
-                    if is_client_disconnect(&send_err) {
-                        return Ok(false);
-                    }
-                    return Err(send_err);
-                }
+                send_request_error(websocket, &request_id, &err)?;
             }
         }
     }
 }
 
+fn send_request_outcome(
+    websocket: &mut WebSocketConnection,
+    request_id: &str,
+    outcome: Result<Value>,
+) -> Result<()> {
+    match outcome {
+        Ok(result) => websocket.send_json(&json!({
+            "type": "result",
+            "requestId": request_id,
+            "ok": true,
+            "result": result,
+        })),
+        Err(err) => send_request_error(websocket, request_id, &err),
+    }
+}
+
+fn send_request_error(
+    websocket: &mut WebSocketConnection,
+    request_id: &str,
+    error: &anyhow::Error,
+) -> Result<()> {
+    websocket.send_json(&json!({
+        "type": "result",
+        "requestId": request_id,
+        "ok": false,
+        "error": error.to_string(),
+        "details": format!("{error:#}"),
+    }))
+}
+
 impl RuntimeState {
-    /// Pre-load a resident engine so the first generation skips the model
-    /// load. Unsupported configurations report `warmed: false` instead of
-    /// failing: warm-up is opportunistic and must never surface setup errors
-    /// the generation path would explain better.
+    fn ensure_neutts_encoder(
+        &mut self,
+        progress: &mut dyn FnMut(String),
+    ) -> Result<&neucodec_encoder::NeuCodecRtenEncoder> {
+        if self.neutts_encoder.is_none() {
+            self.neutts_encoder = Some(neucodec_encoder::NeuCodecRtenEncoder::ensure(
+                &self.cache_dir,
+                progress,
+            )?);
+        }
+        Ok(self.neutts_encoder.as_ref().expect("encoder just set"))
+    }
+
     fn warm(&mut self, payload: Value) -> Result<Value> {
         match self.model {
             LocalModel::Qwen3 => self.warm_qwen3(payload),
@@ -690,82 +410,29 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        target_os = "windows"
+    ))]
     fn warm_qwen3(&mut self, payload: Value) -> Result<Value> {
-        let payload: Qwen3WarmPayload = serde_json::from_value(payload).unwrap_or_default();
-        // Route by the requested repo when the caller names one. Without a
-        // repo, keep the historical behavior: warm the MLX api_server.
-        if let Some(repo) = payload.model_repo.as_deref() {
-            let model_repo = normalize_qwen3_model(Some(repo))?;
-            if model_repo.contains("-Base-") {
-                return Ok(json!({
-                    "warmed": false,
-                    "message": "Qwen3 Base voice cloning cannot be warmed without reference audio.",
-                }));
-            }
-            if !is_qwen3_mlx_custom_voice_model(&model_repo) {
-                return self.warm_qwen3_candle(&model_repo, &payload);
-            }
-        }
-        let api_server_path = match resolve_qwen3_mlx_api_server_path() {
-            Ok(path) => path,
-            Err(err) => {
-                return Ok(json!({
-                    "warmed": false,
-                    "message": format!("Qwen3 MLX api_server is unavailable: {err}"),
-                }));
-            }
-        };
-        let model_path = match resolve_qwen3_mlx_model_path(
-            payload.base_model_path.as_deref(),
-            "Qwen3 MLX warm-up",
-        ) {
-            Ok(path) => path,
-            Err(err) => {
-                return Ok(json!({
-                    "warmed": false,
-                    "message": format!("{err}"),
-                }));
-            }
-        };
-        let key = Qwen3MlxApiServerKey {
-            api_server_path,
-            model_path,
-        };
-        self.ensure_qwen3_mlx_api_server(key)?;
+        let payload: Qwen3WarmPayload =
+            serde_json::from_value(payload).context("Invalid Qwen3 warm payload")?;
+        let model_type = parse_model_type(&payload.mode)?;
+        self.qwen3
+            .warm(Path::new(&payload.model_path), model_type)?;
         Ok(json!({
             "warmed": true,
-            "message": "Qwen3 MLX api_server is loaded and resident.",
+            "message": "Qwen3 model is loaded in the resident Rust bridge.",
+            "provider": resolved_provider(),
         }))
     }
 
-    /// Pre-load the in-process Candle model so the first generation skips the
-    /// weight load. Only warms from already-downloaded files: warm-up is
-    /// best-effort and must never kick off a multi-GB HuggingFace download.
-    fn warm_qwen3_candle(&mut self, model_repo: &str, payload: &Qwen3WarmPayload) -> Result<Value> {
-        let cached = hf_hub::Cache::from_env()
-            .model(model_repo.to_string())
-            .get("model.safetensors")
-            .is_some();
-        if !cached {
-            return Ok(json!({
-                "warmed": false,
-                "message": format!("Qwen3 model {model_repo} is not downloaded yet; skipping warm-up."),
-            }));
-        }
-        let selected_device = select_qwen3_device(payload.device_map.as_deref())?;
-        let dtype = normalize_qwen3_dtype(payload.dtype.as_deref(), &selected_device.resolved)?;
-        let attention = normalize_qwen3_attention(payload.attn_implementation.as_deref())?;
-        let key = Qwen3Key {
-            model_repo: model_repo.to_string(),
-            dtype,
-            device: selected_device.resolved,
-            attention,
-        };
-        self.ensure_qwen3_model(&key, &selected_device.device)?;
-        Ok(json!({
-            "warmed": true,
-            "message": format!("Qwen3 Candle model {model_repo} is loaded and resident."),
-        }))
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        target_os = "windows"
+    )))]
+    fn warm_qwen3(&mut self, _payload: Value) -> Result<Value> {
+        bail!("Qwen3 is unavailable on this platform.")
     }
 
     fn generate(
@@ -780,6 +447,10 @@ impl RuntimeState {
         }
     }
 
+    #[cfg(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        target_os = "windows"
+    ))]
     fn generate_qwen3(
         &mut self,
         request_id: &str,
@@ -788,793 +459,79 @@ impl RuntimeState {
     ) -> Result<GenerationOutput> {
         let payload: Qwen3Payload =
             serde_json::from_value(payload).context("Invalid Qwen3 payload")?;
-        if payload.text.trim().is_empty() {
-            bail!("Text to synthesize is empty.");
-        }
-        let model_repo = normalize_qwen3_model(payload.model_repo.as_deref())?;
-        if payload.mode.as_deref() == Some("voiceClone") {
-            return self.generate_qwen3_voice_clone(request_id, payload, websocket);
-        }
-        if is_qwen3_mlx_custom_voice_model(&model_repo) {
-            return self
-                .generate_qwen3_mlx_custom_voice(request_id, payload, model_repo, websocket);
-        }
-        if model_repo.contains("-Base-") {
-            bail!(
-                "Qwen3 Base models require mode \"voiceClone\" with reference audio and transcript."
-            );
-        }
-        let started = Instant::now();
-        let mut phase_timings = serde_json::Map::new();
-        // Display speaker names are capitalized in the UI; the model's spk_id keys
-        // are lowercase and validation is case-sensitive, so normalize here.
-        let speaker = qwen3_speaker_id(payload.speaker.as_deref().unwrap_or(QWEN3_DEFAULT_SPEAKER));
-        let language = normalize_qwen3_language(
-            payload
-                .language
-                .as_deref()
-                .unwrap_or(QWEN3_DEFAULT_LANGUAGE),
-        )?;
-        let selected_device = select_qwen3_device(payload.device_map.as_deref())?;
-        let dtype = normalize_qwen3_dtype(payload.dtype.as_deref(), &selected_device.resolved)?;
-        let attention = normalize_qwen3_attention(payload.attn_implementation.as_deref())?;
-        let key = Qwen3Key {
-            model_repo: model_repo.clone(),
-            dtype: dtype.clone(),
-            device: selected_device.resolved.clone(),
-            attention,
-        };
-
-        websocket.send_progress(
-            request_id,
-            "model_load",
-            format!(
-                "Loading Rust Qwen3 model on {}: {model_repo}",
-                selected_device.resolved
-            ),
-            started,
-        )?;
-        let load_started = Instant::now();
-        self.ensure_qwen3_model(&key, &selected_device.device)?;
-        phase_timings.insert(
-            "modelLoadSec".to_string(),
-            json!(round_secs(load_started.elapsed().as_secs_f64())),
+        ensure!(
+            payload.temperature.is_none_or(f64::is_finite),
+            "Qwen3 temperature must be finite."
         );
-
-        let host = self.qwen3.as_ref().context("Qwen3 model was not loaded")?;
-        let options = CustomVoiceOptions {
-            max_new_tokens: Some(
-                payload
-                    .max_new_tokens
-                    .unwrap_or(QWEN3_DEFAULT_MAX_NEW_TOKENS),
-            ),
-            temperature: payload.temperature,
-            top_k: payload.top_k,
-            top_p: payload.top_p,
-            non_streaming_mode: Some(true),
-            ..Default::default()
-        };
-
-        let units = qwen3_custom_voice_units(payload.text.trim());
-        let mut sample_rate = 0_usize;
-        let mut sample_count = 0_usize;
-        let mut audio_chunk_count = 0_usize;
-        let mut inference_sec = 0_f64;
-        let mut output_encoding_sec = 0_f64;
-        for (index, unit) in units.iter().enumerate() {
-            websocket.send_progress(
-                request_id,
-                "inference",
-                format!(
-                    "Running Rust Qwen3 inference chunk {}/{}...",
-                    index + 1,
-                    units.len()
-                ),
-                started,
-            )?;
-            let inference_started = Instant::now();
-            let result = host
-                .model
-                .generate_custom_voice_from_text(
-                    unit,
-                    &speaker,
-                    &language,
-                    payload.instruct.as_deref(),
-                    Some(options.clone()),
-                )
-                .map_err(|err| anyhow::anyhow!("Qwen3 generation failed: {err}"))?;
-            inference_sec += inference_started.elapsed().as_secs_f64();
-
-            if sample_rate == 0 {
-                sample_rate = result.sample_rate;
-            } else if sample_rate != result.sample_rate {
-                bail!(
-                    "Qwen3 generation returned inconsistent sample rates: {} then {}.",
-                    sample_rate,
-                    result.sample_rate
-                );
-            }
-
-            let output_started = Instant::now();
-            let samples = result
-                .audio
-                .flatten_all()
-                .and_then(|audio| audio.to_dtype(DType::F32))
-                .and_then(|audio| audio.to_vec1::<f32>())
-                .map_err(|err| anyhow::anyhow!("Failed to read Qwen3 audio tensor: {err}"))?;
-            output_encoding_sec += output_started.elapsed().as_secs_f64();
-            if samples.is_empty() {
-                bail!("Qwen3 generation produced an empty audio chunk.");
-            }
-
-            let silence_after_samples = if index + 1 < units.len() {
-                (sample_rate as f64 * 0.2).round() as usize
-            } else {
-                0
-            };
-            websocket.send_json(&json!({
-                "type": "audio_chunk",
-                "requestId": request_id,
-                "index": index,
-                "total": units.len(),
-                "sampleRate": sample_rate,
-                "sampleCount": samples.len(),
-                "silenceAfterSamples": silence_after_samples,
-            }))?;
-            websocket.send_binary(&float32_to_le_bytes(&samples))?;
-            if index == 0 {
-                phase_timings.insert(
-                    "firstAudioSec".to_string(),
-                    json!(round_secs(started.elapsed().as_secs_f64())),
-                );
-            }
-            sample_count += samples.len() + silence_after_samples;
-            audio_chunk_count += 1;
-        }
-        phase_timings.insert("inferenceSec".to_string(), json!(round_secs(inference_sec)));
-        phase_timings.insert(
-            "outputEncodingSec".to_string(),
-            json!(round_secs(output_encoding_sec)),
+        let model_type = parse_model_type(payload.mode.as_deref().unwrap_or("customVoice"))?;
+        let repo_is_base = payload.model_repo.contains("-Base");
+        ensure!(
+            repo_is_base == (model_type == ExpectedModelType::Base),
+            "Qwen3 model repository does not match the requested mode."
         );
-
-        Ok(GenerationOutput {
-            samples: Vec::new(),
-            sample_rate,
-            model_repo,
-            device: Some(selected_device.resolved),
-            warnings: selected_device.warnings,
-            streamed_audio: Some(StreamedAudioSummary {
-                sample_count,
-                audio_chunk_count,
-            }),
-            phase_timings,
-        })
-    }
-
-    fn generate_qwen3_mlx_custom_voice(
-        &mut self,
-        request_id: &str,
-        payload: Qwen3Payload,
-        model_repo: String,
-        websocket: &mut WebSocketConnection,
-    ) -> Result<GenerationOutput> {
+        let controls = GenerationControls::new(
+            payload.temperature.unwrap_or(0.9),
+            payload.top_k.unwrap_or(50),
+            payload.max_new_tokens.unwrap_or(1_536),
+        );
         let started = Instant::now();
-        let mut phase_timings = serde_json::Map::new();
-        let model_path = resolve_qwen3_mlx_model_path(
-            payload.base_model_path.as_deref(),
-            "Qwen3 MLX CustomVoice",
-        )?;
-        let speaker = qwen3_speaker_id(payload.speaker.as_deref().unwrap_or(QWEN3_DEFAULT_SPEAKER));
-        let language = normalize_qwen3_language(
-            payload
-                .language
-                .as_deref()
-                .unwrap_or(QWEN3_DEFAULT_LANGUAGE),
-        )?;
-        let instruct = payload
-            .instruct
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-
-        if let Ok(api_server_path) = resolve_qwen3_mlx_api_server_path() {
-            let key = Qwen3MlxApiServerKey {
-                api_server_path,
-                model_path: stable_path(&model_path),
-            };
-            websocket.send_progress(
-                request_id,
-                "model_load",
-                format!(
-                    "Loading Qwen3 MLX CustomVoice model: {}",
-                    model_path.display()
-                ),
-                started,
-            )?;
-            let model_load_started = Instant::now();
-            self.ensure_qwen3_mlx_api_server(key.clone())?;
-            phase_timings.insert(
-                "modelLoadSec".to_string(),
-                json!(round_secs(model_load_started.elapsed().as_secs_f64())),
-            );
-
-            websocket.send_progress(
-                request_id,
-                "inference",
-                "Running Qwen3 MLX CustomVoice inference…",
-                started,
-            )?;
-            let inference_started = Instant::now();
-            let mut audio_sent = false;
-            let mut retried = false;
-            let stream_result = loop {
-                // Re-ensure inside the loop so a retry after eviction respawns
-                // the server instead of failing on a missing host.
-                self.ensure_qwen3_mlx_api_server(key.clone())?;
-                let (host, port) = {
-                    let host = self
-                        .qwen3_mlx_api
-                        .as_ref()
-                        .context("Qwen3 MLX api_server host missing after startup.")?;
-                    (host.host.clone(), host.port)
-                };
-                match stream_qwen3_mlx_api_speech(
-                    &host,
-                    port,
-                    payload.text.trim(),
-                    &speaker,
-                    &language,
-                    instruct,
-                    websocket,
-                    request_id,
-                    started,
-                    &mut phase_timings,
-                    &mut audio_sent,
-                ) {
-                    Ok(result) => break result,
-                    Err(err) => {
-                        // A failed request can leave the resident api_server
-                        // dead or in a bad state; evict it (Drop kills the
-                        // child) so the next attempt respawns a fresh server.
-                        self.qwen3_mlx_api.take();
-                        // Retry once for transient failures, but only if no
-                        // audio reached the client yet — a retry after partial
-                        // audio would duplicate the stream prefix.
-                        if !retried && !audio_sent && !is_client_disconnect(&err) {
-                            retried = true;
-                            eprintln!(
-                                "Qwen3 MLX api_server request failed before any audio ({err:#}); retrying once with a fresh server."
-                            );
-                            continue;
-                        }
-                        return Err(err);
-                    }
-                }
-            };
-            phase_timings.insert(
-                "inferenceSec".to_string(),
-                json!(round_secs(inference_started.elapsed().as_secs_f64())),
-            );
-
-            return Ok(GenerationOutput {
-                samples: Vec::new(),
-                sample_rate: stream_result.sample_rate,
-                model_repo,
-                device: Some("mlx".to_string()),
-                warnings: Vec::new(),
-                streamed_audio: Some(StreamedAudioSummary {
-                    sample_count: stream_result.sample_count,
-                    audio_chunk_count: stream_result.audio_chunk_count,
-                }),
-                phase_timings,
-            });
-        }
-
-        self.generate_qwen3_mlx_custom_voice_via_tts(
+        let inference_started = Instant::now();
+        let mut sink = WebSocketQwenSink {
             request_id,
-            payload.text.trim(),
-            model_repo,
-            model_path,
-            speaker,
-            language,
-            instruct,
             websocket,
             started,
-            phase_timings,
-        )
-    }
-
-    fn generate_qwen3_mlx_custom_voice_via_tts(
-        &mut self,
-        request_id: &str,
-        text: &str,
-        model_repo: String,
-        model_path: PathBuf,
-        speaker: String,
-        language: String,
-        instruct: Option<&str>,
-        websocket: &mut WebSocketConnection,
-        started: Instant,
-        mut phase_timings: serde_json::Map<String, Value>,
-    ) -> Result<GenerationOutput> {
-        let tts_path = resolve_qwen3_mlx_tts_path()?;
-        let units = qwen3_custom_voice_units(text);
-        if units.is_empty() {
-            bail!("Qwen3 MLX CustomVoice received empty text.");
-        }
-
-        websocket.send_progress(
-            request_id,
-            "inference",
-            format!(
-                "Running upstream Qwen3 MLX CustomVoice tts ({} units): {}",
-                units.len(),
-                model_path.display()
-            ),
-            started,
-        )?;
-        let inference_started = Instant::now();
-        let mut sample_rate = 0_usize;
-        let mut sample_count = 0_usize;
-        let mut audio_chunk_count = 0_usize;
-
-        for (index, unit) in units.iter().enumerate() {
-            let run_dir = create_qwen3_mlx_run_dir(&self.cache_dir, request_id)?;
-            let mut command = Command::new(&tts_path);
-            command
-                .arg(&model_path)
-                .arg(unit)
-                .arg(&speaker)
-                .arg(&language)
-                .current_dir(&run_dir)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
-            if let Some(instruct) = instruct {
-                command.arg(instruct);
-            }
-
-            let output = match command.output() {
-                Ok(output) => output,
-                Err(err) => {
-                    let _ = std::fs::remove_dir_all(&run_dir);
-                    return Err(err).with_context(|| {
-                        format!(
-                            "Failed to run Qwen3 MLX CustomVoice tts binary {}",
-                            tts_path.display()
-                        )
-                    });
-                }
-            };
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let _ = std::fs::remove_dir_all(&run_dir);
-                bail!(
-                    "Qwen3 MLX CustomVoice tts failed with status {}. {}{}",
-                    output.status,
-                    stderr.trim(),
-                    if stdout.trim().is_empty() {
-                        String::new()
-                    } else {
-                        format!(" stdout: {}", stdout.trim())
-                    }
-                );
-            }
-
-            let output_wav = run_dir.join("output.wav");
-            let read_result = read_wav_as_f32(&output_wav);
-            let _ = std::fs::remove_dir_all(&run_dir);
-            let (samples, unit_sample_rate) = read_result?;
-            if samples.is_empty() {
-                bail!("Qwen3 MLX CustomVoice tts produced empty audio.");
-            }
-            if sample_rate == 0 {
-                sample_rate = unit_sample_rate;
-            } else if unit_sample_rate != sample_rate {
-                bail!("Qwen3 MLX CustomVoice tts returned inconsistent sample rates.");
-            }
-
-            let silence_after_samples = if index + 1 < units.len() {
-                sample_rate / 2
-            } else {
-                0
-            };
-            websocket.send_json(&json!({
-                "type": "audio_chunk",
-                "requestId": request_id,
-                "index": index,
-                "total": units.len(),
-                "sampleRate": sample_rate,
-                "sampleCount": samples.len(),
-                "silenceAfterSamples": silence_after_samples,
-            }))?;
-            websocket.send_binary(&float32_to_le_bytes(&samples))?;
-            if index == 0 {
-                phase_timings.insert(
-                    "firstAudioSec".to_string(),
-                    json!(round_secs(started.elapsed().as_secs_f64())),
-                );
-            }
-            sample_count += samples.len() + silence_after_samples;
-            audio_chunk_count += 1;
-        }
-
-        phase_timings.insert(
-            "inferenceSec".to_string(),
-            json!(round_secs(inference_started.elapsed().as_secs_f64())),
-        );
-        phase_timings.insert("outputEncodingSec".to_string(), json!(0.0));
-
-        Ok(GenerationOutput {
-            samples: Vec::new(),
-            sample_rate,
-            model_repo,
-            device: Some("mlx".to_string()),
-            warnings: vec![
-                "Qwen3 MLX CustomVoice fell back to one-shot tts because OPEN_TTS_QWEN3_MLX_API_SERVER is unavailable.".to_string(),
-            ],
-            streamed_audio: Some(StreamedAudioSummary {
-                sample_count,
-                audio_chunk_count,
-            }),
-            phase_timings,
-        })
-    }
-
-    fn generate_qwen3_voice_clone(
-        &mut self,
-        request_id: &str,
-        payload: Qwen3Payload,
-        websocket: &mut WebSocketConnection,
-    ) -> Result<GenerationOutput> {
-        let started = Instant::now();
-        let mut phase_timings = serde_json::Map::new();
-        let model_repo = normalize_qwen3_model(payload.model_repo.as_deref())?;
-        if !model_repo.contains("-Base-") {
-            bail!("Qwen3 voice cloning requires a Base model repository.");
-        }
-        let model_path = if let Some(path) = payload
-            .base_model_path
-            .as_deref()
-            .map(str::trim)
-            .filter(|path| !path.is_empty())
-        {
-            PathBuf::from(path)
-        } else {
-            std::env::var("OPEN_TTS_QWEN3_MLX_MODEL_DIR")
-                .map(PathBuf::from)
-                .context("Qwen3 Base voice cloning requires `baseModelPath` or OPEN_TTS_QWEN3_MLX_MODEL_DIR.")?
         };
-        if !model_path.exists() {
-            bail!(
-                "Qwen3 Base voice clone model directory does not exist: {}",
-                model_path.display()
-            );
-        }
-        let worker_path = std::env::var("OPEN_TTS_QWEN3_MLX_WORKER")
-            .map(PathBuf::from)
-            .context("Qwen3 Base voice cloning requires OPEN_TTS_QWEN3_MLX_WORKER pointing to pibot-tts-worker.")?;
-        if !worker_path.exists() {
-            bail!(
-                "Qwen3 MLX worker binary does not exist: {}",
-                worker_path.display()
-            );
-        }
-        let reference_text = payload
-            .reference_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .context("Qwen3 Base voice cloning requires referenceText.")?;
-        let reference_audio = payload
-            .reference_audio_base64
-            .as_deref()
-            .context("Qwen3 Base voice cloning requires referenceAudioBase64.")?;
-        let reference_audio = self.write_qwen3_reference_audio(reference_audio)?;
-        let language = normalize_qwen3_language(
-            payload
-                .language
-                .as_deref()
-                .unwrap_or(QWEN3_DEFAULT_LANGUAGE),
-        )?;
-        let output_sample_rate = 24_000_u32;
-        let block_size = 512_usize;
-        let streaming_chunk_size = 4_usize;
-        let top_k = payload.top_k.unwrap_or(50);
-        let max_new_tokens = payload
-            .max_new_tokens
-            .unwrap_or(QWEN3_DEFAULT_MAX_NEW_TOKENS);
-        let temperature = payload.temperature.unwrap_or(0.9);
-        let worker_path = stable_path(&worker_path);
-        let model_path = stable_path(&model_path);
-        let key = Qwen3MlxKey {
-            worker_path: worker_path.clone(),
-            model_path: model_path.clone(),
-            reference_audio_digest: reference_audio.digest.clone(),
-            reference_text: reference_text.to_string(),
-            language: language.clone(),
-            output_sample_rate,
-            block_size,
-            streaming_chunk_size,
-            top_k,
-            max_new_tokens,
-            temperature: temperature.to_string(),
-        };
-        let is_reuse = self.qwen3_mlx.as_ref().is_some_and(|host| host.key == key);
-
-        websocket.send_progress(
-            request_id,
-            "model_load",
-            if is_reuse {
-                format!(
-                    "Reusing upstream Qwen3 MLX worker: {}",
-                    model_path.display()
-                )
-            } else {
-                format!(
-                    "Starting upstream Qwen3 MLX worker: {}",
-                    model_path.display()
-                )
-            },
-            started,
-        )?;
-        let load_started = Instant::now();
-        self.ensure_qwen3_mlx_worker(
-            key,
-            Qwen3MlxWorkerConfig {
-                worker_path: &worker_path,
-                model_path: &model_path,
-                reference_audio_path: &reference_audio.path,
-                reference_text,
-                language: &language,
-                output_sample_rate,
-                block_size,
-                streaming_chunk_size,
-                top_k,
-                max_new_tokens,
-                temperature,
-            },
-        )?;
-        phase_timings.insert(
-            "modelLoadSec".to_string(),
-            json!(round_secs(load_started.elapsed().as_secs_f64())),
-        );
-
-        websocket.send_progress(
-            request_id,
-            "inference",
-            "Running upstream Qwen3 Base voice clone inference...",
-            started,
-        )?;
-        let inference_started = Instant::now();
-        let stream_result = {
-            let host = self
-                .qwen3_mlx
-                .as_mut()
-                .context("Qwen3 MLX worker was not started")?;
-            stream_qwen3_mlx_request(
-                host,
-                request_id,
-                payload.text.trim(),
-                output_sample_rate as usize,
-                websocket,
-            )
-        };
-        if stream_result.is_err() {
-            self.qwen3_mlx.take();
-        }
-        let stream_result = stream_result?;
-        phase_timings.insert(
-            "inferenceSec".to_string(),
-            json!(round_secs(inference_started.elapsed().as_secs_f64())),
-        );
-
-        Ok(GenerationOutput {
-            samples: Vec::new(),
-            sample_rate: stream_result.sample_rate,
-            model_repo,
-            device: Some("mlx".to_string()),
-            warnings: Vec::new(),
-            streamed_audio: Some(StreamedAudioSummary {
-                sample_count: stream_result.sample_count,
-                audio_chunk_count: stream_result.audio_chunk_count,
-            }),
-            phase_timings,
-        })
-    }
-
-    fn write_qwen3_reference_audio(&self, encoded: &str) -> Result<Qwen3ReferenceAudio> {
-        let encoded = encoded.trim();
-        let refs_dir = self.cache_dir.join("qwen3-voice-clone-refs");
-        std::fs::create_dir_all(&refs_dir)
-            .with_context(|| format!("Failed to create {}", refs_dir.display()))?;
-        cleanup_qwen3_reference_cache(&refs_dir);
-        // Hash the base64 payload (not the decoded bytes) so repeat requests
-        // with an already-cached reference skip the decode entirely.
-        let mut hasher = Sha1::new();
-        hasher.update(encoded.as_bytes());
-        let digest = hasher.finalize();
-        let digest = format!("{:x}", digest);
-        let filename = format!("ref-{digest}.wav");
-        let path = refs_dir.join(filename);
-        if !path.exists() {
-            let bytes = BASE64
-                .decode(encoded)
-                .context("Failed to decode Qwen3 reference WAV")?;
-            // Write-then-rename so a crash mid-write can never leave a
-            // truncated reference WAV that the exists() guard would reuse.
-            let temp_path = refs_dir.join(format!("ref-{digest}.wav.tmp-{}", std::process::id()));
-            std::fs::write(&temp_path, bytes).with_context(|| {
-                format!(
-                    "Failed to write Qwen3 reference WAV {}",
-                    temp_path.display()
-                )
-            })?;
-            std::fs::rename(&temp_path, &path).with_context(|| {
-                format!("Failed to finalize Qwen3 reference WAV {}", path.display())
-            })?;
-        }
-        Ok(Qwen3ReferenceAudio { path, digest })
-    }
-
-    fn ensure_qwen3_mlx_worker(
-        &mut self,
-        key: Qwen3MlxKey,
-        config: Qwen3MlxWorkerConfig<'_>,
-    ) -> Result<()> {
-        if self.qwen3_mlx.as_ref().is_some_and(|host| host.key == key) {
-            return Ok(());
-        }
-
-        self.qwen3_mlx.take();
-        let mut command = Command::new(config.worker_path);
-        command
-            .arg("--serve")
-            .arg("--model-name")
-            .arg(config.model_path)
-            .arg("--ref-audio")
-            .arg(config.reference_audio_path)
-            .arg("--ref-text")
-            .arg(config.reference_text)
-            .arg("--language")
-            .arg(config.language)
-            .arg("--output-sample-rate")
-            .arg(config.output_sample_rate.to_string())
-            .arg("--temperature")
-            .arg(config.temperature.to_string())
-            .arg("--top-k")
-            .arg(config.top_k.to_string())
-            .arg("--max-new-tokens")
-            .arg(config.max_new_tokens.to_string())
-            .arg("--blocksize")
-            .arg(config.block_size.to_string())
-            .arg("--streaming-chunk-size")
-            .arg(config.streaming_chunk_size.to_string())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let mut child = spawn_in_own_process_group(&mut command).with_context(|| {
-            format!(
-                "Failed to start Qwen3 MLX worker {}",
-                config.worker_path.display()
-            )
-        })?;
-        let child_pid = child.id();
-        self.resident_shutdown.register(child_pid);
-
-        if let Some(mut stderr) = child.stderr.take() {
-            thread::spawn(move || {
-                let _ = std::io::copy(&mut stderr, &mut std::io::stderr());
-            });
-        }
-
-        let stdin = child
-            .stdin
-            .take()
-            .context("Qwen3 MLX worker stdin was unavailable")?;
-        let stdout = child
-            .stdout
-            .take()
-            .context("Qwen3 MLX worker stdout was unavailable")?;
-        let frames = spawn_worker_frame_reader(stdout);
-        let startup = recv_worker_frame(&frames)
-            .and_then(|frame| frame.context("Qwen3 MLX worker exited before ready."))
-            .and_then(|frame| match frame.frame_type {
-                WORKER_OUTPUT_READY => Ok(()),
-                WORKER_OUTPUT_ERROR => bail!(
-                    "Qwen3 MLX worker failed during startup: {}",
-                    String::from_utf8_lossy(&frame.payload)
-                ),
-                other => bail!("Qwen3 MLX worker returned unexpected startup frame {other}."),
-            });
-        if let Err(err) = startup {
-            // Don't leak the spawned worker when startup fails.
-            self.resident_shutdown.unregister(child_pid);
-            kill_process_group(child_pid);
-            let _ = child.wait();
-            return Err(err);
-        }
-
-        self.qwen3_mlx = Some(Qwen3MlxWorkerHost {
-            key,
-            child,
-            child_pid,
-            resident_shutdown: Arc::clone(&self.resident_shutdown),
-            stdin,
-            frames,
-            next_request_id: 1,
-        });
-        Ok(())
-    }
-
-    fn ensure_qwen3_mlx_api_server(&mut self, key: Qwen3MlxApiServerKey) -> Result<()> {
-        // Reuse the resident server only if its child is still alive; a dead or
-        // unknown-state child falls through and is replaced.
-        if let Some(host) = self.qwen3_mlx_api.as_mut()
-            && host.key == key
-            && matches!(host.child.try_wait(), Ok(None))
-        {
-            return Ok(());
-        }
-
-        // Dropping the previous host kills and reaps its child.
-        self.qwen3_mlx_api.take();
-
-        let (child, port, child_pid) = start_qwen3_mlx_api_server(&key, &self.resident_shutdown)?;
-        self.qwen3_mlx_api = Some(Qwen3MlxApiServerHost {
-            key,
-            child,
-            child_pid,
-            resident_shutdown: Arc::clone(&self.resident_shutdown),
-            host: "127.0.0.1".to_string(),
-            port,
-        });
-        Ok(())
-    }
-
-    fn ensure_qwen3_model(&mut self, key: &Qwen3Key, device: &Device) -> Result<()> {
-        if self.qwen3.as_ref().is_some_and(|host| host.key == *key) {
-            return Ok(());
-        }
-
-        let mode = DetectedMode::CustomVoice {
-            speaker: QWEN3_DEFAULT_SPEAKER.to_string(),
-            instruct: None,
-        };
-        let model_args = ModelArgs {
-            model: Some(key.model_repo.clone()),
-            model_path: None,
-            device: key.device.clone(),
-            dtype: key.dtype.clone(),
-        };
-        let model_dir =
-            qwen_tts::io::model_path::get_model_path(&model_args, &mode).with_context(|| {
-                format!("Failed to resolve Qwen3 model files for {}", key.model_repo)
-            })?;
-        let loader = ModelLoader::from_local_dir(&model_dir).with_context(|| {
-            format!(
-                "Failed to inspect Qwen3 model directory {}",
-                model_dir.display()
-            )
-        })?;
-        let model = loader
-            .load_tts_model(
-                device,
-                &LoaderConfig {
-                    dtype: qwen3_candle_dtype(&key.dtype),
-                    load_tokenizer: true,
-                    load_text_tokenizer: true,
-                    load_generate_config: true,
-                    use_flash_attn: qwen3_attention_uses_flash(&key.attention),
+        let summary = match model_type {
+            ExpectedModelType::CustomVoice => self.qwen3.generate_custom_voice(
+                Path::new(&payload.model_path),
+                &CustomVoiceRequest {
+                    text: &payload.text,
+                    speaker: payload.speaker.as_deref().unwrap_or("Ryan"),
+                    language: payload.language.as_deref().unwrap_or("English"),
+                    instruct: payload.instruct.as_deref().unwrap_or(""),
+                    controls,
                 },
-            )
-            .with_context(|| format!("Failed to load Qwen3 model from {}", model_dir.display()))?;
-        self.qwen3 = Some(Qwen3Host {
-            key: key.clone(),
-            model,
-        });
-        Ok(())
+                &mut sink,
+            )?,
+            ExpectedModelType::Base => {
+                let reference_text = payload
+                    .reference_text
+                    .as_deref()
+                    .context("Qwen3 voice cloning requires referenceText.")?;
+                let encoded = payload
+                    .reference_audio_base64
+                    .as_deref()
+                    .context("Qwen3 voice cloning requires referenceAudioBase64.")?;
+                let reference_wav = BASE64
+                    .decode(encoded.trim())
+                    .context("Failed to decode Qwen3 reference WAV.")?;
+                self.qwen3.generate_voice_clone(
+                    Path::new(&payload.model_path),
+                    &VoiceCloneRequest {
+                        text: &payload.text,
+                        language: payload.language.as_deref().unwrap_or("Auto"),
+                        reference_wav: &reference_wav,
+                        reference_text,
+                        controls,
+                    },
+                    &mut sink,
+                )?
+            }
+        };
+        qwen_generation_output(summary, payload.model_repo, inference_started.elapsed())
+    }
+
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        target_os = "windows"
+    )))]
+    fn generate_qwen3(
+        &mut self,
+        _request_id: &str,
+        _payload: Value,
+        _websocket: &mut WebSocketConnection,
+    ) -> Result<GenerationOutput> {
+        bail!("Qwen3 is unavailable on this platform.")
     }
 
     fn generate_neutts(
@@ -1585,9 +542,10 @@ impl RuntimeState {
     ) -> Result<GenerationOutput> {
         let payload: NeuttsPayload =
             serde_json::from_value(payload).context("Invalid NeuTTS payload")?;
-        if payload.text.trim().is_empty() {
-            bail!("Text to synthesize is empty.");
-        }
+        ensure!(
+            !payload.text.trim().is_empty(),
+            "Text to synthesize is empty."
+        );
         let started = Instant::now();
         let mut phase_timings = serde_json::Map::new();
         let model_repo = normalize_neutts_model(payload.model_repo.as_deref())?;
@@ -1631,8 +589,8 @@ impl RuntimeState {
                             .to_string(),
                     );
                 }
-                let encoder = self.ensure_neutts_encoder(&mut progress)?;
-                encoder.encode(&samples)?
+                self.ensure_neutts_encoder(&mut progress)?
+                    .encode(&samples)?
             }
             (None, None) => bail!(
                 "Provide a reference: either pre-encoded .npy codes (referenceCodesBase64) or a WAV clip (referenceAudioBase64)."
@@ -1686,7 +644,6 @@ impl RuntimeState {
         {
             return Ok(());
         }
-
         let model = neutts::download::load_from_hub(model_repo)
             .with_context(|| format!("Failed to load Rust NeuTTS model {model_repo}"))?;
         self.neutts = Some(NeuttsHost {
@@ -1694,6 +651,87 @@ impl RuntimeState {
             model,
         });
         Ok(())
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+))]
+fn qwen_generation_output(
+    summary: GenerationSummary,
+    model_repo: String,
+    inference_elapsed: Duration,
+) -> Result<GenerationOutput> {
+    ensure!(
+        summary.sample_rate > 0,
+        "Qwen3 returned an invalid sample rate."
+    );
+    let mut phase_timings = serde_json::Map::new();
+    phase_timings.insert(
+        "inferenceSec".to_string(),
+        json!(round_secs(inference_elapsed.as_secs_f64())),
+    );
+    Ok(GenerationOutput {
+        samples: Vec::new(),
+        sample_rate: usize::try_from(summary.sample_rate).context("Invalid Qwen3 sample rate")?,
+        model_repo,
+        device: Some(resolved_provider().to_string()),
+        warnings: Vec::new(),
+        streamed_audio: Some(StreamedAudioSummary {
+            sample_count: summary.sample_count,
+            audio_chunk_count: summary.audio_chunk_count,
+        }),
+        phase_timings,
+    })
+}
+
+fn parse_model_type(mode: &str) -> Result<ExpectedModelType> {
+    match mode {
+        "customVoice" => Ok(ExpectedModelType::CustomVoice),
+        "voiceClone" => Ok(ExpectedModelType::Base),
+        _ => bail!("Unsupported Qwen3 mode: {mode}"),
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+))]
+struct WebSocketQwenSink<'a> {
+    request_id: &'a str,
+    websocket: &'a mut WebSocketConnection,
+    started: Instant,
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    target_os = "windows"
+))]
+impl AudioSink for WebSocketQwenSink<'_> {
+    fn progress(&mut self, phase: &str, message: &str) -> Result<()> {
+        self.websocket
+            .send_progress(self.request_id, phase, message, self.started)
+    }
+
+    fn audio_chunk(
+        &mut self,
+        samples: &[f32],
+        sample_rate: u32,
+        index: usize,
+        total: usize,
+        silence_after_samples: usize,
+    ) -> Result<()> {
+        self.websocket.send_json(&json!({
+            "type": "audio_chunk",
+            "requestId": self.request_id,
+            "index": index,
+            "total": total,
+            "sampleRate": sample_rate,
+            "sampleCount": samples.len(),
+            "silenceAfterSamples": silence_after_samples,
+        }))?;
+        self.websocket.send_binary(&float32_to_le_bytes(samples))
     }
 }
 
@@ -1711,9 +749,10 @@ fn validate_generation_output(output: &GenerationOutput) -> Result<()> {
     let chunk_count = streamed_audio
         .map(|summary| summary.audio_chunk_count)
         .unwrap_or_else(|| sample_count.div_ceil(MAX_AUDIO_CHUNK_SAMPLES));
-    if sample_count == 0 || chunk_count == 0 {
-        bail!("Generation produced no audio samples.");
-    }
+    ensure!(
+        sample_count > 0 && chunk_count > 0,
+        "Generation produced no audio samples."
+    );
     Ok(())
 }
 
@@ -1722,18 +761,8 @@ fn send_generation_result(
     request_id: &str,
     mut output: GenerationOutput,
 ) -> Result<()> {
-    // An invalid output is a per-request failure, not a server-fatal one:
-    // report it as an ok:false result frame instead of propagating (which
-    // would tear down the whole WebSocket server loop).
     if let Err(err) = validate_generation_output(&output) {
-        websocket.send_json(&json!({
-            "type": "result",
-            "requestId": request_id,
-            "ok": false,
-            "error": err.to_string(),
-            "details": format!("{err:#}"),
-        }))?;
-        return Ok(());
+        return send_request_error(websocket, request_id, &err);
     }
 
     let streamed_audio = output.streamed_audio.as_ref();
@@ -1790,8 +819,7 @@ fn send_generation_result(
         "requestId": request_id,
         "ok": true,
         "result": result,
-    }))?;
-    Ok(())
+    }))
 }
 
 fn is_elapsed_phase_timing(key: &str) -> bool {
@@ -1806,773 +834,12 @@ fn is_elapsed_phase_timing(key: &str) -> bool {
 }
 
 fn float32_to_le_bytes(samples: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(samples.len() * std::mem::size_of::<f32>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
     for sample in samples {
-        let cleaned = if sample.is_finite() { *sample } else { 0.0 };
-        bytes.extend_from_slice(&cleaned.to_le_bytes());
+        let clean = if sample.is_finite() { *sample } else { 0.0 };
+        bytes.extend_from_slice(&clean.to_le_bytes());
     }
     bytes
-}
-
-fn read_worker_frame(stdout: &mut ChildStdout) -> Result<Option<WorkerFrame>> {
-    let mut header = [0_u8; WORKER_FRAME_HEADER_BYTES];
-    if !read_exact_or_eof(stdout, &mut header)? {
-        return Ok(None);
-    }
-    let frame_type = header[0];
-    let request_id = u32::from_le_bytes(header[1..5].try_into()?);
-    let payload_len = u32::from_le_bytes(header[5..9].try_into()?) as usize;
-    if payload_len > MAX_WORKER_FRAME_PAYLOAD_BYTES {
-        bail!("Qwen3 MLX worker frame payload exceeds {MAX_WORKER_FRAME_PAYLOAD_BYTES} bytes.");
-    }
-    let mut payload = vec![0_u8; payload_len];
-    if payload_len > 0 {
-        stdout
-            .read_exact(&mut payload)
-            .context("Qwen3 MLX worker frame ended early")?;
-    }
-    Ok(Some(WorkerFrame {
-        frame_type,
-        request_id,
-        payload,
-    }))
-}
-
-/// Parse worker frames from stdout on a dedicated thread so the consumer can
-/// receive with an inactivity deadline. On EOF the sender is dropped (channel
-/// disconnect); a read/parse error is forwarded once before the thread exits.
-fn spawn_worker_frame_reader(mut stdout: ChildStdout) -> mpsc::Receiver<Result<WorkerFrame>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        loop {
-            match read_worker_frame(&mut stdout) {
-                Ok(Some(frame)) => {
-                    if sender.send(Ok(frame)).is_err() {
-                        return;
-                    }
-                }
-                Ok(None) => return,
-                Err(err) => {
-                    let _ = sender.send(Err(err));
-                    return;
-                }
-            }
-        }
-    });
-    receiver
-}
-
-fn recv_worker_frame(frames: &mpsc::Receiver<Result<WorkerFrame>>) -> Result<Option<WorkerFrame>> {
-    match frames.recv_timeout(Duration::from_secs(CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC)) {
-        Ok(Ok(frame)) => Ok(Some(frame)),
-        Ok(Err(err)) => Err(err),
-        // Reader thread exited on stdout EOF: the worker is gone.
-        Err(RecvTimeoutError::Disconnected) => Ok(None),
-        Err(RecvTimeoutError::Timeout) => bail!(
-            "Qwen3 MLX worker produced no output for {CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC}s; treating it as wedged."
-        ),
-    }
-}
-
-fn write_worker_frame<W: Write>(
-    writer: &mut W,
-    frame_type: u8,
-    request_id: u32,
-    payload: &[u8],
-) -> Result<()> {
-    let payload_len = u32::try_from(payload.len()).context("Qwen3 MLX worker payload too large")?;
-    writer.write_all(&[frame_type])?;
-    writer.write_all(&request_id.to_le_bytes())?;
-    writer.write_all(&payload_len.to_le_bytes())?;
-    writer.write_all(payload)?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn stream_qwen3_mlx_request(
-    host: &mut Qwen3MlxWorkerHost,
-    request_id: &str,
-    text: &str,
-    fallback_sample_rate: usize,
-    websocket: &mut WebSocketConnection,
-) -> Result<Qwen3MlxStreamResult> {
-    let worker_request_id = host.next_request_id;
-    host.next_request_id = host.next_request_id.checked_add(1).unwrap_or(1).max(1);
-    write_worker_frame(
-        &mut host.stdin,
-        WORKER_INPUT_SPEAK,
-        worker_request_id,
-        text.as_bytes(),
-    )?;
-
-    let mut sample_rate = fallback_sample_rate;
-    let mut chunk_index = 0_usize;
-    let mut sample_count = 0_usize;
-    loop {
-        let frame = recv_worker_frame(&host.frames)?
-            .context("Qwen3 MLX worker exited before audio was complete.")?;
-        if frame.request_id != worker_request_id {
-            bail!(
-                "Qwen3 MLX worker returned frame for unexpected request {}.",
-                frame.request_id
-            );
-        }
-        match frame.frame_type {
-            WORKER_OUTPUT_AUDIO_START => {
-                if frame.payload.len() == 4 {
-                    sample_rate = u32::from_le_bytes(frame.payload[..4].try_into()?) as usize;
-                }
-            }
-            WORKER_OUTPUT_AUDIO_CHUNK => {
-                if frame.payload.len() % 2 != 0 {
-                    bail!("Qwen3 MLX worker returned malformed PCM chunk.");
-                }
-                if frame.payload.is_empty() {
-                    continue;
-                }
-                // Relay the worker's Int16 PCM bytes as-is ("pcm16") instead of
-                // widening to Float32 — half the WebSocket bytes, no fidelity
-                // loss. Bound each binary message like the buffered path.
-                for chunk in frame.payload.chunks(MAX_AUDIO_CHUNK_SAMPLES * 2) {
-                    let chunk_samples = chunk.len() / 2;
-                    sample_count += chunk_samples;
-                    websocket.send_json(&json!({
-                        "type": "audio_chunk",
-                        "requestId": request_id,
-                        "index": chunk_index,
-                        "total": 0,
-                        "sampleRate": sample_rate,
-                        "sampleCount": chunk_samples,
-                        "silenceAfterSamples": 0,
-                        "encoding": "pcm16",
-                    }))?;
-                    websocket.send_binary(chunk)?;
-                    chunk_index += 1;
-                }
-            }
-            WORKER_OUTPUT_AUDIO_DONE => break,
-            WORKER_OUTPUT_ERROR => bail!(
-                "Qwen3 MLX worker failed: {}",
-                String::from_utf8_lossy(&frame.payload)
-            ),
-            other => bail!("Qwen3 MLX worker returned unexpected frame {other}."),
-        }
-    }
-    Ok(Qwen3MlxStreamResult {
-        sample_rate,
-        sample_count,
-        audio_chunk_count: chunk_index,
-    })
-}
-
-fn resolve_qwen3_mlx_model_path(input: Option<&str>, label: &str) -> Result<PathBuf> {
-    let model_path = if let Some(path) = input.map(str::trim).filter(|path| !path.is_empty()) {
-        PathBuf::from(path)
-    } else {
-        std::env::var("OPEN_TTS_QWEN3_MLX_MODEL_DIR")
-            .map(PathBuf::from)
-            .with_context(|| {
-                format!("{label} requires `baseModelPath` or OPEN_TTS_QWEN3_MLX_MODEL_DIR.")
-            })?
-    };
-    if !model_path.exists() {
-        bail!(
-            "{label} model directory does not exist: {}",
-            model_path.display()
-        );
-    }
-    Ok(stable_path(&model_path))
-}
-
-fn resolve_qwen3_mlx_tts_path() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("OPEN_TTS_QWEN3_MLX_TTS") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Ok(stable_path(&path));
-        }
-        bail!(
-            "OPEN_TTS_QWEN3_MLX_TTS points to a missing tts binary: {}",
-            path.display()
-        );
-    }
-
-    if let Ok(worker_path) = std::env::var("OPEN_TTS_QWEN3_MLX_WORKER") {
-        let worker_path = PathBuf::from(worker_path);
-        if let Some(parent) = worker_path.parent() {
-            let sibling = parent.join(format!("tts{}", std::env::consts::EXE_SUFFIX));
-            if sibling.exists() {
-                return Ok(stable_path(&sibling));
-            }
-        }
-    }
-
-    bail!(
-        "Qwen3 MLX CustomVoice requires OPEN_TTS_QWEN3_MLX_TTS pointing to the upstream `tts` binary."
-    )
-}
-
-fn resolve_qwen3_mlx_api_server_path() -> Result<PathBuf> {
-    if let Ok(path) = std::env::var("OPEN_TTS_QWEN3_MLX_API_SERVER") {
-        let path = PathBuf::from(path);
-        if path.exists() {
-            return Ok(stable_path(&path));
-        }
-        bail!(
-            "OPEN_TTS_QWEN3_MLX_API_SERVER points to a missing api_server binary: {}",
-            path.display()
-        );
-    }
-
-    if let Ok(worker_path) = std::env::var("OPEN_TTS_QWEN3_MLX_WORKER") {
-        let worker_path = PathBuf::from(worker_path);
-        if let Some(parent) = worker_path.parent() {
-            let sibling = parent.join(format!("api_server{}", std::env::consts::EXE_SUFFIX));
-            if sibling.exists() {
-                return Ok(stable_path(&sibling));
-            }
-        }
-    }
-
-    bail!(
-        "Qwen3 MLX CustomVoice requires OPEN_TTS_QWEN3_MLX_API_SERVER pointing to the upstream `api_server` binary."
-    )
-}
-
-fn pick_loopback_port() -> Result<u16> {
-    let listener = TcpListener::bind(("127.0.0.1", 0))
-        .context("Failed to bind ephemeral loopback port for Qwen3 MLX api_server")?;
-    let port = listener
-        .local_addr()
-        .context("Failed to read ephemeral loopback port for Qwen3 MLX api_server")?
-        .port();
-    drop(listener);
-    Ok(port)
-}
-
-enum ApiServerHealth {
-    Ready,
-    ChildExited(std::process::ExitStatus),
-}
-
-fn spawn_qwen3_mlx_api_server(key: &Qwen3MlxApiServerKey, port: u16) -> Result<Child> {
-    let mut command = Command::new(&key.api_server_path);
-    command
-        .arg(&key.model_path)
-        .arg("--host")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let mut child = spawn_in_own_process_group(&mut command).with_context(|| {
-        format!(
-            "Failed to start Qwen3 MLX api_server {}",
-            key.api_server_path.display()
-        )
-    })?;
-
-    if let Some(mut stderr) = child.stderr.take() {
-        thread::spawn(move || {
-            let _ = std::io::copy(&mut stderr, &mut std::io::stderr());
-        });
-    }
-    Ok(child)
-}
-
-fn start_qwen3_mlx_api_server(
-    key: &Qwen3MlxApiServerKey,
-    resident_shutdown: &ResidentProcessShutdown,
-) -> Result<(Child, u16, u32)> {
-    start_qwen3_mlx_api_server_with_timeout(
-        key,
-        resident_shutdown,
-        Duration::from_secs(QWEN3_MLX_API_SERVER_START_TIMEOUT_SEC),
-    )
-}
-
-fn start_qwen3_mlx_api_server_with_timeout(
-    key: &Qwen3MlxApiServerKey,
-    resident_shutdown: &ResidentProcessShutdown,
-    timeout: Duration,
-) -> Result<(Child, u16, u32)> {
-    // `pick_loopback_port` releases its probe socket before the api_server binds
-    // the port (an unavoidable TOCTOU), so an early child exit can be a bind
-    // race with another process. Retry once with a fresh port in that case.
-    for attempt in 0..2 {
-        let port = pick_loopback_port()?;
-        let mut child = spawn_qwen3_mlx_api_server(key, port)?;
-        let child_pid = child.id();
-        resident_shutdown.register(child_pid);
-        match wait_for_http_health("127.0.0.1", port, timeout, &mut child) {
-            Ok(ApiServerHealth::Ready) => return Ok((child, port, child_pid)),
-            Ok(ApiServerHealth::ChildExited(status)) => {
-                resident_shutdown.unregister(child_pid);
-                // try_wait already reaped the direct child, but it may have
-                // spawned descendants into the same process group before exit.
-                kill_process_group(child_pid);
-                if attempt == 0 {
-                    eprintln!(
-                        "Qwen3 MLX api_server exited during startup with status {status}; retrying once with a fresh port."
-                    );
-                    continue;
-                }
-                bail!("Qwen3 MLX api_server exited during startup with status {status}.");
-            }
-            Err(err) => {
-                resident_shutdown.unregister(child_pid);
-                kill_process_group(child_pid);
-                let _ = child.wait();
-                return Err(err.context(format!(
-                    "Qwen3 MLX api_server did not become ready on 127.0.0.1:{port}"
-                )));
-            }
-        }
-    }
-    unreachable!("Qwen3 MLX api_server startup loop always returns")
-}
-
-fn wait_for_http_health(
-    host: &str,
-    port: u16,
-    timeout: Duration,
-    child: &mut Child,
-) -> Result<ApiServerHealth> {
-    let url = format!("http://{host}:{port}/health");
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child
-            .try_wait()
-            .context("Failed checking Qwen3 MLX api_server liveness")?
-        {
-            return Ok(ApiServerHealth::ChildExited(status));
-        }
-        if started.elapsed() > timeout {
-            bail!("Timed out waiting for Qwen3 MLX api_server health check at {url}");
-        }
-        // A per-request timeout keeps a stuck socket from blocking an iteration
-        // (and the child liveness check above) indefinitely.
-        match ureq::get(&url)
-            .timeout(Duration::from_secs(
-                QWEN3_MLX_API_SERVER_HEALTH_REQUEST_TIMEOUT_SEC,
-            ))
-            .call()
-        {
-            Ok(response) if response.status() == 200 => {
-                // Guard against binding to an unrelated process that answers
-                // /health 200 on a raced port: only treat the check as passed
-                // while our child is still alive. This narrows — but cannot
-                // fully close — the TOCTOU between picking the port and the
-                // child binding it; the retry loop in the caller handles the
-                // remaining early-exit race.
-                if let Some(status) = child
-                    .try_wait()
-                    .context("Failed checking Qwen3 MLX api_server liveness")?
-                {
-                    return Ok(ApiServerHealth::ChildExited(status));
-                }
-                return Ok(ApiServerHealth::Ready);
-            }
-            _ => thread::sleep(Duration::from_millis(250)),
-        }
-    }
-}
-
-fn stream_qwen3_mlx_api_speech(
-    host: &str,
-    port: u16,
-    text: &str,
-    voice: &str,
-    language: &str,
-    instruct: Option<&str>,
-    websocket: &mut WebSocketConnection,
-    request_id: &str,
-    started: Instant,
-    phase_timings: &mut serde_json::Map<String, Value>,
-    audio_sent: &mut bool,
-) -> Result<Qwen3MlxStreamResult> {
-    let mut body = json!({
-        "input": text,
-        "voice": voice,
-        "language": language,
-        "response_format": "pcm",
-        "stream": true,
-    });
-    if let Some(instruct) = instruct {
-        body["instructions"] = json!(instruct);
-    }
-
-    let url = format!("http://{host}:{port}/v1/audio/speech");
-    // Per-read inactivity deadline: SSE reads block between deltas, so a wedged
-    // api_server that stops emitting (without exiting) must eventually error
-    // out instead of hanging this request forever.
-    let agent = ureq::AgentBuilder::new()
-        .timeout_read(Duration::from_secs(CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC))
-        .build();
-    let response = agent
-        .post(&url)
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string())
-        .with_context(|| format!("Failed to call Qwen3 MLX api_server at {url}"))?;
-    if response.status() != 200 {
-        let status = response.status();
-        let details = response.into_string().unwrap_or_default();
-        bail!(
-            "Qwen3 MLX api_server returned HTTP {status}: {}",
-            details.trim()
-        );
-    }
-
-    // The upstream api_server streams raw PCM deltas without a guaranteed rate
-    // field; Qwen3's 12Hz codec emits 24 kHz audio, so that is the documented
-    // fallback. Prefer a rate the server reports — response header first, then
-    // any `sample_rate` field carried by an SSE frame.
-    let mut sample_rate = response
-        .header("x-sample-rate")
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|rate| *rate > 0)
-        .unwrap_or(24_000_usize);
-    // Latch the rate at the first audio chunk: a late SSE `sample_rate` field
-    // must not change the rate mid-stream after chunks were already sent.
-    let mut sample_rate_latched = false;
-    let mut chunk_index = 0_usize;
-    let mut sample_count = 0_usize;
-    let mut recorded_first_audio = false;
-    // Read SSE lines on a dedicated thread so receives can carry a two-phase
-    // inactivity deadline: generous before the first audio delta (model load
-    // may still be in flight), short once the stream is producing.
-    let lines = spawn_sse_line_reader(response.into_reader());
-
-    loop {
-        let deadline = if recorded_first_audio {
-            QWEN3_MLX_API_STREAM_INACTIVITY_TIMEOUT_SEC
-        } else {
-            CHILD_OUTPUT_INACTIVITY_TIMEOUT_SEC
-        };
-        let line = match lines.recv_timeout(Duration::from_secs(deadline)) {
-            Ok(Ok(Some(line))) => line,
-            Ok(Ok(None)) => break,
-            Ok(Err(err)) => return Err(err),
-            Err(RecvTimeoutError::Disconnected) => break,
-            Err(RecvTimeoutError::Timeout) => bail!(
-                "Qwen3 MLX api_server produced no output for {deadline}s; treating it as wedged."
-            ),
-        };
-        let trimmed = line.trim();
-        if let Some(data) = trimmed.strip_prefix("data: ") {
-            if data.is_empty() {
-                continue;
-            }
-            let parsed: Value = serde_json::from_str(data).with_context(|| {
-                format!("Failed to parse Qwen3 MLX api_server SSE payload: {data}")
-            })?;
-            if !sample_rate_latched {
-                if let Some(rate) = parsed
-                    .get("sample_rate")
-                    .and_then(Value::as_u64)
-                    .filter(|rate| *rate > 0)
-                {
-                    sample_rate = rate as usize;
-                }
-            }
-            match parsed.get("type").and_then(Value::as_str) {
-                Some("speech.audio.delta") => {
-                    let delta = parsed
-                        .get("delta")
-                        .and_then(Value::as_str)
-                        .context("Qwen3 MLX api_server SSE delta missing audio payload")?;
-                    let pcm = BASE64
-                        .decode(delta)
-                        .context("Failed to decode Qwen3 MLX api_server PCM delta")?;
-                    if pcm.len() % 2 != 0 {
-                        bail!("Qwen3 MLX api_server returned a malformed PCM delta.");
-                    }
-                    if pcm.is_empty() {
-                        continue;
-                    }
-                    if !recorded_first_audio {
-                        phase_timings.insert(
-                            "firstAudioSec".to_string(),
-                            json!(round_secs(started.elapsed().as_secs_f64())),
-                        );
-                        recorded_first_audio = true;
-                    }
-                    sample_rate_latched = true;
-                    // Relay the server's Int16 PCM bytes as-is ("pcm16") —
-                    // converting to Float32 here would double the WebSocket
-                    // payload for no fidelity gain. Bound each binary message
-                    // the same way the buffered path does in
-                    // `send_generation_result`.
-                    for chunk in pcm.chunks(MAX_AUDIO_CHUNK_SAMPLES * 2) {
-                        let chunk_samples = chunk.len() / 2;
-                        sample_count += chunk_samples;
-                        websocket.send_json(&json!({
-                            "type": "audio_chunk",
-                            "requestId": request_id,
-                            "index": chunk_index,
-                            "total": 0,
-                            "sampleRate": sample_rate,
-                            "sampleCount": chunk_samples,
-                            "silenceAfterSamples": 0,
-                            "encoding": "pcm16",
-                        }))?;
-                        *audio_sent = true;
-                        websocket.send_binary(chunk)?;
-                        chunk_index += 1;
-                    }
-                }
-                Some("error") => {
-                    let message = parsed
-                        .get("error")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Qwen3 MLX api_server reported an unknown streaming error.");
-                    bail!("{message}");
-                }
-                Some("speech.audio.done") => break,
-                _ => {}
-            }
-        }
-    }
-
-    if chunk_index == 0 {
-        bail!("Qwen3 MLX api_server returned no audio chunks.");
-    }
-
-    Ok(Qwen3MlxStreamResult {
-        sample_rate,
-        sample_count,
-        audio_chunk_count: chunk_index,
-    })
-}
-
-/// Parse SSE lines on a dedicated thread so the consumer can receive with an
-/// inactivity deadline. Sends `Ok(Some(line))` per line, `Ok(None)` on EOF,
-/// and forwards a read error once before exiting.
-fn spawn_sse_line_reader(
-    reader: impl Read + Send + 'static,
-) -> mpsc::Receiver<Result<Option<String>>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut reader = BufReader::new(reader);
-        loop {
-            let mut line = String::new();
-            match read_sse_line_capped(&mut reader, &mut line) {
-                Ok(0) => {
-                    let _ = sender.send(Ok(None));
-                    return;
-                }
-                Ok(_) => {
-                    if sender.send(Ok(Some(line))).is_err() {
-                        return;
-                    }
-                }
-                Err(err) => {
-                    let _ = sender.send(Err(err));
-                    return;
-                }
-            }
-        }
-    });
-    receiver
-}
-
-/// `read_line` with a hard size cap so a misbehaving SSE stream cannot grow an
-/// unbounded line buffer. Errors out cleanly when the cap is exceeded.
-fn read_sse_line_capped<R: BufRead>(reader: &mut R, line: &mut String) -> Result<usize> {
-    let read = reader
-        .by_ref()
-        .take(MAX_SSE_LINE_BYTES + 1)
-        .read_line(line)?;
-    if line.len() as u64 > MAX_SSE_LINE_BYTES {
-        bail!("Qwen3 MLX api_server SSE line exceeded {MAX_SSE_LINE_BYTES} bytes.");
-    }
-    Ok(read)
-}
-
-fn create_qwen3_mlx_run_dir(cache_dir: &Path, request_id: &str) -> Result<PathBuf> {
-    let safe_request_id = sanitize_request_id_for_path(request_id);
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_else(|_| Duration::from_secs(0))
-        .as_millis();
-    let run_dir = cache_dir
-        .join("qwen3-mlx-customvoice-runs")
-        .join(format!("{millis}-{safe_request_id}"));
-    std::fs::create_dir_all(&run_dir)
-        .with_context(|| format!("Failed to create Qwen3 MLX run dir {}", run_dir.display()))?;
-    Ok(run_dir)
-}
-
-/// Best-effort hygiene for the voice-clone reference cache: drop stale
-/// `*.wav.tmp-*` files left behind by a crash mid-write (skipping ones newer
-/// than a minute so a concurrent write is never raced), then keep only the
-/// newest [`QWEN3_REFERENCE_CACHE_MAX_ENTRIES`] cached references by mtime.
-fn cleanup_qwen3_reference_cache(refs_dir: &Path) {
-    let Ok(entries) = std::fs::read_dir(refs_dir) else {
-        return;
-    };
-    let now = SystemTime::now();
-    let mut refs: Vec<(SystemTime, PathBuf)> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let modified = entry
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(UNIX_EPOCH);
-        let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
-        if is_qwen3_reference_temp_file(name) {
-            if age > Duration::from_secs(60) {
-                let _ = std::fs::remove_file(&path);
-            }
-        } else if name.starts_with("ref-") && name.ends_with(".wav") {
-            refs.push((modified, path));
-        }
-    }
-    if refs.len() > QWEN3_REFERENCE_CACHE_MAX_ENTRIES {
-        refs.sort_by_key(|(modified, _)| *modified);
-        for (_, path) in refs.iter().take(refs.len() - QWEN3_REFERENCE_CACHE_MAX_ENTRIES) {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-fn is_qwen3_reference_temp_file(name: &str) -> bool {
-    name.starts_with("ref-") && name.contains(".wav.tmp-")
-}
-
-fn sanitize_request_id_for_path(request_id: &str) -> String {
-    let sanitized: String = request_id
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
-        .take(80)
-        .collect();
-    if sanitized.is_empty() {
-        "request".to_string()
-    } else {
-        sanitized
-    }
-}
-
-fn read_wav_as_f32(path: &Path) -> Result<(Vec<f32>, usize)> {
-    let reader = hound::WavReader::open(path)
-        .with_context(|| format!("Failed to open Qwen3 MLX output WAV {}", path.display()))?;
-    wav_reader_as_f32(reader, "Qwen3 MLX output WAV")
-}
-
-fn wav_reader_as_f32<R: Read>(
-    mut reader: hound::WavReader<R>,
-    what: &str,
-) -> Result<(Vec<f32>, usize)> {
-    let spec = reader.spec();
-    let channels = usize::from(spec.channels);
-    if channels == 0 {
-        bail!("{what} has zero channels.");
-    }
-    let sample_rate = usize::try_from(spec.sample_rate).context("Invalid WAV sample rate")?;
-    let samples = match spec.sample_format {
-        hound::SampleFormat::Float => {
-            let raw = reader
-                .samples::<f32>()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .with_context(|| format!("Failed reading float {what} samples"))?;
-            downmix_interleaved(raw, channels)
-        }
-        hound::SampleFormat::Int => {
-            if spec.bits_per_sample <= 16 {
-                let raw = reader
-                    .samples::<i16>()
-                    .map(|sample| sample.map(|value| value as f32 / 32768.0))
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .with_context(|| format!("Failed reading int16 {what} samples"))?;
-                downmix_interleaved(raw, channels)
-            } else {
-                let denom = 2_f32.powi(i32::from(spec.bits_per_sample.saturating_sub(1)));
-                let raw = reader
-                    .samples::<i32>()
-                    .map(|sample| sample.map(|value| value as f32 / denom))
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .with_context(|| format!("Failed reading int32 {what} samples"))?;
-                downmix_interleaved(raw, channels)
-            }
-        }
-    };
-    Ok((samples, sample_rate))
-}
-
-/// Decode a base64 WAV reference clip to 16 kHz mono samples ready for the
-/// NeuCodec encoder. Returns the samples and whether the clip was truncated to
-/// the encoder's 20-second window.
-fn prepare_neutts_reference_samples(encoded: &str) -> Result<(Vec<f32>, bool)> {
-    let bytes = BASE64
-        .decode(encoded.trim())
-        .context("Failed to decode NeuTTS reference WAV")?;
-    let reader = hound::WavReader::new(std::io::Cursor::new(bytes))
-        .context("NeuTTS reference must be a valid WAV file")?;
-    let (samples, sample_rate) = wav_reader_as_f32(reader, "NeuTTS reference WAV")?;
-    if samples.is_empty() {
-        bail!("NeuTTS reference WAV contains no audio.");
-    }
-    let mut samples = neutts::codec::resample(
-        &samples,
-        u32::try_from(sample_rate).context("Invalid WAV sample rate")?,
-        neutts::ENCODER_SAMPLE_RATE,
-    );
-    let truncated = samples.len() > neucodec_encoder::ENCODER_WINDOW_SAMPLES;
-    samples.truncate(neucodec_encoder::ENCODER_WINDOW_SAMPLES);
-    Ok((samples, truncated))
-}
-
-fn downmix_interleaved(samples: Vec<f32>, channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return samples;
-    }
-    samples
-        .chunks_exact(channels)
-        .map(|frame| {
-            frame
-                .iter()
-                .map(|value| if value.is_finite() { *value } else { 0.0 })
-                .sum::<f32>()
-                / channels as f32
-        })
-        .collect()
-}
-
-fn stable_path(path: &std::path::Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
-}
-
-impl Drop for Qwen3MlxWorkerHost {
-    fn drop(&mut self) {
-        let _ = write_worker_frame(&mut self.stdin, WORKER_INPUT_SHUTDOWN, 0, &[]);
-        for _ in 0..20 {
-            match self.child.try_wait() {
-                Ok(Some(_)) => {
-                    self.resident_shutdown.unregister(self.child_pid);
-                    return;
-                }
-                Ok(None) => thread::sleep(Duration::from_millis(10)),
-                Err(_) => {
-                    self.resident_shutdown.unregister(self.child_pid);
-                    return;
-                }
-            }
-        }
-        self.resident_shutdown.unregister(self.child_pid);
-        kill_process_group(self.child_pid);
-        let _ = self.child.wait();
-    }
-}
-
-impl Drop for Qwen3MlxApiServerHost {
-    fn drop(&mut self) {
-        self.resident_shutdown.unregister(self.child_pid);
-        kill_process_group(self.child_pid);
-        let _ = self.child.wait();
-    }
 }
 
 fn decode_neutts_reference_codes(encoded: &str) -> Result<Vec<i32>> {
@@ -2585,178 +852,81 @@ fn decode_neutts_reference_codes(encoded: &str) -> Result<Vec<i32>> {
         .context("NeuTTS reference .npy must contain integer NeuCodec codes")
 }
 
-/// Map a UI/IPC speaker display name (capitalized, e.g. "Ryan", "Uncle_Fu") to
-/// the model's lowercase `spk_id` key. Validation in qwen_tts is case-sensitive
-/// and every key is ASCII, so a plain ASCII lowercasing is exact.
-fn qwen3_speaker_id(display: &str) -> String {
-    display.to_ascii_lowercase()
-}
-
-fn is_qwen3_mlx_custom_voice_model(model_repo: &str) -> bool {
-    model_repo.starts_with("mlx-community/") && model_repo.contains("-CustomVoice-")
-}
-
-fn qwen3_custom_voice_units(text: &str) -> Vec<String> {
-    let mut units = Vec::new();
-    let mut current = String::new();
-    let mut current_chars = 0_usize;
-
-    for word in text.split_whitespace() {
-        let max_unit_chars = if units.is_empty() {
-            QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS
-        } else {
-            QWEN3_CUSTOM_VOICE_MAX_UNIT_CHARS
-        };
-        let word_chars = word.chars().count();
-        let pending_chars = current_chars + if current.is_empty() { 0 } else { 1 } + word_chars;
-        if !current.is_empty() && pending_chars > max_unit_chars {
-            units.push(std::mem::take(&mut current));
-            current_chars = 0;
+fn wav_reader_as_f32<R: Read>(
+    mut reader: hound::WavReader<R>,
+    what: &str,
+) -> Result<(Vec<f32>, usize)> {
+    let spec = reader.spec();
+    let channels = usize::from(spec.channels);
+    ensure!(channels > 0, "{what} has zero channels.");
+    let sample_rate = usize::try_from(spec.sample_rate).context("Invalid WAV sample rate")?;
+    let samples = match spec.sample_format {
+        hound::SampleFormat::Float => {
+            let raw = reader
+                .samples::<f32>()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .with_context(|| format!("Failed reading float {what} samples"))?;
+            downmix_interleaved(raw, channels)
         }
-
-        if !current.is_empty() {
-            current.push(' ');
-            current_chars += 1;
+        hound::SampleFormat::Int if spec.bits_per_sample <= 16 => {
+            let raw = reader
+                .samples::<i16>()
+                .map(|sample| sample.map(|value| value as f32 / 32_768.0))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .with_context(|| format!("Failed reading int16 {what} samples"))?;
+            downmix_interleaved(raw, channels)
         }
-        current.push_str(word);
-        current_chars += word_chars;
-
-        if current_chars >= QWEN3_CUSTOM_VOICE_MIN_SENTENCE_CHARS
-            && word.chars().last().is_some_and(is_qwen3_sentence_boundary)
-        {
-            units.push(std::mem::take(&mut current));
-            current_chars = 0;
+        hound::SampleFormat::Int => {
+            let denominator = 2_f32.powi(i32::from(spec.bits_per_sample.saturating_sub(1)));
+            let raw = reader
+                .samples::<i32>()
+                .map(|sample| sample.map(|value| value as f32 / denominator))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .with_context(|| format!("Failed reading int32 {what} samples"))?;
+            downmix_interleaved(raw, channels)
         }
-    }
-
-    if !current.trim().is_empty() {
-        units.push(current);
-    }
-    units
+    };
+    Ok((samples, sample_rate))
 }
 
-fn is_qwen3_sentence_boundary(ch: char) -> bool {
-    matches!(
-        ch,
-        '.' | '!' | '?' | ';' | ':' | '。' | '！' | '？' | '；' | '：'
-    )
+fn prepare_neutts_reference_samples(encoded: &str) -> Result<(Vec<f32>, bool)> {
+    let bytes = BASE64
+        .decode(encoded.trim())
+        .context("Failed to decode NeuTTS reference WAV")?;
+    let reader = hound::WavReader::new(std::io::Cursor::new(bytes))
+        .context("NeuTTS reference must be a valid WAV file")?;
+    let (samples, sample_rate) = wav_reader_as_f32(reader, "NeuTTS reference WAV")?;
+    ensure!(
+        !samples.is_empty(),
+        "NeuTTS reference WAV contains no audio."
+    );
+    let mut samples = neutts::codec::resample(
+        &samples,
+        u32::try_from(sample_rate).context("Invalid WAV sample rate")?,
+        neutts::ENCODER_SAMPLE_RATE,
+    );
+    let truncated = samples.len() > neucodec_encoder::ENCODER_WINDOW_SAMPLES;
+    samples.truncate(neucodec_encoder::ENCODER_WINDOW_SAMPLES);
+    Ok((samples, truncated))
 }
 
-fn normalize_qwen3_model(input: Option<&str>) -> Result<String> {
-    match input.unwrap_or("auto") {
-        "auto" => Ok(QWEN3_AUTO_MODEL.to_string()),
-        "base-auto" => Ok(QWEN3_MLX_BASE_06B_MODEL.to_string()),
-        "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"
-        | "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-        | QWEN3_MLX_CUSTOMVOICE_06B_MODEL
-        | QWEN3_MLX_CUSTOMVOICE_17B_MODEL
-        | QWEN3_MLX_BASE_06B_MODEL
-        | QWEN3_MLX_BASE_17B_MODEL => Ok(input.unwrap().to_string()),
-        other => bail!("Unsupported Qwen3-TTS model repository: {other}"),
+fn downmix_interleaved(samples: Vec<f32>, channels: usize) -> Vec<f32> {
+    if channels <= 1 {
+        return samples
+            .into_iter()
+            .map(|sample| if sample.is_finite() { sample } else { 0.0 })
+            .collect();
     }
-}
-
-fn normalize_qwen3_language(input: &str) -> Result<String> {
-    match input.to_ascii_lowercase().as_str() {
-        "auto" => Ok("auto".to_string()),
-        "chinese" => Ok("chinese".to_string()),
-        "english" => Ok("english".to_string()),
-        "japanese" => Ok("japanese".to_string()),
-        "korean" => Ok("korean".to_string()),
-        "german" => Ok("german".to_string()),
-        "french" => Ok("french".to_string()),
-        "spanish" => Ok("spanish".to_string()),
-        other => bail!("Unsupported Rust Qwen3 language: {other}"),
-    }
-}
-
-fn normalize_qwen3_dtype(input: Option<&str>, resolved_device: &str) -> Result<String> {
-    match input.unwrap_or("auto").to_ascii_lowercase().as_str() {
-        // BF16 halves weight memory traffic on Apple Silicon (~1.5-2x faster
-        // inference); precision-sensitive steps (logits, sampling) run in F32
-        // inside qwen_tts, and the audio output path converts to F32.
-        "auto" => Ok(if resolved_device == "metal" {
-            "bfloat16".to_string()
-        } else {
-            "float32".to_string()
-        }),
-        "float32" | "f32" => Ok("float32".to_string()),
-        "bfloat16" | "bf16" => {
-            if resolved_device == "metal" {
-                Ok("bfloat16".to_string())
-            } else {
-                bail!("Rust Qwen3 bfloat16 requires the Metal device; use float32 on CPU.")
-            }
-        }
-        other => bail!("Unsupported Rust Qwen3 dtype: {other}."),
-    }
-}
-
-fn qwen3_candle_dtype(dtype: &str) -> DType {
-    if dtype == "bfloat16" {
-        DType::BF16
-    } else {
-        DType::F32
-    }
-}
-
-fn try_new_metal_device() -> std::result::Result<Device, String> {
-    use std::panic::{AssertUnwindSafe, catch_unwind};
-
-    match catch_unwind(AssertUnwindSafe(|| Device::new_metal(0))) {
-        Ok(Ok(device)) => Ok(device),
-        Ok(Err(err)) => Err(err.to_string()),
-        Err(_) => Err("Candle Metal initialization panicked.".to_string()),
-    }
-}
-
-fn select_qwen3_device(input: Option<&str>) -> Result<SelectedQwen3Device> {
-    match input.unwrap_or("auto").to_ascii_lowercase().as_str() {
-        "cpu" => Ok(SelectedQwen3Device {
-            resolved: "cpu".to_string(),
-            device: Device::Cpu,
-            warnings: Vec::new(),
-        }),
-        "auto" => match try_new_metal_device() {
-            Ok(device) => Ok(SelectedQwen3Device {
-                resolved: "metal".to_string(),
-                device,
-                warnings: Vec::new(),
-            }),
-            Err(err) => Ok(SelectedQwen3Device {
-                resolved: "cpu".to_string(),
-                device: Device::Cpu,
-                warnings: vec![format!(
-                    "Candle Metal was unavailable for Qwen3 auto device; using CPU fallback ({err})."
-                )],
-            }),
-        },
-        "metal" => try_new_metal_device()
-            .map(|device| SelectedQwen3Device {
-                resolved: "metal".to_string(),
-                device,
-                warnings: Vec::new(),
-            })
-            .map_err(|err| {
-                anyhow::anyhow!(
-                    "Rust Qwen3 Metal device was requested but Candle Metal is unavailable: {err}"
-                )
-            }),
-        other => {
-            bail!("Rust Qwen3 build supports auto, metal, or cpu device maps only, got {other}.")
-        }
-    }
-}
-
-fn normalize_qwen3_attention(input: Option<&str>) -> Result<String> {
-    match input.unwrap_or("auto").to_ascii_lowercase().as_str() {
-        "auto" | "eager" => Ok("eager".to_string()),
-        other => bail!("Rust Qwen3 build currently supports eager attention only, got {other}."),
-    }
-}
-
-fn qwen3_attention_uses_flash(attention: &str) -> bool {
-    attention == "flash"
+    samples
+        .chunks_exact(channels)
+        .map(|frame| {
+            frame
+                .iter()
+                .map(|value| if value.is_finite() { *value } else { 0.0 })
+                .sum::<f32>()
+                / channels as f32
+        })
+        .collect()
 }
 
 fn normalize_neutts_model(input: Option<&str>) -> Result<String> {
@@ -2779,15 +949,9 @@ fn normalize_neutts_model(input: Option<&str>) -> Result<String> {
 }
 
 fn round_secs(value: f64) -> f64 {
-    (value * 1000.0).round() / 1000.0
+    (value * 1_000.0).round() / 1_000.0
 }
 
-/// Background keepalive that writes a single byte to stderr every
-/// [`HEARTBEAT_INTERVAL`] while alive. The Electron host re-arms its per-request
-/// inactivity watchdog on any child stdout/stderr, so this keeps a legitimately
-/// long blocking operation (model download / CPU inference) from being treated
-/// as a stuck worker. Dropping the guard signals the thread and joins it, so the
-/// heartbeat is always stopped before any further WebSocket frame is written.
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 
 struct Heartbeat {
@@ -2807,7 +971,6 @@ impl Heartbeat {
                             return;
                         }
                     }
-                    // Sender dropped (stop requested) or channel closed.
                     _ => return,
                 }
             }
@@ -2821,12 +984,26 @@ impl Heartbeat {
 
 impl Drop for Heartbeat {
     fn drop(&mut self) {
-        // Dropping the sender disconnects the channel, waking the thread immediately.
         self.stop.take();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
     }
+}
+
+fn is_client_disconnect(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<tungstenite::Error>()
+            .is_some_and(|error| {
+                matches!(
+                    error,
+                    tungstenite::Error::ConnectionClosed
+                        | tungstenite::Error::AlreadyClosed
+                        | tungstenite::Error::Io(_)
+                )
+            })
+    })
 }
 
 struct WebSocketConnection {
@@ -2835,28 +1012,19 @@ struct WebSocketConnection {
 
 impl WebSocketConnection {
     fn accept(mut stream: TcpStream, auth_token: &str) -> Result<Self> {
-        // Bound the HTTP upgrade read so a client that connects and sends
-        // nothing cannot park the single-threaded accept loop. The timeout is
-        // relaxed after a successful upgrade so resident model hosts stay warm
-        // across long idle periods.
         stream
             .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_READ_TIMEOUT_SEC)))
             .context("Failed to set WebSocket read timeout")?;
-        // Detect a peer that dies without FIN (host crash/power loss); without
-        // keepalive the post-upgrade blocking read would wedge forever.
         enable_tcp_keepalive(&stream);
-
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_WEBSOCKET_TEXT_FRAME_BYTES))
             .max_frame_size(Some(MAX_WEBSOCKET_TEXT_FRAME_BYTES))
             .accept_unmasked_frames(false);
-
         let (request, tail) = read_websocket_upgrade(&mut stream)?;
         if !websocket_request_path_is_authorized(&request, auth_token) {
             let _ = write_websocket_error_response(&mut stream, StatusCode::UNAUTHORIZED);
             bail!("Unauthorized WebSocket path.");
         }
-
         let response = create_response(&request).context("Invalid WebSocket upgrade request")?;
         write_response(&mut stream, &response)
             .context("Failed writing WebSocket upgrade response")?;
@@ -2867,7 +1035,6 @@ impl WebSocketConnection {
             .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_IDLE_READ_TIMEOUT_SEC)))
             .context("Failed to set WebSocket idle read timeout")?;
         let socket = WebSocket::from_partially_read(stream, tail, Role::Server, Some(config));
-
         Ok(Self { socket })
     }
 
@@ -2877,18 +1044,11 @@ impl WebSocketConnection {
                 Ok(Message::Text(text)) => return Ok(Some(text.to_string())),
                 Ok(Message::Binary(_)) => bail!("Binary WebSocket requests are not supported."),
                 Ok(Message::Close(_)) => return Ok(None),
-                Ok(Message::Ping(payload)) => {
-                    self.socket.send(Message::Pong(payload))?;
-                }
-                Ok(Message::Pong(_)) => {}
-                Ok(Message::Frame(_)) => {}
+                Ok(Message::Ping(payload)) => self.socket.send(Message::Pong(payload))?,
+                Ok(Message::Pong(_) | Message::Frame(_)) => {}
                 Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
                     return Ok(None);
                 }
-                // Idle read timeout: the connection legitimately sits quiet
-                // between requests, so probe with a Ping and keep waiting. A
-                // dead peer fails the Ping write (or a keepalive-reset read)
-                // instead of blocking forever.
                 Err(tungstenite::Error::Io(err))
                     if matches!(
                         err.kind(),
@@ -2946,29 +1106,23 @@ fn websocket_request_path_is_authorized(request: &Request, auth_token: &str) -> 
     constant_time_eq(path_token.as_bytes(), auth_token.as_bytes()) && uri.query().is_none()
 }
 
-/// Constant-time byte comparison so the auth-token path check does not leak
-/// matching-prefix length through timing. Length inequality returns early,
-/// which only leaks the token length (not its contents).
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0_u8;
-    for (x, y) in a.iter().zip(b) {
-        diff |= x ^ y;
+    let mut difference = 0_u8;
+    for (left, right) in a.iter().zip(b) {
+        difference |= left ^ right;
     }
-    diff == 0
+    difference == 0
 }
 
-/// Best-effort SO_KEEPALIVE on the accepted loopback socket so a peer that
-/// vanishes without FIN eventually resets the connection instead of leaving
-/// the bridge blocked on a half-open read.
 fn enable_tcp_keepalive(stream: &TcpStream) {
     #[cfg(unix)]
     {
         use std::os::fd::AsRawFd;
         let enabled: libc::c_int = 1;
-        let rc = unsafe {
+        let result = unsafe {
             libc::setsockopt(
                 stream.as_raw_fd(),
                 libc::SOL_SOCKET,
@@ -2977,7 +1131,7 @@ fn enable_tcp_keepalive(stream: &TcpStream) {
                 std::mem::size_of::<libc::c_int>() as libc::socklen_t,
             )
         };
-        if rc != 0 {
+        if result != 0 {
             eprintln!(
                 "Failed to enable SO_KEEPALIVE on WebSocket connection: {}",
                 std::io::Error::last_os_error()
@@ -2990,9 +1144,7 @@ fn enable_tcp_keepalive(stream: &TcpStream) {
 
 fn read_websocket_upgrade(stream: &mut TcpStream) -> Result<(Request, Vec<u8>)> {
     let mut request = Vec::new();
-    let mut buffer = [0_u8; 1024];
-    // Total handshake deadline: the per-read socket timeout alone would let a
-    // slow-loris client trickle bytes forever and park the accept loop.
+    let mut buffer = [0_u8; 1_024];
     let deadline = Instant::now() + Duration::from_secs(WEBSOCKET_HANDSHAKE_DEADLINE_SEC);
     loop {
         if Instant::now() > deadline {
@@ -3000,15 +1152,12 @@ fn read_websocket_upgrade(stream: &mut TcpStream) -> Result<(Request, Vec<u8>)> 
             bail!("WebSocket handshake exceeded the total handshake deadline.");
         }
         let read = stream.read(&mut buffer)?;
-        if read == 0 {
-            bail!("WebSocket client disconnected during handshake.");
-        }
+        ensure!(read > 0, "WebSocket client disconnected during handshake.");
         request.extend_from_slice(&buffer[..read]);
         if request.len() > MAX_WEBSOCKET_HANDSHAKE_BYTES {
             let _ = write_websocket_error_response(stream, StatusCode::PAYLOAD_TOO_LARGE);
             bail!("WebSocket handshake exceeded the maximum header size.");
         }
-
         if let Some((header_len, parsed)) =
             Request::try_parse(&request).context("Invalid WebSocket handshake request")?
         {
@@ -3028,24 +1177,9 @@ fn write_websocket_error_response(stream: &mut TcpStream, status: StatusCode) ->
     Ok(())
 }
 
-fn read_exact_or_eof<R: Read>(reader: &mut R, buffer: &mut [u8]) -> Result<bool> {
-    let mut read_total = 0;
-    while read_total < buffer.len() {
-        let read = reader.read(&mut buffer[read_total..])?;
-        if read == 0 {
-            return Ok(read_total == 0);
-        }
-        read_total += read;
-    }
-    Ok(true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    use std::os::unix::fs::PermissionsExt;
 
     fn wav_base64(sample_rate: u32, samples: &[i16]) -> String {
         let spec = hound::WavSpec {
@@ -3057,274 +1191,12 @@ mod tests {
         let mut cursor = std::io::Cursor::new(Vec::new());
         {
             let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
-            for &sample in samples {
-                writer.write_sample(sample).unwrap();
+            for sample in samples {
+                writer.write_sample(*sample).unwrap();
             }
             writer.finalize().unwrap();
         }
         BASE64.encode(cursor.into_inner())
-    }
-
-    #[test]
-    fn cargo_manifest_enables_ctrlc_termination_signal_feature() {
-        let manifest =
-            std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml"))
-                .unwrap();
-        let ctrlc_line = manifest
-            .lines()
-            .find(|line| line.trim_start().starts_with("ctrlc"))
-            .expect("manifest should declare ctrlc");
-
-        assert!(
-            ctrlc_line.contains("termination"),
-            "ctrlc must enable the termination feature so SIGTERM reaps resident child process groups"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn api_server_startup_timeout_kills_spawned_process_group() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "open-tts-api-server-cleanup-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp_dir).unwrap();
-        let script_path = temp_dir.join("fake-api-server.sh");
-        let heartbeat_path = temp_dir.join("heartbeat.log");
-        let model_path = temp_dir.join("model");
-        std::fs::create_dir_all(&model_path).unwrap();
-        std::fs::write(
-            &script_path,
-            format!(
-                "#!/bin/sh\n\
-                 while true; do printf x >> '{}'; sleep 0.05; done &\n\
-                 sleep 30\n",
-                heartbeat_path.display()
-            ),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&script_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&script_path, permissions).unwrap();
-
-        let key = Qwen3MlxApiServerKey {
-            api_server_path: script_path,
-            model_path,
-        };
-        let resident_shutdown = ResidentProcessShutdown::default();
-        let result = start_qwen3_mlx_api_server_with_timeout(
-            &key,
-            &resident_shutdown,
-            Duration::from_millis(150),
-        );
-        assert!(result.is_err());
-
-        let first_len = std::fs::metadata(&heartbeat_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        thread::sleep(Duration::from_millis(250));
-        let second_len = std::fs::metadata(&heartbeat_path)
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
-        let _ = std::fs::remove_dir_all(&temp_dir);
-
-        assert_eq!(
-            second_len, first_len,
-            "api_server startup failure must kill the whole spawned process group"
-        );
-    }
-
-    #[test]
-    fn prepare_neutts_reference_samples_resamples_to_encoder_rate() {
-        // 1 second at 48 kHz must land at ~1 second at 16 kHz, untruncated.
-        let encoded = wav_base64(48_000, &vec![1000_i16; 48_000]);
-        let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
-        assert!(!truncated);
-        let expected = neutts::ENCODER_SAMPLE_RATE as usize;
-        assert!(
-            samples.len().abs_diff(expected) <= 2,
-            "got {}",
-            samples.len()
-        );
-    }
-
-    #[test]
-    fn prepare_neutts_reference_samples_truncates_to_encoder_window() {
-        // 25 seconds at 16 kHz must clip to the 20-second encoder window.
-        let encoded = wav_base64(16_000, &vec![1000_i16; 16_000 * 25]);
-        let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
-        assert!(truncated);
-        assert_eq!(samples.len(), neucodec_encoder::ENCODER_WINDOW_SAMPLES);
-    }
-
-    #[test]
-    fn prepare_neutts_reference_samples_rejects_invalid_input() {
-        assert!(prepare_neutts_reference_samples("not base64!").is_err());
-        assert!(prepare_neutts_reference_samples(&BASE64.encode(b"not a wav file")).is_err());
-    }
-
-    #[test]
-    fn speaker_id_lowercases_every_display_name() {
-        // The model's spk_id keys are lowercase; case-sensitive validation means
-        // the capitalized UI names must map exactly to these keys.
-        let cases = [
-            ("Ryan", "ryan"),
-            ("Aiden", "aiden"),
-            ("Vivian", "vivian"),
-            ("Serena", "serena"),
-            ("Uncle_Fu", "uncle_fu"),
-            ("Dylan", "dylan"),
-            ("Eric", "eric"),
-            ("Ono_Anna", "ono_anna"),
-            ("Sohee", "sohee"),
-        ];
-        for (display, expected) in cases {
-            assert_eq!(qwen3_speaker_id(display), expected, "speaker {display}");
-        }
-    }
-
-    #[test]
-    fn default_speaker_is_a_canonical_lowercase_key() {
-        assert_eq!(
-            QWEN3_DEFAULT_SPEAKER,
-            qwen3_speaker_id(QWEN3_DEFAULT_SPEAKER)
-        );
-    }
-
-    #[test]
-    fn qwen3_custom_voice_units_split_sentences_and_cap_long_text() {
-        let units = qwen3_custom_voice_units(
-            "This is a first sentence with enough words to cross the minimum split size. \
-             This is a second sentence with enough words to become another unit!",
-        );
-        assert_eq!(units.len(), 2);
-        assert!(units[0].ends_with("size."));
-        assert!(units[1].ends_with("unit!"));
-
-        let long = "word ".repeat(120);
-        let long_units = qwen3_custom_voice_units(&long);
-        assert!(long_units.len() > 1);
-        assert!(
-            long_units
-                .iter()
-                .all(|unit| unit.chars().count() <= QWEN3_CUSTOM_VOICE_MAX_UNIT_CHARS)
-        );
-        // The first unit bounds time-to-first-audio, so it gets a tighter cap
-        // than the throughput-oriented later units.
-        assert!(long_units[0].chars().count() <= QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS);
-        assert!(
-            long_units[1].chars().count() > QWEN3_CUSTOM_VOICE_FIRST_UNIT_MAX_CHARS,
-            "later units should use the full budget"
-        );
-    }
-
-    #[test]
-    fn normalize_qwen3_model_resolves_auto_and_allows_known_repos() {
-        assert_eq!(normalize_qwen3_model(None).unwrap(), QWEN3_AUTO_MODEL);
-        assert_eq!(
-            normalize_qwen3_model(Some("auto")).unwrap(),
-            QWEN3_AUTO_MODEL
-        );
-        assert_eq!(
-            normalize_qwen3_model(Some("Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice")).unwrap(),
-            "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
-        );
-        assert_eq!(
-            normalize_qwen3_model(Some(QWEN3_MLX_CUSTOMVOICE_06B_MODEL)).unwrap(),
-            QWEN3_MLX_CUSTOMVOICE_06B_MODEL
-        );
-        assert_eq!(
-            normalize_qwen3_model(Some(QWEN3_MLX_CUSTOMVOICE_17B_MODEL)).unwrap(),
-            QWEN3_MLX_CUSTOMVOICE_17B_MODEL
-        );
-        assert!(is_qwen3_mlx_custom_voice_model(
-            QWEN3_MLX_CUSTOMVOICE_06B_MODEL
-        ));
-        assert!(!is_qwen3_mlx_custom_voice_model(QWEN3_MLX_BASE_06B_MODEL));
-        assert_eq!(
-            normalize_qwen3_model(Some("mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit")).unwrap(),
-            "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit"
-        );
-        assert!(normalize_qwen3_model(Some("Qwen/other")).is_err());
-    }
-
-    #[test]
-    fn normalize_qwen3_language_lowercases_and_rejects_unknown() {
-        assert_eq!(normalize_qwen3_language("English").unwrap(), "english");
-        assert_eq!(normalize_qwen3_language("Auto").unwrap(), "auto");
-        assert!(normalize_qwen3_language("Klingon").is_err());
-    }
-
-    #[test]
-    fn normalize_qwen3_dtype_and_device_accept_only_supported() {
-        assert_eq!(normalize_qwen3_dtype(None, "cpu").unwrap(), "float32");
-        assert_eq!(normalize_qwen3_dtype(None, "metal").unwrap(), "bfloat16");
-        assert_eq!(
-            normalize_qwen3_dtype(Some("float32"), "metal").unwrap(),
-            "float32"
-        );
-        assert_eq!(
-            normalize_qwen3_dtype(Some("bf16"), "metal").unwrap(),
-            "bfloat16"
-        );
-        assert!(normalize_qwen3_dtype(Some("bf16"), "cpu").is_err());
-        assert!(normalize_qwen3_dtype(Some("float16"), "metal").is_err());
-        assert_eq!(qwen3_candle_dtype("bfloat16"), DType::BF16);
-        assert_eq!(qwen3_candle_dtype("float32"), DType::F32);
-        assert_eq!(select_qwen3_device(Some("cpu")).unwrap().resolved, "cpu");
-        let auto_device = select_qwen3_device(Some("auto")).unwrap().resolved;
-        assert!(matches!(auto_device.as_str(), "cpu" | "metal"));
-        assert!(select_qwen3_device(Some("cuda")).is_err());
-    }
-
-    #[test]
-    fn normalize_qwen3_attention_accepts_auto_and_eager_only() {
-        assert_eq!(normalize_qwen3_attention(Some("eager")).unwrap(), "eager");
-        assert_eq!(normalize_qwen3_attention(None).unwrap(), "eager");
-        assert!(normalize_qwen3_attention(Some("flash")).is_err());
-    }
-
-    #[test]
-    fn normalize_neutts_model_enforces_allowlist() {
-        assert_eq!(normalize_neutts_model(None).unwrap(), NEUTTS_DEFAULT_MODEL);
-        assert!(normalize_neutts_model(Some("neuphonic/neutts-nano-q8-gguf")).is_ok());
-        assert!(normalize_neutts_model(Some("evil/model")).is_err());
-    }
-
-    #[test]
-    fn sse_line_reader_streams_lines_then_eof() {
-        let lines = spawn_sse_line_reader(std::io::Cursor::new(b"data: a\ndata: b\n".to_vec()));
-        assert_eq!(
-            lines.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
-            Some("data: a\n".to_string())
-        );
-        assert_eq!(
-            lines.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
-            Some("data: b\n".to_string())
-        );
-        assert_eq!(
-            lines.recv_timeout(Duration::from_secs(5)).unwrap().unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn warm_payload_accepts_model_repo_fields() {
-        let payload: Qwen3WarmPayload = serde_json::from_value(json!({
-            "modelRepo": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-            "deviceMap": "auto",
-        }))
-        .unwrap();
-        assert_eq!(
-            payload.model_repo.as_deref(),
-            Some("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice")
-        );
-        assert_eq!(payload.device_map.as_deref(), Some("auto"));
-        assert!(payload.dtype.is_none());
     }
 
     fn output_with(
@@ -3341,6 +1213,46 @@ mod tests {
             streamed_audio,
             phase_timings: serde_json::Map::new(),
         }
+    }
+
+    #[test]
+    fn qwen_payload_rejects_removed_controls() {
+        let payload = json!({
+            "text": "Hello",
+            "modelRepo": QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
+            "modelPath": "/model",
+            "deviceMap": "auto",
+        });
+        assert!(serde_json::from_value::<Qwen3Payload>(payload).is_err());
+    }
+
+    #[test]
+    fn prepare_neutts_reference_samples_resamples_to_encoder_rate() {
+        let encoded = wav_base64(48_000, &vec![1_000_i16; 48_000]);
+        let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
+        assert!(!truncated);
+        assert!(samples.len().abs_diff(neutts::ENCODER_SAMPLE_RATE as usize) <= 2);
+    }
+
+    #[test]
+    fn prepare_neutts_reference_samples_truncates_to_encoder_window() {
+        let encoded = wav_base64(16_000, &vec![1_000_i16; 16_000 * 25]);
+        let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
+        assert!(truncated);
+        assert_eq!(samples.len(), neucodec_encoder::ENCODER_WINDOW_SAMPLES);
+    }
+
+    #[test]
+    fn prepare_neutts_reference_samples_rejects_invalid_input() {
+        assert!(prepare_neutts_reference_samples("not base64!").is_err());
+        assert!(prepare_neutts_reference_samples(&BASE64.encode(b"not a wav file")).is_err());
+    }
+
+    #[test]
+    fn normalize_neutts_model_enforces_allowlist() {
+        assert_eq!(normalize_neutts_model(None).unwrap(), NEUTTS_DEFAULT_MODEL);
+        assert!(normalize_neutts_model(Some("neuphonic/neutts-nano-q8-gguf")).is_ok());
+        assert!(normalize_neutts_model(Some("evil/model")).is_err());
     }
 
     #[test]
@@ -3363,17 +1275,6 @@ mod tests {
     fn validate_generation_output_rejects_empty_audio_and_zero_rate() {
         assert!(validate_generation_output(&output_with(Vec::new(), 24_000, None)).is_err());
         assert!(validate_generation_output(&output_with(vec![0.0; 4], 0, None)).is_err());
-        assert!(
-            validate_generation_output(&output_with(
-                Vec::new(),
-                24_000,
-                Some(StreamedAudioSummary {
-                    sample_count: 0,
-                    audio_chunk_count: 0,
-                }),
-            ))
-            .is_err()
-        );
     }
 
     #[test]
@@ -3381,6 +1282,16 @@ mod tests {
         assert!(is_elapsed_phase_timing("modelLoadSec"));
         assert!(is_elapsed_phase_timing("inferenceSec"));
         assert!(!is_elapsed_phase_timing("firstAudioSec"));
+    }
+
+    #[test]
+    fn float32_transport_cleans_non_finite_samples_without_normalizing() {
+        let bytes = float32_to_le_bytes(&[f32::NAN, f32::INFINITY, -1.5]);
+        let samples = bytes
+            .chunks_exact(4)
+            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        assert_eq!(samples, vec![0.0, 0.0, -1.5]);
     }
 
     #[test]
@@ -3398,56 +1309,6 @@ mod tests {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"secreT"));
         assert!(!constant_time_eq(b"secret", b"secre"));
-        assert!(!constant_time_eq(b"", b"x"));
         assert!(constant_time_eq(b"", b""));
-    }
-
-    #[test]
-    fn read_sse_line_capped_reads_lines_and_rejects_oversized() {
-        let mut reader = BufReader::new(std::io::Cursor::new(b"data: ok\nnext\n".to_vec()));
-        let mut line = String::new();
-        assert_eq!(read_sse_line_capped(&mut reader, &mut line).unwrap(), 9);
-        assert_eq!(line, "data: ok\n");
-
-        let huge = vec![b'a'; (MAX_SSE_LINE_BYTES + 10) as usize];
-        let mut reader = BufReader::new(std::io::Cursor::new(huge));
-        let mut line = String::new();
-        assert!(read_sse_line_capped(&mut reader, &mut line).is_err());
-    }
-
-    #[test]
-    fn reference_cache_cleanup_removes_stale_temps_and_sweeps_old_refs() {
-        let refs_dir = std::env::temp_dir().join(format!(
-            "open-tts-ref-cache-cleanup-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&refs_dir).unwrap();
-        assert!(is_qwen3_reference_temp_file("ref-abc.wav.tmp-123"));
-        assert!(!is_qwen3_reference_temp_file("ref-abc.wav"));
-
-        // Fresh temp files are skipped (a concurrent write must not be raced).
-        let fresh_temp = refs_dir.join("ref-fresh.wav.tmp-1");
-        std::fs::write(&fresh_temp, b"x").unwrap();
-        for index in 0..(QWEN3_REFERENCE_CACHE_MAX_ENTRIES + 3) {
-            std::fs::write(refs_dir.join(format!("ref-{index}.wav")), b"x").unwrap();
-        }
-        cleanup_qwen3_reference_cache(&refs_dir);
-
-        assert!(fresh_temp.exists());
-        let ref_count = std::fs::read_dir(&refs_dir)
-            .unwrap()
-            .flatten()
-            .filter(|entry| {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                name.starts_with("ref-") && name.ends_with(".wav")
-            })
-            .count();
-        assert_eq!(ref_count, QWEN3_REFERENCE_CACHE_MAX_ENTRIES);
-        let _ = std::fs::remove_dir_all(&refs_dir);
     }
 }
