@@ -26,6 +26,8 @@ vendor/qwen3_tts_rs/
 /.cursorrules
 /.windsurfrules
 /AGENT.md
+/AGENTS.md
+/CLAUDE.md
 /COPILOT.md
 /CURSOR.md
 /GEMINI.md
