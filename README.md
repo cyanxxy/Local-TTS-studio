@@ -82,6 +82,7 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
 | **Offline reuse** | Model weights cache in-browser (IndexedDB + Cache API) for repeat use, subject to browser quota, persistence, and eviction behavior. |
 | **Desktop runtimes** | Electron adds Qwen3-TTS to Studio/Reader and exposes NeuTTS Nano and Qwen3 setup pages through a resident Rust WebSocket bridge. |
+| **Shared Qwen voices** | Electron exposes one Qwen profile, speaker, language, instruction, and sampling state across Studio, Reader, and the dedicated setup page. The active speaker is visible and selectable inline. |
 | **Document import (desktop)** | Bring PDFs, scans, Office documents, and images straight into Studio/Reader — parsed on-device, no parsing cloud API. See [Document Import](#document-import-desktop). |
 
 ---
@@ -116,6 +117,8 @@ Qwen inference is compiled into that same process. Apple Silicon initializes the
 
 Model downloads are immutable: each approved profile names an exact Hugging Face revision and required-file list. Files are downloaded through temporary paths, length/digest checked, atomically promoted, and recorded in `open-tts-model.json`. The UI distinguishes a revision-verified cache from a manually selected directory that only passed structural validation.
 
+Existing installations are migrated without another multi-gigabyte download: when Open TTS finds a structurally valid pre-1.1 Qwen cache directory, it atomically adopts it into the revision-scoped layout. Studio, Reader, and the Qwen setup page then use the same model path and the same in-memory voice settings. Switching the exact speaker does not reload the model host; switching to an undownloaded model profile requires downloading or selecting that profile first.
+
 `npm run build:rust` builds the release bridge and copies exactly one executable plus its required provider resources and native library closure into `dist-rust/` for Electron packaging. On macOS this includes `mlx.metallib`; on Windows it includes the LibTorch DLL closure.
 
 ---
@@ -136,7 +139,7 @@ npm run dev:desktop    # Vite + Electron desktop app
 ```
 
 The web app is served at [`http://localhost:5173/studio`](http://localhost:5173/studio).
-The Electron app opens the desktop shell under `/desktop/*`; Qwen3 appears as an Electron-only model option in Studio and Reader after the Rust bridge probes successfully.
+The Electron app opens the desktop shell under `/desktop/*`; Qwen3 appears as an Electron-only model option in Studio and Reader after the Rust bridge probes successfully. Selecting Qwen exposes shared speaker and language controls inline; **Model setup** opens the full profile download and voice-clone configuration page.
 
 ### All scripts
 
