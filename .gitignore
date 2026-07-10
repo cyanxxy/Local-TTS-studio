@@ -65,5 +65,8 @@ coverage/
 # Generated benchmark reports
 reports/
 
+# Isolated agent worktrees
+.worktrees/
+
 # Vercel
 .vercel
