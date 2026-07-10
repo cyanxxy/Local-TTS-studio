@@ -470,7 +470,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
       ...RUN_DEFAULTS,
       requestId: "warm-1",
       command: "warm",
-      payload: { baseModelPath: "/models/qwen3" },
+      payload: { mode: "customVoice", modelPath: "/models/qwen3" },
       spawnConfig: SPAWN_CONFIG,
     });
     expect(warm.response).toMatchObject({

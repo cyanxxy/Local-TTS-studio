@@ -48,9 +48,9 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 
 <img src="./docs/screenshots/reader.png" alt="Open TTS Reader" width="900">
 
-### Qwen3-TTS MLX Runtime
+### Qwen3-TTS Native Runtime
 
-<img src="./docs/screenshots/qwen3-mlx.png" alt="Open TTS Qwen3-TTS MLX runtime" width="900">
+<img src="./docs/screenshots/qwen3-mlx.png" alt="Open TTS Qwen3-TTS native runtime" width="900">
 
 </div>
 
@@ -63,7 +63,7 @@ Browser models prefer WebGPU, fall back to WASM where supported, and cache their
 | **Kokoro-82M** | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 24 kHz browser model, 24 named voices |
 | **Supertonic TTS** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 44.1 kHz browser model, 10 voices |
 | **NeuTTS Nano** | Neuphonic GGUF variants via Rust `neutts` | `/desktop/neutts` | No | Yes | Rust-only local runtime; requires pre-encoded `.npy` reference codes |
-| **Qwen3-TTS MLX + CustomVoice** | Apple-first CustomVoice 6-bit via upstream MLX `tts`; Base cloning via upstream MLX worker; Candle fallback via Rust `qwen_tts` | `/desktop/studio`, `/desktop/reader`, `/desktop/qwen3` | No | Yes | Rust-only local runtime; Studio and Reader expose the default CustomVoice profile directly, while `/desktop/qwen3` keeps setup, downloads, and advanced cloning controls |
+| **Qwen3-TTS Native** | Pinned `qwen3-tts-rs` inside the Rust bridge: MLX on Apple Silicon, LibTorch CUDA/CPU on Windows | `/desktop/studio`, `/desktop/reader`, `/desktop/qwen3` | No | Yes | One resident backend process; CustomVoice and Base voice cloning share revision-pinned downloads and one renderer settings state |
 
 > The deployed web app exposes browser Studio and Reader only. Desktop routes live under `/desktop/*` and are opened by Electron.
 
@@ -103,7 +103,7 @@ Guard rails keep imports predictable: an extension allowlist, a 100 MB file cap,
 
 ## Rust Local Bridge
 
-The desktop-only NeuTTS Nano and Qwen3-TTS integrations run through a compiled Rust binary at `rust/local-tts-bridge`. Electron launches `open-tts-local-bridge` directly; there is no Python runtime, adapter script, interpreter discovery, or managed virtual environment.
+The desktop-only NeuTTS Nano and Qwen3-TTS integrations run through a compiled Rust binary at `rust/local-tts-bridge`. Electron launches `open-tts-local-bridge` directly; there is no Python runtime, adapter script, interpreter discovery, child Qwen server, or managed virtual environment.
 
 The bridge has two actions:
 
@@ -112,7 +112,11 @@ The bridge has two actions:
 
 For generation, Electron starts the bridge with `--host 127.0.0.1 --port 0 --auth-token <token>`. Rust binds the loopback socket, prints `__PORT__<actual-port>` on stdout, and accepts WebSocket traffic only on `/<token>` through the maintained `tungstenite` protocol stack. Metadata travels as JSON frames, while audio streams as raw Float32 binary chunks. The renderer schedules those chunks with Web Audio and owns WAV normalization/export.
 
-`npm run build:rust` builds the release bridge and copies the binary plus native runtime libraries into `dist-rust/` for Electron packaging.
+Qwen inference is compiled into that same process. Apple Silicon initializes the pinned MLX Metal backend; Windows selects LibTorch CUDA when available and otherwise uses LibTorch CPU. The app, not the user, selects the provider from the platform profile. Requests expose only model, voice/language, reference data, and supported sampling controls.
+
+Model downloads are immutable: each approved profile names an exact Hugging Face revision and required-file list. Files are downloaded through temporary paths, length/digest checked, atomically promoted, and recorded in `open-tts-model.json`. The UI distinguishes a revision-verified cache from a manually selected directory that only passed structural validation.
+
+`npm run build:rust` builds the release bridge and copies exactly one executable plus its required provider resources and native library closure into `dist-rust/` for Electron packaging. On macOS this includes `mlx.metallib`; on Windows it includes the LibTorch DLL closure.
 
 ---
 
@@ -163,7 +167,7 @@ Packaged desktop builds bundle the Electron shell and the Rust local bridge bina
 - iPhone and iPad browsers expose Supertonic only — Kokoro is intentionally disabled on iOS pending further validation.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.
 - Electron local runtimes generate through `open-tts-local-bridge --action serve-ws --port 0 --auth-token <token>`; Rust announces the bound loopback port, metadata travels over authenticated WebSocket JSON, and audio streams as binary Float32 chunks.
-- Local-runtime models download on first generation (Qwen3 is roughly 1–2 GB); the bridge streams progress and emits a heartbeat so a slow first-run download or long CPU inference is not mistaken for a stalled worker. NeuTTS additionally requires a pre-encoded `.npy` reference-code file plus its transcript. Qwen3 MLX CustomVoice requires a local upstream `tts` binary and MLX model directory; Base voice cloning additionally requires `pibot-tts-worker`, a reference WAV, and its transcript.
+- Qwen3 model weights are downloaded explicitly from its settings page and cached by immutable profile revision. CustomVoice needs no reference clip; Base voice cloning requires a WAV and its exact transcript. No extra Qwen executable or Python environment is required. NeuTTS accepts a WAV reference or pre-encoded `.npy` codes plus the matching transcript.
 - `vercel.json` provides SPA rewrites plus COOP/COEP headers, which keep the WASM fallback cross-origin isolated (and multi-threaded) for the browser build.
 
 ---
@@ -172,7 +176,7 @@ Packaged desktop builds bundle the Electron shell and the Rust local bridge bina
 
 ```text
 electron/        Desktop shell, custom protocol, preload bridge, runtime helpers
-rust/            Rust local bridge binary for probe and WebSocket transport
+rust/            Rust local bridge with NeuTTS and native Qwen inference
 src/
 ├─ apps/
 │  ├─ web/       Browser renderer shell and entrypoint

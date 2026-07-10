@@ -72,11 +72,11 @@ const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
     ],
   },
   qwen3: {
-    name: "Qwen3-TTS 12Hz MLX",
+    name: "Qwen3-TTS 12Hz Native",
     releaseDate: "January 29, 2026",
     params: "0.6B / 1.7B",
     highlights: [
-      "Defaults to the 0.6B CustomVoice 6-bit MLX profile with nine built-in speakers.",
+      "Defaults to the fastest native 0.6B CustomVoice profile for this platform.",
       "Voice cloning available via the Base profile with a reference WAV and transcript.",
       "Runs on the resident Rust bridge — these models ship as local runtime formats, not browser ONNX.",
     ],
@@ -98,6 +98,9 @@ function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
 
 function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: SynthesisAppProps) {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
+  const qwen3ProviderDetail = window.electron?.platform === "win32"
+    ? "0.6B CustomVoice · LibTorch CUDA/CPU"
+    : "0.6B CustomVoice · Apple MLX";
   const debugProfiling = useMemo(
     () => typeof window !== "undefined"
       && import.meta.env.DEV
@@ -457,12 +460,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
           key: "qwen3",
           label: "Qwen3-TTS",
           badge: "Electron",
-          detail: "0.6B CustomVoice MLX / local runtime",
+          detail: qwen3ProviderDetail,
           selected: studioDesktopModel === "qwen3",
           onSelect: () => handleStudioDesktopModelSelect("qwen3"),
         }]
       : []
-  ), [enableDesktopRuntimes, handleStudioDesktopModelSelect, isElectronRuntime, studioDesktopModel]);
+  ), [enableDesktopRuntimes, handleStudioDesktopModelSelect, isElectronRuntime, qwen3ProviderDetail, studioDesktopModel]);
 
   const readerDesktopModelOptions = useMemo(() => (
     enableDesktopRuntimes && isElectronRuntime
@@ -470,12 +473,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
           key: "qwen3",
           label: "Qwen3-TTS",
           badge: "Electron",
-          detail: "0.6B CustomVoice MLX / local runtime",
+          detail: qwen3ProviderDetail,
           selected: readerDesktopModel === "qwen3",
           onSelect: () => handleReaderDesktopModelSelect("qwen3"),
         }]
       : []
-  ), [enableDesktopRuntimes, handleReaderDesktopModelSelect, isElectronRuntime, readerDesktopModel]);
+  ), [enableDesktopRuntimes, handleReaderDesktopModelSelect, isElectronRuntime, qwen3ProviderDetail, readerDesktopModel]);
 
   const mountedLocalRuntimePages = useMemo(() => {
     if (!enableDesktopRuntimes) return [];
