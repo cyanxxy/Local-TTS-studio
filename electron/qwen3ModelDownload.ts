@@ -350,6 +350,26 @@ export async function inspectQwen3ModelDir(
   return { readiness: "verified" };
 }
 
+export async function adoptLegacyQwen3ModelDir(
+  profile: Qwen3Profile,
+  revisionDir: string,
+  legacyDir: string,
+): Promise<string> {
+  if ((await inspectQwen3ModelDir(revisionDir, profile)).readiness !== "missing") return revisionDir;
+  if ((await inspectQwen3ModelDir(legacyDir, profile)).readiness === "missing") return revisionDir;
+
+  await fs.mkdir(path.dirname(revisionDir), { recursive: true });
+  try {
+    await fs.rename(legacyDir, revisionDir);
+  } catch (error) {
+    // Setup and download IPC can race during renderer startup. If another
+    // caller already adopted the directory, use its result; otherwise retain
+    // the original error instead of hiding a filesystem failure.
+    if ((await inspectQwen3ModelDir(revisionDir, profile)).readiness === "missing") throw error;
+  }
+  return revisionDir;
+}
+
 async function writeManifest(modelDir: string, manifest: Qwen3ModelManifest): Promise<void> {
   const finalPath = path.join(modelDir, QWEN3_MODEL_MANIFEST);
   const temporaryPath = `${finalPath}.download`;

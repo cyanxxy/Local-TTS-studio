@@ -11,6 +11,7 @@ import {
 } from "./documentImport";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import {
+  adoptLegacyQwen3ModelDir,
   createQwen3ModelDownloadCoordinator,
   createSafeProgressSender,
   inspectQwen3ModelDir,
@@ -330,6 +331,16 @@ function getQwen3ModelDir(profile: Qwen3Profile): string {
   return path.join(getCacheDir("qwen3"), profile.provider, `${dirName}-${profile.revision.slice(0, 12)}`);
 }
 
+function getLegacyQwen3ModelDir(profile: Qwen3Profile): string {
+  const dirName = profile.repo.split("/").at(-1);
+  if (!dirName || !/^[A-Za-z0-9._-]+$/.test(dirName)) throw new Error("Invalid Qwen3 model repository.");
+  return path.join(getCacheDir("qwen3"), profile.provider, dirName);
+}
+
+async function resolveQwen3ModelDir(profile: Qwen3Profile): Promise<string> {
+  return adoptLegacyQwen3ModelDir(profile, getQwen3ModelDir(profile), getLegacyQwen3ModelDir(profile));
+}
+
 function getRequestedQwen3Profile(request: unknown): Qwen3Profile {
   const repo = isRecord(request) && typeof request.modelRepo === "string"
     ? request.modelRepo.trim()
@@ -351,7 +362,7 @@ async function handleQwen3Setup(request: unknown): Promise<{
 }> {
   const selected = getRequestedQwen3Profile(request);
   const profiles = await Promise.all(getQwen3Profiles(process.platform).map(async (profile) => {
-    const modelDir = getQwen3ModelDir(profile);
+    const modelDir = await resolveQwen3ModelDir(profile);
     const inspection = await inspectQwen3ModelDir(modelDir, profile);
     return { ...profile, modelDir, ...inspection };
   }));
@@ -359,7 +370,7 @@ async function handleQwen3Setup(request: unknown): Promise<{
     provider: selected.provider,
     profiles,
     recommendedModelRepo: selected.repo,
-    recommendedModelDir: getQwen3ModelDir(selected),
+    recommendedModelDir: await resolveQwen3ModelDir(selected),
   };
 }
 
@@ -369,7 +380,7 @@ async function handleDownloadQwen3Model(
 ): Promise<Qwen3ModelDownloadResult> {
   assertTrustedIpcSender(event, { allowDevServer: isDev });
   const profile = getRequestedQwen3Profile(request);
-  const modelDir = getQwen3ModelDir(profile);
+  const modelDir = await resolveQwen3ModelDir(profile);
   return qwen3ModelDownloads.download(
     profile,
     modelDir,

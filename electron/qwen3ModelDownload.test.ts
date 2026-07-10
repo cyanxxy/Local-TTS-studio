@@ -9,6 +9,7 @@ import { Readable } from "stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Qwen3Profile } from "./qwen3Profiles";
 import {
+  adoptLegacyQwen3ModelDir,
   createQwen3ModelDownloadCoordinator,
   createSafeProgressSender,
   downloadHuggingFaceFile,
@@ -117,6 +118,30 @@ describe("safe progress and Hub URLs", () => {
 });
 
 describe("downloadQwen3Model", () => {
+  it("adopts an existing structurally valid legacy cache directory", async () => {
+    const root = makeTempDir();
+    const legacyDir = path.join(root, "example");
+    const revisionDir = path.join(root, `example-${REVISION.slice(0, 12)}`);
+    fs.mkdirSync(legacyDir);
+    for (const [fileName, body] of FILES) fs.writeFileSync(path.join(legacyDir, fileName), body);
+
+    await expect(adoptLegacyQwen3ModelDir(PROFILE, revisionDir, legacyDir)).resolves.toBe(revisionDir);
+    expect(fs.existsSync(legacyDir)).toBe(false);
+    await expect(inspectQwen3ModelDir(revisionDir, PROFILE)).resolves.toMatchObject({ readiness: "structural" });
+  });
+
+  it("does not adopt an incomplete or wrong-type legacy cache", async () => {
+    const root = makeTempDir();
+    const legacyDir = path.join(root, "example");
+    const revisionDir = path.join(root, `example-${REVISION.slice(0, 12)}`);
+    fs.mkdirSync(legacyDir);
+    fs.writeFileSync(path.join(legacyDir, "config.json"), '{"tts_model_type":"base"}');
+
+    await expect(adoptLegacyQwen3ModelDir(PROFILE, revisionDir, legacyDir)).resolves.toBe(revisionDir);
+    expect(fs.existsSync(legacyDir)).toBe(true);
+    expect(fs.existsSync(revisionDir)).toBe(false);
+  });
+
   it("downloads only required files at the exact revision and writes a verified manifest last", async () => {
     const modelDir = makeTempDir();
     const seen: string[] = [];
