@@ -35,11 +35,10 @@ export function LocalRuntimeRuntimeSettings({
         {runtime?.runtime && <p>Runtime: {runtime.runtime}</p>}
         {runtime?.package && <p>Package: {runtime.package}</p>}
         {runtime?.packageVersion && <p>Package version: {runtime.packageVersion}</p>}
+        {runtime?.provider && <p>Provider: {runtime.provider}</p>}
+        {runtime?.upstreamRevision && <p className="break-all">Runtime revision: {runtime.upstreamRevision}</p>}
         {runtime?.recommendedModelRepo && <p className="break-all">Recommended model: {runtime.recommendedModelRepo}</p>}
         {runtime?.recommendedBaseModelRepo && <p className="break-all">Recommended Base model: {runtime.recommendedBaseModelRepo}</p>}
-        {runtime?.recommendedDeviceMap && <p>Recommended device: {runtime.recommendedDeviceMap}</p>}
-        {runtime?.recommendedDtype && <p>Recommended dtype: {runtime.recommendedDtype}</p>}
-        {runtime?.recommendedAttention && <p>Recommended attention: {runtime.recommendedAttention}</p>}
       </div>
 
       {runtime?.warnings?.length ? (

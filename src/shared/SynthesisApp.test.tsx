@@ -153,7 +153,8 @@ const mock = vi.hoisted(() => {
       probe: vi.fn(),
       generate: vi.fn(),
       cancel: vi.fn(),
-      getQwen3MlxSetup: vi.fn(),
+      getQwen3Setup: vi.fn(),
+      subscribeQwen3DownloadProgress: vi.fn(),
       subscribeProgress: vi.fn(),
       subscribeAudioChunk: vi.fn(),
     },
@@ -465,7 +466,8 @@ function resetMockState() {
     probe: vi.fn(),
     generate: vi.fn(),
     cancel: vi.fn(),
-    getQwen3MlxSetup: vi.fn(),
+    getQwen3Setup: vi.fn(),
+    subscribeQwen3DownloadProgress: vi.fn(),
     subscribeProgress: vi.fn(),
     subscribeAudioChunk: vi.fn(),
   };
@@ -483,17 +485,25 @@ function resetMockState() {
     audioChunkCount: 0,
     phaseTimingsSec: {},
   });
-  mock.localTts.getQwen3MlxSetup.mockResolvedValue({
-    workerAvailable: false,
-    ttsAvailable: true,
-    apiServerAvailable: true,
+  mock.localTts.getQwen3Setup.mockResolvedValue({
+    provider: "mlx",
+    profiles: [{
+      repo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      revision: "7dc92af14613355896fcab13b268c19ede233139",
+      mode: "customVoice",
+      parameters: "0.6B",
+      provider: "mlx",
+      platforms: ["darwin"],
+      weightFormat: "mlx-6bit",
+      label: "CustomVoice · 0.6B · MLX 6-bit",
+      requiredFiles: ["config.json", "model.safetensors"],
+      modelDir: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      readiness: "verified",
+    }],
     recommendedModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
     recommendedModelDir: "/cache/qwen3/mlx/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
-    modelDirExists: true,
-    modelDirLooksReady: true,
-    workerBuildCommand: "",
-    modelDownloadCommand: "",
   });
+  mock.localTts.subscribeQwen3DownloadProgress.mockReturnValue(() => undefined);
   mock.localTts.subscribeProgress.mockReturnValue(() => undefined);
   mock.localTts.subscribeAudioChunk.mockReturnValue(() => undefined);
   mock.getWebGPUStatus.mockResolvedValue({ available: false, message: "No GPU available" });
@@ -631,7 +641,7 @@ describe("SynthesisApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "reader-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "reader-desktop-qwen3-selected" })).toBeInTheDocument();
-    await waitFor(() => expect(mock.localTts.getQwen3MlxSetup).toHaveBeenCalled());
+    await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
 
     expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
@@ -768,7 +778,7 @@ describe("SynthesisApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
-    await waitFor(() => expect(mock.localTts.getQwen3MlxSetup).toHaveBeenCalled());
+    await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "generate" }));
 
     expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();

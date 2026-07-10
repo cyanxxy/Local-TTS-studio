@@ -6,9 +6,8 @@ import type {
   LocalTtsModel,
   LocalTtsProgressEvent,
   LocalTtsProbeResult,
-  LocalTtsQwen3MlxDownloadProgress,
-  LocalTtsQwen3MlxSetup,
 } from "../electron";
+import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { GenerationStats } from "../types";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
@@ -18,17 +17,6 @@ import { LocalRuntimeRuntimeSettings } from "./localRuntime/LocalRuntimeRuntimeS
 import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
 import {
   NEUTTS_OPTIONS,
-  QWEN3_ATTENTION_OPTIONS,
-  QWEN3_DEFAULT_MAX_NEW_TOKENS,
-  QWEN3_DEVICE_OPTIONS,
-  QWEN3_DTYPE_OPTIONS,
-  QWEN3_LANGUAGE_OPTIONS,
-  QWEN3_SPEAKER_OPTIONS,
-  getDefaultQwen3Model,
-  getQwen3LanguageOptionsForSpeaker,
-  qwen3SupportsInstruct,
-  qwen3UsesMlx,
-  qwen3UsesMlxCustomVoice,
   qwen3UsesVoiceClone,
 } from "./localRuntime/modelOptions";
 import {
@@ -76,15 +64,6 @@ function createProbeRequestId(model: LocalTtsModel): string {
   return `${model}-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function clampNumber(value: number, fallback: number, min: number, max: number): number {
-  if (!Number.isFinite(value)) return fallback;
-  return Math.max(min, Math.min(max, value));
-}
-
-function clampInteger(value: number, fallback: number, min: number, max: number): number {
-  return Math.round(clampNumber(value, fallback, min, max));
-}
-
 const GENERATION_TIMING_LABELS: Array<[string, string]> = [
   ["modelLoadSec", "load"],
   ["referenceEncodingSec", "reference"],
@@ -107,34 +86,9 @@ function formatGenerationStatus(generated: LocalTtsGenerateResult): string {
   return `Generated ${generated.durationSec.toFixed(2)}s audio${device} in ${generated.elapsedSec.toFixed(2)}s${suffix}.${warning}`;
 }
 
-function formatStartingGenerationStatus({
-  model,
-  qwen3MlxCustomVoice,
-  qwen3VoiceClone,
-  qwen3DeviceMap,
-  qwen3Dtype,
-  qwen3Attention,
-  qwen3MaxNewTokens,
-}: {
-  model: LocalTtsModel;
-  qwen3MlxCustomVoice: boolean;
-  qwen3VoiceClone: boolean;
-  qwen3DeviceMap: string;
-  qwen3Dtype: string;
-  qwen3Attention: string;
-  qwen3MaxNewTokens: number;
-}): string {
+function formatStartingGenerationStatus(model: LocalTtsModel, profileLabel: string, provider: string): string {
   if (model !== "qwen3") return "Starting local generation...";
-  if (qwen3MlxCustomVoice) return "Starting Qwen3 CustomVoice MLX on mlx.";
-  const backend = qwen3VoiceClone
-    ? "Qwen3 Base MLX voice clone"
-    : "Qwen3 CustomVoice";
-  const device = qwen3VoiceClone
-    ? "mlx"
-    : qwen3DeviceMap === "auto"
-      ? "auto device"
-      : qwen3DeviceMap;
-  return `Starting ${backend} on ${device} (${qwen3Dtype}, ${qwen3Attention}, max ${qwen3MaxNewTokens}).`;
+  return `Starting Qwen3 ${profileLabel} with ${provider}.`;
 }
 
 export function LocalRuntimePage({
@@ -146,6 +100,8 @@ export function LocalRuntimePage({
   links,
   initialText,
 }: LocalRuntimePageProps) {
+  const qwen3 = useQwen3Runtime();
+  const refreshSharedQwen3Setup = qwen3.refreshSetup;
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
   const [cacheInfo, setCacheInfo] = useState<LocalTtsCacheInfo | null>(null);
@@ -162,26 +118,7 @@ export function LocalRuntimePage({
   const [referenceWavBase64, setReferenceWavBase64] = useState<string | null>(null);
   const [referenceAudioGuidance, setReferenceAudioGuidance] = useState<StatusMessage>(null);
 
-  const [qwen3Model, setQwen3Model] = useState(() => getDefaultQwen3Model(window.electron?.platform));
-  const [qwen3BaseModelPath, setQwen3BaseModelPath] = useState("");
-  const [qwen3MlxSetup, setQwen3MlxSetup] = useState<LocalTtsQwen3MlxSetup | null>(null);
-  const [qwen3MlxSetupBusy, setQwen3MlxSetupBusy] = useState(false);
-  const [qwen3MlxDownloadBusy, setQwen3MlxDownloadBusy] = useState(false);
-  const [qwen3MlxDownloadProgress, setQwen3MlxDownloadProgress] = useState<LocalTtsQwen3MlxDownloadProgress | null>(null);
-  const [qwen3ReferenceAudioName, setQwen3ReferenceAudioName] = useState("");
-  const [qwen3ReferenceAudioBase64, setQwen3ReferenceAudioBase64] = useState<string | null>(null);
   const [qwen3ReferenceAudioGuidance, setQwen3ReferenceAudioGuidance] = useState<StatusMessage>(null);
-  const [qwen3ReferenceText, setQwen3ReferenceText] = useState("");
-  const [qwen3Speaker, setQwen3Speaker] = useState(QWEN3_SPEAKER_OPTIONS[0].value);
-  const [qwen3Language, setQwen3Language] = useState(QWEN3_LANGUAGE_OPTIONS[0].value);
-  const [qwen3Instruct, setQwen3Instruct] = useState("");
-  const [qwen3DeviceMap, setQwen3DeviceMap] = useState(QWEN3_DEVICE_OPTIONS[0].value);
-  const [qwen3Dtype, setQwen3Dtype] = useState(QWEN3_DTYPE_OPTIONS[0].value);
-  const [qwen3Attention, setQwen3Attention] = useState(QWEN3_ATTENTION_OPTIONS[0].value);
-  const [qwen3Temperature, setQwen3Temperature] = useState(0.9);
-  const [qwen3TopK, setQwen3TopK] = useState(50);
-  const [qwen3TopP, setQwen3TopP] = useState(1.0);
-  const [qwen3MaxNewTokens, setQwen3MaxNewTokens] = useState(QWEN3_DEFAULT_MAX_NEW_TOKENS);
 
   const [generateBusy, setGenerateBusy] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<LocalTtsProgressEvent | null>(null);
@@ -212,13 +149,7 @@ export function LocalRuntimePage({
   } = audioPlayer;
 
   const electronAvailable = !!window.electron?.localTts;
-  const qwen3LanguageOptions = useMemo(
-    () => getQwen3LanguageOptionsForSpeaker(qwen3Speaker),
-    [qwen3Speaker],
-  );
-  const qwen3VoiceClone = qwen3UsesVoiceClone(qwen3Model);
-  const qwen3MlxCustomVoice = qwen3UsesMlxCustomVoice(qwen3Model);
-  const qwen3Mlx = qwen3UsesMlx(qwen3Model);
+  const qwen3VoiceClone = qwen3UsesVoiceClone(qwen3.profile.repo);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -308,28 +239,14 @@ export function LocalRuntimePage({
     setCacheInfo(info);
   }, [isCurrentPageVersion, model]);
 
-  const refreshQwen3MlxSetup = useCallback(async (pageVersion: number = pageVersionRef.current) => {
-    if (model !== "qwen3" || !window.electron?.localTts?.getQwen3MlxSetup) return;
-    setQwen3MlxSetupBusy(true);
+  const refreshQwen3Setup = useCallback(async () => {
+    if (model !== "qwen3") return;
     try {
-      const setup = await window.electron.localTts.getQwen3MlxSetup();
-      if (!isCurrentPageVersion(pageVersion)) return;
-      setQwen3MlxSetup(setup);
-      setQwen3BaseModelPath((current) => (
-        current.trim().length === 0 && qwen3UsesMlx(qwen3Model) && setup.modelDirLooksReady
-          && qwen3Model === setup.recommendedModelRepo
-          ? setup.recommendedModelDir
-          : current
-      ));
+      await refreshSharedQwen3Setup();
     } catch (err) {
-      if (!isCurrentPageVersion(pageVersion)) return;
       setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
-    } finally {
-      if (isCurrentPageVersion(pageVersion)) {
-        setQwen3MlxSetupBusy(false);
-      }
     }
-  }, [isCurrentPageVersion, model, qwen3Model]);
+  }, [model, refreshSharedQwen3Setup]);
 
   const runProbe = useCallback(async (pageVersion: number = pageVersionRef.current) => {
     if (!window.electron?.localTts) return;
@@ -390,10 +307,6 @@ export function LocalRuntimePage({
     setRuntimeBusy(false);
     setCacheInfo(null);
     setCacheBusy(false);
-    setQwen3MlxSetup(null);
-    setQwen3MlxSetupBusy(false);
-    setQwen3MlxDownloadBusy(false);
-    setQwen3MlxDownloadProgress(null);
     setGenerationProgress(null);
     setStatus(null);
     setGenerateBusy(false);
@@ -408,52 +321,28 @@ export function LocalRuntimePage({
       await Promise.allSettled([
         runProbe(pageVersion),
         refreshCacheInfo(pageVersion),
-        refreshQwen3MlxSetup(pageVersion),
+        refreshQwen3Setup(),
       ]);
     };
 
     void run();
-  }, [electronAvailable, model, refreshCacheInfo, refreshQwen3MlxSetup, runProbe]);
+  }, [electronAvailable, model, refreshCacheInfo, refreshQwen3Setup, runProbe]);
 
-  // Pre-warm the resident Qwen3 MLX api_server as soon as the fast path is
-  // usable (binary found + model directory chosen), so the first generation
-  // skips the model load. Best-effort: failures are ignored and the bridge
-  // worker is reused by the next generation either way.
+  // Pre-warm the selected model inside the resident Rust worker.
   const warmedKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (model !== "qwen3" || !electronAvailable || generateBusy) return;
-    const baseModelPath = qwen3BaseModelPath.trim();
-    if (qwen3MlxCustomVoice) {
-      if (!(qwen3MlxSetup?.apiServerAvailable ?? false)) return;
-      if (!baseModelPath) return;
-    }
-    const warmKey = `${qwen3Model}:${baseModelPath}`;
+    const modelPath = qwen3.modelPath.trim();
+    if (!modelPath || qwen3.readiness === "missing") return;
+    const warmKey = `${qwen3.profile.repo}:${modelPath}`;
     if (warmedKeyRef.current === warmKey) return;
     warmedKeyRef.current = warmKey;
-    // Candle repos warm too: the bridge only pre-loads already-downloaded
-    // weights, so this never kicks off a download.
     void window.electron?.localTts?.warm?.({
       model,
-      modelRepo: qwen3Model,
-      ...(qwen3MlxCustomVoice && baseModelPath ? { baseModelPath } : {}),
+      mode: qwen3.profile.mode,
+      modelPath,
     }).catch(() => undefined);
-  }, [electronAvailable, generateBusy, model, qwen3BaseModelPath, qwen3MlxCustomVoice, qwen3MlxSetup, qwen3Model]);
-
-  useEffect(() => {
-    if (!electronAvailable || !window.electron?.localTts) return;
-
-    return window.electron.localTts.subscribeQwen3MlxDownloadProgress?.((event) => {
-      if (!mountedRef.current) return;
-      if (model !== "qwen3") return;
-      setQwen3MlxDownloadProgress(event);
-      const downloadedMb = (event.downloadedBytes / (1024 * 1024)).toFixed(1);
-      const totalMb = event.totalBytes ? `/${(event.totalBytes / (1024 * 1024)).toFixed(1)} MB` : " MB";
-      setStatus({
-        tone: "info",
-        text: `Downloading ${event.fileName} (${event.fileIndex}/${event.totalFiles}) ${downloadedMb}${totalMb}.`,
-      });
-    });
-  }, [electronAvailable, model]);
+  }, [electronAvailable, generateBusy, model, qwen3.modelPath, qwen3.profile, qwen3.readiness]);
 
   useEffect(() => {
     if (!electronAvailable || !window.electron?.localTts) return;
@@ -563,23 +452,21 @@ export function LocalRuntimePage({
       return referenceText.trim().length > 0 && (!!referenceCodesBase64 || !!referenceWavBase64);
     }
     if (model === "qwen3" && qwen3VoiceClone) {
-      return qwen3BaseModelPath.trim().length > 0
-        && qwen3ReferenceText.trim().length > 0
-        && !!qwen3ReferenceAudioBase64
-        && (qwen3MlxSetup?.workerAvailable ?? false);
+      return qwen3.modelPath.trim().length > 0
+        && qwen3.readiness !== "missing"
+        && qwen3.referenceText.trim().length > 0
+        && !!qwen3.referenceAudioBase64;
     }
-    if (model === "qwen3" && qwen3MlxCustomVoice) {
-      return qwen3BaseModelPath.trim().length > 0
-        && ((qwen3MlxSetup?.apiServerAvailable ?? false) || (qwen3MlxSetup?.ttsAvailable ?? false));
+    if (model === "qwen3") {
+      return qwen3.modelPath.trim().length > 0 && qwen3.readiness !== "missing";
     }
     return true;
   }, [
     model,
-    qwen3BaseModelPath,
-    qwen3MlxCustomVoice,
-    qwen3MlxSetup,
-    qwen3ReferenceAudioBase64,
-    qwen3ReferenceText,
+    qwen3.modelPath,
+    qwen3.readiness,
+    qwen3.referenceAudioBase64,
+    qwen3.referenceText,
     qwen3VoiceClone,
     referenceCodesBase64,
     referenceWavBase64,
@@ -604,125 +491,58 @@ export function LocalRuntimePage({
 
   const handleQwen3ModelChange = useCallback((nextModel: string) => {
     invalidateGeneration();
-    const previousWasMlx = qwen3UsesMlx(qwen3Model);
-    const nextIsMlx = qwen3UsesMlx(nextModel);
-    if (
-      previousWasMlx
-      && nextIsMlx
-      && qwen3MlxSetup?.recommendedModelDir
-      && qwen3BaseModelPath.trim() === qwen3MlxSetup.recommendedModelDir
-    ) {
-      setQwen3BaseModelPath("");
-    }
-    setQwen3Model(nextModel);
-  }, [invalidateGeneration, qwen3BaseModelPath, qwen3MlxSetup, qwen3Model]);
+    qwen3.setProfileRepo(nextModel);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3BaseModelPathChange = useCallback((nextPath: string) => {
     invalidateGeneration();
-    setQwen3BaseModelPath(nextPath);
-  }, [invalidateGeneration]);
+    qwen3.setModelPath(nextPath);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3ChooseBaseModelPath = useCallback(async () => {
-    if (!window.electron?.localTts?.chooseQwen3MlxModelDir) return;
-    try {
-      const result = await window.electron.localTts.chooseQwen3MlxModelDir();
-      if (!result.path) return;
-      invalidateGeneration();
-      setQwen3BaseModelPath(result.path);
-      setStatus({ tone: "success", text: "Qwen3 MLX model directory selected." });
-    } catch (err) {
-      setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
-    }
-  }, [invalidateGeneration]);
-
-  const handleQwen3DownloadMlxModel = useCallback(async () => {
-    if (!window.electron?.localTts?.downloadQwen3MlxModel) return;
-    const pageVersion = pageVersionRef.current;
     invalidateGeneration();
-    setQwen3MlxDownloadBusy(true);
-    setQwen3MlxDownloadProgress(null);
-    setStatus({ tone: "info", text: `Downloading ${qwen3Model} into this user's app model cache…` });
-    try {
-      const result = await window.electron.localTts.downloadQwen3MlxModel({ modelRepo: qwen3Model });
-      if (!isCurrentPageVersion(pageVersion)) return;
-      setQwen3BaseModelPath(result.modelDir);
-      await refreshQwen3MlxSetup(pageVersion);
-      if (!isCurrentPageVersion(pageVersion)) return;
-      setStatus({
-        tone: result.modelDirLooksReady ? "success" : "error",
-        text: result.modelDirLooksReady
-          ? `Downloaded ${result.modelRepo} to ${result.modelDir}.`
-          : `Downloaded ${result.modelRepo}, but the model directory is still missing required files.`,
-      });
-    } catch (err) {
-      if (!isCurrentPageVersion(pageVersion)) return;
-      setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
-    } finally {
-      if (isCurrentPageVersion(pageVersion)) {
-        setQwen3MlxDownloadBusy(false);
-      }
-    }
-  }, [invalidateGeneration, isCurrentPageVersion, qwen3Model, refreshQwen3MlxSetup]);
+    await qwen3.chooseModelPath();
+  }, [invalidateGeneration, qwen3]);
+
+  const handleQwen3DownloadModel = useCallback(async () => {
+    invalidateGeneration();
+    await qwen3.downloadModel();
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3ReferenceTextChange = useCallback((nextReferenceText: string) => {
     invalidateGeneration();
-    setQwen3ReferenceText(nextReferenceText);
-  }, [invalidateGeneration]);
+    qwen3.setReferenceText(nextReferenceText);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3SpeakerChange = useCallback((nextSpeaker: string) => {
     invalidateGeneration();
-    setQwen3Speaker(nextSpeaker);
-    setQwen3Language((currentLanguage) => (
-      getQwen3LanguageOptionsForSpeaker(nextSpeaker).some((option) => option.value === currentLanguage)
-        ? currentLanguage
-        : "Auto"
-    ));
-  }, [invalidateGeneration]);
+    qwen3.setSpeaker(nextSpeaker);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3LanguageChange = useCallback((nextLanguage: string) => {
     invalidateGeneration();
-    setQwen3Language(nextLanguage);
-  }, [invalidateGeneration]);
+    qwen3.setLanguage(nextLanguage);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3InstructChange = useCallback((nextInstruct: string) => {
     invalidateGeneration();
-    setQwen3Instruct(nextInstruct);
-  }, [invalidateGeneration]);
-
-  const handleQwen3DeviceMapChange = useCallback((nextDeviceMap: string) => {
-    invalidateGeneration();
-    setQwen3DeviceMap(nextDeviceMap);
-  }, [invalidateGeneration]);
-
-  const handleQwen3DtypeChange = useCallback((nextDtype: string) => {
-    invalidateGeneration();
-    setQwen3Dtype(nextDtype);
-  }, [invalidateGeneration]);
-
-  const handleQwen3AttentionChange = useCallback((nextAttention: string) => {
-    invalidateGeneration();
-    setQwen3Attention(nextAttention);
-  }, [invalidateGeneration]);
+    qwen3.setInstruct(nextInstruct);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3TemperatureChange = useCallback((nextTemperature: number) => {
     invalidateGeneration();
-    setQwen3Temperature((current) => clampNumber(nextTemperature, current, 0.2, 2));
-  }, [invalidateGeneration]);
+    qwen3.setTemperature(nextTemperature);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3TopKChange = useCallback((nextTopK: number) => {
     invalidateGeneration();
-    setQwen3TopK((current) => clampInteger(nextTopK, current, 0, 1000));
-  }, [invalidateGeneration]);
-
-  const handleQwen3TopPChange = useCallback((nextTopP: number) => {
-    invalidateGeneration();
-    setQwen3TopP((current) => clampNumber(nextTopP, current, 0.5, 1));
-  }, [invalidateGeneration]);
+    qwen3.setTopK(nextTopK);
+  }, [invalidateGeneration, qwen3]);
 
   const handleQwen3MaxNewTokensChange = useCallback((nextMaxNewTokens: number) => {
     invalidateGeneration();
-    setQwen3MaxNewTokens((current) => clampInteger(nextMaxNewTokens, current, 64, 8192));
-  }, [invalidateGeneration]);
+    qwen3.setMaxNewTokens(nextMaxNewTokens);
+  }, [invalidateGeneration, qwen3]);
 
   const handleReferenceAudioChange = useCallback(async (file: File | null) => {
     const pageVersion = pageVersionRef.current;
@@ -773,8 +593,7 @@ export function LocalRuntimePage({
 
     if (!file) {
       if (!isCurrentPageVersion(pageVersion)) return;
-      setQwen3ReferenceAudioName("");
-      setQwen3ReferenceAudioBase64(null);
+      qwen3.setReferenceAudio("", null);
       setQwen3ReferenceAudioGuidance(null);
       return;
     }
@@ -785,18 +604,16 @@ export function LocalRuntimePage({
       }
       const buffer = await file.arrayBuffer();
       if (!isCurrentPageVersion(pageVersion)) return;
-      setQwen3ReferenceAudioBase64(arrayBufferToBase64(buffer));
-      setQwen3ReferenceAudioName(file.name);
+      qwen3.setReferenceAudio(file.name, arrayBufferToBase64(buffer));
       setQwen3ReferenceAudioGuidance({ tone: "success", text: "Reference WAV loaded." });
       setStatus({ tone: "info", text: `Loaded Qwen3 reference WAV: ${file.name}. Enter its exact transcript before generating.` });
     } catch (err) {
       if (!isCurrentPageVersion(pageVersion)) return;
-      setQwen3ReferenceAudioName("");
-      setQwen3ReferenceAudioBase64(null);
+      qwen3.setReferenceAudio("", null);
       setQwen3ReferenceAudioGuidance(null);
       setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
     }
-  }, [invalidateGeneration, isCurrentPageVersion]);
+  }, [invalidateGeneration, isCurrentPageVersion, qwen3]);
 
   const runGeneration = useCallback(async () => {
     if (!window.electron?.localTts) return;
@@ -807,15 +624,7 @@ export function LocalRuntimePage({
     clearGeneratedResult();
     beginAudioStream();
     setGenerateBusy(true);
-    const startingStatus = formatStartingGenerationStatus({
-      model,
-      qwen3MlxCustomVoice,
-      qwen3VoiceClone,
-      qwen3DeviceMap,
-      qwen3Dtype,
-      qwen3Attention,
-      qwen3MaxNewTokens,
-    });
+    const startingStatus = formatStartingGenerationStatus(model, qwen3.profile.label, qwen3.profile.provider);
     setGenerationProgress({
       requestId,
       model,
@@ -839,33 +648,20 @@ export function LocalRuntimePage({
           payload.referenceAudioBase64 = referenceWavBase64;
         }
       } else if (model === "qwen3") {
-        payload.modelRepo = qwen3Model;
-        payload.mode = qwen3VoiceClone ? "voiceClone" : "customVoice";
-        if (qwen3Mlx) {
-          payload.baseModelPath = qwen3BaseModelPath.trim();
-        }
+        payload.modelRepo = qwen3.profile.repo;
+        payload.mode = qwen3.profile.mode;
+        payload.modelPath = qwen3.modelPath.trim();
         if (qwen3VoiceClone) {
-          payload.referenceAudioBase64 = qwen3ReferenceAudioBase64;
-          payload.referenceAudioName = qwen3ReferenceAudioName;
-          payload.referenceText = qwen3ReferenceText.trim();
+          payload.referenceAudioBase64 = qwen3.referenceAudioBase64;
+          payload.referenceText = qwen3.referenceText.trim();
+        } else {
+          payload.speaker = qwen3.speaker;
+          payload.instruct = qwen3.instruct.trim() || undefined;
         }
-        payload.speaker = qwen3Speaker;
-        payload.language = qwen3Language;
-        // Only send the style instruction when the selected model actually
-        // supports it, so the request always matches the UI contract (the field
-        // is disabled for unsupported models). This prevents stale text — e.g.
-        // typed for one model, left behind after switching — from leaking into a
-        // request where the input was greyed out.
-        payload.instruct = qwen3SupportsInstruct(qwen3Model)
-          ? qwen3Instruct.trim() || undefined
-          : undefined;
-        payload.deviceMap = qwen3DeviceMap;
-        payload.dtype = qwen3Dtype;
-        payload.attnImplementation = qwen3Attention;
-        payload.temperature = qwen3Temperature;
-        payload.topK = qwen3TopK;
-        payload.topP = qwen3TopP;
-        payload.maxNewTokens = qwen3MaxNewTokens;
+        payload.language = qwen3.language;
+        payload.temperature = qwen3.temperature;
+        payload.topK = qwen3.topK;
+        payload.maxNewTokens = qwen3.maxNewTokens;
       }
 
       const generated = await window.electron.localTts.generate({
@@ -920,23 +716,7 @@ export function LocalRuntimePage({
     isCurrentPageVersion,
     model,
     neuttsModel,
-    qwen3Attention,
-    qwen3BaseModelPath,
-    qwen3DeviceMap,
-    qwen3Dtype,
-    qwen3Instruct,
-    qwen3Language,
-    qwen3MaxNewTokens,
-    qwen3Mlx,
-    qwen3MlxCustomVoice,
-    qwen3Model,
-    qwen3ReferenceAudioBase64,
-    qwen3ReferenceAudioName,
-    qwen3ReferenceText,
-    qwen3Speaker,
-    qwen3Temperature,
-    qwen3TopK,
-    qwen3TopP,
+    qwen3,
     qwen3VoiceClone,
     referenceCodesBase64,
     referenceWavBase64,
@@ -984,7 +764,7 @@ export function LocalRuntimePage({
     await runGeneration();
   }, [canGenerate, handleClearCache, isCurrentPageVersion, runGeneration]);
 
-  const busy = runtimeBusy || cacheBusy || qwen3MlxSetupBusy || qwen3MlxDownloadBusy || generateBusy;
+  const busy = runtimeBusy || cacheBusy || qwen3.setupBusy || qwen3.downloadBusy || generateBusy;
   const runtimeReady = runtime?.ready ?? false;
   const activeSegmentNumber = useMemo(() => {
     if (!audioPlayer.activeSegmentId) return null;
@@ -1069,42 +849,34 @@ export function LocalRuntimePage({
           referenceAudioName={referenceAudioName}
           referenceAudioGuidance={referenceAudioGuidance}
           onReferenceAudioChange={handleReferenceAudioChange}
-          qwen3Model={qwen3Model}
-          onQwen3ModelChange={handleQwen3ModelChange}
-          qwen3BaseModelPath={qwen3BaseModelPath}
-          onQwen3BaseModelPathChange={handleQwen3BaseModelPathChange}
-          qwen3MlxSetup={qwen3MlxSetup}
-          qwen3MlxSetupBusy={qwen3MlxSetupBusy}
-          qwen3MlxDownloadBusy={qwen3MlxDownloadBusy}
-          qwen3MlxDownloadProgress={qwen3MlxDownloadProgress}
-          onQwen3RefreshMlxSetup={() => { void refreshQwen3MlxSetup(pageVersionRef.current); }}
-          onQwen3DownloadMlxModel={() => { void handleQwen3DownloadMlxModel(); }}
-          onQwen3ChooseBaseModelPath={() => { void handleQwen3ChooseBaseModelPath(); }}
-          qwen3ReferenceAudioName={qwen3ReferenceAudioName}
+          qwen3Profile={qwen3.profile}
+          qwen3Profiles={qwen3.profiles}
+          onQwen3ProfileChange={handleQwen3ModelChange}
+          qwen3ModelPath={qwen3.modelPath}
+          onQwen3ModelPathChange={handleQwen3BaseModelPathChange}
+          qwen3Readiness={qwen3.readiness}
+          qwen3SetupBusy={qwen3.setupBusy}
+          qwen3DownloadBusy={qwen3.downloadBusy}
+          qwen3DownloadProgress={qwen3.downloadProgress}
+          onQwen3RefreshSetup={() => { void refreshQwen3Setup(); }}
+          onQwen3DownloadModel={() => { void handleQwen3DownloadModel(); }}
+          onQwen3ChooseModelPath={() => { void handleQwen3ChooseBaseModelPath(); }}
+          qwen3ReferenceAudioName={qwen3.referenceAudioName}
           qwen3ReferenceAudioGuidance={qwen3ReferenceAudioGuidance}
           onQwen3ReferenceAudioChange={handleQwen3ReferenceAudioChange}
-          qwen3ReferenceText={qwen3ReferenceText}
+          qwen3ReferenceText={qwen3.referenceText}
           onQwen3ReferenceTextChange={handleQwen3ReferenceTextChange}
-          qwen3Speaker={qwen3Speaker}
+          qwen3Speaker={qwen3.speaker}
           onQwen3SpeakerChange={handleQwen3SpeakerChange}
-          qwen3Language={qwen3Language}
-          qwen3LanguageOptions={qwen3LanguageOptions}
+          qwen3Language={qwen3.language}
           onQwen3LanguageChange={handleQwen3LanguageChange}
-          qwen3Instruct={qwen3Instruct}
+          qwen3Instruct={qwen3.instruct}
           onQwen3InstructChange={handleQwen3InstructChange}
-          qwen3DeviceMap={qwen3DeviceMap}
-          onQwen3DeviceMapChange={handleQwen3DeviceMapChange}
-          qwen3Dtype={qwen3Dtype}
-          onQwen3DtypeChange={handleQwen3DtypeChange}
-          qwen3Attention={qwen3Attention}
-          onQwen3AttentionChange={handleQwen3AttentionChange}
-          qwen3Temperature={qwen3Temperature}
+          qwen3Temperature={qwen3.temperature}
           onQwen3TemperatureChange={handleQwen3TemperatureChange}
-          qwen3TopK={qwen3TopK}
+          qwen3TopK={qwen3.topK}
           onQwen3TopKChange={handleQwen3TopKChange}
-          qwen3TopP={qwen3TopP}
-          onQwen3TopPChange={handleQwen3TopPChange}
-          qwen3MaxNewTokens={qwen3MaxNewTokens}
+          qwen3MaxNewTokens={qwen3.maxNewTokens}
           onQwen3MaxNewTokensChange={handleQwen3MaxNewTokensChange}
         />
 

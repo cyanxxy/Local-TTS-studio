@@ -4,22 +4,11 @@ import type {
   LocalTtsGenerateResult,
   LocalTtsProgressEvent,
   LocalTtsProbeResult,
-  LocalTtsQwen3MlxSetup,
 } from "../electron";
 import { MIN_TEXT_LENGTH } from "../constants";
-import type { GenerationStats, ModelState } from "../types";
+import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
-import {
-  QWEN3_ATTENTION_OPTIONS,
-  QWEN3_DEFAULT_MAX_NEW_TOKENS,
-  QWEN3_DEVICE_OPTIONS,
-  QWEN3_DTYPE_OPTIONS,
-  QWEN3_LANGUAGE_OPTIONS,
-  QWEN3_SPEAKER_OPTIONS,
-  getDefaultQwen3Model,
-  qwen3UsesMlx,
-  qwen3UsesMlxCustomVoice,
-} from "../components/localRuntime/modelOptions";
+import type { GenerationStats, ModelState } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 
 interface UseQwen3LocalRuntimeOptions {
@@ -51,35 +40,20 @@ interface UseQwen3LocalRuntimeReturn {
 
 const LOCAL_MODEL = "qwen3";
 
-const DEFAULT_QWEN3_SPEAKER = QWEN3_SPEAKER_OPTIONS[0].value;
-const DEFAULT_QWEN3_LANGUAGE = QWEN3_LANGUAGE_OPTIONS[0].value;
-const DEFAULT_QWEN3_DEVICE = QWEN3_DEVICE_OPTIONS[0].value;
-const DEFAULT_QWEN3_DTYPE = QWEN3_DTYPE_OPTIONS[0].value;
-const DEFAULT_QWEN3_ATTENTION = QWEN3_ATTENTION_OPTIONS[0].value;
-const DEFAULT_QWEN3_TEMPERATURE = 0.9;
-const DEFAULT_QWEN3_TOP_K = 50;
-const DEFAULT_QWEN3_TOP_P = 1.0;
-
-function createLocalRequestId(): string {
-  return `${LOCAL_MODEL}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+function requestId(kind: "probe" | "generate"): string {
+  return `${LOCAL_MODEL}-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function createProbeRequestId(): string {
-  return `${LOCAL_MODEL}-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function buildPlaybackSamples(chunk: ReceivedAudioChunk): Float32Array {
+function playbackSamples(chunk: ReceivedAudioChunk): Float32Array {
   const samples = new Float32Array(chunk.audio, 0, chunk.sampleCount);
-  const silenceAfterSamples = Math.max(0, chunk.silenceAfterSamples);
-  const output = new Float32Array(samples.length + silenceAfterSamples);
+  const output = new Float32Array(samples.length + Math.max(0, chunk.silenceAfterSamples));
   for (let index = 0; index < samples.length; index += 1) {
-    const value = samples[index];
-    output[index] = Number.isFinite(value) ? value : 0;
+    output[index] = Number.isFinite(samples[index]) ? samples[index] : 0;
   }
   return output;
 }
 
-function formatGenerationError(error: unknown): string {
+function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -89,399 +63,263 @@ export function useQwen3LocalRuntime({
   player,
   setShowPlayer,
 }: UseQwen3LocalRuntimeOptions): UseQwen3LocalRuntimeReturn {
+  const settings = useQwen3Runtime();
+  const refreshSetup = settings.refreshSetup;
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
-  const [qwen3MlxSetup, setQwen3MlxSetup] = useState<LocalTtsQwen3MlxSetup | null>(null);
-  const [qwen3MlxSetupBusy, setQwen3MlxSetupBusy] = useState(false);
-  const [qwen3Model, setQwen3Model] = useState(() => getDefaultQwen3Model(window.electron?.platform));
-  const [qwen3BaseModelPath, setQwen3BaseModelPath] = useState("");
   const [generateBusy, setGenerateBusy] = useState(false);
-  const [generationProgress, setGenerationProgress] = useState<LocalTtsProgressEvent | null>(null);
+  const [progress, setProgress] = useState<LocalTtsProgressEvent | null>(null);
   const [result, setResult] = useState<LocalTtsGenerateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-
   const mountedRef = useRef(true);
   const runtimeVersionRef = useRef(0);
   const generationVersionRef = useRef(0);
-  const activeRequestIdRef = useRef<string | null>(null);
-  const activeProbeRequestIdRef = useRef<string | null>(null);
-  const activeRequestGenerationVersionRef = useRef<number | null>(null);
-  const streamedAudioChunksRef = useRef<ReceivedAudioChunk[]>([]);
-  const streamedAudioSampleRateRef = useRef<number | null>(null);
-  const scheduledAudioChunkCountRef = useRef(0);
-  const pendingGenerationProgressRef = useRef<LocalTtsProgressEvent | null>(null);
-  const generationProgressFlushCancelRef = useRef<(() => void) | null>(null);
+  const activeRequestRef = useRef<string | null>(null);
+  const activeRequestVersionRef = useRef<number | null>(null);
+  const activeProbeRef = useRef<string | null>(null);
+  const chunksRef = useRef<ReceivedAudioChunk[]>([]);
+  const sampleRateRef = useRef<number | null>(null);
+  const scheduledCountRef = useRef(0);
+  const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
+  const cancelProgressFlushRef = useRef<(() => void) | null>(null);
   const warmedKeyRef = useRef<string | null>(null);
-
-  const electronAvailable = enabled && !!window.electron?.localTts;
-  const qwen3MlxCustomVoice = qwen3UsesMlxCustomVoice(qwen3Model);
-  const qwen3Mlx = qwen3UsesMlx(qwen3Model);
+  const bridge = window.electron?.localTts;
+  const electronAvailable = enabled && !!bridge;
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-    };
+    return () => { mountedRef.current = false; };
   }, []);
 
   const clearGeneratedResult = useCallback(() => {
-    streamedAudioChunksRef.current = [];
-    streamedAudioSampleRateRef.current = null;
-    scheduledAudioChunkCountRef.current = 0;
+    chunksRef.current = [];
+    sampleRateRef.current = null;
+    scheduledCountRef.current = 0;
     player.reset();
     setResult(null);
-    setGenerationProgress(null);
+    setProgress(null);
   }, [player]);
+
+  const cancelActiveGeneration = useCallback(() => {
+    const active = activeRequestRef.current;
+    if (!active || !bridge) return;
+    player.stopAll();
+    void bridge.cancel({ model: LOCAL_MODEL, requestId: active }).catch(() => undefined);
+  }, [bridge, player]);
 
   const resetGeneratedAudio = useCallback(() => {
     generationVersionRef.current += 1;
-    const activeRequestId = activeRequestIdRef.current;
-    if (generateBusy && activeRequestId && window.electron?.localTts) {
-      void window.electron.localTts.cancel({ model: LOCAL_MODEL, requestId: activeRequestId }).catch(() => undefined);
-    }
-    activeRequestIdRef.current = null;
-    activeRequestGenerationVersionRef.current = null;
+    cancelActiveGeneration();
+    activeRequestRef.current = null;
+    activeRequestVersionRef.current = null;
     clearGeneratedResult();
     setShowPlayer(false);
     setError(null);
     setGenerateBusy(false);
-  }, [clearGeneratedResult, generateBusy, setShowPlayer]);
+  }, [cancelActiveGeneration, clearGeneratedResult, setShowPlayer]);
 
-  const cancelActiveGeneration = useCallback(() => {
-    const requestId = activeRequestIdRef.current;
-    if (!requestId || !window.electron?.localTts) return;
-    player.stopAll();
-    void window.electron.localTts.cancel({ model: LOCAL_MODEL, requestId }).catch(() => undefined);
-  }, [player]);
-
-  const refreshQwen3MlxSetup = useCallback(async (runtimeVersion: number = runtimeVersionRef.current) => {
-    if (!enabled || !window.electron?.localTts?.getQwen3MlxSetup) return;
-    setQwen3MlxSetupBusy(true);
-    try {
-      const setup = await window.electron.localTts.getQwen3MlxSetup();
-      if (!mountedRef.current || runtimeVersionRef.current !== runtimeVersion) return;
-      setQwen3MlxSetup(setup);
-      setQwen3Model((current) => (
-        current === "auto" && window.electron?.platform === "darwin"
-          ? setup.recommendedModelRepo
-          : current
-      ));
-      setQwen3BaseModelPath((current) => (
-        current.trim().length === 0 && setup.modelDirLooksReady
-          ? setup.recommendedModelDir
-          : current
-      ));
-    } catch (err) {
-      if (!mountedRef.current || runtimeVersionRef.current !== runtimeVersion) return;
-      setError(formatGenerationError(err));
-    } finally {
-      if (mountedRef.current && runtimeVersionRef.current === runtimeVersion) {
-        setQwen3MlxSetupBusy(false);
-      }
-    }
-  }, [enabled]);
-
-  const runProbe = useCallback(async (runtimeVersion: number = runtimeVersionRef.current) => {
-    if (!enabled || !window.electron?.localTts) return;
-    const requestId = createProbeRequestId();
-    activeProbeRequestIdRef.current = requestId;
+  const runProbe = useCallback(async () => {
+    if (!enabled || !bridge) return;
+    const version = ++runtimeVersionRef.current;
+    const id = requestId("probe");
+    activeProbeRef.current = id;
     setRuntimeBusy(true);
     setError(null);
     try {
-      const probe = await window.electron.localTts.probe({
-        model: LOCAL_MODEL,
-        requestId,
-      });
-      if (
-        !mountedRef.current
-        || runtimeVersionRef.current !== runtimeVersion
-        || activeProbeRequestIdRef.current !== requestId
-      ) return;
-      setRuntime(probe);
-      if (!probe.ready) {
-        setError(probe.message);
-      }
-    } catch (err) {
-      if (
-        !mountedRef.current
-        || runtimeVersionRef.current !== runtimeVersion
-        || activeProbeRequestIdRef.current !== requestId
-      ) return;
+      const next = await bridge.probe({ model: LOCAL_MODEL, requestId: id });
+      if (!mountedRef.current || runtimeVersionRef.current !== version || activeProbeRef.current !== id) return;
+      setRuntime(next);
+      if (!next.ready) setError(next.message);
+    } catch (nextError) {
+      if (!mountedRef.current || runtimeVersionRef.current !== version || activeProbeRef.current !== id) return;
       setRuntime(null);
-      setError(formatGenerationError(err));
+      setError(message(nextError));
     } finally {
-      if (
-        mountedRef.current
-        && runtimeVersionRef.current === runtimeVersion
-        && activeProbeRequestIdRef.current === requestId
-      ) {
-        activeProbeRequestIdRef.current = null;
+      if (mountedRef.current && runtimeVersionRef.current === version && activeProbeRef.current === id) {
+        activeProbeRef.current = null;
         setRuntimeBusy(false);
       }
     }
-  }, [enabled]);
+  }, [bridge, enabled]);
 
   const retryLoad = useCallback(() => {
     if (!enabled) return;
-    runtimeVersionRef.current += 1;
-    const runtimeVersion = runtimeVersionRef.current;
-    void Promise.allSettled([
-      runProbe(runtimeVersion),
-      refreshQwen3MlxSetup(runtimeVersion),
-    ]);
-  }, [enabled, refreshQwen3MlxSetup, runProbe]);
+    void Promise.allSettled([runProbe(), refreshSetup()]);
+  }, [enabled, refreshSetup, runProbe]);
 
   useEffect(() => {
-    if (!enabled) {
-      runtimeVersionRef.current += 1;
-      generationVersionRef.current += 1;
-      generationProgressFlushCancelRef.current?.();
-      generationProgressFlushCancelRef.current = null;
-      pendingGenerationProgressRef.current = null;
-      const activeRequestId = activeRequestIdRef.current;
-      if (activeRequestId && window.electron?.localTts) {
-        void window.electron.localTts.cancel({ model: LOCAL_MODEL, requestId: activeRequestId }).catch(() => undefined);
-      }
-      activeRequestIdRef.current = null;
-      activeRequestGenerationVersionRef.current = null;
-      activeProbeRequestIdRef.current = null;
-      streamedAudioChunksRef.current = [];
-      streamedAudioSampleRateRef.current = null;
-      scheduledAudioChunkCountRef.current = 0;
-      setRuntimeBusy(false);
-      setQwen3MlxSetupBusy(false);
-      setGenerateBusy(false);
-      setGenerationProgress(null);
+    if (enabled) {
+      retryLoad();
       return;
     }
-    retryLoad();
-  }, [enabled, retryLoad]);
+    runtimeVersionRef.current += 1;
+    generationVersionRef.current += 1;
+    cancelProgressFlushRef.current?.();
+    pendingProgressRef.current = null;
+    cancelActiveGeneration();
+    activeRequestRef.current = null;
+    activeRequestVersionRef.current = null;
+    activeProbeRef.current = null;
+    setRuntimeBusy(false);
+    setGenerateBusy(false);
+    setProgress(null);
+  }, [cancelActiveGeneration, enabled, retryLoad]);
 
   useEffect(() => {
-    if (!electronAvailable || generateBusy) return;
-    const baseModelPath = qwen3BaseModelPath.trim();
-    if (qwen3MlxCustomVoice) {
-      if (!(qwen3MlxSetup?.apiServerAvailable ?? false)) return;
-      if (!baseModelPath) return;
-    }
-    const warmKey = `${qwen3Model}:${baseModelPath}`;
-    if (warmedKeyRef.current === warmKey) return;
-    warmedKeyRef.current = warmKey;
-    // Candle repos warm too: the bridge only pre-loads already-downloaded
-    // weights, so this never kicks off a download.
-    void window.electron?.localTts?.warm?.({
+    if (!electronAvailable || generateBusy || !bridge?.warm) return;
+    const path = settings.modelPath.trim();
+    if (!path || settings.readiness === "missing") return;
+    const key = `${settings.profile.repo}:${path}`;
+    if (warmedKeyRef.current === key) return;
+    warmedKeyRef.current = key;
+    void bridge.warm({
       model: LOCAL_MODEL,
-      modelRepo: qwen3Model,
-      ...(qwen3MlxCustomVoice && baseModelPath ? { baseModelPath } : {}),
+      mode: settings.profile.mode,
+      modelPath: path,
     }).catch(() => undefined);
-  }, [electronAvailable, generateBusy, qwen3BaseModelPath, qwen3MlxCustomVoice, qwen3MlxSetup, qwen3Model]);
+  }, [bridge, electronAvailable, generateBusy, settings.modelPath, settings.profile, settings.readiness]);
 
   useEffect(() => {
-    if (!electronAvailable || !window.electron?.localTts) return;
-
-    const flushGenerationProgress = () => {
-      const event = pendingGenerationProgressRef.current;
-      if (!event) return;
-      pendingGenerationProgressRef.current = null;
-      setGenerationProgress(event);
-    };
-
-    return window.electron.localTts.subscribeProgress((event) => {
-      if (!mountedRef.current) return;
-      if (event.model !== LOCAL_MODEL) return;
-      if (event.requestId === activeProbeRequestIdRef.current) return;
-      if (event.requestId !== activeRequestIdRef.current) return;
-      if (activeRequestGenerationVersionRef.current !== generationVersionRef.current) return;
-
-      pendingGenerationProgressRef.current = event;
-      generationProgressFlushCancelRef.current?.();
-      generationProgressFlushCancelRef.current = scheduleNextUiFrame(flushGenerationProgress);
+    if (!electronAvailable || !bridge) return;
+    return bridge.subscribeProgress((event) => {
+      if (!mountedRef.current || event.model !== LOCAL_MODEL || event.requestId !== activeRequestRef.current) return;
+      if (activeRequestVersionRef.current !== generationVersionRef.current) return;
+      pendingProgressRef.current = event;
+      cancelProgressFlushRef.current?.();
+      cancelProgressFlushRef.current = scheduleNextUiFrame(() => {
+        if (pendingProgressRef.current) setProgress(pendingProgressRef.current);
+        pendingProgressRef.current = null;
+      });
     });
-  }, [electronAvailable]);
+  }, [bridge, electronAvailable]);
 
   useEffect(() => {
-    if (!electronAvailable || !window.electron?.localTts) return;
-
-    return window.electron.localTts.subscribeAudioChunk((event: LocalTtsAudioChunkEvent) => {
-      if (!mountedRef.current) return;
-      if (event.model !== LOCAL_MODEL) return;
-      if (event.requestId !== activeRequestIdRef.current) return;
-      if (activeRequestGenerationVersionRef.current !== generationVersionRef.current) return;
+    if (!electronAvailable || !bridge) return;
+    return bridge.subscribeAudioChunk((event: LocalTtsAudioChunkEvent) => {
+      if (!mountedRef.current || event.model !== LOCAL_MODEL || event.requestId !== activeRequestRef.current) return;
+      if (activeRequestVersionRef.current !== generationVersionRef.current) return;
       if (event.sampleCount <= 0 || event.audio.byteLength !== event.sampleCount * Float32Array.BYTES_PER_ELEMENT) return;
-
-      if (event.index === 0 || streamedAudioSampleRateRef.current !== event.sampleRate) {
-        streamedAudioChunksRef.current = [];
-        streamedAudioSampleRateRef.current = event.sampleRate;
+      if (event.index === 0 || sampleRateRef.current !== event.sampleRate) {
+        chunksRef.current = [];
+        sampleRateRef.current = event.sampleRate;
+        scheduledCountRef.current = 0;
       }
-
-      streamedAudioChunksRef.current[event.index] = {
+      chunksRef.current[event.index] = {
         audio: event.audio,
         sampleCount: event.sampleCount,
         silenceAfterSamples: event.silenceAfterSamples,
       };
-
-      const contiguousChunks = streamedAudioChunksRef.current
-        .slice(0, event.index + 1)
-        .filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
-      if (contiguousChunks.length !== event.index + 1) return;
-
-      const sampleRate = streamedAudioSampleRateRef.current ?? event.sampleRate;
-      const displayTotal = event.total > 0 ? event.total : event.index + 1;
-      while (scheduledAudioChunkCountRef.current < contiguousChunks.length) {
-        const chunkIndex = scheduledAudioChunkCountRef.current;
-        const chunk = contiguousChunks[chunkIndex];
-        scheduledAudioChunkCountRef.current += 1;
+      const contiguous = chunksRef.current.slice(0, event.index + 1).filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
+      if (contiguous.length !== event.index + 1) return;
+      while (scheduledCountRef.current < contiguous.length) {
+        const index = scheduledCountRef.current++;
+        const chunk = contiguous[index];
         void player.scheduleChunk({
-          audio: buildPlaybackSamples(chunk),
-          samplingRate: sampleRate,
-          text: `Qwen3 section ${chunkIndex + 1}`,
-          index: chunkIndex + 1,
-          total: displayTotal,
-          pauseAfterSec: chunk.silenceAfterSamples / sampleRate,
-        }).catch((err: unknown) => {
-          if (!mountedRef.current) return;
-          setError(formatGenerationError(err));
+          audio: playbackSamples(chunk),
+          samplingRate: event.sampleRate,
+          text: `Qwen3 section ${index + 1}`,
+          index: index + 1,
+          total: event.total > 0 ? event.total : contiguous.length,
+          pauseAfterSec: chunk.silenceAfterSamples / event.sampleRate,
+        }).catch((nextError: unknown) => {
+          if (mountedRef.current) setError(message(nextError));
         });
       }
     });
-  }, [electronAvailable, player]);
+  }, [bridge, electronAvailable, player]);
 
   useEffect(() => () => {
-    generationProgressFlushCancelRef.current?.();
-    const requestId = activeRequestIdRef.current;
-    if (!requestId || !window.electron?.localTts) return;
-    void window.electron.localTts.cancel({ model: LOCAL_MODEL, requestId }).catch(() => undefined);
-    activeRequestIdRef.current = null;
-    activeRequestGenerationVersionRef.current = null;
-  }, []);
+    cancelProgressFlushRef.current?.();
+    cancelActiveGeneration();
+  }, [cancelActiveGeneration]);
 
-  const qwen3Ready = useMemo(() => {
-    if (!electronAvailable || !(runtime?.ready ?? false)) return false;
-    if (qwen3MlxCustomVoice) {
-      return qwen3BaseModelPath.trim().length > 0
-        && ((qwen3MlxSetup?.apiServerAvailable ?? false) || (qwen3MlxSetup?.ttsAvailable ?? false));
-    }
-    return true;
-  }, [electronAvailable, qwen3BaseModelPath, qwen3MlxCustomVoice, qwen3MlxSetup, runtime]);
-
-  const modelState = useMemo<ModelState>(() => {
-    const loading = enabled && (runtimeBusy || qwen3MlxSetupBusy);
-    const setupError = enabled && electronAvailable && runtime?.ready && qwen3MlxCustomVoice && !qwen3Ready && !loading
-      ? "Qwen3 MLX model files are not ready. Open Qwen3-TTS settings to download or choose the model directory."
-      : null;
-    return {
-      ready: qwen3Ready,
-      loading,
-      downloadProgress: qwen3Ready ? 100 : loading ? 25 : 0,
-      error: error ?? setupError,
-      backend: null,
-    };
-  }, [electronAvailable, enabled, error, qwen3MlxCustomVoice, qwen3Ready, qwen3MlxSetupBusy, runtime, runtimeBusy]);
-
-  const canGenerate = enabled
-    && qwen3Ready
-    && !generateBusy
-    && text.trim().length >= MIN_TEXT_LENGTH;
+  const settingsReady = settings.modelPath.trim().length > 0
+    && settings.readiness !== "missing"
+    && (settings.profile.mode !== "voiceClone"
+      || (!!settings.referenceAudioBase64 && settings.referenceText.trim().length > 0));
+  const ready = electronAvailable && (runtime?.ready ?? false) && settingsReady;
+  const combinedError = error
+    ?? settings.error
+    ?? (enabled && runtime?.ready && !settingsReady && !settings.setupBusy
+      ? "Select or download a valid Qwen3 model directory before generating."
+      : null);
+  const modelState = useMemo<ModelState>(() => ({
+    ready,
+    loading: enabled && (runtimeBusy || settings.setupBusy),
+    downloadProgress: ready ? 100 : runtimeBusy || settings.setupBusy ? 25 : 0,
+    error: combinedError,
+    backend: null,
+  }), [combinedError, enabled, ready, runtimeBusy, settings.setupBusy]);
+  const canGenerate = ready && !generateBusy && text.trim().length >= MIN_TEXT_LENGTH;
 
   const stats = useMemo<GenerationStats>(() => {
     const processingTime = result?.elapsedSec ?? 0;
-    const duration = player.totalDuration || result?.durationSec || 0;
     return {
       firstLatency: null,
       processingTime,
       charsPerSec: processingTime > 0 ? text.trim().length / processingTime : 0,
       rtf: result && result.durationSec > 0 ? result.elapsedSec / result.durationSec : 0,
-      totalDuration: duration,
+      totalDuration: player.totalDuration || result?.durationSec || 0,
       currentDuration: player.currentTime,
     };
   }, [player.currentTime, player.totalDuration, result, text]);
 
   const handleGenerate = useCallback(() => {
-    if (!canGenerate || !window.electron?.localTts) return;
-
-    const generationVersion = generationVersionRef.current;
-    const requestId = createLocalRequestId();
-    const baseModelPath = qwen3BaseModelPath.trim();
-
+    if (!canGenerate || !bridge) return;
+    const version = generationVersionRef.current;
+    const id = requestId("generate");
     clearGeneratedResult();
     setShowPlayer(true);
     player.beginStream();
     setGenerateBusy(true);
     setError(null);
-    setGenerationProgress({
-      requestId,
+    setProgress({
+      requestId: id,
       model: LOCAL_MODEL,
       phase: "queued",
-      message: qwen3MlxCustomVoice ? "Starting Qwen3 CustomVoice MLX." : "Starting Qwen3 CustomVoice.",
+      message: `Starting Qwen3 ${settings.profile.label} with ${settings.profile.provider}.`,
       elapsedSec: 0,
     });
-    activeRequestIdRef.current = requestId;
-    activeRequestGenerationVersionRef.current = generationVersion;
-
+    activeRequestRef.current = id;
+    activeRequestVersionRef.current = version;
     const payload: Record<string, unknown> = {
       text: text.trim(),
-      modelRepo: qwen3Model,
-      mode: "customVoice",
-      speaker: DEFAULT_QWEN3_SPEAKER,
-      language: DEFAULT_QWEN3_LANGUAGE,
-      deviceMap: DEFAULT_QWEN3_DEVICE,
-      dtype: DEFAULT_QWEN3_DTYPE,
-      attnImplementation: DEFAULT_QWEN3_ATTENTION,
-      temperature: DEFAULT_QWEN3_TEMPERATURE,
-      topK: DEFAULT_QWEN3_TOP_K,
-      topP: DEFAULT_QWEN3_TOP_P,
-      maxNewTokens: QWEN3_DEFAULT_MAX_NEW_TOKENS,
+      mode: settings.profile.mode,
+      modelRepo: settings.profile.repo,
+      modelPath: settings.modelPath.trim(),
+      language: settings.language,
+      temperature: settings.temperature,
+      topK: settings.topK,
+      maxNewTokens: settings.maxNewTokens,
     };
-    if (qwen3Mlx && baseModelPath) {
-      payload.baseModelPath = baseModelPath;
+    if (settings.profile.mode === "customVoice") {
+      payload.speaker = settings.speaker;
+      payload.instruct = settings.instruct;
+    } else {
+      payload.referenceAudioBase64 = settings.referenceAudioBase64;
+      payload.referenceText = settings.referenceText.trim();
     }
-
-    void window.electron.localTts.generate({
-      model: LOCAL_MODEL,
-      requestId,
-      payload,
-    }).then((generated) => {
-      if (!mountedRef.current) return;
-      if (activeRequestIdRef.current !== requestId) return;
-      if (generationVersionRef.current !== generationVersion) return;
-      setResult(generated);
-      const expectedChunks = generated.audioChunkCount;
-      if (expectedChunks > 0) {
-        const completeChunks = streamedAudioChunksRef.current
-          .slice(0, expectedChunks)
-          .filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
-        if (completeChunks.length !== expectedChunks) {
-          throw new Error("Generation returned incomplete streamed audio.");
-        }
+    void bridge.generate({ model: LOCAL_MODEL, requestId: id, payload }).then((generated) => {
+      if (!mountedRef.current || activeRequestRef.current !== id || generationVersionRef.current !== version) return;
+      if (chunksRef.current.filter(Boolean).length !== generated.audioChunkCount) {
+        throw new Error("Generation returned incomplete streamed audio.");
       }
+      setResult(generated);
       player.endStream();
-      setGenerationProgress(null);
-      setError(null);
-    }).catch((err: unknown) => {
-      if (!mountedRef.current) return;
-      if (activeRequestIdRef.current !== requestId) return;
+      setProgress(null);
+    }).catch((nextError: unknown) => {
+      if (!mountedRef.current || activeRequestRef.current !== id) return;
       player.endStream();
       clearGeneratedResult();
-      setGenerationProgress(null);
-      const message = formatGenerationError(err);
-      setError(/cancelled/i.test(message) ? null : message);
+      const text = message(nextError);
+      setError(/cancelled/i.test(text) ? null : text);
     }).finally(() => {
-      if (!mountedRef.current || activeRequestIdRef.current !== requestId) return;
-      activeRequestIdRef.current = null;
-      activeRequestGenerationVersionRef.current = null;
+      if (!mountedRef.current || activeRequestRef.current !== id) return;
+      activeRequestRef.current = null;
+      activeRequestVersionRef.current = null;
       setGenerateBusy(false);
     });
-  }, [
-    canGenerate,
-    clearGeneratedResult,
-    player,
-    qwen3BaseModelPath,
-    qwen3Mlx,
-    qwen3MlxCustomVoice,
-    qwen3Model,
-    setShowPlayer,
-    text,
-  ]);
+  }, [bridge, canGenerate, clearGeneratedResult, player, setShowPlayer, settings, text]);
 
   const handleStop = useCallback(() => {
     cancelActiveGeneration();
@@ -492,9 +330,9 @@ export function useQwen3LocalRuntime({
     modelState,
     canGenerate,
     isGenerating: generateBusy,
-    generationProgress: generationProgress ? 0 : 0,
+    generationProgress: progress ? 0 : 0,
     stats,
-    error: modelState.error,
+    error: combinedError,
     handleGenerate,
     handleStop,
     retryLoad,

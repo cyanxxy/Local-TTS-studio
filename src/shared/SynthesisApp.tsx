@@ -9,6 +9,7 @@ import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelCacheControls } from "../hooks/useModelCacheControls";
 import { useQwen3LocalRuntime } from "../hooks/useQwen3LocalRuntime";
+import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
 import { TextInput } from "../components/TextInput";
 import { ModelToggle } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
@@ -95,7 +96,7 @@ function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
   return (LOCAL_RUNTIME_PAGE_KEYS as readonly AppPage[]).includes(page);
 }
 
-export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: SynthesisAppProps) {
+function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: SynthesisAppProps) {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
   const debugProfiling = useMemo(
     () => typeof window !== "undefined"
@@ -912,6 +913,14 @@ export function SynthesisApp({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
       </div>
     </div>
+  );
+}
+
+export function SynthesisApp(props: SynthesisAppProps) {
+  return (
+    <Qwen3RuntimeProvider>
+      <SynthesisAppContent {...props} />
+    </Qwen3RuntimeProvider>
   );
 }
 
