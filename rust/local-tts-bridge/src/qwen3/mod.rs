@@ -1,3 +1,5 @@
+mod config;
+mod model_files;
 mod text;
 
 pub const UPSTREAM_REVISION: &str = "288a716ce38a91c826dd67968c75d1dd4b0f07bc";
