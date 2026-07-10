@@ -10,6 +10,16 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "jsdom",
+    // Node 26 installs an experimental global `localStorage` accessor before
+    // jsdom starts. Vitest deliberately preserves pre-existing globals, so its
+    // jsdom Storage object would otherwise remain hidden behind an undefined
+    // Node accessor. Disable Node's experimental Web Storage in test workers.
+    pool: "forks",
+    poolOptions: {
+      forks: {
+        execArgv: ["--no-experimental-webstorage"],
+      },
+    },
     include: ["src/**/*.test.ts", "src/**/*.test.tsx", "electron/**/*.test.ts", "vite.*.test.ts"],
     setupFiles: [resolve(ROOT_DIR, "src/test-setup.ts")],
     coverage: {
