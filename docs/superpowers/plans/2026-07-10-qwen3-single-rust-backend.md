@@ -283,7 +283,7 @@ Expected: fails because `Qwen3Runtime` and reference preparation do not exist.
 
 - [ ] **Step 3: Implement the production engine around `TTSInference`**
 
-Use `TTSInference::new(model_path, Device::Gpu(0))` on Apple Silicon. On Windows, select `Device::Gpu(0)` only when `tch::Cuda::is_available()` is true, otherwise `Device::Cpu`. Use `generate_with_params` or `generate_with_instruct` for CustomVoice. Use the pinned runtime's audio encoder/speaker encoder and `generate_with_icl_streaming` for Base voice cloning. Do not call `Qwen3TTSModel`.
+On Apple Silicon, call `qwen3_tts_rs::backend::mlx::stream::init_mlx(true)` on the resident inference thread before constructing tensors. Pass `Device::Cpu` to `TTSInference::new` because the pinned MLX tensor adapter intentionally ignores the unified `Device` value and uses the initialized global MLX Metal stream; this matches the pinned upstream binaries. On Windows, select `Device::Gpu(0)` only when `tch::Cuda::is_available()` is true, otherwise select `Device::Cpu`. Use `generate_with_params` or `generate_with_instruct` for CustomVoice. Use the pinned runtime's audio encoder/speaker encoder and `generate_with_icl_streaming` for Base voice cloning. Do not call `Qwen3TTSModel`.
 
 - [ ] **Step 4: Implement reference WAV handling**
 

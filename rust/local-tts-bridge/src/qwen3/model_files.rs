@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail, ensure};
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ExpectedModelType {
     CustomVoice,
     Base,
