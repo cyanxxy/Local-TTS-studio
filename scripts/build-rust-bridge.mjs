@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveRustTargetDir } from "./rust-target-dir.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const crateDir = path.join(rootDir, "rust", "local-tts-bridge");
@@ -11,23 +11,12 @@ const outDir = path.join(rootDir, "dist-rust");
 const binaryName = process.platform === "win32"
   ? "open-tts-local-bridge.exe"
   : "open-tts-local-bridge";
-const releaseTargetDir = path.join(crateDir, "target", "release");
+const targetDir = resolveRustTargetDir(rootDir);
+const releaseTargetDir = path.join(targetDir, "release");
 const builtBinaryPath = path.join(releaseTargetDir, binaryName);
 const copiedBinaryPath = path.join(outDir, binaryName);
-const executableSuffix = process.platform === "win32" ? ".exe" : "";
-const qwen3MlxToolBaseNames = [
-  "pibot-tts-worker",
-  "tts",
-  "voice_clone",
-  "api_server",
-  "qwen3-tts",
-  "trace_vocoder",
-  "trace_rust",
-];
-const qwen3MlxWorkerName = executableName("pibot-tts-worker");
-const qwen3MlxTtsName = executableName("tts");
 const nativeLibraryPattern = process.platform === "win32"
-  ? /^(ggml|llama|mtmd).*\.dll$/i
+  ? /^(?:ggml|llama|mtmd|torch|c10|asmjit|fbgemm|uv|libiomp|cudart|cublas|cufft|curand|cusparse|nvrtc|nvToolsExt|zlib|shm|kineto|omp).*\.dll$/i
   : process.platform === "darwin"
     ? /^lib(ggml|llama|mtmd).*\.dylib$/i
     : /^lib(ggml|llama|mtmd).*\.so(?:\.\d+)*$/i;
@@ -38,15 +27,15 @@ if (!fs.existsSync(manifestPath)) {
 
 execFileSync("cargo", ["build", "--release", "--manifest-path", manifestPath], {
   cwd: rootDir,
+  env: { ...process.env, CARGO_TARGET_DIR: targetDir },
   stdio: "inherit",
 });
 
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 fs.copyFileSync(builtBinaryPath, copiedBinaryPath);
-const copiedExecutablePaths = [copiedBinaryPath];
 
-function collectNativeLibraries(dir) {
+function collectNativeLibraries(dir, pattern = nativeLibraryPattern) {
   if (!fs.existsSync(dir)) return [];
   const found = [];
   const visit = (currentDir) => {
@@ -54,7 +43,7 @@ function collectNativeLibraries(dir) {
       const fullPath = path.join(currentDir, entry.name);
       if (entry.isDirectory()) {
         visit(fullPath);
-      } else if ((entry.isFile() || entry.isSymbolicLink()) && nativeLibraryPattern.test(entry.name)) {
+      } else if ((entry.isFile() || entry.isSymbolicLink()) && pattern.test(entry.name)) {
         found.push(fullPath);
       }
     }
@@ -69,122 +58,65 @@ function collectNativeLibraries(dir) {
   });
 }
 
+const directlyLinkedDarwinLibraries = process.platform === "darwin"
+  ? new Set(execFileSync("otool", ["-L", builtBinaryPath], { encoding: "utf8" })
+    .split("\n")
+    .slice(1)
+    .map((line) => line.trim().replace(/\s+\(compatibility version.*$/, ""))
+    .map((loadPath) => path.basename(loadPath))
+    .filter((name) => nativeLibraryPattern.test(name)))
+  : new Set();
+
 const copiedNativeLibraries = new Set();
 for (const libraryPath of collectNativeLibraries(releaseTargetDir)) {
   const fileName = path.basename(libraryPath);
+  if (process.platform === "darwin" && !directlyLinkedDarwinLibraries.has(fileName)) continue;
+  if (process.platform !== "darwin" && process.platform !== "win32" && !/\.so\.0$/i.test(fileName)) continue;
   if (copiedNativeLibraries.has(fileName)) continue;
   fs.copyFileSync(libraryPath, path.join(outDir, fileName));
   copiedNativeLibraries.add(fileName);
+}
+
+if (process.platform === "win32") {
+  const libtorchDir = process.env.LIBTORCH;
+  if (!libtorchDir) {
+    throw new Error("Windows release packaging requires LIBTORCH to point to the pinned LibTorch distribution.");
+  }
+  for (const libraryPath of collectNativeLibraries(path.join(libtorchDir, "lib"), /\.dll$/i)) {
+    const fileName = path.basename(libraryPath);
+    if (copiedNativeLibraries.has(fileName)) continue;
+    fs.copyFileSync(libraryPath, path.join(outDir, fileName));
+    copiedNativeLibraries.add(fileName);
+  }
 }
 
 if (process.platform !== "win32") {
   fs.chmodSync(copiedBinaryPath, 0o755);
 }
 
-const copiedQwen3MlxTools = copyQwen3MlxTools();
-if (copiedQwen3MlxTools.length > 0) {
-  copyQwen3MlxMetallib();
-}
-
 if (process.platform === "darwin") {
-  for (const executablePath of copiedExecutablePaths) {
-    makeSelfContainedDarwin(outDir, executablePath);
-  }
+  copyMlxMetallib();
+  makeSelfContainedDarwin(outDir, copiedBinaryPath);
 }
 
-function executableName(baseName) {
-  return `${baseName}${executableSuffix}`;
-}
-
-function copyQwen3MlxTools() {
-  const sources = resolveQwen3MlxToolSources();
-  const copied = [];
-  for (const [toolName, sourcePath] of sources) {
-    const copiedPath = path.join(outDir, toolName);
-    fs.copyFileSync(sourcePath, copiedPath);
-    if (process.platform !== "win32") {
-      fs.chmodSync(copiedPath, 0o755);
-    }
-    copiedExecutablePaths.push(copiedPath);
-    copied.push(toolName);
-    const kind = toolName === qwen3MlxWorkerName ? "worker" : "tool";
-    console.log(`Copied Qwen3 MLX ${kind} to ${copiedPath}`);
-  }
-  return copied;
-}
-
-// The MLX binaries bake in an absolute compile-time path to mlx.metallib
-// (inside the build machine's cargo target dir), so on any other machine the
-// GPU kernels only load via MLX's colocated-file fallback: mlx.metallib sitting
-// next to the executable. Ship it in dist-rust or Qwen3 MLX fails on user Macs
-// with "Failed to load the default metallib".
-function copyQwen3MlxMetallib() {
-  if (process.platform !== "darwin") return;
+// MLX first looks next to the running executable for its compiled Metal kernels.
+// Package that one resource beside the bridge rather than shipping upstream tools.
+function copyMlxMetallib() {
   const metallibName = "mlx.metallib";
-  for (const releaseDir of qwen3MlxReleaseDirs()) {
-    const buildDir = path.join(releaseDir, "build");
-    if (!fs.existsSync(buildDir)) continue;
-    for (const entry of fs.readdirSync(buildDir)) {
+  const buildDir = path.join(releaseTargetDir, "build");
+  if (fs.existsSync(buildDir)) {
+    for (const entry of fs.readdirSync(buildDir).sort()) {
       const candidate = path.join(buildDir, entry, "out", "lib", metallibName);
-      if (fs.existsSync(candidate)) {
-        const copiedPath = path.join(outDir, metallibName);
-        fs.copyFileSync(candidate, copiedPath);
-        console.log(`Copied Qwen3 MLX metallib to ${copiedPath}`);
-        return;
-      }
+      if (!fs.existsSync(candidate)) continue;
+      const copiedPath = path.join(outDir, metallibName);
+      fs.copyFileSync(candidate, copiedPath);
+      console.log(`Copied MLX Metal kernels to ${copiedPath}`);
+      return;
     }
   }
   throw new Error(
-    "Qwen3 MLX binaries were copied but mlx.metallib was not found in any cargo build dir; " +
-    "the shipped binaries would fail to load Metal kernels on other machines.",
+    `The Qwen3 bridge was built without a discoverable ${metallibName}; the packaged MLX runtime would fail.`,
   );
-}
-
-function resolveQwen3MlxToolSources() {
-  const sources = new Map();
-  const explicitWorker = process.env.OPEN_TTS_QWEN3_MLX_WORKER;
-  if (explicitWorker && fs.existsSync(explicitWorker)) {
-    sources.set(qwen3MlxWorkerName, explicitWorker);
-  }
-  const explicitTts = process.env.OPEN_TTS_QWEN3_MLX_TTS;
-  if (explicitTts && fs.existsSync(explicitTts)) {
-    sources.set(qwen3MlxTtsName, explicitTts);
-  }
-
-  for (const releaseDir of qwen3MlxReleaseDirs()) {
-    for (const baseName of qwen3MlxToolBaseNames) {
-      const toolName = executableName(baseName);
-      if (sources.has(toolName)) continue;
-      const candidate = path.join(releaseDir, toolName);
-      if (fs.existsSync(candidate)) {
-        sources.set(toolName, candidate);
-      }
-    }
-  }
-  return sources;
-}
-
-function qwen3MlxReleaseDirs() {
-  const dirs = [];
-  const explicitWorker = process.env.OPEN_TTS_QWEN3_MLX_WORKER;
-  if (explicitWorker) {
-    dirs.push(path.dirname(explicitWorker));
-  }
-  const explicitTts = process.env.OPEN_TTS_QWEN3_MLX_TTS;
-  if (explicitTts) {
-    dirs.push(path.dirname(explicitTts));
-  }
-  const explicitSourceDir = process.env.OPEN_TTS_QWEN3_TTS_RS_DIR;
-  if (explicitSourceDir) {
-    dirs.push(path.join(explicitSourceDir, "target", "release"));
-  }
-  dirs.push(
-    path.join(os.tmpdir(), "open-tts-qwen3-mlx-target", "release"),
-    path.join(rootDir, "rust", "qwen3_tts_rs", "target", "release"),
-    path.join(rootDir, "rust", "qwen3-tts-rs", "target", "release"),
-    path.join(rootDir, "vendor", "qwen3_tts_rs", "target", "release"),
-  );
-  return [...new Set(dirs.map((dir) => path.resolve(dir)))];
 }
 
 // On macOS the freshly built binary and the copied ggml/llama/mtmd dylibs still
@@ -285,10 +217,20 @@ function makeSelfContainedDarwin(bundleDir, binaryPath) {
   }
 }
 
-console.log(`Copied Rust bridge to ${copiedBinaryPath}`);
-if (copiedQwen3MlxTools.length > 0) {
-  console.log(`Copied ${copiedQwen3MlxTools.length} Qwen3 MLX binaries to ${outDir}`);
+const allowedArtifact = (name) => name === binaryName
+  || (process.platform === "darwin" && name === "mlx.metallib")
+  || /\.(?:dylib|dll)$/i.test(name)
+  || /\.so(?:\.\d+)*$/i.test(name);
+const unexpectedArtifacts = fs.readdirSync(outDir).filter((name) => !allowedArtifact(name));
+if (unexpectedArtifacts.length > 0) {
+  throw new Error(`Unexpected Rust package artifacts: ${unexpectedArtifacts.join(", ")}`);
 }
+const executableArtifacts = fs.readdirSync(outDir).filter((name) => name === binaryName || /\.exe$/i.test(name));
+if (executableArtifacts.length !== 1 || executableArtifacts[0] !== binaryName) {
+  throw new Error(`Rust package must contain exactly one executable: ${binaryName}`);
+}
+
+console.log(`Copied Rust bridge to ${copiedBinaryPath}`);
 if (copiedNativeLibraries.size > 0) {
   console.log(`Copied ${copiedNativeLibraries.size} native bridge libraries to ${outDir}`);
 }

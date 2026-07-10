@@ -235,7 +235,7 @@ fn qwen3_probe_result() -> Value {
         "package": "qwen3-tts-rs",
         "packageVersion": "0.2.2",
         "upstreamRevision": qwen3::UPSTREAM_REVISION,
-        "provider": qwen3::compiled_provider(),
+        "provider": "unsupported",
         "warnings": ["This platform has no packaged Qwen3 tensor provider."],
     })
 }

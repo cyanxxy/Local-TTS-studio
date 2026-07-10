@@ -10,10 +10,7 @@
   "scripts": {
     "dev": "npm run dev:web",
     "dev:web": "vite --port 5173",
-    "build:qwen3-mlx-worker": "node scripts/build-qwen3-mlx-worker.mjs",
-    "build:qwen3-mlx-tools": "node scripts/build-qwen3-mlx-worker.mjs --all-bins",
     "build:rust": "node scripts/build-rust-bridge.mjs",
-    "build:rust:all": "npm run build:qwen3-mlx-tools && npm run build:rust",
     "build:electron:main": "npm run build:rust && node -e \"require('node:fs').rmSync('dist-electron', { recursive: true, force: true })\" && tsc -p tsconfig.electron.json && node -e \"require('node:fs').copyFileSync('electron/package.json', 'dist-electron/package.json')\"",
     "dev:desktop": "npm run build:electron:main && concurrently \"npm run dev:web\" \"wait-on http://localhost:5173/desktop/studio && electron .\"",
     "dev:electron": "npm run dev:desktop",
@@ -29,8 +26,7 @@
     "test:rust": "node scripts/test-rust-bridge.mjs",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "eval:inference": "node scripts/inference-speed-eval.mjs",
-    "profile:qwen3": "tsc -p tsconfig.electron.json && node dist-electron/qwen3ProfileCli.js"
+    "eval:inference": "node scripts/inference-speed-eval.mjs"
   },
   "dependencies": {
     "@breezystack/lamejs": "^1.2.7",
