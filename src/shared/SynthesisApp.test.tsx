@@ -779,6 +779,7 @@ describe("SynthesisApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "Qwen exact speaker" }), { target: { value: "Serena" } });
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "generate" }));
 
@@ -793,6 +794,7 @@ describe("SynthesisApp", () => {
           text: "Initial script with enough text.",
           modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
           mode: "customVoice",
+          speaker: "Serena",
         }),
       }));
     });

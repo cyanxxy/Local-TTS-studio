@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   BookOpen,
   ChevronDown,
@@ -31,6 +31,7 @@ interface AdvancedReaderPageProps {
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
+  desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
   supertonicState: ModelState;
   unavailableModels?: Partial<Record<ModelType, string>>;
@@ -174,6 +175,7 @@ export function AdvancedReaderPage({
   activeModel,
   onModelChange,
   desktopModelOptions = [],
+  desktopModelSettings,
   kokoroState,
   supertonicState,
   unavailableModels,
@@ -519,6 +521,8 @@ export function AdvancedReaderPage({
                     </div>
                   </div>
                 )}
+
+                {selectedDesktopModel && desktopModelSettings}
 
                 {!selectedDesktopModel && (
                   <VoiceSelector

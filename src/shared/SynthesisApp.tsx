@@ -10,6 +10,7 @@ import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelCacheControls } from "../hooks/useModelCacheControls";
 import { useQwen3LocalRuntime } from "../hooks/useQwen3LocalRuntime";
 import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
+import { Qwen3InlineSettings } from "../components/Qwen3InlineSettings";
 import { TextInput } from "../components/TextInput";
 import { ModelToggle } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
@@ -740,6 +741,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                     unavailableModels={unavailableModels}
                   />
 
+                  {isStudioUsingQwen3 && (
+                    <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />
+                  )}
+
                   {!isStudioUsingQwen3 && (
                     <VoiceSelector
                       activeModel={activeModel}
@@ -820,6 +825,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               activeModel={activeModel}
               onModelChange={handleReaderModelChange}
               desktopModelOptions={readerDesktopModelOptions}
+              desktopModelSettings={isReaderUsingQwen3 ? (
+                <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />
+              ) : undefined}
               kokoroState={kokoroState}
               supertonicState={supertonicState}
               unavailableModels={unavailableModels}
