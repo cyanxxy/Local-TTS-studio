@@ -779,7 +779,8 @@ describe("SynthesisApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
-    fireEvent.change(screen.getByRole("combobox", { name: "Qwen exact speaker" }), { target: { value: "Serena" } });
+    fireEvent.click(screen.getByRole("button", { name: "Serena" }));
+    expect(screen.getByRole("button", { name: "Serena" })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
     fireEvent.click(screen.getByRole("button", { name: "generate" }));
 

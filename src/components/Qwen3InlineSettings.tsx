@@ -27,15 +27,30 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
         </select>
       </label>
 
+      {!voiceClone && (
+        <fieldset>
+          <legend className="text-xs font-medium text-text-secondary">Exact speaker</legend>
+          <div className="mt-1.5 grid grid-cols-3 gap-1.5">
+            {QWEN3_SPEAKER_OPTIONS.map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                aria-pressed={qwen.speaker === option.value}
+                onClick={() => qwen.setSpeaker(option.value)}
+                className={`min-w-0 rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${
+                  qwen.speaker === option.value
+                    ? "border-accent/45 bg-accent/10 text-accent shadow-accent-sm"
+                    : "border-white/55 bg-white/40 text-text-secondary hover:bg-white/65 hover:text-text-primary"
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </fieldset>
+      )}
+
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        {!voiceClone && (
-          <label className="block text-xs font-medium text-text-secondary">
-            Exact speaker
-            <select aria-label="Qwen exact speaker" value={qwen.speaker} onChange={(event) => qwen.setSpeaker(event.target.value)} className={`mt-1 ${inputClass}`}>
-              {QWEN3_SPEAKER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-          </label>
-        )}
         <label className="block text-xs font-medium text-text-secondary">
           Language
           <select aria-label="Qwen language" value={qwen.language} onChange={(event) => qwen.setLanguage(event.target.value)} className={`mt-1 ${inputClass}`}>

@@ -9,7 +9,7 @@ import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelCacheControls } from "../hooks/useModelCacheControls";
 import { useQwen3LocalRuntime } from "../hooks/useQwen3LocalRuntime";
-import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
+import { Qwen3RuntimeProvider, useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { Qwen3InlineSettings } from "../components/Qwen3InlineSettings";
 import { TextInput } from "../components/TextInput";
 import { ModelToggle } from "../components/ModelToggle";
@@ -99,9 +99,10 @@ function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
 
 function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: SynthesisAppProps) {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
+  const qwen3Settings = useQwen3Runtime();
   const qwen3ProviderDetail = window.electron?.platform === "win32"
-    ? "0.6B CustomVoice · LibTorch CUDA/CPU"
-    : "0.6B CustomVoice · Apple MLX";
+    ? `${qwen3Settings.profile.parameters} ${qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : "Voice clone"} · LibTorch`
+    : `${qwen3Settings.profile.parameters} ${qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : "Voice clone"} · Apple MLX`;
   const debugProfiling = useMemo(
     () => typeof window !== "undefined"
       && import.meta.env.DEV
