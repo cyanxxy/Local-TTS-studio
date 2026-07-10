@@ -1,4 +1,10 @@
 import type { IpcMainInvokeEvent } from "electron";
+import {
+  getQwen3Profile,
+  QWEN3_LANGUAGES,
+  QWEN3_SPEAKERS,
+  type Qwen3Mode,
+} from "./qwen3Profiles";
 import { isAllowedAppUrl } from "./security";
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
@@ -21,51 +27,23 @@ const ALLOWED_NEUTTS_MODELS = new Set([
   "neuphonic/neutts-nano-spanish-q8-gguf",
 ]);
 
-const ALLOWED_QWEN3_MODELS = new Set([
-  "auto",
-  "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-  "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice",
-  "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
-  "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit",
-  "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
-  "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit",
+const ALLOWED_QWEN3_SPEAKERS = new Set<string>(QWEN3_SPEAKERS);
+const ALLOWED_QWEN3_LANGUAGES = new Set<string>(QWEN3_LANGUAGES);
+const ALLOWED_QWEN3_MODES = new Set<Qwen3Mode>(["customVoice", "voiceClone"]);
+const QWEN3_GENERATE_FIELDS = new Set([
+  "text",
+  "mode",
+  "modelRepo",
+  "modelPath",
+  "referenceAudioBase64",
+  "referenceText",
+  "speaker",
+  "language",
+  "instruct",
+  "temperature",
+  "topK",
+  "maxNewTokens",
 ]);
-
-const ALLOWED_QWEN3_SPEAKERS = new Set([
-  "Vivian",
-  "Serena",
-  "Uncle_Fu",
-  "Dylan",
-  "Eric",
-  "Ryan",
-  "Aiden",
-  "Ono_Anna",
-  "Sohee",
-]);
-
-const ALLOWED_QWEN3_LANGUAGES = new Set([
-  "Auto",
-  "Chinese",
-  "English",
-  "Japanese",
-  "Korean",
-  "German",
-  "French",
-  "Spanish",
-]);
-
-const ALLOWED_QWEN3_DTYPES = new Set(["auto", "float32", "bfloat16"]);
-const ALLOWED_QWEN3_ATTENTION = new Set(["auto", "eager"]);
-const ALLOWED_QWEN3_DEVICES = new Set(["auto", "cpu", "metal"]);
-const ALLOWED_QWEN3_MODES = new Set(["customVoice", "voiceClone"]);
-
-function isQwen3BaseModel(modelRepo: string | undefined): boolean {
-  return !!modelRepo && modelRepo.includes("-Base-");
-}
-
-function isQwen3MlxCustomVoiceModel(modelRepo: string | undefined): boolean {
-  return !!modelRepo && modelRepo.startsWith("mlx-community/") && modelRepo.includes("-CustomVoice-");
-}
 
 export type LocalModel = typeof LOCAL_MODELS[number];
 export type BridgeAction = "probe" | "generate";
@@ -90,12 +68,6 @@ export interface ValidatedLocalBridgeRequest {
   payload: Record<string, unknown>;
 }
 
-export interface BridgeProbeMlxEngines {
-  apiServer: boolean;
-  tts: boolean;
-  worker: boolean;
-}
-
 export interface BridgeProbeResult {
   ready: boolean;
   message: string;
@@ -105,11 +77,8 @@ export interface BridgeProbeResult {
   warnings?: string[];
   recommendedModelRepo?: string | null;
   recommendedBaseModelRepo?: string | null;
-  recommendedDeviceMap?: string | null;
-  recommendedDtype?: string | null;
-  recommendedAttention?: string | null;
-  /** Engine binaries the Rust bridge itself resolved (Qwen3 only). */
-  mlxEngines?: BridgeProbeMlxEngines;
+  provider?: string;
+  upstreamRevision?: string;
 }
 
 export interface WarmRequest {
@@ -274,18 +243,35 @@ export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown>
   };
 }
 
-export function sanitizeQwen3Payload(payload: unknown): Record<string, unknown> {
+export function sanitizeQwen3Payload(
+  payload: unknown,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, unknown> {
   if (!isRecord(payload)) throw new Error("Qwen3 payload must be an object.");
+  const unknownField = Object.keys(payload).find((field) => !QWEN3_GENERATE_FIELDS.has(field));
+  if (unknownField) throw new Error(`Unknown Qwen3-TTS field: \`${unknownField}\`.`);
 
   const text = parseRequiredText(payload.text, "text");
-  const mode = parseOptionalString(payload.mode, "mode", { maxLength: 32 }) ?? "customVoice";
-  if (!ALLOWED_QWEN3_MODES.has(mode)) {
+  const mode = parseOptionalString(payload.mode, "mode", { maxLength: 32 });
+  if (!mode || !ALLOWED_QWEN3_MODES.has(mode as Qwen3Mode)) {
     throw new Error("Unsupported Qwen3-TTS mode.");
   }
   const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
-  if (modelRepo && !ALLOWED_QWEN3_MODELS.has(modelRepo)) {
+  if (!modelRepo) throw new Error("`modelRepo` is required for Qwen3-TTS.");
+  const profile = getQwen3Profile(modelRepo);
+  if (!profile) {
     throw new Error("Unsupported Qwen3-TTS model repository.");
   }
+  if (!profile.platforms.includes(platform as "darwin" | "win32")) {
+    throw new Error(`Qwen3-TTS profile is unavailable on ${platform}.`);
+  }
+  if (profile.mode !== mode) throw new Error("Qwen3-TTS model repository does not match the requested mode.");
+
+  const modelPath = parseOptionalString(payload.modelPath, "modelPath", {
+    maxLength: 1000,
+    pattern: /^[^\0]+$/,
+  });
+  if (!modelPath) throw new Error("`modelPath` is required for Qwen3-TTS.");
 
   const speaker = parseOptionalString(payload.speaker, "speaker", { maxLength: 64 });
   if (speaker && !ALLOWED_QWEN3_SPEAKERS.has(speaker)) {
@@ -298,104 +284,64 @@ export function sanitizeQwen3Payload(payload: unknown): Record<string, unknown> 
   }
 
   const instruct = parseOptionalString(payload.instruct, "instruct", { maxLength: 1000 });
-  const baseModelPath = parseOptionalString(payload.baseModelPath, "baseModelPath", {
-    maxLength: 1000,
-    pattern: /^[^\0]+$/,
-  });
   const referenceText = parseOptionalString(payload.referenceText, "referenceText", {
     maxLength: MAX_REFERENCE_TEXT_LENGTH,
-  });
-  const referenceAudioName = parseOptionalString(payload.referenceAudioName, "referenceAudioName", {
-    maxLength: 255,
-    pattern: /^[^/\\\0]+\.wav$/i,
   });
   const referenceAudioBase64 = parseOptionalString(payload.referenceAudioBase64, "referenceAudioBase64", {
     maxLength: MAX_REFERENCE_AUDIO_BASE64_LENGTH,
   });
 
   if (mode === "voiceClone") {
-    if (!isQwen3BaseModel(modelRepo)) {
-      throw new Error("Qwen3-TTS voice cloning requires a Base model repository.");
-    }
-    if (!baseModelPath) throw new Error("`baseModelPath` is required for Qwen3-TTS voice cloning.");
     if (!referenceText) throw new Error("`referenceText` is required for Qwen3-TTS voice cloning.");
-    if (!referenceAudioName || !referenceAudioBase64) {
+    if (!referenceAudioBase64) {
       throw new Error("A WAV `referenceAudioBase64` payload is required for Qwen3-TTS voice cloning.");
     }
-  } else {
-    if (isQwen3BaseModel(modelRepo)) {
-      throw new Error("Qwen3-TTS Base models require voiceClone mode.");
-    }
-    if (isQwen3MlxCustomVoiceModel(modelRepo) && !baseModelPath) {
-      throw new Error("`baseModelPath` is required for Qwen3-TTS MLX CustomVoice.");
-    }
-  }
-
-  const deviceMap = parseOptionalString(payload.deviceMap, "deviceMap", {
-    maxLength: 32,
-    pattern: /^(auto|cpu|metal)$/i,
-  })?.toLowerCase();
-  if (deviceMap && !ALLOWED_QWEN3_DEVICES.has(deviceMap)) {
-    throw new Error("Unsupported Qwen3-TTS device map.");
-  }
-
-  const dtype = parseOptionalString(payload.dtype, "dtype", { maxLength: 16 })?.toLowerCase();
-  if (dtype && !ALLOWED_QWEN3_DTYPES.has(dtype)) {
-    throw new Error("Unsupported Qwen3-TTS dtype.");
-  }
-
-  const attnImplementation = parseOptionalString(payload.attnImplementation, "attnImplementation", { maxLength: 32 });
-  if (attnImplementation && !ALLOWED_QWEN3_ATTENTION.has(attnImplementation)) {
-    throw new Error("Unsupported Qwen3-TTS attention implementation.");
   }
 
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
   const topK = parseOptionalInteger(payload.topK, "topK", { min: 0, max: 1000 });
-  const topP = parseOptionalNumber(payload.topP, "topP", { min: 0.5, max: 1.0 });
   const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 8192 });
 
   return {
     text,
-    ...(payload.mode != null ? { mode } : {}),
+    mode,
     modelRepo,
-    ...(baseModelPath ? { baseModelPath } : {}),
+    modelPath,
     ...(referenceText ? { referenceText } : {}),
-    ...(referenceAudioName ? { referenceAudioName } : {}),
     ...(referenceAudioBase64 ? { referenceAudioBase64 } : {}),
     speaker,
     language,
     instruct,
-    deviceMap,
-    dtype,
-    attnImplementation,
     temperature,
     topK,
-    topP,
     maxNewTokens,
   };
 }
 
-export function sanitizeGeneratePayload(model: LocalModel, payload: unknown): Record<string, unknown> {
-  return model === "neutts" ? sanitizeNeuttsPayload(payload) : sanitizeQwen3Payload(payload);
+export function sanitizeGeneratePayload(
+  model: LocalModel,
+  payload: unknown,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, unknown> {
+  return model === "neutts" ? sanitizeNeuttsPayload(payload) : sanitizeQwen3Payload(payload, platform);
 }
 
 export function sanitizeWarmRequest(request: unknown): WarmRequest {
   if (!isRecord(request)) throw new Error("Invalid warm request payload.");
   const model = assertLocalModel(String(request.model));
-  const baseModelPath = parseOptionalString(request.baseModelPath, "baseModelPath", {
+  if (model !== "qwen3") return { model, payload: {} };
+  const unknownField = Object.keys(request).find((field) => !["model", "mode", "modelPath"].includes(field));
+  if (unknownField) throw new Error(`Unknown Qwen3-TTS warm-up field: \`${unknownField}\`.`);
+  const mode = parseOptionalString(request.mode, "mode", { maxLength: 32 });
+  if (!mode || !ALLOWED_QWEN3_MODES.has(mode as Qwen3Mode)) throw new Error("Unsupported Qwen3-TTS mode.");
+  const modelPath = parseOptionalString(request.modelPath, "modelPath", {
     maxLength: 1000,
     pattern: /^[^\0]+$/,
   });
-  const modelRepo = parseOptionalString(request.modelRepo, "modelRepo", { maxLength: 128 });
-  if (modelRepo && !ALLOWED_QWEN3_MODELS.has(modelRepo)) {
-    throw new Error("Unsupported Qwen3-TTS model repository.");
-  }
+  if (!modelPath) throw new Error("`modelPath` is required for Qwen3-TTS warm-up.");
   return {
     model,
-    payload: {
-      ...(baseModelPath ? { baseModelPath } : {}),
-      ...(modelRepo ? { modelRepo } : {}),
-    },
+    payload: { mode, modelPath },
   };
 }
 
@@ -450,36 +396,15 @@ export function parseBridgeProbeResult(result: unknown): BridgeProbeResult {
     }
     parsed.recommendedBaseModelRepo = result.recommendedBaseModelRepo;
   }
-  if (result.recommendedDeviceMap != null) {
-    if (typeof result.recommendedDeviceMap !== "string") {
-      throw new Error("Probe response has invalid `recommendedDeviceMap`.");
-    }
-    parsed.recommendedDeviceMap = result.recommendedDeviceMap;
+  if (result.provider != null) {
+    if (typeof result.provider !== "string") throw new Error("Probe response has invalid `provider`.");
+    parsed.provider = result.provider;
   }
-  if (result.recommendedDtype != null) {
-    if (typeof result.recommendedDtype !== "string") throw new Error("Probe response has invalid `recommendedDtype`.");
-    parsed.recommendedDtype = result.recommendedDtype;
-  }
-  if (result.recommendedAttention != null) {
-    if (typeof result.recommendedAttention !== "string") {
-      throw new Error("Probe response has invalid `recommendedAttention`.");
+  if (result.upstreamRevision != null) {
+    if (typeof result.upstreamRevision !== "string") {
+      throw new Error("Probe response has invalid `upstreamRevision`.");
     }
-    parsed.recommendedAttention = result.recommendedAttention;
-  }
-  if (result.mlxEngines != null) {
-    if (
-      !isRecord(result.mlxEngines)
-      || typeof result.mlxEngines.apiServer !== "boolean"
-      || typeof result.mlxEngines.tts !== "boolean"
-      || typeof result.mlxEngines.worker !== "boolean"
-    ) {
-      throw new Error("Probe response has invalid `mlxEngines`.");
-    }
-    parsed.mlxEngines = {
-      apiServer: result.mlxEngines.apiServer,
-      tts: result.mlxEngines.tts,
-      worker: result.mlxEngines.worker,
-    };
+    parsed.upstreamRevision = result.upstreamRevision;
   }
 
   return parsed;

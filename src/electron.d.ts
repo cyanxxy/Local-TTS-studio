@@ -9,14 +9,8 @@ export interface LocalTtsProbeResult {
   warnings?: string[];
   recommendedModelRepo?: string | null;
   recommendedBaseModelRepo?: string | null;
-  recommendedDeviceMap?: string | null;
-  recommendedDtype?: string | null;
-  recommendedAttention?: string | null;
-  mlxEngines?: {
-    apiServer: boolean;
-    tts: boolean;
-    worker: boolean;
-  };
+  provider?: string;
+  upstreamRevision?: string;
 }
 
 export interface LocalTtsWarmResult {
@@ -44,23 +38,31 @@ export interface LocalTtsCacheInfo {
   sizeBytes: number;
 }
 
-export interface LocalTtsQwen3MlxSetup {
-  workerAvailable: boolean;
-  workerPath?: string;
-  ttsAvailable: boolean;
-  ttsPath?: string;
-  apiServerAvailable: boolean;
-  apiServerPath?: string;
-  recommendedModelRepo: string;
-  recommendedModelDir: string;
-  modelDirExists: boolean;
-  modelDirLooksReady: boolean;
-  workerBuildCommand: string;
-  modelDownloadCommand: string;
+export interface LocalTtsQwen3ProfileSetup {
+  repo: string;
+  revision: string;
+  mode: "customVoice" | "voiceClone";
+  parameters: "0.6B" | "1.7B";
+  provider: "mlx" | "libtorch";
+  platforms: readonly ("darwin" | "win32")[];
+  weightFormat: "mlx-6bit" | "safetensors";
+  label: string;
+  requiredFiles: readonly string[];
+  modelDir: string;
+  readiness: "missing" | "structural" | "verified";
+  reason?: string;
 }
 
-export interface LocalTtsQwen3MlxDownloadProgress {
+export interface LocalTtsQwen3Setup {
+  provider: "mlx" | "libtorch";
+  profiles: LocalTtsQwen3ProfileSetup[];
+  recommendedModelRepo: string;
+  recommendedModelDir: string;
+}
+
+export interface LocalTtsQwen3DownloadProgress {
   modelRepo: string;
+  revision: string;
   modelDir: string;
   fileName: string;
   fileIndex: number;
@@ -69,12 +71,13 @@ export interface LocalTtsQwen3MlxDownloadProgress {
   totalBytes?: number;
 }
 
-export interface LocalTtsQwen3MlxDownloadResult {
+export interface LocalTtsQwen3DownloadResult {
   modelRepo: string;
+  revision: string;
   modelDir: string;
   downloadedFiles: number;
   skippedFiles: number;
-  modelDirLooksReady: boolean;
+  readiness: "missing" | "structural" | "verified";
 }
 
 export interface LocalTtsProgressEvent {
@@ -117,8 +120,8 @@ interface LocalTtsBridge {
   }) => Promise<LocalTtsGenerateResult>;
   warm?: (request: {
     model: LocalTtsModel;
-    baseModelPath?: string;
-    modelRepo?: string;
+    mode?: "customVoice" | "voiceClone";
+    modelPath?: string;
   }) => Promise<LocalTtsWarmResult>;
   cancel: (request: {
     model: LocalTtsModel;
@@ -126,11 +129,11 @@ interface LocalTtsBridge {
   }) => Promise<{ cancelled: boolean }>;
   getCacheInfo: (request: { model: LocalTtsModel }) => Promise<LocalTtsCacheInfo>;
   clearCache: (request: { model: LocalTtsModel }) => Promise<{ path: string; cleared: boolean }>;
-  getQwen3MlxSetup: () => Promise<LocalTtsQwen3MlxSetup>;
-  downloadQwen3MlxModel: (request: { modelRepo: string }) => Promise<LocalTtsQwen3MlxDownloadResult>;
-  chooseQwen3MlxModelDir: () => Promise<{ path: string | null }>;
-  subscribeQwen3MlxDownloadProgress: (
-    listener: (event: LocalTtsQwen3MlxDownloadProgress) => void,
+  getQwen3Setup: (request?: { modelRepo?: string }) => Promise<LocalTtsQwen3Setup>;
+  downloadQwen3Model: (request: { modelRepo: string }) => Promise<LocalTtsQwen3DownloadResult>;
+  chooseQwen3ModelDir: () => Promise<{ path: string | null }>;
+  subscribeQwen3DownloadProgress: (
+    listener: (event: LocalTtsQwen3DownloadProgress) => void,
   ) => () => void;
   subscribeProgress: (listener: (event: LocalTtsProgressEvent) => void) => () => void;
   subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;

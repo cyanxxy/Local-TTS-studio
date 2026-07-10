@@ -25,22 +25,22 @@ contextBridge.exposeInMainWorld("electron", {
   localTts: {
     probe: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:probe", request),
     generate: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:generate", request),
-    warm: (request: { model: LocalModel; baseModelPath?: string; modelRepo?: string }) => (
+    warm: (request: { model: LocalModel; mode?: string; modelPath?: string }) => (
       ipcRenderer.invoke("local-tts:warm", request)
     ),
     cancel: (request: CancelRequest) => ipcRenderer.invoke("local-tts:cancel", request),
     getCacheInfo: (request: CacheRequest) => ipcRenderer.invoke("local-tts:cache-info", request),
     clearCache: (request: CacheRequest) => ipcRenderer.invoke("local-tts:clear-cache", request),
-    getQwen3MlxSetup: () => ipcRenderer.invoke("local-tts:qwen3-mlx-setup"),
-    downloadQwen3MlxModel: (request: { modelRepo: string }) => (
-      ipcRenderer.invoke("local-tts:download-qwen3-mlx-model", request)
+    getQwen3Setup: (request?: { modelRepo?: string }) => ipcRenderer.invoke("local-tts:qwen3-setup", request),
+    downloadQwen3Model: (request: { modelRepo: string }) => (
+      ipcRenderer.invoke("local-tts:download-qwen3-model", request)
     ),
-    chooseQwen3MlxModelDir: () => ipcRenderer.invoke("local-tts:choose-qwen3-mlx-model-dir"),
-    subscribeQwen3MlxDownloadProgress: (listener: (event: unknown) => void) => {
+    chooseQwen3ModelDir: () => ipcRenderer.invoke("local-tts:choose-qwen3-model-dir"),
+    subscribeQwen3DownloadProgress: (listener: (event: unknown) => void) => {
       const wrapped = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
-      ipcRenderer.on("local-tts:qwen3-mlx-download-progress", wrapped);
+      ipcRenderer.on("local-tts:qwen3-download-progress", wrapped);
       return () => {
-        ipcRenderer.off("local-tts:qwen3-mlx-download-progress", wrapped);
+        ipcRenderer.off("local-tts:qwen3-download-progress", wrapped);
       };
     },
     subscribeProgress: (listener: (event: unknown) => void) => {

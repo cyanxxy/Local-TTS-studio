@@ -138,100 +138,81 @@ describe("localTtsIpc request sanitizers", () => {
   });
 
   it("sanitizes Qwen3 Rust payloads", () => {
+    const customRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
+    const baseRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
     expect(sanitizeGeneratePayload("qwen3", {
       text: "  Hello from Qwen. ",
-      modelRepo: "auto",
+      mode: "customVoice",
+      modelRepo: customRepo,
+      modelPath: " /models/qwen3-customvoice ",
       speaker: "Aiden",
-      language: "English",
+      language: "Italian",
       instruct: "Warm narration.",
-      deviceMap: "CPU",
-      dtype: "FLOAT32",
-      attnImplementation: "eager",
       temperature: 0.75,
       topK: 64,
-      topP: 0.88,
       maxNewTokens: 2304,
-    })).toEqual({
+    }, "darwin")).toEqual({
       text: "Hello from Qwen.",
-      modelRepo: "auto",
+      mode: "customVoice",
+      modelRepo: customRepo,
+      modelPath: "/models/qwen3-customvoice",
       speaker: "Aiden",
-      language: "English",
+      language: "Italian",
       instruct: "Warm narration.",
-      deviceMap: "cpu",
-      dtype: "float32",
-      attnImplementation: "eager",
       temperature: 0.75,
       topK: 64,
-      topP: 0.88,
       maxNewTokens: 2304,
     });
 
-    expect(sanitizeGeneratePayload("qwen3", { text: "Hello", deviceMap: "metal", topK: 0 }))
-      .toMatchObject({ deviceMap: "metal", topK: 0 });
-
     expect(sanitizeGeneratePayload("qwen3", {
       text: "Built-in speaker.",
       mode: "customVoice",
-      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
-      baseModelPath: " /models/qwen3-customvoice-6bit ",
+      modelRepo: customRepo,
+      modelPath: " /models/qwen3-customvoice-6bit ",
       speaker: "Ryan",
-    })).toMatchObject({
+      language: "Russian",
+    }, "darwin")).toMatchObject({
       text: "Built-in speaker.",
       mode: "customVoice",
-      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
-      baseModelPath: "/models/qwen3-customvoice-6bit",
+      modelRepo: customRepo,
+      modelPath: "/models/qwen3-customvoice-6bit",
       speaker: "Ryan",
+      language: "Russian",
     });
 
     expect(sanitizeGeneratePayload("qwen3", {
       text: "Clone this.",
       mode: "voiceClone",
-      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
-      baseModelPath: " /models/qwen3-base-6bit ",
+      modelRepo: baseRepo,
+      modelPath: " /models/qwen3-base-6bit ",
       referenceText: "Exact reference words.",
-      referenceAudioName: "voice.wav",
       referenceAudioBase64: " AQID ",
-      language: "German",
+      language: "Portuguese",
       topK: 30,
-    })).toMatchObject({
+    }, "darwin")).toMatchObject({
       text: "Clone this.",
       mode: "voiceClone",
-      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
-      baseModelPath: "/models/qwen3-base-6bit",
+      modelRepo: baseRepo,
+      modelPath: "/models/qwen3-base-6bit",
       referenceText: "Exact reference words.",
-      referenceAudioName: "voice.wav",
       referenceAudioBase64: "AQID",
-      language: "German",
+      language: "Portuguese",
       topK: 30,
     });
 
-    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", deviceMap: "mps" }))
-      .toThrow("invalid format");
-    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", topK: 1001 }))
+    const valid = { text: "Hello", mode: "customVoice", modelRepo: customRepo, modelPath: "/model" };
+    for (const removedField of ["deviceMap", "dtype", "attnImplementation", "topP", "baseModelPath"]) {
+      expect(() => sanitizeGeneratePayload("qwen3", { ...valid, [removedField]: "removed" }, "darwin"))
+        .toThrow(`Unknown Qwen3-TTS field: \`${removedField}\``);
+    }
+    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, topK: 1001 }, "darwin"))
       .toThrow("between 0 and 1000");
-    expect(() => sanitizeGeneratePayload("qwen3", {
-      text: "Hello",
-      mode: "voiceClone",
-      modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-    })).toThrow("Base model");
-    expect(() => sanitizeGeneratePayload("qwen3", {
-      text: "Hello",
-      mode: "customVoice",
-      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
-      baseModelPath: "/models/base",
-    })).toThrow("Base models require voiceClone");
-    expect(() => sanitizeGeneratePayload("qwen3", {
-      text: "Hello",
-      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
-    })).toThrow("MLX CustomVoice");
-    expect(sanitizeGeneratePayload("qwen3", { text: "Hello", dtype: "BFLOAT16" }))
-      .toMatchObject({ dtype: "bfloat16" });
-    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", dtype: "float16" }))
-      .toThrow("Unsupported Qwen3-TTS dtype");
-    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", attnImplementation: "sdpa" }))
-      .toThrow("Unsupported Qwen3-TTS attention");
-    expect(() => sanitizeGeneratePayload("qwen3", { text: "Hello", language: "Italian" }))
-      .toThrow("Unsupported Qwen3-TTS language");
+    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, mode: "voiceClone" }, "darwin"))
+      .toThrow("does not match");
+    expect(() => sanitizeGeneratePayload("qwen3", valid, "win32"))
+      .toThrow("unavailable on win32");
+    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, extra: true }, "darwin"))
+      .toThrow("Unknown Qwen3-TTS field");
   });
 
   it("sanitizes cache and cancellation requests", () => {
@@ -245,22 +226,17 @@ describe("localTtsIpc request sanitizers", () => {
   });
 
   it("sanitizes warm-up requests", () => {
-    expect(sanitizeWarmRequest({ model: "qwen3", baseModelPath: "/models/qwen3" })).toEqual({
+    expect(sanitizeWarmRequest({ model: "qwen3", mode: "customVoice", modelPath: "/models/qwen3" })).toEqual({
       model: "qwen3",
-      payload: { baseModelPath: "/models/qwen3" },
+      payload: { mode: "customVoice", modelPath: "/models/qwen3" },
     });
-    expect(sanitizeWarmRequest({ model: "qwen3" })).toEqual({ model: "qwen3", payload: {} });
-    expect(sanitizeWarmRequest({ model: "qwen3", baseModelPath: "  " })).toEqual({ model: "qwen3", payload: {} });
+    expect(() => sanitizeWarmRequest({ model: "qwen3" })).toThrow("Unsupported Qwen3-TTS mode");
     expect(() => sanitizeWarmRequest({ model: "kani" })).toThrow("Unsupported local model");
-    expect(() => sanitizeWarmRequest({ model: "qwen3", baseModelPath: "a".repeat(1001) }))
+    expect(() => sanitizeWarmRequest({ model: "qwen3", mode: "customVoice", modelPath: "a".repeat(1001) }))
       .toThrow("exceeds 1000 characters");
     expect(() => sanitizeWarmRequest(null)).toThrow("Invalid warm request payload");
-    expect(sanitizeWarmRequest({ model: "qwen3", modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" })).toEqual({
-      model: "qwen3",
-      payload: { modelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" },
-    });
-    expect(() => sanitizeWarmRequest({ model: "qwen3", modelRepo: "evil/repo" }))
-      .toThrow("Unsupported Qwen3-TTS model repository");
+    expect(() => sanitizeWarmRequest({ model: "qwen3", mode: "customVoice", modelPath: "/model", topP: 0.9 }))
+      .toThrow("Unknown Qwen3-TTS warm-up field");
   });
 });
 
@@ -269,14 +245,13 @@ describe("localTtsIpc bridge result parsing", () => {
     ready: true,
     message: "Qwen3 Rust runtime is ready.",
     runtime: "rust",
-    package: "qwen_tts",
-    packageVersion: "0.1.1",
-    warnings: ["Metal auto-selection is enabled."],
-    recommendedModelRepo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
+    package: "qwen3-tts-rs",
+    packageVersion: "0.2.2",
+    upstreamRevision: "288a716ce38a91c826dd67968c75d1dd4b0f07bc",
+    provider: "mlx",
+    warnings: [],
+    recommendedModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
     recommendedBaseModelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit",
-    recommendedDeviceMap: "auto",
-    recommendedDtype: "float32",
-    recommendedAttention: "eager",
   };
 
   const generateResult = {
@@ -299,17 +274,7 @@ describe("localTtsIpc bridge result parsing", () => {
     expect(() => parseBridgeProbeResult({ ...probeResult, runtime: "node" })).toThrow("Rust runtime marker");
     expect(() => parseBridgeProbeResult({ ...probeResult, ready: "yes" })).toThrow("ready");
     expect(() => parseBridgeProbeResult({ ...probeResult, package: 1 })).toThrow("package");
-    expect(() => parseBridgeProbeResult({ ...probeResult, recommendedDeviceMap: 1 })).toThrow("recommendedDeviceMap");
-  });
-
-  it("parses optional probe mlxEngines availability", () => {
-    const mlxEngines = { apiServer: true, tts: true, worker: false };
-    expect(parseBridgeProbeResult({ ...probeResult, mlxEngines })).toEqual({ ...probeResult, mlxEngines });
-    expect(parseBridgeProbeResult(probeResult).mlxEngines).toBeUndefined();
-    expect(() => parseBridgeProbeResult({ ...probeResult, mlxEngines: { apiServer: "yes", tts: true, worker: false } }))
-      .toThrow("mlxEngines");
-    expect(() => parseBridgeProbeResult({ ...probeResult, mlxEngines: { apiServer: true } }))
-      .toThrow("mlxEngines");
+    expect(() => parseBridgeProbeResult({ ...probeResult, provider: 1 })).toThrow("provider");
   });
 
   it("parses warm-up envelopes without throwing", () => {
@@ -317,11 +282,11 @@ describe("localTtsIpc bridge result parsing", () => {
       type: "result",
       requestId: "qwen3-warm-1",
       ok: true,
-      result: { warmed: true, message: "Qwen3 MLX api_server is loaded and resident." },
-    })).toEqual({ warmed: true, message: "Qwen3 MLX api_server is loaded and resident." });
+      result: { warmed: true, message: "Qwen3 model is loaded in the resident Rust bridge." },
+    })).toEqual({ warmed: true, message: "Qwen3 model is loaded in the resident Rust bridge." });
     expect(parseBridgeWarmResult({ ok: true, result: { warmed: false } })).toEqual({ warmed: false });
-    expect(parseBridgeWarmResult({ ok: false, error: "api_server missing" }))
-      .toEqual({ warmed: false, message: "api_server missing" });
+    expect(parseBridgeWarmResult({ ok: false, error: "model missing" }))
+      .toEqual({ warmed: false, message: "model missing" });
     expect(parseBridgeWarmResult({ ok: true, result: { warmed: "yes" } }).warmed).toBe(false);
     expect(parseBridgeWarmResult(null).warmed).toBe(false);
   });

@@ -1,6 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell, type IpcMainInvokeEvent } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
-import { existsSync } from "fs";
 import { promises as fs } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
@@ -12,12 +11,17 @@ import {
 } from "./documentImport";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import {
-  buildQwen3SetupWarnings,
-  createQwen3MlxDownloadCoordinator,
+  createQwen3ModelDownloadCoordinator,
   createSafeProgressSender,
-  qwen3MlxModelDirLooksReady,
-  type Qwen3MlxDownloadResult,
-} from "./qwen3MlxDownload";
+  inspectQwen3ModelDir,
+  type Qwen3ModelDownloadResult,
+} from "./qwen3ModelDownload";
+import {
+  getDefaultQwen3Profile,
+  getQwen3Profile,
+  getQwen3Profiles,
+  type Qwen3Profile,
+} from "./qwen3Profiles";
 import {
   createWebSocketBridgeWorkerPool,
   type WebSocketBridgeWorkerPool,
@@ -59,7 +63,7 @@ const RUST_BRIDGE_TIMEOUT_MS = 5 * 60 * 1000;
 // genuinely stuck) rather than during a slow first-run download or CPU inference.
 const RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 // On the WebSocket path stdout/stderr are diagnostic-only (results travel over
-// the socket), so keep modest caps that still tolerate MLX startup logs.
+// the socket), so keep modest caps that still tolerate native-provider startup logs.
 const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES = 16 * 1024 * 1024;
 const RUST_CANCEL_KILL_AFTER_MS = 2_000;
@@ -73,17 +77,6 @@ const RUST_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
 // intentionally no stdout fallback for models in this set; generation is
 // WebSocket-only, and `probe` is the only remaining one-shot subprocess action.
 const WEBSOCKET_WORKER_MODELS: ReadonlySet<LocalModel> = new Set<LocalModel>(["neutts", "qwen3"]);
-const QWEN3_MLX_CUSTOMVOICE_06B_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
-const QWEN3_MLX_CUSTOMVOICE_17B_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit";
-const QWEN3_MLX_BASE_06B_MODEL = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
-const QWEN3_MLX_BASE_17B_MODEL = "mlx-community/Qwen3-TTS-12Hz-1.7B-Base-6bit";
-const QWEN3_MLX_CUSTOMVOICE_06B_DIR_NAME = "Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
-const QWEN3_MLX_DOWNLOAD_MODELS = new Set([
-  QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
-  QWEN3_MLX_CUSTOMVOICE_17B_MODEL,
-  QWEN3_MLX_BASE_06B_MODEL,
-  QWEN3_MLX_BASE_17B_MODEL,
-]);
 protocol.registerSchemesAsPrivileged([
   {
     scheme: ELECTRON_APP_SCHEME,
@@ -105,7 +98,7 @@ const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
 });
 let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
 
-// Best-effort engine warm-up (currently Qwen3 MLX api_server). At most one
+// Best-effort Qwen model warm-up. At most one
 // warm-up runs per model; a generate request that arrives while one is in
 // flight waits for it (the warm-up is doing exactly the model load the
 // generation would otherwise pay) instead of failing with "already running".
@@ -279,18 +272,6 @@ function getRustBridgeBinaryName(): string {
   return process.platform === "win32" ? "open-tts-local-bridge.exe" : "open-tts-local-bridge";
 }
 
-function getQwen3MlxWorkerBinaryName(): string {
-  return process.platform === "win32" ? "pibot-tts-worker.exe" : "pibot-tts-worker";
-}
-
-function getQwen3MlxTtsBinaryName(): string {
-  return process.platform === "win32" ? "tts.exe" : "tts";
-}
-
-function getQwen3MlxApiServerBinaryName(): string {
-  return process.platform === "win32" ? "api_server.exe" : "api_server";
-}
-
 function getRustBridgeBinaryPath(): string {
   const binaryName = getRustBridgeBinaryName();
   if (isDev) {
@@ -304,7 +285,7 @@ function shouldForwardRustBridgeEnv(key: string): boolean {
     "CUDA_",
     "HF_",
     "HUGGINGFACE_",
-    "OPEN_TTS_",
+    "OPEN_TTS_NEUCODEC_",
     "TTS_",
   ].some((prefix) => key.startsWith(prefix))
     || [
@@ -339,134 +320,66 @@ function buildRustBridgeEnv(cacheDir: string): NodeJS.ProcessEnv {
   env.HF_HOME = hfHome;
   env.HF_HUB_CACHE = path.join(hfHome, "hub");
   env.HUGGINGFACE_HUB_CACHE = path.join(hfHome, "hub");
-  if (!env.OPEN_TTS_QWEN3_MLX_WORKER) {
-    const bundledWorker = path.join(path.dirname(getRustBridgeBinaryPath()), getQwen3MlxWorkerBinaryName());
-    if (existsSync(bundledWorker)) {
-      env.OPEN_TTS_QWEN3_MLX_WORKER = bundledWorker;
-    }
-  }
-  if (!env.OPEN_TTS_QWEN3_MLX_TTS) {
-    const bundledTts = path.join(path.dirname(getRustBridgeBinaryPath()), getQwen3MlxTtsBinaryName());
-    if (existsSync(bundledTts)) {
-      env.OPEN_TTS_QWEN3_MLX_TTS = bundledTts;
-    }
-  }
-  if (!env.OPEN_TTS_QWEN3_MLX_API_SERVER) {
-    const bundledApiServer = path.join(path.dirname(getRustBridgeBinaryPath()), getQwen3MlxApiServerBinaryName());
-    if (existsSync(bundledApiServer)) {
-      env.OPEN_TTS_QWEN3_MLX_API_SERVER = bundledApiServer;
-    }
-  }
 
   return env;
 }
 
-function getQwen3MlxRecommendedModelDir(): string {
-  return path.join(getCacheDir("qwen3"), "mlx", QWEN3_MLX_CUSTOMVOICE_06B_DIR_NAME);
+function getQwen3ModelDir(profile: Qwen3Profile): string {
+  const dirName = profile.repo.split("/").at(-1);
+  if (!dirName || !/^[A-Za-z0-9._-]+$/.test(dirName)) throw new Error("Invalid Qwen3 model repository.");
+  return path.join(getCacheDir("qwen3"), profile.provider, `${dirName}-${profile.revision.slice(0, 12)}`);
 }
 
-function getQwen3MlxModelDir(modelRepo: string): string {
-  const dirName = modelRepo.split("/").pop();
-  if (!dirName || dirName.includes("..") || dirName.includes("/") || dirName.includes("\\")) {
-    throw new Error("Invalid Qwen3 MLX model repository.");
+function getRequestedQwen3Profile(request: unknown): Qwen3Profile {
+  const repo = isRecord(request) && typeof request.modelRepo === "string"
+    ? request.modelRepo.trim()
+    : getDefaultQwen3Profile(process.platform).repo;
+  const profile = getQwen3Profile(repo);
+  if (!profile || !profile.platforms.includes(process.platform as "darwin" | "win32")) {
+    throw new Error("Unsupported Qwen3 model profile for this platform.");
   }
-  return path.join(getCacheDir("qwen3"), "mlx", dirName);
+  return profile;
 }
 
-function assertQwen3MlxDownloadModel(modelRepo: unknown): string {
-  const repo = typeof modelRepo === "string" && modelRepo.trim()
-    ? modelRepo.trim()
-    : QWEN3_MLX_CUSTOMVOICE_06B_MODEL;
-  if (!QWEN3_MLX_DOWNLOAD_MODELS.has(repo)) {
-    throw new Error("Unsupported Qwen3 MLX model download.");
-  }
-  return repo;
-}
+const qwen3ModelDownloads = createQwen3ModelDownloadCoordinator();
 
-function getQwen3MlxWorkerPath(): string | undefined {
-  const env = buildRustBridgeEnv(getCacheDir("qwen3"));
-  return env.OPEN_TTS_QWEN3_MLX_WORKER;
-}
-
-function getQwen3MlxTtsPath(): string | undefined {
-  const env = buildRustBridgeEnv(getCacheDir("qwen3"));
-  return env.OPEN_TTS_QWEN3_MLX_TTS;
-}
-
-function getQwen3MlxApiServerPath(): string | undefined {
-  const env = buildRustBridgeEnv(getCacheDir("qwen3"));
-  return env.OPEN_TTS_QWEN3_MLX_API_SERVER;
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-const qwen3MlxDownloads = createQwen3MlxDownloadCoordinator();
-
-async function handleQwen3MlxSetup(): Promise<{
-  workerAvailable: boolean;
-  workerPath?: string;
-  ttsAvailable: boolean;
-  ttsPath?: string;
-  apiServerAvailable: boolean;
-  apiServerPath?: string;
+async function handleQwen3Setup(request: unknown): Promise<{
+  provider: Qwen3Profile["provider"];
+  profiles: Array<Qwen3Profile & { modelDir: string; readiness: "missing" | "structural" | "verified"; reason?: string }>;
   recommendedModelRepo: string;
   recommendedModelDir: string;
-  modelDirExists: boolean;
-  modelDirLooksReady: boolean;
-  workerBuildCommand: string;
-  modelDownloadCommand: string;
 }> {
-  const workerPath = getQwen3MlxWorkerPath();
-  const ttsPath = getQwen3MlxTtsPath();
-  const apiServerPath = getQwen3MlxApiServerPath();
-  const recommendedModelDir = getQwen3MlxRecommendedModelDir();
-  const [workerAvailable, ttsAvailable, apiServerAvailable, modelDirStats, modelDirLooksReady] = await Promise.all([
-    workerPath ? fs.access(workerPath).then(() => true, () => false) : Promise.resolve(false),
-    ttsPath ? fs.access(ttsPath).then(() => true, () => false) : Promise.resolve(false),
-    apiServerPath ? fs.access(apiServerPath).then(() => true, () => false) : Promise.resolve(false),
-    fs.stat(recommendedModelDir).then((stats) => stats, () => null),
-    qwen3MlxModelDirLooksReady(recommendedModelDir),
-  ]);
-
+  const selected = getRequestedQwen3Profile(request);
+  const profiles = await Promise.all(getQwen3Profiles(process.platform).map(async (profile) => {
+    const modelDir = getQwen3ModelDir(profile);
+    const inspection = await inspectQwen3ModelDir(modelDir, profile);
+    return { ...profile, modelDir, ...inspection };
+  }));
   return {
-    workerAvailable,
-    ...(workerPath ? { workerPath } : {}),
-    ttsAvailable,
-    ...(ttsPath ? { ttsPath } : {}),
-    apiServerAvailable,
-    ...(apiServerPath ? { apiServerPath } : {}),
-    recommendedModelRepo: QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
-    recommendedModelDir,
-    modelDirExists: modelDirStats?.isDirectory() ?? false,
-    modelDirLooksReady,
-    workerBuildCommand: "npm run build:qwen3-mlx-worker && npm run build:rust",
-    modelDownloadCommand: `hf download ${QWEN3_MLX_CUSTOMVOICE_06B_MODEL} --local-dir ${shellQuote(recommendedModelDir)}`,
+    provider: selected.provider,
+    profiles,
+    recommendedModelRepo: selected.repo,
+    recommendedModelDir: getQwen3ModelDir(selected),
   };
 }
 
-async function handleDownloadQwen3MlxModel(
+async function handleDownloadQwen3Model(
   request: unknown,
   event: IpcMainInvokeEvent,
-): Promise<Qwen3MlxDownloadResult> {
+): Promise<Qwen3ModelDownloadResult> {
   assertTrustedIpcSender(event, { allowDevServer: isDev });
-  const modelRepo = assertQwen3MlxDownloadModel(
-    isRecord(request) ? request.modelRepo : undefined,
-  );
-  const modelDir = getQwen3MlxModelDir(modelRepo);
-  // Concurrent invokes for the same model directory share one download, and
-  // progress sends tolerate a window that closes mid-download.
-  return qwen3MlxDownloads.download(
-    modelRepo,
+  const profile = getRequestedQwen3Profile(request);
+  const modelDir = getQwen3ModelDir(profile);
+  return qwen3ModelDownloads.download(
+    profile,
     modelDir,
-    createSafeProgressSender(event.sender, "local-tts:qwen3-mlx-download-progress"),
+    createSafeProgressSender(event.sender, "local-tts:qwen3-download-progress"),
   );
 }
 
-async function handleChooseQwen3MlxModelDir(): Promise<{ path: string | null }> {
+async function handleChooseQwen3ModelDir(): Promise<{ path: string | null }> {
   const result = await dialog.showOpenDialog({
-    title: "Choose Qwen3 MLX model directory",
+    title: "Choose Qwen3 model directory",
     properties: ["openDirectory"],
   });
   if (result.canceled || result.filePaths.length === 0) {
@@ -837,7 +750,7 @@ async function handleClearCache(request: unknown): Promise<{ path: string; clear
   return { path: cachePath, cleared: true };
 }
 
-// Pre-load the resident engine (Qwen3 MLX api_server) on the model's
+// Pre-load the selected Qwen model in the resident Rust worker so the model's
 // WebSocket worker so the first generation skips the model load. Failures
 // degrade to `warmed: false` — warm-up must never surface an error the
 // generation path would explain better.
@@ -941,12 +854,6 @@ app.whenReady().then(() => {
   ipcMain.handle("local-tts:probe", async (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
     const probe = await runRustBridge("probe", request, event);
-    // The Rust probe ships static, hypothetical warnings; replace them for
-    // Qwen3 with the actual MLX engine status detected on this machine.
-    if (isRecord(request) && request.model === "qwen3" && isRecord(probe)) {
-      const setup = await handleQwen3MlxSetup();
-      probe.warnings = buildQwen3SetupWarnings(setup);
-    }
     return probe;
   });
 
@@ -975,21 +882,19 @@ app.whenReady().then(() => {
     return handleClearCache(request);
   });
 
-  ipcMain.handle("local-tts:qwen3-mlx-setup", (event) => {
+  ipcMain.handle("local-tts:qwen3-setup", (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    return handleQwen3MlxSetup();
+    return handleQwen3Setup(request);
   });
 
-  ipcMain.handle("local-tts:download-qwen3-mlx-model", (event, request: unknown) => {
-    // Enforce the trusted-sender gate at the handler boundary like every other
-    // channel; handleDownloadQwen3MlxModel re-checks as defense-in-depth.
+  ipcMain.handle("local-tts:download-qwen3-model", (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    return handleDownloadQwen3MlxModel(request, event);
+    return handleDownloadQwen3Model(request, event);
   });
 
-  ipcMain.handle("local-tts:choose-qwen3-mlx-model-dir", (event) => {
+  ipcMain.handle("local-tts:choose-qwen3-model-dir", (event) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    return handleChooseQwen3MlxModelDir();
+    return handleChooseQwen3ModelDir();
   });
 
   ipcMain.handle("document:import", (event) => {
