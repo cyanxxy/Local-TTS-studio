@@ -1,6 +1,6 @@
 # Performance Benchmarks
 
-Open TTS includes a reproducible inference-speed benchmark that runs the same Web Worker inference path used by the app.
+Open TTS includes a reproducible inference-speed benchmark that runs the same browser Web Worker inference path used by the app. It currently covers Kokoro and Supertonic; it does not benchmark the Electron-only native Qwen or NeuTTS runtimes.
 
 ```bash
 npm run eval:inference
@@ -23,4 +23,35 @@ Reports are written to `reports/inference-speed/*.json`. Compare against a saved
 npm run eval:inference -- --baseline reports/inference-speed/example.json
 ```
 
-Keep dated machine-specific results in `reports/inference-speed/` rather than in the top-level README.
+## Interpreting results
+
+- Compare like with like: the same model, backend, model cache state, hardware, OS, browser/Electron version, warm-up count, and input text.
+- Treat first-load measurements separately from warm resident inference. Model downloads and graph compilation can dominate a cold run.
+- Use first-chunk latency for responsiveness and real-time factor for sustained throughput. An RTF below `1.0` means generation is faster than the resulting audio duration.
+- Run enough measured iterations to expose variance, and retain the raw JSON rather than only an average.
+- Keep dated machine-specific results in `reports/inference-speed/` rather than presenting them as universal numbers in the top-level README.
+
+## Native Qwen evaluation
+
+Qwen3-TTS runs inside the resident Rust bridge, outside the browser eval harness. Any Qwen report should identify:
+
+- Open TTS version and commit
+- Qwen profile and immutable upstream revision
+- provider (`MLX/Metal`, `LibTorch CUDA`, or `LibTorch CPU`)
+- machine, memory, OS, and GPU/driver details
+- cold load time, first-audio latency, wall time, audio duration, RTF, and chunk count
+- input text, speaker/language, sampling settings, warm-up count, and measured iterations
+
+Do not compare Qwen native results with browser-model evals or measurements from the removed pre-v1.2 child-server/adapter architecture. Those paths have different loading, streaming, and transport costs.
+
+## Release validation
+
+Performance observations complement correctness checks; they do not replace them. Before release, run:
+
+```bash
+npm run lint
+npm run test
+npm run build
+```
+
+For desktop releases, also run `npm run build:desktop` on each supported provider platform, or build the packaged artifact with `npm run dist`.

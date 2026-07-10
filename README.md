@@ -18,7 +18,7 @@ Browser-native neural speech synthesis through WebGPU, plus optional Electron de
 [![Electron 42](https://img.shields.io/badge/Electron-42-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
 [![Rust](https://img.shields.io/badge/Rust-local%20bridge-B7410E?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-[Quick Start](#quick-start) · [Models](#models) · [Capabilities](#capabilities) · [Document Import](#document-import-desktop) · [Docs](#documentation)
+[Quick Start](#quick-start) · [Models](#models) · [Capabilities](#capabilities) · [Performance](#performance--evaluation) · [Document Import](#document-import-desktop) · [Docs](#documentation)
 
 </div>
 
@@ -115,11 +115,31 @@ For generation, Electron starts the bridge with `--host 127.0.0.1 --port 0 --aut
 
 Qwen inference is compiled into that same process. Apple Silicon initializes the pinned MLX Metal backend; Windows selects LibTorch CUDA when available and otherwise uses LibTorch CPU. The app, not the user, selects the provider from the platform profile. Requests expose only model, voice/language, reference data, and supported sampling controls.
 
+The resident host loads a selected model once and reuses it across requests. CustomVoice emits completed text units immediately as raw Float32 WebSocket chunks; Base voice cloning also caches prepared reference features for reuse. Text units are split by Unicode scalar count—not byte offsets—so dense CJK, emoji, combining marks, and long unbroken text cannot be sliced through UTF-8 boundaries.
+
 Model downloads are immutable: each approved profile names an exact Hugging Face revision and required-file list. Files are downloaded through temporary paths, length/digest checked, atomically promoted, and recorded in `open-tts-model.json`. The UI distinguishes a revision-verified cache from a manually selected directory that only passed structural validation.
 
 Existing installations are migrated without another multi-gigabyte download: when Open TTS finds a structurally valid pre-1.1 Qwen cache directory, it atomically adopts it into the revision-scoped layout. Studio, Reader, and the Qwen setup page then use the same model path and the same in-memory voice settings. Switching the exact speaker does not reload the model host; switching to an undownloaded model profile requires downloading or selecting that profile first.
 
 `npm run build:rust` builds the release bridge and copies exactly one executable plus its required provider resources and native library closure into `dist-rust/` for Electron packaging. On macOS this includes `mlx.metallib`; on Windows it includes the LibTorch DLL closure.
+
+---
+
+## Performance & Evaluation
+
+Open TTS ships a reproducible browser-inference evaluation harness instead of presenting one machine's result as a universal benchmark:
+
+```bash
+npm run eval:inference
+npm run eval:inference -- --model kokoro --iterations 3 --warmups 1
+npm run eval:inference -- --model supertonic --iterations 3 --warmups 1
+```
+
+Each report records model/backend identity, WebGPU availability, load and generation latency, first-chunk latency, characters per second, real-time factor, warm-up count, and measured iterations. Reports are written under `reports/inference-speed/` and can be compared with `--baseline` to catch regressions on the same hardware and software stack.
+
+Qwen performance must be measured separately for each native provider and model profile: MLX/Metal on Apple Silicon, LibTorch CUDA on Windows with a compatible GPU, or LibTorch CPU fallback. Browser eval numbers and results from the removed pre-v1.2 child-server architecture are not valid Qwen native-backend comparisons. See [Performance benchmarks](./docs/performance.md) for the complete methodology and reporting checklist.
+
+The release gate is `npm run lint`, `npm run test`, and `npm run build`. Desktop packaging additionally runs the pinned native Qwen build and provider-resource checks through `npm run build:desktop` or `npm run dist`.
 
 ---
 
