@@ -1,4 +1,5 @@
 mod neucodec_encoder;
+mod qwen3;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;

@@ -27,3 +27,9 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 candle-core = { version = "0.9", features = ["metal"] }
 qwen_tts = { version = "0.1.1", features = ["metal"] }
+
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+qwen3-tts-rs = { git = "https://github.com/badlogic/qwen3_tts_rs.git", rev = "288a716ce38a91c826dd67968c75d1dd4b0f07bc", default-features = false, features = ["mlx"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+qwen3-tts-rs = { git = "https://github.com/badlogic/qwen3_tts_rs.git", rev = "288a716ce38a91c826dd67968c75d1dd4b0f07bc", default-features = false, features = ["tch-backend"] }

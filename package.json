@@ -26,7 +26,7 @@
     "lint": "eslint .",
     "test": "npm run test:js && npm run test:rust",
     "test:js": "vitest run",
-    "test:rust": "cargo test --manifest-path rust/local-tts-bridge/Cargo.toml",
+    "test:rust": "node scripts/test-rust-bridge.mjs",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "eval:inference": "node scripts/inference-speed-eval.mjs",

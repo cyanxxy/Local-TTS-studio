@@ -35,6 +35,9 @@
 - Modify: `rust/local-tts-bridge/Cargo.toml`
 - Modify: `rust/local-tts-bridge/Cargo.lock`
 - Create: `rust/local-tts-bridge/src/qwen3/mod.rs`
+- Create: `scripts/rust-target-dir.mjs`
+- Create: `scripts/test-rust-bridge.mjs`
+- Modify: `package.json`
 - Test: `rust/local-tts-bridge/src/qwen3/mod.rs`
 
 **Interfaces:**
@@ -104,8 +107,10 @@ Expected: one focused test passes and `Cargo.lock` records the exact Git revisio
 
 - [ ] **Step 5: Commit**
 
+The pinned crate's unconditional `mp3lame-sys` dependency uses an autotools install step that breaks when Cargo's target path contains spaces. Route Rust tests through `scripts/test-rust-bridge.mjs`, which sets `CARGO_TARGET_DIR` to a workspace-keyed directory beneath `os.tmpdir()` unless the caller explicitly supplies one. Reuse `resolveRustTargetDir()` from the production build script in Task 8.
+
 ```bash
-git add rust/local-tts-bridge/Cargo.toml rust/local-tts-bridge/Cargo.lock rust/local-tts-bridge/src/main.rs rust/local-tts-bridge/src/qwen3/mod.rs
+git add rust/local-tts-bridge/Cargo.toml rust/local-tts-bridge/Cargo.lock rust/local-tts-bridge/src/main.rs rust/local-tts-bridge/src/qwen3/mod.rs scripts/rust-target-dir.mjs scripts/test-rust-bridge.mjs package.json docs/superpowers/plans/2026-07-10-qwen3-single-rust-backend.md
 git commit -m "build: pin native Qwen runtime"
 ```
 
