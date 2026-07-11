@@ -90,6 +90,7 @@ export function useQwen3LocalRuntime({
   const resetPlayer = player.reset;
   const scheduleChunk = player.scheduleChunk;
   const stopAll = player.stopAll;
+  const selectedModelKey = `${settings.profile.repo}:${settings.modelPath.trim()}`;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -109,7 +110,7 @@ export function useQwen3LocalRuntime({
     const active = activeRequestRef.current;
     if (!active || !bridge) return;
     stopAll();
-    void bridge.cancel({ model: LOCAL_MODEL, requestId: active }).catch(() => undefined);
+    void Promise.resolve(bridge.cancel({ model: LOCAL_MODEL, requestId: active })).catch(() => undefined);
   }, [bridge, stopAll]);
 
   const resetGeneratedAudio = useCallback(() => {
@@ -122,6 +123,27 @@ export function useQwen3LocalRuntime({
     setError(null);
     setGenerateBusy(false);
   }, [cancelActiveGeneration, clearGeneratedResult, setShowPlayer]);
+
+  // A load/generation error belongs to the model path that produced it. Do
+  // not carry that stale error into a newly selected profile: it would leave
+  // the new model behind "Retry Model Load" even when its files are valid.
+  useEffect(() => {
+    generationVersionRef.current += 1;
+    cancelActiveGeneration();
+    activeRequestRef.current = null;
+    activeRequestVersionRef.current = null;
+    pendingProgressRef.current = null;
+    cancelProgressFlushRef.current?.();
+    cancelProgressFlushRef.current = null;
+    setGenerateBusy(false);
+    setProgress(null);
+    setResult(null);
+    setError(null);
+    chunksRef.current = [];
+    sampleRateRef.current = null;
+    scheduledCountRef.current = 0;
+    stopAll();
+  }, [cancelActiveGeneration, selectedModelKey, stopAll]);
 
   const runProbe = useCallback(async () => {
     if (!enabled || !bridge) return;

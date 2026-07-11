@@ -4,6 +4,7 @@ import { QWEN3_LANGUAGE_OPTIONS, QWEN3_SPEAKER_OPTIONS } from "./localRuntime/mo
 export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const qwen = useQwen3Runtime();
   const voiceClone = qwen.profile.mode === "voiceClone";
+  const profileReadiness = new Map(qwen.setup?.profiles.map((profile) => [profile.repo, profile.readiness]) ?? []);
   const inputClass = "w-full rounded-lg border border-black/10 bg-white/55 px-3 py-2 text-sm text-text-primary backdrop-blur-sm";
 
   return (
@@ -23,9 +24,27 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
       <label className="block text-xs font-medium text-text-secondary">
         Profile
         <select aria-label="Qwen profile" value={qwen.profile.repo} onChange={(event) => qwen.setProfileRepo(event.target.value)} className={`mt-1 ${inputClass}`}>
-          {qwen.profiles.map((profile) => <option key={profile.repo} value={profile.repo}>{profile.label}</option>)}
+          {qwen.profiles.map((profile) => {
+            const readiness = profileReadiness.get(profile.repo) ?? "missing";
+            return (
+              <option key={profile.repo} value={profile.repo} disabled={readiness === "missing"}>
+                {profile.label}{readiness === "missing" ? " · download in Model setup" : ""}
+              </option>
+            );
+          })}
         </select>
       </label>
+
+      {qwen.readiness === "missing" && (
+        <div className="rounded-lg border border-danger/20 bg-danger-light/70 px-3 py-2 text-xs text-danger">
+          <p>This profile is not installed.</p>
+          {onOpenSetup && (
+            <button type="button" onClick={onOpenSetup} className="mt-1 font-semibold underline underline-offset-2">
+              Open Model setup to download it
+            </button>
+          )}
+        </div>
+      )}
 
       {!voiceClone && (
         <fieldset>
