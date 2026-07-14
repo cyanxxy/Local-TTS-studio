@@ -722,7 +722,7 @@ impl AudioSink for WebSocketQwenSink<'_> {
         total: usize,
         silence_after_samples: usize,
     ) -> Result<()> {
-        self.websocket.send_json(&json!({
+        let mut metadata = json!({
             "type": "audio_chunk",
             "requestId": self.request_id,
             "index": index,
@@ -730,7 +730,12 @@ impl AudioSink for WebSocketQwenSink<'_> {
             "sampleRate": sample_rate,
             "sampleCount": samples.len(),
             "silenceAfterSamples": silence_after_samples,
-        }))?;
+        });
+        if total > 0 {
+            metadata["textUnitIndex"] = json!(index);
+            metadata["textUnitTotal"] = json!(total);
+        }
+        self.websocket.send_json(&metadata)?;
         self.websocket.send_binary(&float32_to_le_bytes(samples))
     }
 }

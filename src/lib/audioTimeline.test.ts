@@ -62,4 +62,46 @@ describe("audioTimeline", () => {
       { startSec: 1, endSec: 3, text: "Section 2" },
     ]);
   });
+
+  it("groups streamed transport chunks that belong to one semantic text unit", () => {
+    const chunks = retimeStoredChunks([
+      chunk({
+        segmentId: "qwen-unit-1",
+        audio: new Float32Array(4),
+        samplingRate: 4,
+        text: "A complete Qwen sentence.",
+        textStart: 10,
+        textEnd: 35,
+        index: 1,
+        total: 2,
+      }),
+      chunk({
+        segmentId: "qwen-unit-1",
+        audio: new Float32Array(8),
+        samplingRate: 4,
+        text: "A complete Qwen sentence.",
+        textStart: 10,
+        textEnd: 35,
+        index: 1,
+        total: 2,
+        pauseAfterSec: 0.2,
+      }),
+    ]);
+
+    expect(buildAudioSegments(chunks)).toEqual([expect.objectContaining({
+      id: "qwen-unit-1",
+      text: "A complete Qwen sentence.",
+      startSec: 0,
+      endSec: 3,
+      textStart: 10,
+      textEnd: 35,
+      index: 1,
+      total: 2,
+    })]);
+    expect(buildCaptionSegments(chunks)).toEqual([{
+      startSec: 0,
+      endSec: 2.8,
+      text: "A complete Qwen sentence.",
+    }]);
+  });
 });

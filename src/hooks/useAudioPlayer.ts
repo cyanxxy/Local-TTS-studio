@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import type { AudioExportOptions, CaptionExportFormat } from "../types";
+import type { CachedReaderAudioChunk } from "../lib/readerDocument";
 import { AUDIO_PLAYER_MAX_BUFFER_SECONDS } from "../constants";
 import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
 import { downloadAudioChunks } from "../lib/audioExportClient";
@@ -35,6 +36,11 @@ export interface UseAudioPlayerReturn {
   download: (options?: AudioExportOptions) => Promise<void>;
   downloadCaptions: (format: CaptionExportFormat) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
+  getAudioCacheSnapshot: () => CachedReaderAudioChunk[];
+  restoreAudioCache: (
+    chunks: readonly CachedReaderAudioChunk[],
+    options?: { currentTime?: number; playbackRate?: number },
+  ) => void;
   beginStream: () => void;
   endStream: () => void;
   reset: () => void;
@@ -382,8 +388,19 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     const startSec = totalDurationRef.current;
     const endSec = startSec + chunkDuration;
-    segmentCounterRef.current += 1;
-    const segmentId = `segment-${segmentCounterRef.current}`;
+    const previous = allChunksRef.current.at(-1);
+    const continuesSemanticSegment = previous
+      && typeof chunk.textStart === "number"
+      && typeof chunk.textEnd === "number"
+      && previous.textStart === chunk.textStart
+      && previous.textEnd === chunk.textEnd
+      && previous.text === chunk.text
+      && previous.index === chunk.index
+      && previous.total === chunk.total;
+    if (!continuesSemanticSegment) segmentCounterRef.current += 1;
+    const segmentId = continuesSemanticSegment
+      ? previous.segmentId
+      : `segment-${segmentCounterRef.current}`;
 
     const storedChunk: StoredAudioChunk = {
       ...chunk,
@@ -597,6 +614,79 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     pruneBufferedAudio();
   }, [pruneBufferedAudio, rebuildSegmentState, replayFromOffset, syncCurrentTime, syncTotalDuration]);
 
+  const getAudioCacheSnapshot = useCallback((): CachedReaderAudioChunk[] => (
+    allChunksRef.current.map((chunk) => ({
+      audio: new Float32Array(chunk.audio).buffer,
+      samplingRate: chunk.samplingRate,
+      text: chunk.text ?? "",
+      index: chunk.index ?? 0,
+      total: chunk.total ?? allChunksRef.current.length,
+      textStart: chunk.textStart,
+      textEnd: chunk.textEnd,
+      pauseAfterSec: chunk.pauseAfterSec,
+      pauseKind: chunk.pauseKind,
+    }))
+  ), []);
+
+  const restoreAudioCache = useCallback((
+    chunks: readonly CachedReaderAudioChunk[],
+    options: { currentTime?: number; playbackRate?: number } = {},
+  ) => {
+    stopAllNodes();
+    cancelTimelineStateFlush();
+    segmentCounterRef.current = 0;
+    let previousSource: CachedReaderAudioChunk | undefined;
+    let previousSegmentId: string | undefined;
+    const restored: StoredAudioChunk[] = chunks.map((chunk) => {
+      const continuesSemanticSegment = previousSource
+        && typeof chunk.textStart === "number"
+        && typeof chunk.textEnd === "number"
+        && previousSource.textStart === chunk.textStart
+        && previousSource.textEnd === chunk.textEnd
+        && previousSource.text === chunk.text
+        && previousSource.index === chunk.index
+        && previousSource.total === chunk.total;
+      if (!continuesSemanticSegment) segmentCounterRef.current += 1;
+      const segmentId = continuesSemanticSegment && previousSegmentId
+        ? previousSegmentId
+        : `segment-${segmentCounterRef.current}`;
+      previousSource = chunk;
+      previousSegmentId = segmentId;
+      return {
+        ...chunk,
+        audio: new Float32Array(chunk.audio.slice(0)),
+        startSec: 0,
+        endSec: 0,
+        segmentId,
+      };
+    });
+    allChunksRef.current = retimeStoredChunks(restored);
+    samplingRateRef.current = restored[0]?.samplingRate ?? samplingRateRef.current;
+    const duration = allChunksRef.current.at(-1)?.endSec ?? 0;
+    totalDurationRef.current = duration;
+    const restoredRate = clamp(options.playbackRate ?? 1, MIN_PLAYBACK_RATE, MAX_PLAYBACK_RATE);
+    playbackRateRef.current = restoredRate;
+    setPlaybackRateState(restoredRate);
+    const restoredTime = clamp(options.currentTime ?? 0, 0, duration);
+    currentTimeRef.current = restoredTime;
+    timelineAnchorRef.current = restoredTime;
+    contextAnchorRef.current = 0;
+    nextPlayTimeRef.current = 0;
+    scheduleCursorRef.current = findChunkIndexAtTime(restoredTime);
+    activeSegmentCursorRef.current = Math.max(0, scheduleCursorRef.current);
+    autoPlayOnChunkRef.current = false;
+    streamCompleteRef.current = true;
+    interruptedRef.current = false;
+    isPlayingRef.current = false;
+    setIsPlaying(false);
+    setError(null);
+    setTotalDuration(duration);
+    setSegments(buildAudioSegments(allChunksRef.current));
+    setCurrentTime(restoredTime);
+    updateActiveSegment(restoredTime);
+    pruneBufferedAudio();
+  }, [cancelTimelineStateFlush, findChunkIndexAtTime, pruneBufferedAudio, stopAllNodes, updateActiveSegment]);
+
   const beginStream = useCallback(() => {
     streamCompleteRef.current = false;
   }, []);
@@ -686,6 +776,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     download,
     downloadCaptions,
     replaceSegment,
+    getAudioCacheSnapshot,
+    restoreAudioCache,
     beginStream,
     endStream,
     reset,

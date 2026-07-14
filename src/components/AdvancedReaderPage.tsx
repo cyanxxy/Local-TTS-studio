@@ -3,7 +3,10 @@ import {
   BookOpen,
   ChevronDown,
   FileUp,
+  Library,
+  Link2,
   Loader2,
+  Plus,
   SlidersHorizontal,
 } from "lucide-react";
 import {
@@ -17,8 +20,14 @@ import { getMeaningfulTextLength } from "../lib/textValidation";
 import type { ModelState, ModelType, GenerationStats } from "../types";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
+import { buildQwen3TextUnits } from "../lib/qwenChunking";
+import {
+  estimateWordRanges,
+  type ReaderDocumentRecord,
+} from "../lib/readerDocument";
 import { AudioPlayer, type AudioPlayerPrimaryAction } from "./AudioPlayer";
 import { ModelToggle } from "./ModelToggle";
+import { ReaderLibrarySidebar } from "./ReaderLibrarySidebar";
 import { VoiceSelector } from "./VoiceSelector";
 
 interface AdvancedReaderPageProps {
@@ -28,9 +37,28 @@ interface AdvancedReaderPageProps {
   /** Desktop-only document import (PDF/DOCX/images via LiteParse); absent on web builds. */
   onImportDocument?: () => void;
   isImportingDocument?: boolean;
+  onImportFile?: (file: File) => Promise<void> | void;
+  onImportUrl?: (url: string) => Promise<void> | void;
+  documents?: ReaderDocumentRecord[];
+  activeDocument?: ReaderDocumentRecord | null;
+  libraryLoading?: boolean;
+  libraryError?: string | null;
+  libraryPersistent?: boolean;
+  onNewDocument?: () => void;
+  onOpenDocument?: (id: string) => void;
+  onDeleteDocument?: (id: string) => void;
+  onUpdateDocumentMetadata?: (
+    patch: Pick<Partial<ReaderDocumentRecord>, "title" | "author">,
+  ) => void;
+  onAddBookmark?: (input: { label: string; textOffset: number; positionSec: number }) => void;
+  onRemoveBookmark?: (id: string) => void;
+  onAddNote?: (input: { text: string; quote: string; textOffset: number }) => void;
+  onUpdateNote?: (id: string, text: string) => void;
+  onRemoveNote?: (id: string) => void;
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
+  desktopVoiceLabel?: string;
   desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
   supertonicState: ModelState;
@@ -81,6 +109,7 @@ interface OverlayPart {
   text: string;
   sectionIndex: number;
   isActive: boolean;
+  isWordActive: boolean;
 }
 
 interface SectionBoundary {
@@ -111,10 +140,11 @@ function buildOverlayParts(
   text: string,
   boundaries: SectionBoundary[],
   activeRange: { start: number; end: number } | null,
+  activeWordRange: { start: number; end: number } | null,
 ): OverlayPart[] {
   if (!text) return [];
-  if (boundaries.length === 0 && !activeRange) {
-    return [{ text, sectionIndex: -1, isActive: false }];
+  if (boundaries.length === 0 && !activeRange && !activeWordRange) {
+    return [{ text, sectionIndex: -1, isActive: false, isWordActive: false }];
   }
 
   const offsets = new Set<number>([0, text.length]);
@@ -125,6 +155,10 @@ function buildOverlayParts(
   if (activeRange) {
     offsets.add(clamp(activeRange.start, 0, text.length));
     offsets.add(clamp(activeRange.end, 0, text.length));
+  }
+  if (activeWordRange) {
+    offsets.add(clamp(activeWordRange.start, 0, text.length));
+    offsets.add(clamp(activeWordRange.end, 0, text.length));
   }
 
   const sorted = [...offsets].sort((a, b) => a - b);
@@ -142,11 +176,15 @@ function buildOverlayParts(
     const isActive = activeRange
       ? partStart >= activeRange.start && partEnd <= activeRange.end
       : false;
+    const isWordActive = activeWordRange
+      ? partStart >= activeWordRange.start && partEnd <= activeWordRange.end
+      : false;
 
     parts.push({
       text: text.slice(partStart, partEnd),
       sectionIndex,
       isActive,
+      isWordActive,
     });
   }
 
@@ -172,9 +210,26 @@ export function AdvancedReaderPage({
   onTextChange,
   onImportDocument,
   isImportingDocument = false,
+  onImportFile,
+  onImportUrl,
+  documents = [],
+  activeDocument = null,
+  libraryLoading = false,
+  libraryError = null,
+  libraryPersistent = true,
+  onNewDocument,
+  onOpenDocument,
+  onDeleteDocument,
+  onUpdateDocumentMetadata,
+  onAddBookmark,
+  onRemoveBookmark,
+  onAddNote,
+  onUpdateNote,
+  onRemoveNote,
   activeModel,
   onModelChange,
   desktopModelOptions = [],
+  desktopVoiceLabel,
   desktopModelSettings,
   kokoroState,
   supertonicState,
@@ -225,17 +280,31 @@ export function AdvancedReaderPage({
       }
     : activeModel === "kokoro" ? kokoroState : supertonicState;
   const activeModelLabel = selectedDesktopModel?.label ?? MODELS[activeModel].label;
+  const activeVoiceLabel = selectedDesktopModel
+    ? desktopVoiceLabel ?? selectedDesktopModel.label
+    : formatVoiceName(voice);
   const overlayRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const readingTextId = useId();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [urlImportOpen, setUrlImportOpen] = useState(false);
+  const [urlInput, setUrlInput] = useState("");
+  const [urlImportError, setUrlImportError] = useState<string | null>(null);
+  const [urlImportBusy, setUrlImportBusy] = useState(false);
+  const [navigationTextOffset, setNavigationTextOffset] = useState<number | null>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const settingsOpenRef = useRef(settingsOpen);
 
   useEffect(() => {
     settingsOpenRef.current = settingsOpen;
   }, [settingsOpen]);
+
+  useEffect(() => {
+    setNavigationTextOffset(null);
+  }, [activeDocument?.id, text]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -249,8 +318,10 @@ export function AdvancedReaderPage({
   }, []);
 
   const previewChunks = useMemo(
-    () => chunkTextForModelDetailed(text, activeModel, { runtime: { backend: runtimeBackend, quality } }),
-    [activeModel, quality, runtimeBackend, text],
+    () => selectedDesktopModel?.key === "qwen3"
+      ? buildQwen3TextUnits(text)
+      : chunkTextForModelDetailed(text, activeModel, { runtime: { backend: runtimeBackend, quality } }),
+    [activeModel, quality, runtimeBackend, selectedDesktopModel?.key, text],
   );
 
   const activeSegmentIndex = useMemo(
@@ -258,8 +329,12 @@ export function AdvancedReaderPage({
     [activeSegmentId, segments],
   );
 
+  const activeSegment = useMemo(
+    () => segments.find((segment) => segment.id === activeSegmentId) ?? null,
+    [activeSegmentId, segments],
+  );
+
   const activeRange = useMemo(() => {
-    const activeSegment = segments.find((segment) => segment.id === activeSegmentId) ?? null;
     if (
       activeSegment
       && typeof activeSegment.textStart === "number"
@@ -277,7 +352,28 @@ export function AdvancedReaderPage({
     }
 
     return null;
-  }, [activeSegmentId, activeSegmentIndex, previewChunks, segments]);
+  }, [activeSegment, activeSegmentIndex, previewChunks]);
+
+  const estimatedWords = useMemo(() => {
+    if (!activeSegment || typeof activeSegment.textStart !== "number") return [];
+    const speechEnd = Math.max(
+      activeSegment.startSec,
+      activeSegment.endSec - Math.max(0, activeSegment.pauseAfterSec ?? 0),
+    );
+    return estimateWordRanges(
+      activeSegment.text,
+      activeSegment.textStart,
+      activeSegment.startSec,
+      speechEnd,
+    );
+  }, [activeSegment]);
+
+  const activeWordRange = useMemo(() => {
+    const activeWord = estimatedWords.find(
+      (word) => currentTime >= word.startSec && currentTime < word.endSec,
+    );
+    return activeWord ? { start: activeWord.start, end: activeWord.end } : null;
+  }, [currentTime, estimatedWords]);
 
   const sectionBoundaries = useMemo((): SectionBoundary[] => {
     if (segments.length > 0) {
@@ -300,8 +396,8 @@ export function AdvancedReaderPage({
   }, [segments, previewChunks, text.length]);
 
   const overlayParts = useMemo(
-    () => buildOverlayParts(text, sectionBoundaries, activeRange),
-    [text, sectionBoundaries, activeRange],
+    () => buildOverlayParts(text, sectionBoundaries, activeRange, activeWordRange),
+    [text, sectionBoundaries, activeRange, activeWordRange],
   );
 
   const hasGeneratedSegments = segments.length > 0;
@@ -309,6 +405,16 @@ export function AdvancedReaderPage({
   const charsRemaining = MIN_TEXT_LENGTH - meaningfulLength;
   const hasAudio = totalDuration > 0;
   const focusMode = isPlaying && activeRange !== null;
+  const currentTextOffset = activeWordRange?.start
+    ?? activeRange?.start
+    ?? navigationTextOffset
+    ?? activeDocument?.progress.textOffset
+    ?? 0;
+  const readingProgress = activeDocument?.progress.percent
+    ?? (text.length > 0 ? (currentTextOffset / text.length) * 100 : 0);
+  const currentChapter = activeDocument?.chapters.find(
+    (chapter) => currentTextOffset >= chapter.start && currentTextOffset < chapter.end,
+  ) ?? activeDocument?.chapters.at(-1) ?? null;
 
   // Auto-follow backs off after the user scrolls manually, so reading ahead
   // or reviewing earlier text is never yanked back to the spoken sentence.
@@ -331,7 +437,8 @@ export function AdvancedReaderPage({
     if (!isPlaying) return;
     if (Date.now() - lastUserScrollAtRef.current < USER_SCROLL_GRACE_MS) return;
     if (!overlayRef.current || !textareaRef.current) return;
-    const marker = overlayRef.current.querySelector<HTMLElement>(".reader-chunk-highlight-active");
+    const marker = overlayRef.current.querySelector<HTMLElement>(".reader-word-highlight-active")
+      ?? overlayRef.current.querySelector<HTMLElement>(".reader-chunk-highlight-active");
     if (!marker) return;
 
     // Keep the spoken sentence in the upper third of the page, book-style.
@@ -413,34 +520,147 @@ export function AdvancedReaderPage({
     }
   }, [activeSegmentIndex, onRetakeSegment, segments]);
 
+  const handleJumpToOffset = useCallback((offset: number, positionSec?: number) => {
+    const targetOffset = clamp(offset, 0, text.length);
+    setNavigationTextOffset(targetOffset);
+    if (typeof positionSec === "number" && totalDuration > 0) {
+      onSeek(clamp(positionSec / totalDuration, 0, 1));
+    } else {
+      const targetSegment = segments.find((segment) => (
+        typeof segment.textStart === "number"
+        && typeof segment.textEnd === "number"
+        && targetOffset >= segment.textStart
+        && targetOffset < segment.textEnd
+      )) ?? segments.find((segment) => typeof segment.textStart === "number" && segment.textStart >= targetOffset);
+      if (targetSegment) onJumpToSegment(targetSegment.id);
+    }
+
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.focus();
+      textarea.setSelectionRange(targetOffset, targetOffset);
+      const ratio = text.length > 0 ? targetOffset / text.length : 0;
+      const nextTop = Math.max(0, ratio * (textarea.scrollHeight - textarea.clientHeight));
+      programmaticScrollRef.current = true;
+      textarea.scrollTop = nextTop;
+      if (overlayRef.current) overlayRef.current.scrollTop = nextTop;
+    }
+  }, [onJumpToSegment, onSeek, segments, text.length, totalDuration]);
+
+  const handleFilePick = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (file) void onImportFile?.(file);
+  }, [onImportFile]);
+
+  const handleUrlImport = useCallback(async () => {
+    const url = urlInput.trim();
+    if (!url || !onImportUrl || urlImportBusy) return;
+    setUrlImportBusy(true);
+    setUrlImportError(null);
+    try {
+      await onImportUrl(url);
+      setUrlInput("");
+      setUrlImportOpen(false);
+      setLibraryOpen(true);
+    } catch (error) {
+      setUrlImportError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setUrlImportBusy(false);
+    }
+  }, [onImportUrl, urlImportBusy, urlInput]);
+
+  const handleDeleteDocument = useCallback((id: string) => {
+    const document = documents.find((entry) => entry.id === id);
+    if (!document || !onDeleteDocument) return;
+    if (window.confirm(`Delete “${document.title}” and its cached audio?`)) onDeleteDocument(id);
+  }, [documents, onDeleteDocument]);
+
   return (
-    <div className={`flex w-full flex-col gap-3 sm:gap-4 ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : "mt-6"}`}>
+    <div className={`relative flex w-full flex-col gap-3 sm:gap-4 ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : "mt-6"}`}>
+
+      <ReaderLibrarySidebar
+        open={libraryOpen}
+        documents={documents}
+        activeDocument={activeDocument}
+        currentTextOffset={currentTextOffset}
+        currentTime={currentTime}
+        loading={libraryLoading}
+        persistent={libraryPersistent}
+        onClose={() => setLibraryOpen(false)}
+        onOpenDocument={(id) => onOpenDocument?.(id)}
+        onNewDocument={() => onNewDocument?.()}
+        onDeleteDocument={handleDeleteDocument}
+        onUpdateMetadata={(patch) => onUpdateDocumentMetadata?.(patch)}
+        onJumpToOffset={handleJumpToOffset}
+        onAddBookmark={(input) => onAddBookmark?.(input)}
+        onRemoveBookmark={(id) => onRemoveBookmark?.(id)}
+        onAddNote={(input) => onAddNote?.(input)}
+        onUpdateNote={(id, value) => onUpdateNote?.(id, value)}
+        onRemoveNote={(id) => onRemoveNote?.(id)}
+      />
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".epub,.txt,.md,.html,.htm"
+        onChange={handleFilePick}
+        className="sr-only"
+        tabIndex={-1}
+        aria-hidden
+      />
 
       {/* ── Toolbar ─────────────────────────────────────────── */}
       {/* relative z-30 lifts the toolbar's stacking context above the document
           panel so the settings popover never paints behind the reader overlay */}
-      <div className="glass relative z-30 flex items-center justify-between gap-3 rounded-2xl py-2 pr-2 pl-3">
+      <div className="glass relative z-30 flex flex-wrap items-center justify-between gap-2 rounded-2xl py-2 pr-2 pl-3 sm:gap-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-accent-light">
             <BookOpen size={14} className="text-accent" />
           </div>
           <div className="min-w-0">
-            <h2 className="font-display text-lg leading-none font-semibold text-text-primary">Reader</h2>
+            <h2 className="truncate font-display text-lg leading-none font-semibold text-text-primary">
+              {activeDocument?.title || "Reader"}
+            </h2>
             <p className="mt-0.5 truncate font-mono text-xs tabular-nums text-text-muted">
-              {meaningfulLength.toLocaleString()} chars · {previewChunks.length} section{previewChunks.length !== 1 ? "s" : ""}
+              {activeDocument?.author ? `${activeDocument.author} · ` : ""}
+              {Math.round(readingProgress)}% · {activeDocument?.chapters.length ?? previewChunks.length} chapter{(activeDocument?.chapters.length ?? previewChunks.length) !== 1 ? "s" : ""}
               {statusLabel ? ` · ${statusLabel}` : ""}
             </p>
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-        {onImportDocument && (
+        <button
+          type="button"
+          onClick={() => setLibraryOpen(true)}
+          aria-label="Open Reader library"
+          className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98]"
+        >
+          <Library size={14} className="text-text-muted" />
+          <span className="hidden font-medium lg:inline">Library</span>
+          <span className="rounded-full bg-accent-light px-1.5 font-mono text-2xs text-accent">{documents.length}</span>
+        </button>
+
+        {onNewDocument && (
           <button
             type="button"
-            onClick={onImportDocument}
+            onClick={onNewDocument}
+            aria-label="New document"
+            title="New document"
+            className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/50 bg-white/40 text-text-muted shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-accent active:translate-y-0 active:scale-[0.98]"
+          >
+            <Plus size={15} />
+          </button>
+        )}
+
+        {(onImportDocument || onImportFile) && (
+          <button
+            type="button"
+            onClick={() => onImportDocument ? onImportDocument() : fileInputRef.current?.click()}
             disabled={isImportingDocument}
             aria-label="Import document"
-            title="Import a document (PDF, text, Office, images)"
+            title="Import EPUB, PDF, text, Office, or image documents"
             className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98] disabled:cursor-default disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:bg-white/40"
           >
             {isImportingDocument
@@ -450,6 +670,55 @@ export function AdvancedReaderPage({
               {isImportingDocument ? "Importing…" : "Import"}
             </span>
           </button>
+        )}
+
+        {onImportUrl && (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setUrlImportOpen((open) => !open);
+                setUrlImportError(null);
+              }}
+              aria-label="Import from URL"
+              aria-expanded={urlImportOpen}
+              title="Import article from URL"
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/50 bg-white/40 text-text-muted shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-accent active:translate-y-0 active:scale-[0.98]"
+            >
+              <Link2 size={15} />
+            </button>
+            {urlImportOpen && (
+              <div className="glass-pop absolute top-full right-0 z-50 mt-2 w-[min(25rem,calc(100vw-1.5rem))] rounded-2xl p-4">
+                <label className="block text-xs font-semibold uppercase tracking-widest text-text-muted">
+                  Article URL
+                  <input
+                    type="url"
+                    value={urlInput}
+                    onChange={(event) => setUrlInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void handleUrlImport();
+                    }}
+                    placeholder="https://example.com/article"
+                    autoFocus
+                    className="mt-2 w-full rounded-xl border border-white/55 bg-white/45 px-3 py-2.5 text-sm normal-case tracking-normal text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
+                  />
+                </label>
+                {urlImportError && <p className="mt-2 text-xs leading-5 text-danger">{urlImportError}</p>}
+                <p className="mt-2 text-xs leading-5 text-text-muted">
+                  Article text and headings are extracted locally after download.
+                </p>
+                <button
+                  type="button"
+                  disabled={!urlInput.trim() || urlImportBusy}
+                  onClick={() => void handleUrlImport()}
+                  className="glass-accent mt-3 flex w-full items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-semibold text-white transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {urlImportBusy ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
+                  {urlImportBusy ? "Importing article…" : "Import article"}
+                </button>
+              </div>
+            )}
+          </div>
         )}
 
         {/* Voice & model settings popover */}
@@ -467,7 +736,7 @@ export function AdvancedReaderPage({
               }`}
               style={activeModelState.ready ? { boxShadow: "0 0 6px color-mix(in srgb, var(--color-success) 60%, transparent)" } : undefined}
             />
-            <span className="hidden font-medium sm:inline">{formatVoiceName(voice)}</span>
+            <span className="hidden font-medium sm:inline">{activeVoiceLabel}</span>
             <span className="hidden text-xs text-text-muted md:inline">{activeModelLabel}</span>
             <SlidersHorizontal size={13} className="text-text-muted sm:hidden" />
             <ChevronDown
@@ -477,50 +746,16 @@ export function AdvancedReaderPage({
           </button>
 
           {settingsOpen && (
-            <div className="glass-pop animate-scale-in absolute top-full right-0 z-50 mt-2 w-[min(22rem,calc(100vw-2rem))] origin-top-right rounded-2xl p-4">
+            <div className="glass-pop animate-scale-in absolute top-full right-0 z-50 mt-2 max-h-[min(42rem,calc(100vh-8rem))] w-[min(28rem,calc(100vw-2rem))] origin-top-right overflow-y-auto rounded-2xl p-4">
               <div className="flex flex-col gap-4">
                 <ModelToggle
                   activeModel={activeModel}
                   onModelChange={onModelChange}
+                  desktopModelOptions={desktopModelOptions}
                   kokoroState={kokoroState}
                   supertonicState={supertonicState}
                   unavailableModels={unavailableModels}
                 />
-
-                {desktopModelOptions.length > 0 && (
-                  <div className="flex flex-col gap-1.5">
-                    <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
-                      Desktop runtime
-                    </span>
-                    <div className="grid grid-cols-1 gap-1.5">
-                      {desktopModelOptions.map((option) => (
-                        <button
-                          key={option.key}
-                          type="button"
-                          onClick={() => {
-                            option.onSelect();
-                            setSettingsOpen(false);
-                          }}
-                          className={`flex min-w-0 items-start justify-between gap-3 rounded-2xl border px-3 py-2.5 text-left text-lg font-semibold backdrop-blur-md transition-all duration-200 active:translate-y-0 active:scale-[0.98] ${
-                            option.selected
-                              ? "border-accent/40 bg-accent/[0.10] text-accent shadow-accent-sm ring-1 ring-accent/15"
-                              : "border-white/50 bg-white/35 text-text-muted shadow-glass-sm hover:-translate-y-0.5 hover:bg-white/55 hover:text-text-primary"
-                          }`}
-                        >
-                          <span className="min-w-0">
-                            <span className={option.selected ? "block text-accent" : "block text-text-primary"}>{option.label}</span>
-                            <span className="mt-0.5 block text-xs font-medium leading-4 text-text-muted">
-                              {option.detail}
-                            </span>
-                          </span>
-                          <span className="shrink-0 rounded-full border border-accent/25 bg-accent-light px-2 py-0.5 font-mono text-2xs uppercase tracking-[0.12em] text-accent">
-                            {option.badge}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
 
                 {selectedDesktopModel && desktopModelSettings}
 
@@ -568,6 +803,51 @@ export function AdvancedReaderPage({
         </div>
       </div>
 
+      {selectedDesktopModel && modelError && (
+        <div className="flex flex-col gap-3 rounded-2xl border border-danger/20 bg-danger/[0.06] px-4 py-3 sm:flex-row sm:items-center sm:justify-between" role="status">
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-text-primary">Qwen needs setup in Reader</p>
+            <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-text-secondary">{modelError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="shrink-0 rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm font-semibold text-text-primary shadow-glass-sm transition-all hover:bg-white/70 active:scale-[0.98]"
+          >
+            Open Qwen settings
+          </button>
+        </div>
+      )}
+
+      {(libraryError || currentChapter) && (
+        <div className="flex flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0">
+            {libraryError ? (
+              <p className="text-xs text-danger" role="status">{libraryError}</p>
+            ) : currentChapter ? (
+              <button
+                type="button"
+                onClick={() => setLibraryOpen(true)}
+                className="truncate text-left text-xs font-medium text-text-muted transition-colors hover:text-accent"
+              >
+                Chapter {currentChapter.order + 1} of {activeDocument?.chapters.length}: {currentChapter.title}
+              </button>
+            ) : null}
+          </div>
+          <div className="flex min-w-32 items-center gap-2 sm:w-56">
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
+              <div
+                className="h-full rounded-full bg-accent transition-[transform] duration-300 origin-left"
+                style={{ transform: `scaleX(${clamp(readingProgress / 100, 0, 1)})` }}
+              />
+            </div>
+            <span className="w-9 text-right font-mono text-2xs text-text-muted tabular-nums">
+              {Math.round(readingProgress)}%
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* ── Document ────────────────────────────────────────── */}
       <section className={`glass-panel relative overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}>
         <label htmlFor={readingTextId} className="sr-only">
@@ -583,15 +863,20 @@ export function AdvancedReaderPage({
               const activeClass = part.isActive
                 ? "reader-chunk-highlight reader-chunk-highlight-active"
                 : "";
+              const wordClass = part.isWordActive ? "reader-word-highlight-active" : "";
               const tintClass = part.sectionIndex >= 0
                 ? part.sectionIndex % 2 === 0
                   ? "reader-section-even"
                   : "reader-section-odd"
                 : "";
-              const className = `${tintClass} ${activeClass}`.trim();
+              const className = `${tintClass} ${activeClass} ${wordClass}`.trim();
 
               return (
-                <span key={`part-${index}`} className={className || undefined}>
+                <span
+                  key={`part-${index}`}
+                  className={className || undefined}
+                  data-reader-active-word={part.isWordActive ? "true" : undefined}
+                >
                   {part.text}
                 </span>
               );

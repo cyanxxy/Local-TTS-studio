@@ -11,7 +11,24 @@ export const IDLE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const REQUEST_IDLE_TIMEOUT_MS = 30_000;
 
 export type UrlRequest = (url: string) => Promise<IncomingMessage>;
+export type HuggingFaceXetDownloader = (input: {
+  modelRepo: string;
+  revision: string;
+  fileName: string;
+  destination: string;
+  onProgress: (downloadedBytes: number, totalBytes?: number) => void;
+}) => Promise<boolean>;
 export type Qwen3ModelReadiness = "missing" | "structural" | "verified";
+
+export class HuggingFaceDownloadStatusError extends Error {
+  constructor(
+    readonly statusCode: number | undefined,
+    readonly url: string,
+  ) {
+    super(`Download failed with status ${statusCode ?? "unknown"} for ${url}.`);
+    this.name = "HuggingFaceDownloadStatusError";
+  }
+}
 
 export interface Qwen3ModelDownloadProgress {
   modelRepo: string;
@@ -222,7 +239,7 @@ export async function downloadHuggingFaceFile(
   const response = await request(url);
   if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
     response.resume();
-    throw new Error(`Download failed with status ${response.statusCode ?? "unknown"} for ${url}.`);
+    throw new HuggingFaceDownloadStatusError(response.statusCode, url);
   }
   const lengthHeader = response.headers["content-length"];
   const contentLength = typeof lengthHeader === "string" ? Number(lengthHeader) : undefined;
@@ -382,6 +399,7 @@ export async function downloadQwen3Model(
   modelDir: string,
   onProgress: (progress: Qwen3ModelDownloadProgress) => void,
   request: UrlRequest = requestUrl,
+  xetDownloader?: HuggingFaceXetDownloader,
 ): Promise<Qwen3ModelDownloadResult> {
   await fs.mkdir(modelDir, { recursive: true });
   const hubFiles = await getRequiredHubFiles(profile, request);
@@ -411,7 +429,7 @@ export async function downloadQwen3Model(
       continue;
     }
     const url = `https://huggingface.co/${profile.repo}/resolve/${profile.revision}/${encodeHuggingFacePath(file.path)}`;
-    const result = await downloadHuggingFaceFile(url, destination, (downloadedBytes, totalBytes) => {
+    const reportProgress = (downloadedBytes: number, totalBytes?: number) => {
       onProgress({
         modelRepo: profile.repo,
         revision: profile.revision,
@@ -422,7 +440,33 @@ export async function downloadQwen3Model(
         downloadedBytes,
         ...(typeof totalBytes === "number" && Number.isFinite(totalBytes) ? { totalBytes } : {}),
       });
-    }, request, file);
+    };
+    let result: DownloadedFile;
+    try {
+      result = await downloadHuggingFaceFile(url, destination, reportProgress, request, file);
+    } catch (error) {
+      const shouldUseXet = xetDownloader
+        && error instanceof HuggingFaceDownloadStatusError
+        && error.statusCode === 403
+        && file.path.endsWith(".safetensors");
+      if (!shouldUseXet) throw error;
+      await fs.rm(destination, { force: true });
+      const downloaded = await xetDownloader({
+        modelRepo: profile.repo,
+        revision: profile.revision,
+        fileName: file.path,
+        destination,
+        onProgress: reportProgress,
+      });
+      const verified = await hashFile(destination);
+      if (file.sizeBytes != null && verified.sizeBytes !== file.sizeBytes) {
+        throw new Error(`Xet download size mismatch for ${file.path}.`);
+      }
+      if (file.sha256 != null && verified.sha256 !== file.sha256) {
+        throw new Error(`Xet download digest mismatch for ${file.path}.`);
+      }
+      result = { downloaded, ...verified };
+    }
     downloadedFiles += result.downloaded ? 1 : 0;
     manifestFiles.push({ path: file.path, sizeBytes: result.sizeBytes, sha256: result.sha256 });
   }

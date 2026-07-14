@@ -45,12 +45,14 @@ export interface WebSocketAudioChunk {
   sampleRate: number;
   sampleCount: number;
   silenceAfterSamples: number;
+  textUnitIndex?: number;
+  textUnitTotal?: number;
   audio: ArrayBuffer;
 }
 
 export interface CreateWebSocketBridgeWorkerPoolOptions<TModel extends string> {
   spawn: WebSocketWorkerSpawn<TModel>;
-  idleEvictMs: number;
+  idleEvictMs: number | ((model: TModel) => number);
   killGraceMs?: number;
   connectTimeoutMs?: number;
   host?: string;
@@ -291,6 +293,26 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
   if (parsed.encoding !== undefined && parsed.encoding !== "pcm16") {
     throw new Error("WebSocket bridge returned an audio chunk with an unsupported encoding.");
   }
+  const hasTextUnitIndex = parsed.textUnitIndex !== undefined;
+  const hasTextUnitTotal = parsed.textUnitTotal !== undefined;
+  if (hasTextUnitIndex !== hasTextUnitTotal) {
+    throw new Error("WebSocket bridge returned incomplete text-unit metadata.");
+  }
+  let textUnitMetadata: Pick<PendingAudioChunkMetadata, "textUnitIndex" | "textUnitTotal"> = {};
+  if (hasTextUnitIndex && hasTextUnitTotal) {
+    const textUnitIndex = Number(parsed.textUnitIndex);
+    const textUnitTotal = Number(parsed.textUnitTotal);
+    if (
+      !Number.isInteger(textUnitIndex)
+      || !Number.isInteger(textUnitTotal)
+      || textUnitIndex < 0
+      || textUnitTotal <= 0
+      || textUnitIndex >= textUnitTotal
+    ) {
+      throw new Error("WebSocket bridge returned invalid text-unit metadata.");
+    }
+    textUnitMetadata = { textUnitIndex, textUnitTotal };
+  }
   return {
     requestId,
     index,
@@ -298,6 +320,7 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
     sampleRate,
     sampleCount,
     silenceAfterSamples,
+    ...textUnitMetadata,
     pcm16: parsed.encoding === "pcm16",
   };
 }
@@ -338,6 +361,9 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   const requestModel = new Map<string, TModel>();
   const cancelledRequests = new Set<string>();
   const startingModels = new Set<TModel>();
+  const idleEvictionDelay = (model: TModel): number => (
+    typeof idleEvictMs === "function" ? idleEvictMs(model) : idleEvictMs
+  );
 
   function clearActiveIdleTimer(active: ActiveRequest): void {
     if (active.idleTimer) {
@@ -435,7 +461,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       active.resolve({ response: outcome.response, stdout: active.stdout, stderr: active.stderr });
       if (worker.alive && isOpen(worker.socket)) {
         if (worker.evictTimer) clearTimeout(worker.evictTimer);
-        worker.evictTimer = setTimeout(() => killWorker(model, worker), idleEvictMs);
+        worker.evictTimer = setTimeout(() => killWorker(model, worker), idleEvictionDelay(model));
         worker.evictTimer.unref?.();
       }
     } else {

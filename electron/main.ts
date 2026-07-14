@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell, type IpcMainInvokeEvent } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
+import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
@@ -9,12 +10,16 @@ import {
   importDocumentFromDialog,
   type DocumentParser,
 } from "./documentImport";
+import { importRemoteDocument } from "./urlImport";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
+import { runHfXetDownloader } from "./hfXetDownload";
 import {
   adoptLegacyQwen3ModelDir,
   createQwen3ModelDownloadCoordinator,
   createSafeProgressSender,
+  downloadQwen3Model,
   inspectQwen3ModelDir,
+  requestUrl,
   type Qwen3ModelDownloadResult,
 } from "./qwen3ModelDownload";
 import {
@@ -56,6 +61,24 @@ import {
 
 const isDev = !app.isPackaged;
 const RUST_BRIDGE_TIMEOUT_MS = 5 * 60 * 1000;
+const EPUB_TRANSFER_CHUNK_BYTES = 1024 * 1024;
+const EPUB_TRANSFER_TTL_MS = 60_000;
+
+interface PendingEpubTransfer {
+  senderId: number;
+  bytes: Uint8Array;
+  expires: ReturnType<typeof setTimeout>;
+}
+
+const pendingEpubTransfers = new Map<string, PendingEpubTransfer>();
+
+function stageEpubTransfer(senderId: number, bytes: Uint8Array): string {
+  const id = randomUUID();
+  const expires = setTimeout(() => pendingEpubTransfers.delete(id), EPUB_TRANSFER_TTL_MS);
+  expires.unref();
+  pendingEpubTransfers.set(id, { senderId, bytes, expires });
+  return id;
+}
 // Generation (model download + inference) can legitimately run for many minutes,
 // so the WebSocket worker request uses an inactivity watchdog instead of an
 // absolute deadline. The Rust bridge emits a periodic stderr heartbeat for the
@@ -273,11 +296,21 @@ function getRustBridgeBinaryName(): string {
   return process.platform === "win32" ? "open-tts-local-bridge.exe" : "open-tts-local-bridge";
 }
 
+function getHfXetDownloaderBinaryName(): string {
+  return process.platform === "win32" ? "open-tts-hf-xet-downloader.exe" : "open-tts-hf-xet-downloader";
+}
+
 function getRustBridgeBinaryPath(): string {
   const binaryName = getRustBridgeBinaryName();
   if (isDev) {
     return path.join(app.getAppPath(), "dist-rust", binaryName);
   }
+  return path.join(process.resourcesPath, "dist-rust", binaryName);
+}
+
+function getHfXetDownloaderBinaryPath(): string {
+  const binaryName = getHfXetDownloaderBinaryName();
+  if (isDev) return path.join(app.getAppPath(), "dist-rust", binaryName);
   return path.join(process.resourcesPath, "dist-rust", binaryName);
 }
 
@@ -352,7 +385,22 @@ function getRequestedQwen3Profile(request: unknown): Qwen3Profile {
   return profile;
 }
 
-const qwen3ModelDownloads = createQwen3ModelDownloadCoordinator();
+const qwen3ModelDownloads = createQwen3ModelDownloadCoordinator(
+  (profile, modelDir, onProgress) => downloadQwen3Model(
+    profile,
+    modelDir,
+    onProgress,
+    requestUrl,
+    ({ revision, fileName, destination, onProgress: reportFileProgress }) => runHfXetDownloader({
+      binaryPath: getHfXetDownloaderBinaryPath(),
+      modelRepo: profile.repo,
+      revision,
+      fileName,
+      destination,
+      onProgress: reportFileProgress,
+    }),
+  ),
+);
 
 async function handleQwen3Setup(request: unknown): Promise<{
   provider: Qwen3Profile["provider"];
@@ -530,6 +578,8 @@ async function runRustBridge(
       sampleRate: number;
       sampleCount: number;
       silenceAfterSamples: number;
+      textUnitIndex?: number;
+      textUnitTotal?: number;
       audio: ArrayBuffer;
     }) => {
       if (!event) return;
@@ -908,7 +958,7 @@ app.whenReady().then(() => {
     return handleChooseQwen3ModelDir();
   });
 
-  ipcMain.handle("document:import", (event) => {
+  ipcMain.handle("document:import", async (event) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
     // Attach the dialog to the requesting window (macOS modal sheet), which
     // also blocks mid-import text edits behind the dialog.
@@ -918,7 +968,50 @@ app.whenReady().then(() => {
         owner ? dialog.showOpenDialog(owner, options) : dialog.showOpenDialog(options)
       ),
     };
-    return importDocumentFromDialog(ownedDialog, getLiteParseDocumentParser);
+    const result = await importDocumentFromDialog(ownedDialog, getLiteParseDocumentParser);
+    if (result.canceled || !result.epubBytes) return result;
+    const { epubBytes, ...metadata } = result;
+    return {
+      ...metadata,
+      epubTransferId: stageEpubTransfer(event.sender.id, epubBytes),
+      epubByteLength: epubBytes.byteLength,
+    };
+  });
+
+  ipcMain.on("document:read-epub", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    const port = event.ports[0];
+    if (!port || !isRecord(request) || typeof request.transferId !== "string") return;
+    const transfer = pendingEpubTransfers.get(request.transferId);
+    if (!transfer || transfer.senderId !== event.sender.id) {
+      port.postMessage({ error: "The EPUB transfer expired. Import the file again." });
+      port.close();
+      return;
+    }
+    pendingEpubTransfers.delete(request.transferId);
+    clearTimeout(transfer.expires);
+
+    let offset = 0;
+    const sendNextChunk = () => {
+      if (offset >= transfer.bytes.byteLength) {
+        port.postMessage({ done: true });
+        port.close();
+        return;
+      }
+      const end = Math.min(transfer.bytes.byteLength, offset + EPUB_TRANSFER_CHUNK_BYTES);
+      port.postMessage({ offset, chunk: transfer.bytes.slice(offset, end) });
+      offset = end;
+      setImmediate(sendNextChunk);
+    };
+    sendNextChunk();
+  });
+
+  ipcMain.handle("document:import-url", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    if (!isRecord(request) || typeof request.url !== "string" || request.url.length > 2048) {
+      throw new Error("Invalid document URL.");
+    }
+    return importRemoteDocument(request.url);
   });
 });
 

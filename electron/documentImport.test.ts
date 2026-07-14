@@ -14,6 +14,7 @@ function makeFs(overrides: Partial<ImportFs> = {}): ImportFs {
   return {
     stat: vi.fn().mockResolvedValue({ size: 1024 }),
     readFile: vi.fn().mockResolvedValue("plain file text"),
+    readBinaryFile: vi.fn().mockResolvedValue(new Uint8Array([80, 75, 3, 4])),
     ...overrides,
   };
 }
@@ -28,13 +29,13 @@ const passthroughParser: DocumentParser = {
 
 describe("isSupportedImportExtension", () => {
   it("accepts the documented extensions", () => {
-    for (const ext of [".pdf", ".txt", ".md", ".docx", ".pptx", ".odt", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"]) {
+    for (const ext of [".epub", ".pdf", ".txt", ".md", ".docx", ".pptx", ".odt", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"]) {
       expect(isSupportedImportExtension(ext)).toBe(true);
     }
   });
 
   it("rejects unknown extensions", () => {
-    expect(isSupportedImportExtension(".epub")).toBe(false);
+    expect(isSupportedImportExtension(".mobi")).toBe(false);
     expect(isSupportedImportExtension("")).toBe(false);
   });
 
@@ -77,11 +78,22 @@ describe("importDocumentFromPath", () => {
     expect(result.text).toBe("page one\n\npage two");
   });
 
+  it("returns EPUB bytes for structured parsing in the renderer", async () => {
+    const fsApi = makeFs({ readBinaryFile: vi.fn().mockResolvedValue(new Uint8Array([1, 2, 3])) });
+    const result = await importDocumentFromPath("/tmp/book.epub", makeParserFactory(passthroughParser), fsApi);
+    expect(result).toEqual({
+      canceled: false,
+      fileName: "book.epub",
+      text: "",
+      epubBytes: new Uint8Array([1, 2, 3]),
+    });
+  });
+
   it("rejects unsupported extensions without touching the filesystem", async () => {
     const fsApi = makeFs();
     await expect(
-      importDocumentFromPath("/tmp/book.epub", makeParserFactory(passthroughParser), fsApi),
-    ).rejects.toThrow("Unsupported file type: .epub");
+      importDocumentFromPath("/tmp/book.mobi", makeParserFactory(passthroughParser), fsApi),
+    ).rejects.toThrow("Unsupported file type: .mobi");
     expect(fsApi.stat).not.toHaveBeenCalled();
   });
 

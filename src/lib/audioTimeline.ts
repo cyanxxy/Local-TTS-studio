@@ -73,7 +73,17 @@ export function toAudioSegment(
 }
 
 export function buildAudioSegments(chunks: readonly StoredAudioChunk[]): AudioSegment[] {
-  return chunks.map((chunk, index) => toAudioSegment(chunk, index, chunks.length));
+  const groups = groupSemanticChunks(chunks);
+  return groups.map((group, index) => {
+    const first = group[0];
+    const last = group[group.length - 1];
+    return toAudioSegment({
+      ...first,
+      endSec: last.endSec,
+      pauseAfterSec: last.pauseAfterSec,
+      pauseKind: last.pauseKind,
+    }, index, groups.length);
+  });
 }
 
 export function retimeStoredChunks(chunks: readonly StoredAudioChunk[]): StoredAudioChunk[] {
@@ -92,11 +102,25 @@ export function retimeStoredChunks(chunks: readonly StoredAudioChunk[]): StoredA
 }
 
 export function buildCaptionSegments(chunks: readonly StoredAudioChunk[]): CaptionSegment[] {
-  return chunks
-    .map((chunk, index) => ({
-      startSec: chunk.startSec,
-      endSec: getCaptionEndSec(chunk),
-      text: (chunk.text || `Section ${index + 1}`).trim(),
-    }))
+  return groupSemanticChunks(chunks)
+    .map((group, index) => {
+      const first = group[0];
+      const last = group[group.length - 1];
+      return {
+        startSec: first.startSec,
+        endSec: getCaptionEndSec(last),
+        text: (first.text || `Section ${index + 1}`).trim(),
+      };
+    })
     .filter((segment) => segment.text.length > 0);
+}
+
+function groupSemanticChunks(chunks: readonly StoredAudioChunk[]): StoredAudioChunk[][] {
+  const groups: StoredAudioChunk[][] = [];
+  for (const chunk of chunks) {
+    const current = groups.at(-1);
+    if (current?.[0].segmentId === chunk.segmentId) current.push(chunk);
+    else groups.push([chunk]);
+  }
+  return groups;
 }

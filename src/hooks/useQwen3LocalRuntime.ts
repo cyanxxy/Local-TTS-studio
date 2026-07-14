@@ -7,6 +7,8 @@ import type {
 } from "../electron";
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
+import type { TextChunk } from "../lib/chunking";
+import { buildQwen3TextUnits } from "../lib/qwenChunking";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import type { GenerationStats, ModelState } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
@@ -22,6 +24,8 @@ interface ReceivedAudioChunk {
   audio: ArrayBuffer;
   sampleCount: number;
   silenceAfterSamples: number;
+  textUnitIndex?: number;
+  textUnitTotal?: number;
 }
 
 interface UseQwen3LocalRuntimeReturn {
@@ -54,7 +58,21 @@ function playbackSamples(chunk: ReceivedAudioChunk): Float32Array {
 }
 
 function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  const raw = error instanceof Error ? error.message : String(error);
+  return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
+}
+
+function wholeTextUnit(text: string): TextChunk[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const start = text.indexOf(trimmed);
+  return [{
+    text: trimmed,
+    start,
+    end: start + trimmed.length,
+    pauseAfterSec: 0,
+    pauseKind: "none",
+  }];
 }
 
 export function useQwen3LocalRuntime({
@@ -83,6 +101,7 @@ export function useQwen3LocalRuntime({
   const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const cancelProgressFlushRef = useRef<(() => void) | null>(null);
   const warmedKeyRef = useRef<string | null>(null);
+  const activeTextUnitsRef = useRef<TextChunk[]>([]);
   const bridge = window.electron?.localTts;
   const electronAvailable = enabled && !!bridge;
   const beginStream = player.beginStream;
@@ -101,6 +120,7 @@ export function useQwen3LocalRuntime({
     chunksRef.current = [];
     sampleRateRef.current = null;
     scheduledCountRef.current = 0;
+    activeTextUnitsRef.current = [];
     resetPlayer();
     setResult(null);
     setProgress(null);
@@ -142,6 +162,7 @@ export function useQwen3LocalRuntime({
     chunksRef.current = [];
     sampleRateRef.current = null;
     scheduledCountRef.current = 0;
+    activeTextUnitsRef.current = [];
     stopAll();
   }, [cancelActiveGeneration, selectedModelKey, stopAll]);
 
@@ -235,25 +256,36 @@ export function useQwen3LocalRuntime({
         audio: event.audio,
         sampleCount: event.sampleCount,
         silenceAfterSamples: event.silenceAfterSamples,
+        textUnitIndex: event.textUnitIndex,
+        textUnitTotal: event.textUnitTotal,
       };
       const contiguous = chunksRef.current.slice(0, event.index + 1).filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
       if (contiguous.length !== event.index + 1) return;
       while (scheduledCountRef.current < contiguous.length) {
         const index = scheduledCountRef.current++;
         const chunk = contiguous[index];
+        const reportedUnitIndex = chunk.textUnitIndex
+          ?? (event.total > 0 ? index : activeTextUnitsRef.current.length === 1 ? 0 : index);
+        const textUnitIndex = Math.min(
+          Math.max(0, reportedUnitIndex),
+          Math.max(0, activeTextUnitsRef.current.length - 1),
+        );
+        const textUnit = activeTextUnitsRef.current[textUnitIndex];
         void scheduleChunk({
           audio: playbackSamples(chunk),
           samplingRate: event.sampleRate,
-          text: `Qwen3 section ${index + 1}`,
-          index: index + 1,
-          total: event.total > 0 ? event.total : contiguous.length,
+          text: textUnit?.text ?? text,
+          index: textUnitIndex + 1,
+          total: (chunk.textUnitTotal ?? activeTextUnitsRef.current.length) || 1,
+          textStart: textUnit?.start ?? 0,
+          textEnd: textUnit?.end ?? text.length,
           pauseAfterSec: chunk.silenceAfterSamples / event.sampleRate,
         }).catch((nextError: unknown) => {
           if (mountedRef.current) setError(message(nextError));
         });
       }
     });
-  }, [bridge, electronAvailable, scheduleChunk]);
+  }, [bridge, electronAvailable, scheduleChunk, text]);
 
   useEffect(() => () => {
     cancelProgressFlushRef.current?.();
@@ -296,6 +328,9 @@ export function useQwen3LocalRuntime({
     const version = generationVersionRef.current;
     const id = requestId("generate");
     clearGeneratedResult();
+    activeTextUnitsRef.current = settings.profile.mode === "customVoice"
+      ? buildQwen3TextUnits(text)
+      : wholeTextUnit(text);
     setShowPlayer(true);
     beginStream();
     setGenerateBusy(true);

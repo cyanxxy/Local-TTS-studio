@@ -1,12 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps, ReactNode } from "react";
 import { AdvancedReaderPage } from "./AdvancedReaderPage";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { GenerationStats, ModelState } from "../types";
+import { createReaderDocument } from "../lib/readerDocument";
 
 vi.mock("./ModelToggle", () => ({
-  ModelToggle: () => <div data-testid="model-toggle" />,
+  ModelToggle: ({ desktopModelOptions = [] }: {
+    desktopModelOptions?: Array<{ key: string; label: string; onSelect: () => void }>;
+  }) => (
+    <div data-testid="model-toggle">
+      {desktopModelOptions.map((option) => (
+        <button key={option.key} type="button" onClick={option.onSelect}>{option.label}</button>
+      ))}
+    </div>
+  ),
 }));
 
 vi.mock("./VoiceSelector", () => ({
@@ -208,5 +217,103 @@ describe("AdvancedReaderPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Qwen3-TTS/i }));
 
     expect(onSelectQwen3).toHaveBeenCalledTimes(1);
+  });
+
+  it("highlights the estimated current word inside the active audio segment", () => {
+    const { container } = renderReader({
+      text: "Hello extraordinary world.",
+      totalDuration: 3,
+      currentTime: 1.5,
+      isPlaying: true,
+      activeSegmentId: "segment-1",
+      segments: [createSegment({
+        text: "Hello extraordinary world.",
+        startSec: 0,
+        endSec: 3,
+        textStart: 0,
+        textEnd: 26,
+      })],
+    });
+
+    expect(container.querySelector("[data-reader-active-word='true']")).toHaveTextContent("extraordinary");
+  });
+
+  it("opens the local library, navigates the table of contents, and creates bookmarks", () => {
+    const onJumpToSegment = vi.fn();
+    const onAddBookmark = vi.fn();
+    const document = createReaderDocument({
+      id: "doc-1",
+      title: "Structured book",
+      author: "Local Author",
+      text: "# Opening\nFirst text.\n\n# Ending\nFinal text.",
+    });
+    renderReader({
+      text: document.text,
+      documents: [document],
+      activeDocument: document,
+      onOpenDocument: vi.fn(),
+      onNewDocument: vi.fn(),
+      onDeleteDocument: vi.fn(),
+      onUpdateDocumentMetadata: vi.fn(),
+      onAddBookmark,
+      onRemoveBookmark: vi.fn(),
+      onAddNote: vi.fn(),
+      onUpdateNote: vi.fn(),
+      onRemoveNote: vi.fn(),
+      onJumpToSegment,
+      totalDuration: 4,
+      activeSegmentId: "segment-1",
+      segments: [createSegment({
+        text: "# Opening\nFirst text.",
+        textStart: 0,
+        textEnd: document.chapters[1]?.start ?? document.text.length,
+      }), createSegment({
+        id: "segment-2",
+        text: "# Ending\nFinal text.",
+        startSec: 2,
+        endSec: 4,
+        textStart: document.chapters[1]?.start ?? 0,
+        textEnd: document.text.length,
+      })],
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
+    fireEvent.click(screen.getByRole("button", { name: "Contents" }));
+    fireEvent.click(screen.getByRole("button", { name: /Ending/ }));
+    expect(onJumpToSegment).toHaveBeenCalledWith("segment-2");
+
+    fireEvent.click(screen.getByRole("button", { name: "Bookmarks" }));
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark this position" }));
+    expect(onAddBookmark).toHaveBeenCalledWith(expect.objectContaining({ positionSec: 0 }));
+  });
+
+  it("updates the visible chapter when navigating a document before audio exists", () => {
+    const document = createReaderDocument({
+      id: "doc-no-audio",
+      title: "Quiet chapters",
+      text: "# Opening\nFirst text.\n\n# Ending\nFinal text.",
+    });
+    renderReader({
+      text: document.text,
+      documents: [document],
+      activeDocument: document,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
+    fireEvent.click(screen.getByRole("button", { name: "Contents" }));
+    fireEvent.click(screen.getByRole("button", { name: /Ending/ }));
+
+    expect(screen.getByRole("button", { name: "Chapter 2 of 2: Ending" })).toBeInTheDocument();
+  });
+
+  it("imports article URLs from the toolbar", async () => {
+    const onImportUrl = vi.fn(async () => {});
+    renderReader({ onImportUrl });
+    fireEvent.click(screen.getByRole("button", { name: "Import from URL" }));
+    fireEvent.change(screen.getByPlaceholderText("https://example.com/article"), {
+      target: { value: "https://example.com/story" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Import article" }));
+    await waitFor(() => expect(onImportUrl).toHaveBeenCalledWith("https://example.com/story"));
   });
 });

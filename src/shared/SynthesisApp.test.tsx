@@ -1,8 +1,15 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { strToU8, zipSync } from "fflate";
 import WebApp from "../apps/web/WebApp";
 import { SynthesisApp } from "./SynthesisApp";
 import type { ModelState } from "../types";
+import {
+  buildAudioSignature,
+  createReaderDocument,
+  type CachedReaderAudio,
+  type ReaderDocumentRecord,
+} from "../lib/readerDocument";
 
 const mock = vi.hoisted(() => {
   const readyState: ModelState = {
@@ -79,6 +86,8 @@ const mock = vi.hoisted(() => {
       download: vi.fn(async () => {}),
       downloadCaptions: vi.fn(),
       replaceSegment: vi.fn(),
+      getAudioCacheSnapshot: vi.fn(() => []),
+      restoreAudioCache: vi.fn(),
       beginStream: vi.fn(),
       endStream: vi.fn(),
       reset: vi.fn(),
@@ -161,6 +170,27 @@ const mock = vi.hoisted(() => {
     persistAppState: vi.fn(),
     persistCreatorState: vi.fn(),
     getWebGPUStatus: vi.fn(),
+    readerLibrary: {
+      documents: [] as ReaderDocumentRecord[],
+      activeDocument: null as ReaderDocumentRecord | null,
+      loading: false,
+      error: null as string | null,
+      persistent: true,
+      createDocument: vi.fn(async (input: Record<string, unknown>) => input),
+      openDocument: vi.fn(async () => undefined),
+      deleteDocument: vi.fn(async () => undefined),
+      updateActiveText: vi.fn(),
+      updateActiveMetadata: vi.fn(),
+      updateProgress: vi.fn(),
+      addBookmark: vi.fn(),
+      removeBookmark: vi.fn(),
+      addNote: vi.fn(),
+      updateNote: vi.fn(),
+      removeNote: vi.fn(),
+      saveAudio: vi.fn(async () => undefined),
+      loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+      clearAudio: vi.fn(async () => undefined),
+    },
   };
 });
 
@@ -178,6 +208,10 @@ vi.mock("../hooks/useAudioPlayer", () => ({
 
 vi.mock("../hooks/useTTS", () => ({
   useTTS: vi.fn(() => mock.tts),
+}));
+
+vi.mock("../hooks/useReaderLibrary", () => ({
+  useReaderLibrary: () => mock.readerLibrary,
 }));
 
 vi.mock("../hooks/useCreatorSettings", () => ({
@@ -221,8 +255,15 @@ vi.mock("../lib/voices", () => ({
 }));
 
 vi.mock("../components/TextInput", () => ({
-  TextInput: ({ text, onTextChange }: { text: string; onTextChange: (value: string) => void }) => (
-    <textarea aria-label="script" value={text} onChange={(event) => onTextChange(event.target.value)} />
+  TextInput: ({ text, onTextChange, onImportDocument }: {
+    text: string;
+    onTextChange: (value: string) => void;
+    onImportDocument?: () => void;
+  }) => (
+    <div>
+      <textarea aria-label="script" value={text} onChange={(event) => onTextChange(event.target.value)} />
+      {onImportDocument && <button type="button" onClick={onImportDocument}>studio-import</button>}
+    </div>
   ),
 }));
 
@@ -326,6 +367,8 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     text,
     onTextChange,
     onImportDocument,
+    onImportFile,
+    onImportUrl,
     isImportingDocument,
     onModelChange,
     onVoiceChange,
@@ -337,10 +380,14 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onRetakeSegment,
     onJumpToSegment,
     desktopModelOptions = [],
+    desktopVoiceLabel,
+    desktopModelSettings,
   }: {
     text: string;
     onTextChange: (value: string) => void;
     onImportDocument?: () => void;
+    onImportFile?: (file: File) => void;
+    onImportUrl?: (url: string) => void;
     isImportingDocument?: boolean;
     onModelChange: (model: "kokoro" | "supertonic") => void;
     onVoiceChange: (voice: string) => void;
@@ -352,14 +399,20 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onRetakeSegment: (segmentId: string) => void;
     onJumpToSegment: (segmentId: string) => void;
     desktopModelOptions?: Array<{ key: string; label: string; selected?: boolean; onSelect: () => void }>;
+    desktopVoiceLabel?: string;
+    desktopModelSettings?: React.ReactNode;
   }) => (
     <div>
       <div data-testid="reader-text-value">{text}</div>
+      {desktopVoiceLabel && <div data-testid="reader-desktop-voice">{desktopVoiceLabel}</div>}
+      {desktopModelSettings}
       {onImportDocument && (
         <button type="button" onClick={onImportDocument}>
           reader-import{isImportingDocument ? "-busy" : ""}
         </button>
       )}
+      {onImportFile && <button type="button">reader-file-import</button>}
+      {onImportUrl && <button type="button" onClick={() => onImportUrl("https://example.com")}>reader-url-import</button>}
       <button type="button" onClick={() => onTextChange("Reader text with enough length.")}>reader-text</button>
       <button type="button" onClick={() => onModelChange("supertonic")}>reader-model</button>
       <button type="button" onClick={() => onVoiceChange("af_bella")}>reader-voice</button>
@@ -436,6 +489,8 @@ function resetMockState() {
     jumpToSegment: vi.fn(),
     download: vi.fn(async () => {}),
     downloadCaptions: vi.fn(),
+    getAudioCacheSnapshot: vi.fn(() => []),
+    restoreAudioCache: vi.fn(),
     beginStream: vi.fn(),
     endStream: vi.fn(),
   };
@@ -470,6 +525,28 @@ function resetMockState() {
     subscribeQwen3DownloadProgress: vi.fn(),
     subscribeProgress: vi.fn(),
     subscribeAudioChunk: vi.fn(),
+  };
+  mock.readerLibrary = {
+    ...mock.readerLibrary,
+    documents: [],
+    activeDocument: null,
+    loading: false,
+    error: null,
+    persistent: true,
+    createDocument: vi.fn(async (input: Record<string, unknown>) => input),
+    openDocument: vi.fn(async () => undefined),
+    deleteDocument: vi.fn(async () => undefined),
+    updateActiveText: vi.fn(),
+    updateActiveMetadata: vi.fn(),
+    updateProgress: vi.fn(),
+    addBookmark: vi.fn(),
+    removeBookmark: vi.fn(),
+    addNote: vi.fn(),
+    updateNote: vi.fn(),
+    removeNote: vi.fn(),
+    saveAudio: vi.fn(async () => undefined),
+    loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+    clearAudio: vi.fn(async () => undefined),
   };
   mock.localTts.probe.mockResolvedValue({
     ready: true,
@@ -615,7 +692,78 @@ describe("SynthesisApp", () => {
     expect(mock.player.jumpToSegment).not.toHaveBeenCalledWith("");
   });
 
+  it("restores matching cached Reader audio once while progress records update", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const document = createReaderDocument({
+      id: "cached-reader",
+      text: "Cached Reader text with enough length.",
+    });
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    mock.readerLibrary.loadAudio.mockResolvedValue({
+      documentId: document.id,
+      signature: buildAudioSignature({
+        text: document.text,
+        model: "kokoro",
+        voice: "af_heart",
+        quality: 5,
+        tuning: mock.creator.generationSettings,
+      }),
+      chunks: [{
+        audio: new Float32Array([0.1, -0.1]).buffer,
+        samplingRate: 24_000,
+        text: document.text,
+        index: 0,
+        total: 1,
+      }],
+      currentTime: 2,
+      playbackRate: 1,
+      totalDuration: 4,
+      updatedAt: Date.now(),
+    });
+
+    const view = render(<WebApp />);
+    await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1));
+
+    mock.readerLibrary.activeDocument = {
+      ...document,
+      progress: { ...document.progress, positionSec: 2, percent: 50, updatedAt: Date.now() },
+    };
+    view.rerender(<WebApp />);
+    await Promise.resolve();
+
+    expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1);
+  });
+
   it("runs Qwen3 from the reader model option without leaving the reader tab", async () => {
+    let audioChunkListener: ((event: {
+      requestId: string;
+      model: "qwen3";
+      index: number;
+      total: number;
+      sampleRate: number;
+      sampleCount: number;
+      silenceAfterSamples: number;
+      textUnitIndex?: number;
+      textUnitTotal?: number;
+      audio: ArrayBuffer;
+    }) => void) | undefined;
+    mock.localTts.subscribeAudioChunk.mockImplementation((listener) => {
+      audioChunkListener = listener;
+      return () => undefined;
+    });
+    mock.localTts.cancel.mockResolvedValue(undefined);
+    mock.localTts.generate.mockReturnValue(new Promise(() => {}));
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     Object.defineProperty(window, "electron", {
       value: {
@@ -639,14 +787,20 @@ describe("SynthesisApp", () => {
 
     render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "reader-desktop-qwen3-selected" })).toBeInTheDocument();
+    expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Vivian");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
     await waitFor(() => expect(mock.localTts.probe).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Aiden" }));
+    fireEvent.change(screen.getByLabelText("Qwen language"), { target: { value: "English" } });
+    fireEvent.click(screen.getByText("Advanced voice controls"));
+    fireEvent.change(screen.getByLabelText("Qwen voice instruction"), {
+      target: { value: "Warm and unhurried" },
+    });
+    expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Aiden");
     fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
 
-    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
-    expect(mock.generation.resetGeneratedAudio).toHaveBeenCalled();
+    expect(mock.generation.handleGenerate).not.toHaveBeenCalled();
     expect(mock.routing.navigateToPage).not.toHaveBeenCalledWith("qwen3");
     await waitFor(() => {
       expect(mock.localTts.generate).toHaveBeenCalledWith(expect.objectContaining({
@@ -655,12 +809,37 @@ describe("SynthesisApp", () => {
           text: "Initial script with enough text.",
           modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
           mode: "customVoice",
+          speaker: "Aiden",
+          language: "English",
+          instruct: "Warm and unhurried",
         }),
       }));
     });
+    const request = mock.localTts.generate.mock.calls[0][0];
+    act(() => {
+      audioChunkListener?.({
+        requestId: request.requestId,
+        model: "qwen3",
+        index: 0,
+        total: 0,
+        sampleRate: 24_000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+        textUnitIndex: 0,
+        textUnitTotal: 1,
+        audio: new Float32Array([0.25, -0.25]).buffer,
+      });
+    });
+    await waitFor(() => expect(mock.player.scheduleChunk).toHaveBeenCalledWith(expect.objectContaining({
+      text: "Initial script with enough text.",
+      index: 1,
+      total: 1,
+      textStart: 0,
+      textEnd: "Initial script with enough text.".length,
+    })));
   });
 
-  it("hides document import on web builds", () => {
+  it("exposes local EPUB/file and URL import on web builds", () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "reader",
@@ -675,10 +854,11 @@ describe("SynthesisApp", () => {
 
     render(<WebApp />);
 
-    expect(screen.queryByRole("button", { name: /reader-import/ })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "reader-file-import" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "reader-url-import" })).toBeInTheDocument();
   });
 
-  it("imports a document on desktop and routes its text through handleTextChange", async () => {
+  it("imports a desktop document into the structured Reader library", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     const importDocument = vi.fn().mockResolvedValue({
       canceled: false,
@@ -711,9 +891,53 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "reader-import" }));
     expect(importDocument).toHaveBeenCalled();
     await waitFor(() => {
-      expect(screen.getByTestId("reader-text-value")).toHaveTextContent(
-        "Imported chapter text with enough length.",
-      );
+      expect(mock.readerLibrary.createDocument).toHaveBeenCalledWith(expect.objectContaining({
+        title: "chapter",
+        description: "2 pages",
+        sourceType: "file",
+        sourceName: "chapter.pdf",
+        text: "Imported chapter text with enough length.",
+      }));
+    });
+  });
+
+  it("parses a desktop EPUB into the Studio script instead of clearing it", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    const epubBytes = zipSync({
+      "META-INF/container.xml": strToU8(`<?xml version="1.0"?>
+        <container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+          <rootfiles><rootfile full-path="OPS/book.opf" /></rootfiles>
+        </container>`),
+      "OPS/book.opf": strToU8(`<?xml version="1.0"?>
+        <package xmlns="http://www.idpf.org/2007/opf">
+          <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Studio Book</dc:title></metadata>
+          <manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml" /></manifest>
+          <spine><itemref idref="chapter" /></spine>
+        </package>`),
+      "OPS/chapter.xhtml": strToU8("<html><body><h1>Chapter</h1><p>EPUB text belongs in the Studio script.</p></body></html>"),
+    });
+    const importDocument = vi.fn().mockResolvedValue({
+      canceled: false,
+      fileName: "studio.epub",
+      text: "",
+      epubBytes,
+    });
+    Object.defineProperty(window, "electron", {
+      value: {
+        isElectron: true,
+        platform: "darwin",
+        documents: { importDocument },
+        localTts: mock.localTts,
+      },
+      configurable: true,
+    });
+
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(screen.getByRole("button", { name: "studio-import" }));
+
+    await waitFor(() => {
+      expect((screen.getByRole("textbox", { name: "script" }) as HTMLTextAreaElement).value)
+        .toContain("EPUB text belongs");
     });
   });
 

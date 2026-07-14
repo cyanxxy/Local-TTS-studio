@@ -6,6 +6,7 @@ export interface DocumentImportSuccess {
   fileName: string;
   text: string;
   pageCount?: number;
+  epubBytes?: Uint8Array;
 }
 
 export type DocumentImportResult = { canceled: true } | DocumentImportSuccess;
@@ -34,7 +35,14 @@ export interface ImportOpenDialog {
 export interface ImportFs {
   stat: (filePath: string) => Promise<{ size: number }>;
   readFile: (filePath: string, encoding: "utf8") => Promise<string>;
+  readBinaryFile: (filePath: string) => Promise<Uint8Array>;
 }
+
+const defaultImportFs: ImportFs = {
+  stat: (filePath) => fsPromises.stat(filePath),
+  readFile: (filePath, encoding) => fsPromises.readFile(filePath, encoding),
+  readBinaryFile: async (filePath) => new Uint8Array(await fsPromises.readFile(filePath)),
+};
 
 export const MAX_IMPORT_FILE_BYTES = 100 * 1024 * 1024;
 export const MAX_IMPORT_PAGES = 800;
@@ -50,12 +58,14 @@ const PDF_EXTENSIONS = new Set([".pdf"]);
 // actionable error when the external tool is missing.
 const OFFICE_EXTENSIONS = new Set([".docx", ".pptx", ".odt"]);
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".tif", ".tiff", ".webp"]);
+const EPUB_EXTENSIONS = new Set([".epub"]);
 
 export const IMPORT_DIALOG_FILTERS = [
   {
     name: "Documents",
-    extensions: ["pdf", "txt", "md", "docx", "pptx", "odt", "png", "jpg", "jpeg", "tif", "tiff", "webp"],
+    extensions: ["epub", "pdf", "txt", "md", "docx", "pptx", "odt", "png", "jpg", "jpeg", "tif", "tiff", "webp"],
   },
+  { name: "eBooks", extensions: ["epub"] },
   { name: "PDF", extensions: ["pdf"] },
   { name: "Plain text", extensions: ["txt", "md"] },
   { name: "Office documents", extensions: ["docx", "pptx", "odt"] },
@@ -65,6 +75,7 @@ export const IMPORT_DIALOG_FILTERS = [
 export function isSupportedImportExtension(extension: string): boolean {
   return (
     PLAIN_TEXT_EXTENSIONS.has(extension) ||
+    EPUB_EXTENSIONS.has(extension) ||
     PDF_EXTENSIONS.has(extension) ||
     OFFICE_EXTENSIONS.has(extension) ||
     IMAGE_EXTENSIONS.has(extension)
@@ -117,7 +128,7 @@ function describeParseFailure(fileName: string, extension: string, error: unknow
 export async function importDocumentFromPath(
   filePath: string,
   parserFactory: DocumentParserFactory,
-  fsApi: ImportFs = fsPromises,
+  fsApi: ImportFs = defaultImportFs,
 ): Promise<DocumentImportSuccess> {
   const fileName = path.basename(filePath);
   const extension = path.extname(filePath).toLowerCase();
@@ -134,7 +145,10 @@ export async function importDocumentFromPath(
 
   let text: string;
   let pageCount: number | undefined;
-  if (PLAIN_TEXT_EXTENSIONS.has(extension)) {
+  if (EPUB_EXTENSIONS.has(extension)) {
+    const epubBytes = await fsApi.readBinaryFile(filePath);
+    return { canceled: false, fileName, text: "", epubBytes };
+  } else if (PLAIN_TEXT_EXTENSIONS.has(extension)) {
     text = await fsApi.readFile(filePath, "utf8");
   } else {
     let outcome: DocumentParseOutcome;
@@ -163,7 +177,7 @@ export async function importDocumentFromPath(
 export async function importDocumentFromDialog(
   dialogApi: ImportOpenDialog,
   parserFactory: DocumentParserFactory,
-  fsApi: ImportFs = fsPromises,
+  fsApi: ImportFs = defaultImportFs,
 ): Promise<DocumentImportResult> {
   const result = await dialogApi.showOpenDialog({
     title: "Import document",

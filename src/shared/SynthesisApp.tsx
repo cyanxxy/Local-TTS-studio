@@ -11,6 +11,7 @@ import { useModelCacheControls } from "../hooks/useModelCacheControls";
 import { useQwen3LocalRuntime } from "../hooks/useQwen3LocalRuntime";
 import { Qwen3RuntimeProvider, useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { Qwen3InlineSettings } from "../components/Qwen3InlineSettings";
+import { useReaderLibrary } from "../hooks/useReaderLibrary";
 import { TextInput } from "../components/TextInput";
 import { ModelToggle } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
@@ -39,6 +40,15 @@ import {
 } from "../lib/appState";
 import { resolveKokoroVoice } from "../lib/voices";
 import { hasMinimumSynthesisText } from "../lib/textValidation";
+import {
+  buildAudioSignature,
+} from "../lib/readerDocument";
+import {
+  fetchRemoteDocument,
+  importReaderFile,
+  parseEpubDocument,
+  parseHtmlReaderDocument,
+} from "../lib/readerImport";
 
 type LocalRuntimePageKey = Extract<AppPage, "neutts" | "qwen3">;
 type InlineDesktopModelKey = Extract<LocalRuntimePageKey, "qwen3">;
@@ -144,10 +154,13 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const [importError, setImportError] = useState<string | null>(null);
   const [isImportingDocument, setIsImportingDocument] = useState(false);
   const [studioDesktopModel, setStudioDesktopModel] = useState<InlineDesktopModelKey | null>(null);
-  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(null);
+  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(() => (
+    enableDesktopRuntimes && isElectronRuntime ? "qwen3" : null
+  ));
   const [visitedLocalRuntimePages, setVisitedLocalRuntimePages] = useState<Set<LocalRuntimePageKey>>(
     () => (enableDesktopRuntimes && isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
   );
+  const readerLibrary = useReaderLibrary(initialState.text);
 
   const {
     kokoroState,
@@ -165,8 +178,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   });
 
   const player = useAudioPlayer();
-  const isReaderUsingQwen3 = readerDesktopModel === "qwen3";
-  const isStudioUsingQwen3 = studioDesktopModel === "qwen3";
+  const isReaderUsingQwen3 = isReaderPage && readerDesktopModel === "qwen3";
+  const isStudioUsingQwen3 = isStudioPage && studioDesktopModel === "qwen3";
   const isUsingQwen3Inline = isReaderUsingQwen3 || isStudioUsingQwen3;
   const qwen3LocalRuntime = useQwen3LocalRuntime({
     enabled: enableDesktopRuntimes && isElectronRuntime && isUsingQwen3Inline,
@@ -326,9 +339,13 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
       qwen3LocalRuntime.cancelActiveGeneration();
       resetGeneratedAudio();
       qwen3LocalRuntime.resetGeneratedAudio();
+      if (isReaderPage && readerLibrary.activeDocument) {
+        void readerLibrary.clearAudio(readerLibrary.activeDocument.id);
+      }
     }
 
     setText(nextText);
+    if (isReaderPage) readerLibrary.updateActiveText(nextText);
     setExportError(null);
     setImportError(null);
   }, [
@@ -337,6 +354,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     player.segments.length,
     player.totalDuration,
     qwen3LocalRuntime,
+    isReaderPage,
+    readerLibrary,
     resetGeneratedAudio,
     text,
     tts.isGenerating,
@@ -364,7 +383,24 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     try {
       const result = await documentsBridge.importDocument();
       if (!result.canceled) {
-        handleTextChangeRef.current(result.text);
+        if (result.epubBytes) {
+          const document = parseEpubDocument(new Uint8Array(result.epubBytes), result.fileName);
+          if (isReaderPage) {
+            await readerLibrary.createDocument(document);
+          } else {
+            handleTextChangeRef.current(document.text);
+          }
+        } else if (isReaderPage) {
+          await readerLibrary.createDocument({
+            title: result.fileName.replace(/\.[^.]+$/, ""),
+            description: result.pageCount ? `${result.pageCount} pages` : "",
+            sourceType: "file",
+            sourceName: result.fileName,
+            text: result.text,
+          });
+        } else {
+          handleTextChangeRef.current(result.text);
+        }
       }
     } catch (err) {
       const raw = err instanceof Error ? err.message : String(err);
@@ -375,7 +411,56 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
       importInFlightRef.current = false;
       setIsImportingDocument(false);
     }
-  }, [documentsBridge]);
+  }, [documentsBridge, isReaderPage, readerLibrary]);
+
+  const handleImportReaderFile = useCallback(async (file: File) => {
+    if (importInFlightRef.current) return;
+    importInFlightRef.current = true;
+    setImportError(null);
+    setIsImportingDocument(true);
+    try {
+      const document = await importReaderFile(file);
+      await readerLibrary.createDocument(document);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setImportError(message);
+    } finally {
+      importInFlightRef.current = false;
+      setIsImportingDocument(false);
+    }
+  }, [readerLibrary]);
+
+  const handleImportReaderUrl = useCallback(async (url: string) => {
+    if (importInFlightRef.current) throw new Error("Another document import is still running.");
+    importInFlightRef.current = true;
+    setImportError(null);
+    setIsImportingDocument(true);
+    try {
+      const payload = documentsBridge?.importUrl
+        ? await documentsBridge.importUrl(url)
+        : await fetchRemoteDocument(url);
+      const document = parseHtmlReaderDocument(payload);
+      await readerLibrary.createDocument(document);
+    } catch (error) {
+      let message = error instanceof Error ? error.message : String(error);
+      if (!documentsBridge && /failed to fetch|networkerror|load failed/i.test(message)) {
+        message = "This site blocks direct browser imports. Use the desktop app for cross-origin article URLs.";
+      }
+      setImportError(message);
+      throw new Error(message);
+    } finally {
+      importInFlightRef.current = false;
+      setIsImportingDocument(false);
+    }
+  }, [documentsBridge, readerLibrary]);
+
+  const handleNewReaderDocument = useCallback(() => {
+    void readerLibrary.createDocument({
+      title: "Untitled document",
+      sourceType: "text",
+      text: "Start writing or paste text here.",
+    });
+  }, [readerLibrary]);
 
   const handleVoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === voice) return;
@@ -618,6 +703,169 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     ? studioVisibleError
     : (tts.error ?? retakeError);
   const visibleError = visibleGenerationError ?? visibleModelError ?? importError ?? exportError ?? player.error;
+
+  const lastReaderProgressUpdateRef = useRef(0);
+  const readerAudioSaveTimerRef = useRef<number | null>(null);
+  const activeReaderDocument = readerLibrary.activeDocument;
+  const activeReaderDocumentId = activeReaderDocument?.id ?? null;
+  const activeReaderDocumentRef = useRef(activeReaderDocument);
+  activeReaderDocumentRef.current = activeReaderDocument;
+  const loadReaderAudio = readerLibrary.loadAudio;
+  const saveReaderAudio = readerLibrary.saveAudio;
+  const updateReaderProgress = readerLibrary.updateProgress;
+  const restoreReaderAudio = player.restoreAudioCache;
+  const getReaderAudioSnapshot = player.getAudioCacheSnapshot;
+  const readerAudioActionsRef = useRef({
+    cancel: cancelActiveGeneration,
+    load: loadReaderAudio,
+    reset: resetGeneratedAudio,
+    restore: restoreReaderAudio,
+  });
+  readerAudioActionsRef.current = {
+    cancel: cancelActiveGeneration,
+    load: loadReaderAudio,
+    reset: resetGeneratedAudio,
+    restore: restoreReaderAudio,
+  };
+  const activeReaderAudioSignature = activeReaderDocument
+    ? buildAudioSignature({
+        text: activeReaderDocument.text,
+        model: isReaderUsingQwen3 ? "qwen3" : activeModel,
+        voice: isReaderUsingQwen3 ? qwen3Settings.speaker : voice,
+        quality,
+        tuning: creator.generationSettings,
+      })
+    : null;
+  const qwenReaderControlsRef = useRef({
+    cancel: qwen3LocalRuntime.cancelActiveGeneration,
+    reset: qwen3LocalRuntime.resetGeneratedAudio,
+  });
+  qwenReaderControlsRef.current = {
+    cancel: qwen3LocalRuntime.cancelActiveGeneration,
+    reset: qwen3LocalRuntime.resetGeneratedAudio,
+  };
+  const readerPlaybackSnapshotRef = useRef({
+    currentTime: player.currentTime,
+    playbackRate: player.playbackRate,
+    totalDuration: player.totalDuration,
+  });
+  readerPlaybackSnapshotRef.current = {
+    currentTime: player.currentTime,
+    playbackRate: player.playbackRate,
+    totalDuration: player.totalDuration,
+  };
+
+  useEffect(() => {
+    const document = activeReaderDocumentRef.current;
+    if (!isReaderPage || !document || document.id !== activeReaderDocumentId) return;
+    let cancelled = false;
+
+    readerAudioActionsRef.current.cancel(true);
+    qwenReaderControlsRef.current.cancel();
+    readerAudioActionsRef.current.reset();
+    qwenReaderControlsRef.current.reset();
+    setText(document.text);
+    setExportError(null);
+    setImportError(null);
+
+    const restore = async () => {
+      const cache = await readerAudioActionsRef.current.load(document.id);
+      if (cancelled || !cache) return;
+      if (!activeReaderAudioSignature || cache.signature !== activeReaderAudioSignature) return;
+      readerAudioActionsRef.current.restore(cache.chunks, {
+        currentTime: document.progress.positionSec || cache.currentTime,
+        playbackRate: cache.playbackRate,
+      });
+      setShowPlayer(cache.chunks.length > 0);
+    };
+    void restore().catch((cause) => {
+      if (!cancelled) setImportError(cause instanceof Error ? cause.message : String(cause));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeReaderDocumentId,
+    activeReaderAudioSignature,
+    isReaderPage,
+  ]);
+
+  useEffect(() => {
+    if (!isReaderPage || !activeReaderDocument) return;
+    const now = Date.now();
+    const atEnd = player.totalDuration > 0 && player.currentTime >= player.totalDuration;
+    if (atEnd && activeReaderDocument.progress.percent >= 99.999) return;
+    if (!atEnd && now - lastReaderProgressUpdateRef.current < 750) return;
+    lastReaderProgressUpdateRef.current = now;
+
+    const segment = player.segments.find((entry) => entry.id === player.activeSegmentId);
+    let textOffset = activeReaderDocument.progress.textOffset;
+    if (segment && typeof segment.textStart === "number" && typeof segment.textEnd === "number") {
+      const duration = Math.max(0.001, segment.endSec - segment.startSec);
+      const ratio = Math.max(0, Math.min(1, (player.currentTime - segment.startSec) / duration));
+      textOffset = segment.textStart + (segment.textEnd - segment.textStart) * ratio;
+    } else if (atEnd) {
+      textOffset = activeReaderDocument.text.length;
+    }
+    updateReaderProgress({
+      positionSec: player.currentTime,
+      totalDurationSec: player.totalDuration,
+      textOffset,
+    });
+  }, [
+    isReaderPage,
+    player.activeSegmentId,
+    player.currentTime,
+    player.segments,
+    player.totalDuration,
+    activeReaderDocument,
+    updateReaderProgress,
+  ]);
+
+  useEffect(() => {
+    const documentId = activeReaderDocumentId;
+    if (!isReaderPage || !documentId || player.segments.length === 0) return;
+    if (readerAudioSaveTimerRef.current !== null) window.clearTimeout(readerAudioSaveTimerRef.current);
+    readerAudioSaveTimerRef.current = window.setTimeout(() => {
+      const chunks = getReaderAudioSnapshot();
+      if (chunks.length === 0) return;
+      const playback = readerPlaybackSnapshotRef.current;
+      void saveReaderAudio({
+        documentId,
+        signature: buildAudioSignature({
+          text,
+          model: isReaderUsingQwen3 ? "qwen3" : activeModel,
+          voice: isReaderUsingQwen3 ? qwen3Settings.speaker : voice,
+          quality,
+          tuning: creator.generationSettings,
+        }),
+        chunks,
+        currentTime: playback.currentTime,
+        playbackRate: playback.playbackRate,
+        totalDuration: playback.totalDuration,
+        updatedAt: Date.now(),
+      }).catch((cause) => setImportError(cause instanceof Error ? cause.message : String(cause)));
+    }, 800);
+    return () => {
+      if (readerAudioSaveTimerRef.current !== null) {
+        window.clearTimeout(readerAudioSaveTimerRef.current);
+        readerAudioSaveTimerRef.current = null;
+      }
+    };
+  }, [
+    activeModel,
+    creator.generationSettings,
+    isReaderPage,
+    isReaderUsingQwen3,
+    qwen3Settings.speaker,
+    activeReaderDocumentId,
+    getReaderAudioSnapshot,
+    player.segments.length,
+    quality,
+    saveReaderAudio,
+    text,
+    voice,
+  ]);
   const activeSegmentIndex = player.activeSegmentId
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
     : -1;
@@ -822,10 +1070,35 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               text={text}
               onTextChange={handleTextChange}
               onImportDocument={documentsBridge ? handleImportDocument : undefined}
+              onImportFile={handleImportReaderFile}
+              onImportUrl={handleImportReaderUrl}
               isImportingDocument={isImportingDocument}
+              documents={readerLibrary.documents}
+              activeDocument={activeReaderDocument}
+              libraryLoading={readerLibrary.loading}
+              libraryError={readerLibrary.error}
+              libraryPersistent={readerLibrary.persistent}
+              onNewDocument={handleNewReaderDocument}
+              onOpenDocument={(id) => {
+                void readerLibrary.openDocument(id).catch((cause) => (
+                  setImportError(cause instanceof Error ? cause.message : String(cause))
+                ));
+              }}
+              onDeleteDocument={(id) => {
+                void readerLibrary.deleteDocument(id).catch((cause) => (
+                  setImportError(cause instanceof Error ? cause.message : String(cause))
+                ));
+              }}
+              onUpdateDocumentMetadata={readerLibrary.updateActiveMetadata}
+              onAddBookmark={readerLibrary.addBookmark}
+              onRemoveBookmark={readerLibrary.removeBookmark}
+              onAddNote={readerLibrary.addNote}
+              onUpdateNote={readerLibrary.updateNote}
+              onRemoveNote={readerLibrary.removeNote}
               activeModel={activeModel}
               onModelChange={handleReaderModelChange}
               desktopModelOptions={readerDesktopModelOptions}
+              desktopVoiceLabel={isReaderUsingQwen3 ? qwen3Settings.speaker.replace(/_/g, " ") : undefined}
               desktopModelSettings={isReaderUsingQwen3 ? (
                 <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />
               ) : undefined}

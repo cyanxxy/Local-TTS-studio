@@ -169,6 +169,31 @@ describe("downloadQwen3Model", () => {
     await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
   });
 
+  it("falls back to Xet for a safetensors 403 while preserving the pinned revision", async () => {
+    const modelDir = makeTempDir();
+    const hubRequest = fakeHubRequest();
+    const request: UrlRequest = (url) => url.endsWith("/model.safetensors")
+      ? Promise.resolve(fakeResponse("", { statusCode: 403 }))
+      : hubRequest(url);
+    const xetDownloader = vi.fn(async ({ destination }: { destination: string }) => {
+      fs.writeFileSync(destination, FILES.get("model.safetensors")!);
+      return true;
+    });
+
+    await expect(downloadQwen3Model(
+      PROFILE,
+      modelDir,
+      () => {},
+      request,
+      xetDownloader,
+    )).resolves.toMatchObject({ readiness: "verified", downloadedFiles: 2 });
+    expect(xetDownloader).toHaveBeenCalledWith(expect.objectContaining({
+      modelRepo: PROFILE.repo,
+      revision: REVISION,
+      fileName: "model.safetensors",
+    }));
+  });
+
   it("distinguishes structural model directories from revision-verified ones", async () => {
     const modelDir = makeTempDir();
     for (const [fileName, body] of FILES) fs.writeFileSync(path.join(modelDir, fileName), body);

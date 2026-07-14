@@ -67,8 +67,8 @@ coverage/
 # Generated benchmark reports
 reports/
 
-# Isolated agent worktrees
-.worktrees/
+# Isolated agent worktrees (repo root only)
+/.worktrees/
 
 # Vercel
 .vercel

@@ -153,6 +153,40 @@ describe("useAudioPlayer", () => {
     expect(result.current.segments[1]?.startSec).toBe(500);
   });
 
+  it("serializes and restores cached PCM with timeline metadata and resume position", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk({
+        audio: new Float32Array([0.25, -0.5, 0.75, 0]),
+        samplingRate: 4,
+        text: "Cached chapter",
+        index: 0,
+        total: 1,
+        textStart: 10,
+        textEnd: 24,
+      });
+    });
+    const snapshot = result.current.getAudioCacheSnapshot();
+    expect([...new Float32Array(snapshot[0].audio)]).toEqual([0.25, -0.5, 0.75, 0]);
+
+    act(() => {
+      result.current.reset();
+      result.current.restoreAudioCache(snapshot, { currentTime: 0.5, playbackRate: 1.5 });
+    });
+
+    expect(result.current.totalDuration).toBe(1);
+    expect(result.current.currentTime).toBe(0.5);
+    expect(result.current.playbackRate).toBe(1.5);
+    expect(result.current.segments[0]).toMatchObject({
+      text: "Cached chapter",
+      textStart: 10,
+      textEnd: 24,
+      startSec: 0,
+      endSec: 1,
+    });
+    expect(result.current.isPlaying).toBe(false);
+  });
+
   it("keeps seeking paused when playback is not active", async () => {
     const { result } = renderHook(() => useAudioPlayer());
 

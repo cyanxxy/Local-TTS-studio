@@ -277,6 +277,8 @@ describe("createWebSocketBridgeWorkerPool", () => {
         sampleRate: 24000,
         sampleCount: 2,
         silenceAfterSamples: 0,
+        textUnitIndex: 0,
+        textUnitTotal: 1,
       });
       const audio = Buffer.alloc(2 * Float32Array.BYTES_PER_ELEMENT);
       new DataView(audio.buffer, audio.byteOffset, audio.byteLength).setFloat32(0, 0.5, true);
@@ -318,6 +320,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(spawn).toHaveBeenCalledTimes(1);
     expect(progress).toHaveLength(1);
     expect(audioChunks).toHaveLength(1);
+    expect(audioChunks[0]).toMatchObject({ textUnitIndex: 0, textUnitTotal: 1 });
     expect(audioChunks[0]).toMatchObject({ requestId: "r1", sampleRate: 24000, sampleCount: 2 });
     expect(first.response).toMatchObject({ ok: true, requestId: "r1" });
     expect(second.response).toMatchObject({ ok: true, requestId: "r2" });

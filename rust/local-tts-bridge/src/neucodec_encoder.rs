@@ -136,8 +136,8 @@ fn stream_to_file(
     total_bytes: Option<u64>,
     progress: &mut dyn FnMut(String),
 ) -> Result<()> {
-    let mut file = fs::File::create(path)
-        .with_context(|| format!("Failed to create {}", path.display()))?;
+    let mut file =
+        fs::File::create(path).with_context(|| format!("Failed to create {}", path.display()))?;
     let mut buffer = vec![0u8; 1 << 20];
     let mut written: u64 = 0;
     let mut next_report: u64 = 0;
@@ -158,10 +158,7 @@ fn stream_to_file(
                     written / 1_000_000,
                     total / 1_000_000
                 ),
-                _ => format!(
-                    "Downloading NeuCodec encoder: {} MB",
-                    written / 1_000_000
-                ),
+                _ => format!("Downloading NeuCodec encoder: {} MB", written / 1_000_000),
             };
             progress(progress_text);
             next_report = written + 100_000_000;

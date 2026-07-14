@@ -96,15 +96,25 @@ export interface LocalTtsAudioChunkEvent {
   sampleRate: number;
   sampleCount: number;
   silenceAfterSamples: number;
+  textUnitIndex?: number;
+  textUnitTotal?: number;
   audio: ArrayBuffer;
 }
 
 export type DocumentImportResult =
   | { canceled: true }
-  | { canceled: false; fileName: string; text: string; pageCount?: number };
+  | { canceled: false; fileName: string; text: string; pageCount?: number; epubBytes?: Uint8Array };
+
+export interface DocumentUrlImportResult {
+  requestedUrl: string;
+  finalUrl: string;
+  contentType: string;
+  html: string;
+}
 
 interface DocumentsBridge {
   importDocument: () => Promise<DocumentImportResult>;
+  importUrl: (url: string) => Promise<DocumentUrlImportResult>;
 }
 
 interface LocalTtsBridge {

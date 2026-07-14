@@ -11,10 +11,15 @@ const outDir = path.join(rootDir, "dist-rust");
 const binaryName = process.platform === "win32"
   ? "open-tts-local-bridge.exe"
   : "open-tts-local-bridge";
+const xetDownloaderBinaryName = process.platform === "win32"
+  ? "open-tts-hf-xet-downloader.exe"
+  : "open-tts-hf-xet-downloader";
 const targetDir = resolveRustTargetDir(rootDir);
 const releaseTargetDir = path.join(targetDir, "release");
 const builtBinaryPath = path.join(releaseTargetDir, binaryName);
 const copiedBinaryPath = path.join(outDir, binaryName);
+const builtXetDownloaderPath = path.join(releaseTargetDir, xetDownloaderBinaryName);
+const copiedXetDownloaderPath = path.join(outDir, xetDownloaderBinaryName);
 const nativeLibraryPattern = process.platform === "win32"
   ? /^(?:ggml|llama|mtmd|torch|c10|asmjit|fbgemm|uv|libiomp|cudart|cublas|cufft|curand|cusparse|nvrtc|nvToolsExt|zlib|shm|kineto|omp).*\.dll$/i
   : process.platform === "darwin"
@@ -34,6 +39,7 @@ execFileSync("cargo", ["build", "--release", "--manifest-path", manifestPath], {
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 fs.copyFileSync(builtBinaryPath, copiedBinaryPath);
+fs.copyFileSync(builtXetDownloaderPath, copiedXetDownloaderPath);
 
 function collectNativeLibraries(dir, pattern = nativeLibraryPattern) {
   if (!fs.existsSync(dir)) return [];
@@ -59,12 +65,12 @@ function collectNativeLibraries(dir, pattern = nativeLibraryPattern) {
 }
 
 const directlyLinkedDarwinLibraries = process.platform === "darwin"
-  ? new Set(execFileSync("otool", ["-L", builtBinaryPath], { encoding: "utf8" })
+  ? new Set([builtBinaryPath, builtXetDownloaderPath].flatMap((executablePath) => execFileSync("otool", ["-L", executablePath], { encoding: "utf8" })
     .split("\n")
     .slice(1)
     .map((line) => line.trim().replace(/\s+\(compatibility version.*$/, ""))
     .map((loadPath) => path.basename(loadPath))
-    .filter((name) => nativeLibraryPattern.test(name)))
+    .filter((name) => nativeLibraryPattern.test(name))))
   : new Set();
 
 const copiedNativeLibraries = new Set();
@@ -92,11 +98,13 @@ if (process.platform === "win32") {
 
 if (process.platform !== "win32") {
   fs.chmodSync(copiedBinaryPath, 0o755);
+  fs.chmodSync(copiedXetDownloaderPath, 0o755);
 }
 
 if (process.platform === "darwin") {
   copyMlxMetallib();
   makeSelfContainedDarwin(outDir, copiedBinaryPath);
+  makeSelfContainedDarwin(outDir, copiedXetDownloaderPath);
 }
 
 // MLX first looks next to the running executable for its compiled Metal kernels.
@@ -218,6 +226,7 @@ function makeSelfContainedDarwin(bundleDir, binaryPath) {
 }
 
 const allowedArtifact = (name) => name === binaryName
+  || name === xetDownloaderBinaryName
   || (process.platform === "darwin" && name === "mlx.metallib")
   || /\.(?:dylib|dll)$/i.test(name)
   || /\.so(?:\.\d+)*$/i.test(name);
@@ -225,12 +234,19 @@ const unexpectedArtifacts = fs.readdirSync(outDir).filter((name) => !allowedArti
 if (unexpectedArtifacts.length > 0) {
   throw new Error(`Unexpected Rust package artifacts: ${unexpectedArtifacts.join(", ")}`);
 }
-const executableArtifacts = fs.readdirSync(outDir).filter((name) => name === binaryName || /\.exe$/i.test(name));
-if (executableArtifacts.length !== 1 || executableArtifacts[0] !== binaryName) {
-  throw new Error(`Rust package must contain exactly one executable: ${binaryName}`);
+const executableArtifacts = fs.readdirSync(outDir).filter((name) => (
+  name === binaryName || name === xetDownloaderBinaryName || /\.exe$/i.test(name)
+));
+if (
+  executableArtifacts.length !== 2
+  || !executableArtifacts.includes(binaryName)
+  || !executableArtifacts.includes(xetDownloaderBinaryName)
+) {
+  throw new Error(`Rust package must contain the bridge and Xet downloader executables.`);
 }
 
 console.log(`Copied Rust bridge to ${copiedBinaryPath}`);
+console.log(`Copied Hugging Face Xet downloader to ${copiedXetDownloaderPath}`);
 if (copiedNativeLibraries.size > 0) {
   console.log(`Copied ${copiedNativeLibraries.size} native bridge libraries to ${outDir}`);
 }

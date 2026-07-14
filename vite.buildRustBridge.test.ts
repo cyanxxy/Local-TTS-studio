@@ -10,10 +10,11 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), 
   scripts: Record<string, string>;
 };
 
-describe("single Rust bridge packaging", () => {
-  it("builds only the bridge and rejects unexpected executable artifacts", () => {
+describe("Rust runtime packaging", () => {
+  it("builds the bridge plus the scoped Xet downloader and rejects other executables", () => {
     expect(buildScript).toContain('const binaryName = process.platform === "win32"');
-    expect(buildScript).toContain("Rust package must contain exactly one executable");
+    expect(buildScript).toContain('const xetDownloaderBinaryName = process.platform === "win32"');
+    expect(buildScript).toContain("Rust package must contain the bridge and Xet downloader executables");
     expect(buildScript).not.toMatch(/pibot-tts-worker|api_server|voice_clone|OPEN_TTS_QWEN3_MLX/);
   });
 
