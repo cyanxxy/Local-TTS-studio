@@ -586,8 +586,16 @@ function resetMockState() {
   mock.getWebGPUStatus.mockResolvedValue({ available: false, message: "No GPU available" });
 }
 
+function showOptionalDesktopModels() {
+  localStorage.setItem("open-tts-preferences-v1", JSON.stringify({
+    showNeuTTS: true,
+    showQwen3TTS: true,
+  }));
+}
+
 describe("SynthesisApp", () => {
   beforeEach(() => {
+    localStorage.clear();
     resetMockState();
     Object.defineProperty(window, "electron", {
       value: undefined,
@@ -654,6 +662,54 @@ describe("SynthesisApp", () => {
 
     await waitFor(() => expect(mock.persistAppState).toHaveBeenCalled());
     await waitFor(() => expect(mock.persistCreatorState).toHaveBeenCalled());
+  });
+
+  it("supports macOS and Windows keyboard shortcuts without hijacking text entry", () => {
+    const { rerender } = render(<WebApp />);
+
+    fireEvent.keyDown(document, { key: ",", metaKey: true });
+    expect(screen.getByRole("dialog", { name: "Appearance" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
+
+    fireEvent.keyDown(document, { key: "2", ctrlKey: true });
+    fireEvent.keyDown(document, { key: "1", metaKey: true });
+    expect(mock.routing.navigateToPage).toHaveBeenCalledWith("reader");
+    expect(mock.routing.navigateToPage).toHaveBeenCalledWith("studio");
+
+    fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
+    expect(mock.generation.handleGenerate).toHaveBeenCalledTimes(1);
+
+    fireEvent.keyDown(document, { key: " ", code: "Space" });
+    fireEvent.keyDown(document, { key: "ArrowLeft", altKey: true });
+    fireEvent.keyDown(document, { key: "ArrowRight", altKey: true });
+    expect(mock.player.togglePlay).toHaveBeenCalledTimes(1);
+    expect(mock.player.skip).toHaveBeenCalledWith(-10);
+    expect(mock.player.skip).toHaveBeenCalledWith(10);
+
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "script" }), { key: " ", code: "Space" });
+    expect(mock.player.togglePlay).toHaveBeenCalledTimes(1);
+
+    mock.generation.isGenerationBusy = true;
+    rerender(<WebApp />);
+    fireEvent.keyDown(document, { key: ".", metaKey: true });
+    expect(mock.generation.handleStop).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies interface and Reader font preferences app-wide", async () => {
+    render(<WebApp />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Open app settings" }));
+    fireEvent.click(screen.getByRole("button", { name: "App font Outfit" }));
+    fireEvent.click(screen.getByRole("button", { name: "Reading font Georgia" }));
+
+    expect(document.documentElement.dataset.interfaceFont).toBe("outfit");
+    expect(document.documentElement.dataset.readingFont).toBe("georgia");
+    await waitFor(() => {
+      expect(JSON.parse(localStorage.getItem("open-tts-preferences-v1") ?? "{}")).toMatchObject({
+        interfaceFont: "outfit",
+        readingFont: "georgia",
+      });
+    });
   });
 
   it("orchestrates reader controls and segment jumps", () => {
@@ -745,6 +801,47 @@ describe("SynthesisApp", () => {
     expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1);
   });
 
+  it("hides optional navigation pages without removing inline Qwen from Studio", () => {
+    Object.defineProperty(window, "electron", {
+      value: {
+        isElectron: true,
+        platform: "darwin",
+        localTts: mock.localTts,
+      },
+      configurable: true,
+    });
+    mock.routing = {
+      activePage: "studio",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+        { key: "neutts", label: "NeuTTS Nano" },
+        { key: "qwen3", label: "Qwen3-TTS" },
+      ],
+      isReaderPage: false,
+      isStudioPage: true,
+      navigateToPage: vi.fn(),
+    };
+
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    expect(screen.queryByRole("link", { name: "NeuTTS Nano" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Qwen3-TTS" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
+    expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open app settings" }));
+    fireEvent.click(screen.getAllByRole("button", { name: "Optional models" })[0]);
+    fireEvent.click(screen.getByRole("checkbox", { name: /Show NeuTTS Nano/i }));
+    fireEvent.click(screen.getByRole("checkbox", { name: /Show Qwen3-TTS/i }));
+
+    expect(screen.getByRole("link", { name: "NeuTTS Nano" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Qwen3-TTS" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("checkbox", { name: /Show Qwen3-TTS/i }));
+    expect(screen.queryByRole("link", { name: "Qwen3-TTS" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+  });
+
   it("runs Qwen3 from the reader model option without leaving the reader tab", async () => {
     let audioChunkListener: ((event: {
       requestId: string;
@@ -787,6 +884,8 @@ describe("SynthesisApp", () => {
 
     render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
+    expect(screen.queryByRole("link", { name: "Qwen3-TTS" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "reader-desktop-qwen3-selected" })).toBeInTheDocument();
     expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Vivian");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
@@ -975,6 +1074,7 @@ describe("SynthesisApp", () => {
   });
 
   it("runs Qwen3 from the studio model option only in Electron without leaving Studio", async () => {
+    showOptionalDesktopModels();
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
     expect(screen.queryByRole("button", { name: "studio-desktop-qwen3" })).not.toBeInTheDocument();
@@ -1026,6 +1126,7 @@ describe("SynthesisApp", () => {
   });
 
   it("renders local runtime routes", () => {
+    showOptionalDesktopModels();
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "neutts",
@@ -1048,6 +1149,7 @@ describe("SynthesisApp", () => {
   });
 
   it("preserves local runtime tab DOM state when switching tabs", () => {
+    showOptionalDesktopModels();
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "neutts",

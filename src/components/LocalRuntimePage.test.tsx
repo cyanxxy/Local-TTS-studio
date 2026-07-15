@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   LocalTtsAudioChunkEvent,
   LocalTtsGenerateResult,
+  LocalTtsQwen3DownloadProgress,
   LocalTtsQwen3Setup,
 } from "../electron";
 import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
@@ -19,6 +20,8 @@ const audio = vi.hoisted(() => ({
   reset: vi.fn(),
   scheduleChunk: vi.fn().mockResolvedValue(undefined),
   stopAll: vi.fn(),
+  togglePlay: vi.fn().mockResolvedValue(undefined),
+  skip: vi.fn(),
   download: vi.fn().mockResolvedValue(undefined),
 }));
 
@@ -110,10 +113,12 @@ describe("LocalRuntimePage", () => {
   const downloadQwen3Model = vi.fn();
   const chooseQwen3ModelDir = vi.fn();
   let audioListener: ((event: LocalTtsAudioChunkEvent) => void) | null = null;
+  let downloadProgressListener: ((event: LocalTtsQwen3DownloadProgress) => void) | null = null;
 
   beforeEach(() => {
     vi.clearAllMocks();
     audioListener = null;
+    downloadProgressListener = null;
     getQwen3Setup.mockResolvedValue(setup);
     chooseQwen3ModelDir.mockResolvedValue({ path: "/chosen/model" });
     downloadQwen3Model.mockResolvedValue({
@@ -163,7 +168,10 @@ describe("LocalRuntimePage", () => {
         getQwen3Setup,
         downloadQwen3Model,
         chooseQwen3ModelDir,
-        subscribeQwen3DownloadProgress: vi.fn(() => () => undefined),
+        subscribeQwen3DownloadProgress: vi.fn((listener) => {
+          downloadProgressListener = listener;
+          return () => { downloadProgressListener = null; };
+        }),
         subscribeProgress: vi.fn(() => () => undefined),
         subscribeAudioChunk: vi.fn((listener) => {
           audioListener = listener;
@@ -184,8 +192,79 @@ describe("LocalRuntimePage", () => {
     renderPage();
     expect(await screen.findByText("Provider: mlx")).toBeInTheDocument();
     expect(screen.getByText(/Runtime revision: 288a716/)).toBeInTheDocument();
-    expect(screen.getByText(/Revision 7dc92af14613 · directory verified/)).toBeInTheDocument();
+    expect(screen.getByText(/Revision 7dc92af14613/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Qwen model ready" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "Re-download model" })).toHaveLength(1);
     expect(screen.queryByText(/device map|dtype|attention|top-p|api_server|Candle/i)).not.toBeInTheDocument();
+  });
+
+  it("generates from the cross-platform primary-modifier shortcut", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Generate" })).toBeEnabled());
+
+    fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
+
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+  });
+
+  it("shows clear model download progress and file details", async () => {
+    getQwen3Setup.mockResolvedValue({
+      ...setup,
+      profiles: setup.profiles.map((profile, index) => (
+        index === 0 ? { ...profile, readiness: "missing" as const } : profile
+      )),
+    });
+    let finishDownload: ((value: Awaited<ReturnType<typeof downloadQwen3Model>>) => void) | undefined;
+    downloadQwen3Model.mockReturnValue(new Promise((resolve) => { finishDownload = resolve; }));
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Download Qwen model" }));
+    act(() => {
+      downloadProgressListener?.({
+        modelRepo: CUSTOM_REPO,
+        revision: setup.profiles[0].revision,
+        modelDir: CUSTOM_PATH,
+        fileName: "model.safetensors",
+        fileIndex: 2,
+        totalFiles: 6,
+        downloadedBytes: 50 * 1024 * 1024,
+        totalBytes: 100 * 1024 * 1024,
+      });
+    });
+
+    expect(screen.getByText("Downloading file 2 of 6")).toBeInTheDocument();
+    expect(screen.getByText("model.safetensors")).toBeInTheDocument();
+    expect(screen.getByText("50.0 of 100.0 MB")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "Qwen model download" })).toHaveAttribute("aria-valuenow", "25");
+
+    await act(async () => {
+      finishDownload?.({
+        modelRepo: CUSTOM_REPO,
+        revision: setup.profiles[0].revision,
+        modelDir: CUSTOM_PATH,
+        downloadedFiles: 2,
+        skippedFiles: 0,
+        readiness: "verified",
+      });
+    });
+  });
+
+  it("shows a useful recovery message when model download fails", async () => {
+    getQwen3Setup.mockResolvedValue({
+      ...setup,
+      profiles: setup.profiles.map((profile, index) => (
+        index === 0 ? { ...profile, readiness: "missing" as const } : profile
+      )),
+    });
+    downloadQwen3Model.mockRejectedValue(new Error("Network connection was interrupted."));
+
+    renderPage();
+    fireEvent.click(await screen.findByRole("button", { name: "Download Qwen model" }));
+
+    expect(await screen.findByText("Model setup failed")).toBeInTheDocument();
+    expect(screen.getByText("Network connection was interrupted.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download Qwen model" })).toBeEnabled();
   });
 
   it("generates CustomVoice with only the new native request fields", async () => {
@@ -214,9 +293,9 @@ describe("LocalRuntimePage", () => {
 
   it("generates Base voice cloning with exact transcript and WAV only", async () => {
     renderPage();
-    await screen.findByText(/directory verified/);
-    fireEvent.change(screen.getByLabelText("Native profile"), { target: { value: BASE_REPO } });
-    await waitFor(() => expect(screen.getByLabelText("Native profile")).toHaveValue(BASE_REPO));
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    fireEvent.change(screen.getByLabelText("Model size and voice mode"), { target: { value: BASE_REPO } });
+    await waitFor(() => expect(screen.getByLabelText("Model size and voice mode")).toHaveValue(BASE_REPO));
     const wav = new File([new Uint8Array([1, 2, 3])], "voice.wav", { type: "audio/wav" });
     const referenceInput = await screen.findByLabelText(/^Reference WAV/i);
     await act(async () => {
@@ -238,11 +317,12 @@ describe("LocalRuntimePage", () => {
 
   it("uses generic choose and revision-verified download APIs", async () => {
     renderPage();
-    await screen.findByText(/directory verified/);
-    fireEvent.click(screen.getByRole("button", { name: "Choose…" }));
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    fireEvent.click(screen.getByText("Use an existing model folder"));
+    fireEvent.click(screen.getByRole("button", { name: "Choose folder…" }));
     await waitFor(() => expect(chooseQwen3ModelDir).toHaveBeenCalledOnce());
     expect(screen.getByLabelText("Model directory")).toHaveValue("/chosen/model");
-    fireEvent.click(screen.getByRole("button", { name: "Download & verify" }));
+    fireEvent.click(screen.getByRole("button", { name: "Repair model download" }));
     await waitFor(() => expect(downloadQwen3Model).toHaveBeenCalledWith({ modelRepo: CUSTOM_REPO }));
     expect(screen.getByLabelText("Model directory")).toHaveValue(CUSTOM_PATH);
   });

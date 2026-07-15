@@ -1,10 +1,12 @@
 import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { Settings2 } from "lucide-react";
 import type { ChunkPauseKind, ModelType } from "../types";
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useModelLoader } from "../hooks/useModelLoader";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { useTTS } from "../hooks/useTTS";
 import { useAppRouting } from "../hooks/useAppRouting";
+import { useAppPreferences } from "../hooks/useAppPreferences";
 import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelCacheControls } from "../hooks/useModelCacheControls";
@@ -20,6 +22,7 @@ import { ControlsProvider } from "../components/ControlsContext";
 import { AudioPlayer } from "../components/AudioPlayer";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
+import { AppSettingsDialog } from "../components/AppSettingsDialog";
 import { CreatorToolsPanel } from "../components/CreatorToolsPanel";
 import { AdvancedReaderPage } from "../components/AdvancedReaderPage";
 import { LocalRuntimePage } from "../components/LocalRuntimePage";
@@ -31,6 +34,11 @@ import {
   isModelSupportedInBrowser,
 } from "../lib/browserSupport";
 import { getWebGPUStatus, type WebGPUStatus } from "../lib/webgpu";
+import {
+  hasPrimaryShortcutModifier,
+  isEditableShortcutTarget,
+  isMacPlatform,
+} from "../lib/appShortcuts";
 import {
   getInitialAppState,
   getInitialCreatorState,
@@ -109,6 +117,8 @@ function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
 
 function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: SynthesisAppProps) {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
+  const { preferences, updatePreferences, resetPreferences } = useAppPreferences();
+  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const qwen3Settings = useQwen3Runtime();
   const qwen3ProviderDetail = window.electron?.platform === "win32"
     ? `${qwen3Settings.profile.parameters} ${qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : "Voice clone"} · LibTorch`
@@ -135,10 +145,15 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   );
   const localInferenceSupported = browserSupport.isSupported;
   const unavailableModels = browserSupport.unsupportedModelMessages;
-  const { activePage, availableTabs, isReaderPage, isStudioPage, navigateToPage } = useAppRouting(
+  const { activePage, availableTabs: routeTabs, isReaderPage, isStudioPage, navigateToPage } = useAppRouting(
     enableDesktopRuntimes,
     routeBasePath,
   );
+  const availableTabs = useMemo(() => routeTabs.filter((tab) => {
+    if (tab.key === "neutts") return preferences.showNeuTTS;
+    if (tab.key === "qwen3") return preferences.showQwen3TTS;
+    return true;
+  }), [preferences.showNeuTTS, preferences.showQwen3TTS, routeTabs]);
 
   const [text, setText] = useState(initialState.text);
   const [activeModel, setActiveModel] = useState<ModelType>(() => (
@@ -154,13 +169,19 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const [importError, setImportError] = useState<string | null>(null);
   const [isImportingDocument, setIsImportingDocument] = useState(false);
   const [studioDesktopModel, setStudioDesktopModel] = useState<InlineDesktopModelKey | null>(null);
-  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(() => (
-    enableDesktopRuntimes && isElectronRuntime ? "qwen3" : null
-  ));
+  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(null);
   const [visitedLocalRuntimePages, setVisitedLocalRuntimePages] = useState<Set<LocalRuntimePageKey>>(
     () => (enableDesktopRuntimes && isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
   );
   const readerLibrary = useReaderLibrary(initialState.text);
+
+  const closeAppSettings = useCallback(() => setAppSettingsOpen(false), []);
+
+  useEffect(() => {
+    if (activePage === "neutts" && !preferences.showNeuTTS) {
+      navigateToPage("studio");
+    }
+  }, [activePage, navigateToPage, preferences.showNeuTTS]);
 
   const {
     kokoroState,
@@ -692,6 +713,91 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const readerGenerationProgress = isReaderUsingQwen3 ? qwen3LocalRuntime.generationProgress : tts.generationProgress;
   const readerStats = isReaderUsingQwen3 ? qwen3LocalRuntime.stats : tts.stats;
   const readerVisibleError = isReaderUsingQwen3 ? qwen3LocalRuntime.error : (tts.error ?? retakeError);
+
+  useEffect(() => {
+    const handleAppShortcut = (event: KeyboardEvent) => {
+      const primaryModifier = hasPrimaryShortcutModifier(event);
+
+      if (primaryModifier && event.key === ",") {
+        event.preventDefault();
+        setAppSettingsOpen(true);
+        return;
+      }
+
+      if (appSettingsOpen) return;
+
+      if (primaryModifier && event.key === "1") {
+        event.preventDefault();
+        handlePageNavigation("studio");
+        return;
+      }
+
+      if (primaryModifier && event.key === "2") {
+        event.preventDefault();
+        handlePageNavigation("reader");
+        return;
+      }
+
+      if (primaryModifier && event.key === "Enter") {
+        if (isStudioPage && studioCanGenerate && !studioGenerationBusy) {
+          event.preventDefault();
+          handleGenerate();
+        } else if (isReaderPage && readerCanGenerate && !readerGenerationBusy) {
+          event.preventDefault();
+          handleReaderGenerate();
+        }
+        return;
+      }
+
+      if (primaryModifier && event.key === ".") {
+        if (isStudioPage && studioGenerationBusy) {
+          event.preventDefault();
+          handleStudioStop();
+        } else if (isReaderPage && readerGenerationBusy) {
+          event.preventDefault();
+          handleReaderStop();
+        }
+        return;
+      }
+
+      if (isLocalRuntimePage(activePage) || isEditableShortcutTarget(event.target)) return;
+
+      if (!primaryModifier && !event.altKey && event.code === "Space" && player.totalDuration > 0) {
+        event.preventDefault();
+        void player.togglePlay();
+        return;
+      }
+
+      if (!primaryModifier && event.altKey && player.totalDuration > 0) {
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          player.skip(-10);
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          player.skip(10);
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handleAppShortcut);
+    return () => document.removeEventListener("keydown", handleAppShortcut);
+  }, [
+    activePage,
+    appSettingsOpen,
+    handleGenerate,
+    handlePageNavigation,
+    handleReaderGenerate,
+    handleReaderStop,
+    handleStudioStop,
+    isReaderPage,
+    isStudioPage,
+    player,
+    readerCanGenerate,
+    readerGenerationBusy,
+    studioCanGenerate,
+    studioGenerationBusy,
+  ]);
+
   const visibleModelError = isReaderPage
     ? readerModelState.error
     : isStudioPage
@@ -888,14 +994,14 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
   return (
     <div className="min-h-screen font-sans text-text-primary">
-      <div className={isReaderPage ? "w-full px-3 py-3 sm:px-4 sm:py-4 md:px-6 md:py-6" : "w-full px-4 py-6 sm:px-6 sm:py-8 md:px-8 md:py-10"}>
+      <div className={`app-page ${isReaderPage ? "w-full px-3 py-3 sm:px-4 sm:py-4 md:px-6 md:py-6" : "w-full px-4 py-6 sm:px-6 sm:py-8 md:px-8 md:py-6 lg:py-10"}`}>
 
         {/* Header */}
-        <header className={isReaderPage ? "mb-4" : "mb-8 sm:mb-10"}>
-          <div className={`flex justify-between gap-4 flex-wrap ${isReaderPage ? "items-center" : "items-start"}`}>
-            <div>
+        <header className={isReaderPage ? "mb-4" : "mb-8 lg:mb-10"}>
+          <div className={`flex flex-nowrap justify-between gap-2 sm:gap-4 ${isReaderPage ? "items-center" : "items-start"}`}>
+            <div className="min-w-0 flex-1">
               <h1
-                className={`${isReaderPage ? "text-3xl sm:text-4xl" : "text-5xl sm:text-6xl"} font-display leading-none font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-br from-text-primary to-accent/70`}
+                className={`${isReaderPage ? "text-3xl sm:text-4xl" : "text-[2.5rem] sm:text-6xl"} whitespace-nowrap font-display leading-none font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-br from-text-primary to-accent/70`}
               >
                 Open TTS
               </h1>
@@ -906,28 +1012,39 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               )}
             </div>
 
-            {showWasmBadge && (
-              <div className="mt-1 flex flex-col items-end gap-1 flex-shrink-0">
-                <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-accent/25 bg-accent-light backdrop-blur-md text-accent text-base font-semibold shadow-glass-sm">
-                  <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse" />
-                  CPU mode
+            <div className="mt-1 flex shrink-0 items-start gap-2">
+              {showWasmBadge && (
+                <div className="flex flex-col items-end gap-1">
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-accent/25 bg-accent-light backdrop-blur-md text-accent text-base font-semibold shadow-glass-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse" />
+                    CPU mode
+                  </div>
+                  {webgpuModeNote && (
+                    <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[240px] sm:text-right">
+                      {webgpuModeNote}
+                    </p>
+                  )}
+                  {showSingleThreadedNote && (
+                    <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[220px] sm:text-right">
+                      Cross-origin isolation is off, so CPU mode runs single-threaded.
+                    </p>
+                  )}
                 </div>
-                {webgpuModeNote && (
-                  <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[240px] sm:text-right">
-                    {webgpuModeNote}
-                  </p>
-                )}
-                {showSingleThreadedNote && (
-                  <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[220px] sm:text-right">
-                    Cross-origin isolation is off, so CPU mode runs single-threaded.
-                  </p>
-                )}
-              </div>
-            )}
+              )}
+              <button
+                type="button"
+                onClick={() => setAppSettingsOpen(true)}
+                aria-label="Open app settings"
+                title={`Settings (${isMacPlatform(window.electron?.platform ?? navigator.platform) ? "⌘," : "Ctrl+,"})`}
+                className="glass-control no-drag flex h-10 w-10 items-center justify-center rounded-xl text-text-muted hover:text-accent"
+              >
+                <Settings2 size={18} />
+              </button>
+            </div>
           </div>
 
           {/* Page navigation */}
-          <nav className={`${isReaderPage ? "mt-4" : "mt-6 sm:mt-8"} grid w-full grid-cols-2 gap-1 rounded-2xl glass p-1 sm:inline-flex sm:w-auto`}>
+          <nav className={`${isReaderPage ? "mt-4" : "mt-6 lg:mt-8"} grid w-full grid-cols-2 gap-1 rounded-2xl glass p-1 sm:inline-flex sm:w-auto`}>
             {availableTabs.map((tab) => (
               <a
                 key={tab.key}
@@ -965,9 +1082,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
             <DownloadProgress kokoroState={kokoroState} supertonicState={supertonicState} />
 
             <div className="mt-6 glass-panel rounded-[24px]">
-              <div className="grid grid-cols-1 lg:grid-cols-5">
+              <div className="grid grid-cols-1 md:grid-cols-5">
                 {/* Left: text input */}
-                <div className="flex min-h-[320px] flex-col border-border/40 p-4 sm:min-h-[360px] sm:p-6 lg:col-span-3 lg:border-r">
+                <div className="flex min-h-[320px] flex-col border-border/40 p-4 sm:min-h-[360px] sm:p-6 md:col-span-3 md:border-r">
                   <span className="text-xs font-semibold uppercase tracking-widest text-text-muted mb-3 flex-shrink-0">Script</span>
                   <div className="flex-1 min-h-0">
                     <TextInput
@@ -980,7 +1097,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
                 </div>
 
                 {/* Right: controls */}
-                <div className="flex flex-col gap-5 border-t border-border/40 p-4 sm:gap-6 sm:p-6 lg:col-span-2 lg:border-t-0">
+                <div className="flex flex-col gap-5 border-t border-border/40 p-4 sm:gap-6 sm:p-6 md:col-span-2 md:border-t-0">
                   <ModelToggle
                     activeModel={activeModel}
                     onModelChange={handleStudioModelChange}
@@ -1151,6 +1268,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               aria-hidden={!isActive}
             >
               <LocalRuntimePage
+                active={isActive}
                 model={page}
                 name={config.name}
                 releaseDate={config.releaseDate}
@@ -1197,6 +1315,14 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
         )}
 
       </div>
+      <AppSettingsDialog
+        open={appSettingsOpen}
+        desktopModelsAvailable={enableDesktopRuntimes && isElectronRuntime}
+        preferences={preferences}
+        onChange={updatePreferences}
+        onReset={resetPreferences}
+        onClose={closeAppSettings}
+      />
     </div>
   );
 }

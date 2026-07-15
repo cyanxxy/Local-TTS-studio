@@ -4,7 +4,7 @@ import { SettingsPanel } from "./SettingsPanel";
 
 /** Open the collapsible settings panel by clicking its header. */
 function openPanel() {
-  fireEvent.click(screen.getByText(/settings/i));
+  fireEvent.click(screen.getByText(/model storage/i));
 }
 
 describe("SettingsPanel", () => {

@@ -31,7 +31,7 @@ export function SettingsPanel({
         className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/40 transition-colors"
       >
         <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
-          Settings
+          Model storage
         </span>
         <ChevronDown
           size={14}

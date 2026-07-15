@@ -1,4 +1,15 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
+import { createPortal } from "react-dom";
 import {
   BookOpen,
   ChevronDown,
@@ -204,6 +215,86 @@ function documentPadding(fullScreen: boolean): string {
     : "reader-doc-pad py-8";
 }
 
+interface ViewportPopoverProps {
+  anchorRef: RefObject<HTMLElement | null>;
+  popoverRef: RefObject<HTMLDivElement | null>;
+  maxWidth: number;
+  className: string;
+  children: ReactNode;
+}
+
+function ViewportPopover({
+  anchorRef,
+  popoverRef,
+  maxWidth,
+  className,
+  children,
+}: ViewportPopoverProps) {
+  const [position, setPosition] = useState<{
+    top: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const updatePosition = () => {
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+
+      const rect = anchor.getBoundingClientRect();
+      const viewport = window.visualViewport;
+      const viewportLeft = viewport?.offsetLeft ?? 0;
+      const viewportTop = viewport?.offsetTop ?? 0;
+      const viewportWidth = viewport?.width ?? window.innerWidth;
+      const viewportHeight = viewport?.height ?? window.innerHeight;
+      const viewportRight = viewportLeft + viewportWidth;
+      const viewportBottom = viewportTop + viewportHeight;
+      const gutter = 12;
+      const gap = 8;
+      const width = Math.min(maxWidth, Math.max(0, viewportWidth - gutter * 2));
+      const left = Math.min(
+        Math.max(rect.right - width, viewportLeft + gutter),
+        viewportRight - width - gutter,
+      );
+      const availableBelow = viewportBottom - rect.bottom - gap - gutter;
+      const availableAbove = rect.top - viewportTop - gap - gutter;
+      const openAbove = availableBelow < 220 && availableAbove > availableBelow;
+      const maxHeight = Math.max(96, Math.min(672, openAbove ? availableAbove : availableBelow));
+      const top = openAbove
+        ? Math.max(viewportTop + gutter, rect.top - gap - maxHeight)
+        : rect.bottom + gap;
+
+      setPosition({ top, left, width, maxHeight });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    window.visualViewport?.addEventListener("resize", updatePosition);
+    window.visualViewport?.addEventListener("scroll", updatePosition);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+      window.visualViewport?.removeEventListener("resize", updatePosition);
+      window.visualViewport?.removeEventListener("scroll", updatePosition);
+    };
+  }, [anchorRef, maxWidth]);
+
+  if (!position) return null;
+
+  return createPortal(
+    <div
+      ref={popoverRef}
+      className={`fixed z-[120] overflow-y-auto ${className}`}
+      style={position}
+    >
+      {children}
+    </div>,
+    document.body,
+  );
+}
+
 export function AdvancedReaderPage({
   fullScreen = false,
   text,
@@ -296,11 +387,20 @@ export function AdvancedReaderPage({
   const [urlImportBusy, setUrlImportBusy] = useState(false);
   const [navigationTextOffset, setNavigationTextOffset] = useState<number | null>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
+  const settingsButtonRef = useRef<HTMLButtonElement>(null);
+  const settingsPopoverRef = useRef<HTMLDivElement>(null);
+  const urlButtonRef = useRef<HTMLButtonElement>(null);
+  const urlPopoverRef = useRef<HTMLDivElement>(null);
   const settingsOpenRef = useRef(settingsOpen);
+  const urlImportOpenRef = useRef(urlImportOpen);
 
   useEffect(() => {
     settingsOpenRef.current = settingsOpen;
   }, [settingsOpen]);
+
+  useEffect(() => {
+    urlImportOpenRef.current = urlImportOpen;
+  }, [urlImportOpen]);
 
   useEffect(() => {
     setNavigationTextOffset(null);
@@ -308,9 +408,20 @@ export function AdvancedReaderPage({
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
-      if (!settingsOpenRef.current) return;
-      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (
+        settingsOpenRef.current
+        && !settingsRef.current?.contains(target)
+        && !settingsPopoverRef.current?.contains(target)
+      ) {
         setSettingsOpen(false);
+      }
+      if (
+        urlImportOpenRef.current
+        && !urlButtonRef.current?.contains(target)
+        && !urlPopoverRef.current?.contains(target)
+      ) {
+        setUrlImportOpen(false);
       }
     };
     document.addEventListener("mousedown", handler);
@@ -630,12 +741,12 @@ export function AdvancedReaderPage({
           </div>
         </div>
 
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex w-full shrink-0 items-center justify-between gap-1 sm:w-auto sm:justify-start sm:gap-2">
         <button
           type="button"
           onClick={() => setLibraryOpen(true)}
           aria-label="Open Reader library"
-          className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98]"
+          className="flex min-h-[44px] min-w-[44px] items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98]"
         >
           <Library size={14} className="text-text-muted" />
           <span className="hidden font-medium lg:inline">Library</span>
@@ -648,7 +759,7 @@ export function AdvancedReaderPage({
             onClick={onNewDocument}
             aria-label="New document"
             title="New document"
-            className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/50 bg-white/40 text-text-muted shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-accent active:translate-y-0 active:scale-[0.98]"
+            className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl border border-white/50 bg-white/40 text-text-muted shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-accent active:translate-y-0 active:scale-[0.98]"
           >
             <Plus size={15} />
           </button>
@@ -661,7 +772,7 @@ export function AdvancedReaderPage({
             disabled={isImportingDocument}
             aria-label="Import document"
             title="Import EPUB, PDF, text, Office, or image documents"
-            className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98] disabled:cursor-default disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:bg-white/40"
+            className="flex min-h-[44px] min-w-[44px] items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98] disabled:cursor-default disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:bg-white/40"
           >
             {isImportingDocument
               ? <Loader2 size={14} className="animate-spin text-text-muted" />
@@ -675,6 +786,7 @@ export function AdvancedReaderPage({
         {onImportUrl && (
           <div className="relative">
             <button
+              ref={urlButtonRef}
               type="button"
               onClick={() => {
                 setUrlImportOpen((open) => !open);
@@ -683,12 +795,17 @@ export function AdvancedReaderPage({
               aria-label="Import from URL"
               aria-expanded={urlImportOpen}
               title="Import article from URL"
-              className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/50 bg-white/40 text-text-muted shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-accent active:translate-y-0 active:scale-[0.98]"
+              className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl border border-white/50 bg-white/40 text-text-muted shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-accent active:translate-y-0 active:scale-[0.98]"
             >
               <Link2 size={15} />
             </button>
             {urlImportOpen && (
-              <div className="glass-pop absolute top-full right-0 z-50 mt-2 w-[min(25rem,calc(100vw-1.5rem))] rounded-2xl p-4">
+              <ViewportPopover
+                anchorRef={urlButtonRef}
+                popoverRef={urlPopoverRef}
+                maxWidth={400}
+                className="glass-pop rounded-2xl p-4"
+              >
                 <label className="block text-xs font-semibold uppercase tracking-widest text-text-muted">
                   Article URL
                   <input
@@ -716,7 +833,7 @@ export function AdvancedReaderPage({
                   {urlImportBusy ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
                   {urlImportBusy ? "Importing article…" : "Import article"}
                 </button>
-              </div>
+              </ViewportPopover>
             )}
           </div>
         )}
@@ -724,11 +841,12 @@ export function AdvancedReaderPage({
         {/* Voice & model settings popover */}
         <div ref={settingsRef} className="relative">
           <button
+            ref={settingsButtonRef}
             type="button"
             onClick={() => setSettingsOpen((o) => !o)}
             aria-expanded={settingsOpen}
             aria-label="Voice settings"
-            className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98]"
+            className="flex min-h-[44px] min-w-[44px] items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 active:translate-y-0 active:scale-[0.98]"
           >
             <span
               className={`h-1.5 w-1.5 shrink-0 rounded-full ${
@@ -746,7 +864,12 @@ export function AdvancedReaderPage({
           </button>
 
           {settingsOpen && (
-            <div className="glass-pop animate-scale-in absolute top-full right-0 z-50 mt-2 max-h-[min(42rem,calc(100vh-8rem))] w-[min(28rem,calc(100vw-2rem))] origin-top-right overflow-y-auto rounded-2xl p-4">
+            <ViewportPopover
+              anchorRef={settingsButtonRef}
+              popoverRef={settingsPopoverRef}
+              maxWidth={448}
+              className="glass-pop animate-scale-in origin-top-right rounded-2xl p-4"
+            >
               <div className="flex flex-col gap-4">
                 <ModelToggle
                   activeModel={activeModel}
@@ -797,7 +920,7 @@ export function AdvancedReaderPage({
                   </div>
                 )}
               </div>
-            </div>
+            </ViewportPopover>
           )}
         </div>
         </div>
@@ -828,7 +951,7 @@ export function AdvancedReaderPage({
               <button
                 type="button"
                 onClick={() => setLibraryOpen(true)}
-                className="truncate text-left text-xs font-medium text-text-muted transition-colors hover:text-accent"
+                className="block w-full max-w-full truncate text-left text-xs font-medium text-text-muted transition-colors hover:text-accent"
               >
                 Chapter {currentChapter.order + 1} of {activeDocument?.chapters.length}: {currentChapter.title}
               </button>

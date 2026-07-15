@@ -105,6 +105,134 @@
   --glass-border-soft: color-mix(in srgb, #ffffff 36%, transparent);
 }
 
+/* ── App-wide appearance preferences ──────────────────────── */
+:root[data-theme="dark"] {
+  --color-surface: #101114;
+  --color-panel: #1c1d22;
+  --color-border: #34363d;
+  --color-border-strong: #4a4c55;
+  --color-text-primary: #f5f5f7;
+  --color-text-secondary: #c3c3c8;
+  --color-text-muted: #92939b;
+  --color-danger: #ff6961;
+  --color-danger-light: rgba(255, 105, 97, 0.13);
+  --color-success: #30d158;
+  --color-warning: #ffd60a;
+  --color-warning-light: rgba(255, 214, 10, 0.13);
+  --glass-bg: color-mix(in srgb, #24262c 72%, transparent);
+  --glass-bg-strong: color-mix(in srgb, #24262c 86%, transparent);
+  --glass-border: color-mix(in srgb, #ffffff 16%, transparent);
+  --glass-border-soft: color-mix(in srgb, #ffffff 10%, transparent);
+  --shadow-glass-sm:
+    0 1px 2px rgb(0 0 0 / 0.18),
+    0 5px 16px rgb(0 0 0 / 0.2),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.08);
+  --shadow-glass-md:
+    0 2px 8px rgb(0 0 0 / 0.22),
+    0 16px 40px rgb(0 0 0 / 0.3),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.1);
+  --shadow-glass-lg:
+    0 8px 20px rgb(0 0 0 / 0.28),
+    0 30px 72px rgb(0 0 0 / 0.42),
+    inset 0 1px 0 0 rgb(255 255 255 / 0.12);
+}
+
+:root[data-theme="dark"][data-accent="blue"] {
+  --color-accent: #0a84ff;
+  --color-accent-hover: #409cff;
+  --color-accent-light: rgba(10, 132, 255, 0.16);
+}
+
+:root[data-accent="violet"] {
+  --color-accent: #8c42c4;
+  --color-accent-hover: #9d52d2;
+  --color-accent-light: rgba(140, 66, 196, 0.12);
+}
+:root[data-theme="dark"][data-accent="violet"] {
+  --color-accent: #bf5af2;
+  --color-accent-hover: #cc75f5;
+  --color-accent-light: rgba(191, 90, 242, 0.16);
+}
+
+:root[data-accent="teal"] {
+  --color-accent: #007f80;
+  --color-accent-hover: #008f90;
+  --color-accent-light: rgba(0, 127, 128, 0.12);
+}
+:root[data-theme="dark"][data-accent="teal"] {
+  --color-accent: #40c8c8;
+  --color-accent-hover: #62d3d3;
+  --color-accent-light: rgba(64, 200, 200, 0.16);
+}
+
+:root[data-accent="orange"] {
+  --color-accent: #d96704;
+  --color-accent-hover: #e87510;
+  --color-accent-light: rgba(217, 103, 4, 0.12);
+}
+:root[data-theme="dark"][data-accent="orange"] {
+  --color-accent: #ff9f0a;
+  --color-accent-hover: #ffb33d;
+  --color-accent-light: rgba(255, 159, 10, 0.16);
+}
+
+:root[data-interface-size="small"] { font-size: 93.75%; }
+:root[data-interface-size="medium"] { font-size: 100%; }
+:root[data-interface-size="large"] { font-size: 106.25%; }
+
+:root[data-interface-font="inter"] {
+  --font-sans: "Inter Variable", "Inter", system-ui, sans-serif;
+}
+:root[data-interface-font="system"] {
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+:root[data-interface-font="outfit"] {
+  --font-sans: "Outfit Variable", "Outfit", system-ui, sans-serif;
+}
+
+:root[data-reading-font="literata"] {
+  --font-reading: "Literata Variable", "Literata", Georgia, "Times New Roman", serif;
+}
+:root[data-reading-font="inter"] {
+  --font-reading: "Inter Variable", "Inter", system-ui, sans-serif;
+}
+:root[data-reading-font="outfit"] {
+  --font-reading: "Outfit Variable", "Outfit", system-ui, sans-serif;
+}
+:root[data-reading-font="georgia"] {
+  --font-reading: Georgia, "Times New Roman", serif;
+}
+
+:root[data-theme="dark"] body {
+  background-image:
+    radial-gradient(ellipse 120% 32% at 50% -6%, color-mix(in srgb, var(--color-accent) 15%, transparent), transparent 70%),
+    radial-gradient(ellipse 60% 50% at 0% 0%, color-mix(in srgb, #40c8c8 8%, transparent), transparent 60%),
+    radial-gradient(ellipse 70% 60% at 100% 12%, color-mix(in srgb, #bf5af2 9%, transparent), transparent 62%),
+    radial-gradient(ellipse 90% 70% at 85% 100%, color-mix(in srgb, var(--color-accent) 7%, transparent), transparent 65%);
+}
+
+/* Existing glass controls use white tints. In dark mode those become subtle
+   highlights instead of opaque white blocks. */
+:root[data-theme="dark"] :is([class^="bg-white/"], [class*=" bg-white/"]) {
+  background-color: rgb(255 255 255 / 0.07) !important;
+}
+:root[data-theme="dark"] :is([class^="border-white/"], [class*=" border-white/"]) {
+  border-color: rgb(255 255 255 / 0.13) !important;
+}
+:root[data-theme="dark"] [class*="hover:bg-white/"]:hover {
+  background-color: rgb(255 255 255 / 0.12) !important;
+}
+
+:root[data-transparency="reduced"] :is(.glass, .glass-panel, .glass-pop, .glass-inset, .glass-control) {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+:root[data-transparency="reduced"] .glass,
+:root[data-transparency="reduced"] .glass-control { background-color: var(--color-panel); }
+:root[data-transparency="reduced"] .glass-panel,
+:root[data-transparency="reduced"] .glass-pop { background-color: var(--color-panel); }
+:root[data-transparency="reduced"] .glass-inset { background-color: var(--color-surface); }
+
 *,
 *::before,
 *::after {
@@ -152,11 +280,22 @@ body {
   -webkit-app-region: drag;
   padding-top: 1.6rem;
 }
+@media (min-width: 768px) and (max-width: 1023px) and (max-height: 650px) {
+  .is-electron.is-mac .app-page {
+    padding-top: 0;
+  }
+}
 .is-electron.is-mac header :is(a, button, input, select, textarea, label, [role="slider"], [tabindex]) {
   -webkit-app-region: no-drag;
 }
 .drag-region { -webkit-app-region: drag; }
 .no-drag { -webkit-app-region: no-drag; }
+/* Fixed overlays can overlap the macOS title/header drag region. Explicitly
+   opt the full settings subtree out so every control receives pointer input. */
+.is-electron.is-mac .app-settings-overlay,
+.is-electron.is-mac .app-settings-overlay * {
+  -webkit-app-region: no-drag;
+}
 
 ::selection {
   background: var(--color-accent);
@@ -484,6 +623,17 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* ── Respect reduced-motion ───────────────────────────────── */
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+:root[data-motion="reduced"] .glass-control:hover,
+:root[data-motion="reduced"] .glass-accent:hover { transform: none; }
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -240,21 +240,21 @@ export function AudioPlayer({
     isDragging.current = false;
   }, []);
 
-  const transportButton = (enabled: boolean, size: "sm" | "md" = "md") =>
-    `flex ${size === "sm" || compact ? "h-8 w-8" : "h-9 w-9"} items-center justify-center rounded-full border transition-all duration-200 ${
+  const transportButton = (enabled: boolean) =>
+    `flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full border transition-all duration-200 ${
       enabled
         ? "border-white/55 bg-white/40 text-text-secondary shadow-glass-sm backdrop-blur-md hover:-translate-y-0.5 hover:bg-white/60 hover:text-accent"
         : "cursor-not-allowed border-border/70 text-text-muted/60"
     }`;
 
   const utilityButton = (enabled: boolean) =>
-    `flex h-8 w-8 items-center justify-center rounded-full transition-all duration-200 ${
+    `flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full transition-all duration-200 ${
       enabled
         ? "text-text-muted hover:bg-white/55 hover:text-accent"
         : "cursor-not-allowed text-text-muted/50"
     }`;
 
-  const centerButtonSize = isDock ? "h-13 w-13" : compact ? "h-9 w-9" : "h-10 w-10";
+  const centerButtonSize = isDock ? "h-13 w-13" : "h-[44px] w-[44px]";
   const centerLabel = effectivePrimaryAction?.label ?? (isPlaying ? "Pause" : "Play");
   const centerDisabled = effectivePrimaryAction
     ? Boolean(effectivePrimaryAction.disabled)
@@ -398,7 +398,7 @@ export function AudioPlayer({
       disabled={centerDisabled}
       aria-label={centerLabel}
       title={centerLabel}
-      className={`flex ${centerButtonSize} items-center justify-center rounded-full transition-all duration-300 ${centerClass}`}
+      className={`flex ${centerButtonSize} shrink-0 items-center justify-center rounded-full transition-all duration-300 ${centerClass}`}
     >
       {effectivePrimaryAction
         ? renderPrimaryActionIcon(effectivePrimaryAction)
@@ -484,7 +484,7 @@ export function AudioPlayer({
                 onClick={() => onPlaybackRateChange(nextPlaybackRate(playbackRate))}
                 aria-label={`Playback speed ${formatPlaybackRate(playbackRate)}`}
                 title="Playback speed"
-                className="flex h-8 min-w-8 items-center justify-center rounded-full px-1 font-mono text-xs text-text-muted transition-all duration-200 hover:bg-white/55 hover:text-accent tabular-nums"
+                className="flex h-[44px] min-w-[44px] items-center justify-center rounded-full px-1 font-mono text-xs text-text-muted transition-all duration-200 hover:bg-white/55 hover:text-accent tabular-nums"
               >
                 {formatPlaybackRate(playbackRate)}
               </button>
@@ -529,7 +529,7 @@ export function AudioPlayer({
                 onClick={onStop}
                 aria-label={isGenerating ? "Stop generation" : "Stop playback"}
                 title={isGenerating ? "Stop generation" : "Stop playback"}
-                className="flex h-8 w-8 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger hover:text-white"
+                className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger hover:text-white"
               >
                 <Square size={12} />
               </button>
@@ -555,7 +555,7 @@ export function AudioPlayer({
             onClick={onSkipBackward}
             disabled={!hasAudio}
             aria-label="Back 10 seconds"
-            className={transportButton(hasAudio, "sm")}
+            className={transportButton(hasAudio)}
           >
             <RotateCcw size={14} />
           </button>
@@ -565,7 +565,7 @@ export function AudioPlayer({
             onClick={onSkipForward}
             disabled={!hasAudio}
             aria-label="Forward 10 seconds"
-            className={transportButton(hasAudio, "sm")}
+            className={transportButton(hasAudio)}
           >
             <RotateCw size={14} />
           </button>
@@ -575,7 +575,7 @@ export function AudioPlayer({
               onClick={onStop}
               aria-label={isGenerating ? "Stop generation" : "Stop playback"}
               title={isGenerating ? "Stop generation" : "Stop playback"}
-              className={`${compact ? "h-8 w-8" : "h-9 w-9"} rounded-full border border-danger/30 bg-danger-light text-danger shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-0.5 hover:bg-danger hover:text-white`}
+              className="h-[44px] w-[44px] shrink-0 rounded-full border border-danger/30 bg-danger-light text-danger shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-0.5 hover:bg-danger hover:text-white"
             >
               <Square size={12} className="mx-auto" />
             </button>
@@ -596,7 +596,7 @@ export function AudioPlayer({
             disabled={!hasAudio}
             aria-label="Download audio"
             title="Download audio"
-            className={`ml-auto shrink-0 rounded-xl p-2 transition-all sm:ml-0 ${
+            className={`ml-auto flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl transition-all sm:ml-0 ${
               hasAudio
                 ? "text-text-muted hover:bg-accent-light hover:text-accent"
                 : "cursor-not-allowed text-text-muted"

@@ -11,6 +11,7 @@ interface LocalRuntimeSidebarProps {
   links: Array<{ label: string; href: string }>;
   onClearCache: () => void;
   onRedownload: () => void;
+  showRedownload?: boolean;
   runtime: LocalTtsProbeResult | null;
   runtimeBusy: boolean;
   runtimeReady: boolean;
@@ -24,6 +25,7 @@ export function LocalRuntimeSidebar({
   links,
   onClearCache,
   onRedownload,
+  showRedownload = true,
   runtime,
   runtimeBusy,
   runtimeReady,
@@ -78,19 +80,21 @@ export function LocalRuntimeSidebar({
             Clear Local Cache
           </button>
 
-          <button
-            onClick={onRedownload}
-            disabled={!electronAvailable || busy || !runtimeReady}
-            className={`
-              px-3 py-2 rounded-lg text-xs font-semibold transition-colors
-              ${!electronAvailable || busy || !runtimeReady
-                ? "bg-border text-text-muted cursor-not-allowed"
-                : "glass-accent text-white"
-              }
-            `}
-          >
-            Re-download Model
-          </button>
+          {showRedownload && (
+            <button
+              onClick={onRedownload}
+              disabled={!electronAvailable || busy || !runtimeReady}
+              className={`
+                px-3 py-2 rounded-lg text-xs font-semibold transition-colors
+                ${!electronAvailable || busy || !runtimeReady
+                  ? "bg-border text-text-muted cursor-not-allowed"
+                  : "glass-accent text-white"
+                }
+              `}
+            >
+              Re-download Model
+            </button>
+          )}
         </div>
       </div>
 

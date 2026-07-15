@@ -11,8 +11,15 @@ import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { GenerationStats } from "../types";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
+import {
+  hasPrimaryShortcutModifier,
+  isEditableShortcutTarget,
+} from "../lib/appShortcuts";
 import { AudioPlayer } from "./AudioPlayer";
-import { LocalRuntimeModelInputs } from "./localRuntime/LocalRuntimeModelInputs";
+import {
+  LocalRuntimeModelInputs,
+  LocalRuntimeQwenSetup,
+} from "./localRuntime/LocalRuntimeModelInputs";
 import { LocalRuntimeRuntimeSettings } from "./localRuntime/LocalRuntimeRuntimeSettings";
 import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
 import {
@@ -26,6 +33,7 @@ import {
 } from "./localRuntime/utils";
 
 interface LocalRuntimePageProps {
+  active?: boolean;
   model: LocalTtsModel;
   name: string;
   releaseDate: string;
@@ -92,6 +100,7 @@ function formatStartingGenerationStatus(model: LocalTtsModel, profileLabel: stri
 }
 
 export function LocalRuntimePage({
+  active = true,
   model,
   name,
   releaseDate,
@@ -766,6 +775,63 @@ export function LocalRuntimePage({
 
   const busy = runtimeBusy || cacheBusy || qwen3.setupBusy || qwen3.downloadBusy || generateBusy;
   const runtimeReady = runtime?.ready ?? false;
+
+  useEffect(() => {
+    if (!active) return;
+
+    const handleLocalRuntimeShortcut = (event: KeyboardEvent) => {
+      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      const primaryModifier = hasPrimaryShortcutModifier(event);
+
+      if (primaryModifier && event.key === "Enter") {
+        if (electronAvailable && runtimeReady && canGenerate && !busy) {
+          event.preventDefault();
+          void runGeneration();
+        }
+        return;
+      }
+
+      if (primaryModifier && event.key === ".") {
+        if (generateBusy) {
+          event.preventDefault();
+          void cancelActiveGeneration();
+        }
+        return;
+      }
+
+      if (isEditableShortcutTarget(event.target)) return;
+
+      if (!primaryModifier && !event.altKey && event.code === "Space" && audioPlayer.totalDuration > 0) {
+        event.preventDefault();
+        void audioPlayer.togglePlay();
+        return;
+      }
+
+      if (!primaryModifier && event.altKey && audioPlayer.totalDuration > 0) {
+        if (event.key === "ArrowLeft") {
+          event.preventDefault();
+          audioPlayer.skip(-10);
+        } else if (event.key === "ArrowRight") {
+          event.preventDefault();
+          audioPlayer.skip(10);
+        }
+      }
+    };
+
+    document.addEventListener("keydown", handleLocalRuntimeShortcut);
+    return () => document.removeEventListener("keydown", handleLocalRuntimeShortcut);
+  }, [
+    active,
+    audioPlayer,
+    busy,
+    canGenerate,
+    cancelActiveGeneration,
+    electronAvailable,
+    generateBusy,
+    runGeneration,
+    runtimeReady,
+  ]);
+
   const activeSegmentNumber = useMemo(() => {
     if (!audioPlayer.activeSegmentId) return null;
     const index = audioPlayer.segments.findIndex((segment) => segment.id === audioPlayer.activeSegmentId);
@@ -820,6 +886,24 @@ export function LocalRuntimePage({
           </ul>
         </div>
 
+        {model === "qwen3" && (
+          <LocalRuntimeQwenSetup
+            qwen3Profile={qwen3.profile}
+            qwen3Profiles={qwen3.profiles}
+            onQwen3ProfileChange={handleQwen3ModelChange}
+            qwen3ModelPath={qwen3.modelPath}
+            onQwen3ModelPathChange={handleQwen3BaseModelPathChange}
+            qwen3Readiness={qwen3.readiness}
+            qwen3SetupBusy={qwen3.setupBusy}
+            qwen3DownloadBusy={qwen3.downloadBusy}
+            qwen3DownloadProgress={qwen3.downloadProgress}
+            qwen3Error={qwen3.error}
+            onQwen3RefreshSetup={() => { void refreshQwen3Setup(); }}
+            onQwen3DownloadModel={() => { void handleQwen3DownloadModel(); }}
+            onQwen3ChooseModelPath={() => { void handleQwen3ChooseBaseModelPath(); }}
+          />
+        )}
+
         <div className="space-y-2">
           <label className="block text-xs font-semibold uppercase tracking-wider text-text-secondary">
             Text
@@ -858,6 +942,7 @@ export function LocalRuntimePage({
           qwen3SetupBusy={qwen3.setupBusy}
           qwen3DownloadBusy={qwen3.downloadBusy}
           qwen3DownloadProgress={qwen3.downloadProgress}
+          qwen3Error={qwen3.error}
           onQwen3RefreshSetup={() => { void refreshQwen3Setup(); }}
           onQwen3DownloadModel={() => { void handleQwen3DownloadModel(); }}
           onQwen3ChooseModelPath={() => { void handleQwen3ChooseBaseModelPath(); }}
@@ -966,6 +1051,7 @@ export function LocalRuntimePage({
         links={links}
         onClearCache={handleClearCache}
         onRedownload={handleRedownload}
+        showRedownload={model !== "qwen3"}
         runtime={runtime}
         runtimeBusy={runtimeBusy}
         runtimeReady={runtimeReady}
