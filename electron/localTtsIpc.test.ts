@@ -135,6 +135,11 @@ describe("localTtsIpc request sanitizers", () => {
       referenceCodesBase64: "abc",
       modelRepo: "neuphonic/neutts-nano",
     })).toThrow("Unsupported NeuTTS");
+    expect(() => sanitizeGeneratePayload("neutts", {
+      text: "x".repeat(6_001),
+      referenceText: "ref",
+      referenceCodesBase64: "abc",
+    })).toThrow("exceeds 6000 characters");
   });
 
   it("sanitizes Qwen3 Rust payloads", () => {
@@ -201,6 +206,22 @@ describe("localTtsIpc request sanitizers", () => {
     });
 
     const valid = { text: "Hello", mode: "customVoice", modelRepo: customRepo, modelPath: "/model" };
+    expect(sanitizeGeneratePayload("qwen3", {
+      ...valid,
+      text: "x".repeat(6_001),
+    }, "darwin").text).toHaveLength(6_001);
+    expect(() => sanitizeGeneratePayload("qwen3", {
+      ...valid,
+      text: "x".repeat(1_500_001),
+    }, "darwin")).toThrow("exceeds 1500000 characters");
+    expect(() => sanitizeGeneratePayload("qwen3", {
+      text: "x".repeat(6_001),
+      mode: "voiceClone",
+      modelRepo: baseRepo,
+      modelPath: "/model",
+      referenceText: "Exact reference words.",
+      referenceAudioBase64: "AQID",
+    }, "darwin")).toThrow("exceeds 6000 characters");
     for (const removedField of ["deviceMap", "dtype", "attnImplementation", "topP", "baseModelPath"]) {
       expect(() => sanitizeGeneratePayload("qwen3", { ...valid, [removedField]: "removed" }, "darwin"))
         .toThrow(`Unknown Qwen3-TTS field: \`${removedField}\``);

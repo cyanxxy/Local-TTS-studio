@@ -31,4 +31,18 @@ describe("buildQwen3TextUnits", () => {
     expect(text.slice(units[0].start, units[0].end)).toBe(units[0].text);
     expect(units.map((unit) => unit.text).join("")).toBe(text.trim());
   });
+
+  it("preserves complete ranges for Reader chapters beyond the old IPC limit", () => {
+    const sentence = `${"Reader narration ".repeat(20)}ends here. `;
+    const text = `  ${sentence.repeat(30)}  `;
+    expect(text.trim().length).toBeGreaterThan(6_000);
+
+    const units = buildQwen3TextUnits(text);
+
+    expect(units.map((unit) => unit.text).join("")).toBe(text.trim());
+    expect(units[0].start).toBe(2);
+    expect(units.at(-1)?.end).toBe(text.indexOf(text.trim()) + text.trim().length);
+    expect(units.every((unit) => text.slice(unit.start, unit.end) === unit.text)).toBe(true);
+    expect(units.every((unit) => Array.from(unit.text).length <= QWEN3_UNIT_MAX_CHARS)).toBe(true);
+  });
 });

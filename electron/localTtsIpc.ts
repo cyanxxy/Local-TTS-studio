@@ -12,6 +12,10 @@ export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
 export const LOCAL_MODELS = ["neutts", "qwen3"] as const;
 
 const MAX_TEXT_LENGTH = 6000;
+// Keep this aligned with MAX_READER_TEXT_CHARS. Qwen CustomVoice splits the
+// request into 400-code-point units inside the native runtime and streams each
+// unit, so Reader documents can safely cross the generic single-utterance cap.
+const MAX_QWEN3_CUSTOM_VOICE_TEXT_LENGTH = 1_500_000;
 const MAX_REFERENCE_TEXT_LENGTH = 2000;
 const MAX_REFERENCE_CODES_BASE64_LENGTH = 25_000_000;
 const MAX_REFERENCE_AUDIO_BASE64_LENGTH = 60_000_000;
@@ -251,11 +255,15 @@ export function sanitizeQwen3Payload(
   const unknownField = Object.keys(payload).find((field) => !QWEN3_GENERATE_FIELDS.has(field));
   if (unknownField) throw new Error(`Unknown Qwen3-TTS field: \`${unknownField}\`.`);
 
-  const text = parseRequiredText(payload.text, "text");
   const mode = parseOptionalString(payload.mode, "mode", { maxLength: 32 });
   if (!mode || !ALLOWED_QWEN3_MODES.has(mode as Qwen3Mode)) {
     throw new Error("Unsupported Qwen3-TTS mode.");
   }
+  const text = parseRequiredText(
+    payload.text,
+    "text",
+    mode === "customVoice" ? MAX_QWEN3_CUSTOM_VOICE_TEXT_LENGTH : MAX_TEXT_LENGTH,
+  );
   const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
   if (!modelRepo) throw new Error("`modelRepo` is required for Qwen3-TTS.");
   const profile = getQwen3Profile(modelRepo);
