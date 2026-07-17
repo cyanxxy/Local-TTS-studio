@@ -420,8 +420,17 @@ describe("createWebSocketBridgeWorkerPool", () => {
   });
 
   it("sends a graceful shutdown WebSocket command when cancelling an in-flight request", async () => {
-    const { pool, servers, children } = makePool(() => {
-      // Stall so cancel hits a connected worker with an open socket.
+    const { pool, servers, children } = makePool((message, server) => {
+      if (message.command === "shutdown") {
+        // A result already queued by the transport must not beat an accepted
+        // cancellation and resolve the generation promise.
+        server.sendJson({
+          type: "result",
+          requestId: "r1",
+          ok: true,
+          result: { audioChunkCount: 1, sampleRate: 24_000 },
+        });
+      }
     });
 
     const run = pool.run("qwen3", {
@@ -434,11 +443,39 @@ describe("createWebSocketBridgeWorkerPool", () => {
 
     // Keep the fake server alive long enough to read the graceful shutdown frame.
     children[0].onKill = null;
+    const cancelledRun = expect(run).rejects.toThrow(/cancelled/i);
     expect(pool.cancel("r1")).toBe(true);
     await waitFor(() => servers[0].messages.some((message) => message.command === "shutdown"));
+    await cancelledRun;
     servers[0].close();
     children[0].exit(null as unknown as number);
-    await expect(run).rejects.toThrow(/cancelled/i);
+  });
+
+  it("keeps cancellation authoritative when request sending fails in the activation gap", async () => {
+    const { pool } = makePool();
+    const originalSend = WebSocket.prototype.send;
+    let intercepted = false;
+    const sendSpy = vi.spyOn(WebSocket.prototype, "send").mockImplementation(function (data) {
+      if (!intercepted && typeof data === "string" && data.includes('"requestId":"r-cancel-gap"')) {
+        intercepted = true;
+        expect(pool.cancel("r-cancel-gap")).toBe(true);
+        throw new Error("socket closed during cancellation");
+      }
+      return originalSend.call(this, data);
+    });
+
+    try {
+      await expect(pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r-cancel-gap",
+        payload: { text: "one" },
+        spawnConfig: SPAWN_CONFIG,
+      })).rejects.toThrow(/^Generation cancelled\.$/);
+      expect(intercepted).toBe(true);
+    } finally {
+      sendSpy.mockRestore();
+      await pool.shutdownAll();
+    }
   });
 
   it("runs warm commands whose results carry no streamed audio and reuses the worker for generation", async () => {
@@ -491,6 +528,30 @@ describe("createWebSocketBridgeWorkerPool", () => {
     });
     expect(generated.response).toMatchObject({ ok: true, requestId: "r1" });
     expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects audio frames returned for a command request", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId: message.requestId,
+        index: 0,
+        total: 1,
+        sampleRate: 24_000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "warm-1",
+      command: "warm",
+      payload: { mode: "customVoice", modelPath: "/models/qwen3" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/unexpected audio.*command/i);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
   });
 
   it("spawns an independent worker per model and streams binary audio for neutts and qwen3", async () => {
@@ -686,6 +747,28 @@ describe("createWebSocketBridgeWorkerPool", () => {
     await expect(run).resolves.toMatchObject({ response: { ok: true, requestId: "r1" } });
   });
 
+  it("enforces a protocol-progress deadline even while heartbeats continue", async () => {
+    const { pool, children, servers } = makePool();
+    const heartbeat = setInterval(() => children[0]?.emitStderr(" "), 25);
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      idleTimeoutMs: 80,
+      progressTimeoutMs: 180,
+      requestId: "r1",
+      payload: { text: "stuck inference" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+
+    try {
+      await waitFor(() => servers[0]?.messages.length === 1);
+      await expect(run).rejects.toThrow(/no protocol progress/i);
+      expect(children[0].killed).toBe(true);
+    } finally {
+      clearInterval(heartbeat);
+      servers[0]?.close();
+    }
+  });
+
   it("rejects successful results when the streamed audio chunk count is incomplete", async () => {
     const { pool, children, servers } = makePool((message, server) => {
       sendAudioChunk(server, message.requestId, { index: 0, total: 2 });
@@ -800,7 +883,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
         total: 1,
         sampleRate: 24000,
         sampleCount: 2,
-        silenceAfterSamples: 48_000 * 60 + 1,
+        silenceAfterSamples: 192_001,
       });
     });
 
@@ -941,7 +1024,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(children[0].killed).toBe(true);
     children[0].exit(null as unknown as number);
     await expect(shutdown).resolves.toBe(true);
-    await expect(run).rejects.toThrow(/Failed to start Rust local bridge worker/);
+    await expect(run).rejects.toThrow(/Generation cancelled/);
   });
 
   it("reports a startup exit instead of a connect timeout when the bridge dies before connecting", async () => {
@@ -968,6 +1051,79 @@ describe("createWebSocketBridgeWorkerPool", () => {
       payload: {},
       spawnConfig: SPAWN_CONFIG,
     })).rejects.toThrow(/exited during startup|exited before announcing/i);
+  });
+
+  it("surfaces a bounded structured startup failure", async () => {
+    const children: FakeChild[] = [];
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      children.push(child);
+      setTimeout(() => child.emitStdout(
+        `${BRIDGE_RESULT_PREFIX}{"ok":false,"error":"Failed to bind loopback socket."}\n`,
+      ), 0);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      connectTimeoutMs: 1_000,
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow("Failed to bind loopback socket.");
+    expect(children[0].killed).toBe(true);
+  });
+
+  it("bounds unterminated startup output before a port announcement", async () => {
+    const children: FakeChild[] = [];
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      children.push(child);
+      setTimeout(() => child.emitStdout("x".repeat(64 * 1024 + 1)), 0);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      connectTimeoutMs: 1_000,
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/startup output exceeded 65536 bytes/i);
+    expect(children[0].killed).toBe(true);
+  });
+
+  it("never exposes the WebSocket authentication token in connection errors", async () => {
+    let authToken = "";
+    const spawn = vi.fn((_model: TestModel, config: WebSocketWorkerSpawnRuntimeConfig) => {
+      authToken = config.authToken;
+      const child = new FakeChild();
+      setTimeout(() => child.emitStdout("__PORT__1\n"), 0);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      connectTimeoutMs: 150,
+    });
+
+    const error = await pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    }).then(() => null, (reason: unknown) => reason instanceof Error ? reason : new Error(String(reason)));
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).not.toContain(authToken);
+    expect(error?.message).not.toMatch(/ws:\/\/[^ ]+\//);
   });
 
   it("cancels an in-flight request by killing the WebSocket worker", async () => {
@@ -1023,7 +1179,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
         index: 0,
         total: 1,
         sampleRate: 48000,
-        sampleCount: 48_000 * 600 + 1,
+        sampleCount: 262_145,
         silenceAfterSamples: 0,
       });
     });
@@ -1034,6 +1190,81 @@ describe("createWebSocketBridgeWorkerPool", () => {
       payload: { text: "huge" },
       spawnConfig: SPAWN_CONFIG,
     })).rejects.toThrow(/maximum sample count/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects audio that exceeds the cumulative request byte limit", async () => {
+    const children: FakeChild[] = [];
+    const servers: FakeWebSocketServer[] = [];
+    const spawn = vi.fn((_model: TestModel, config: WebSocketWorkerSpawnRuntimeConfig) => {
+      const child = new FakeChild();
+      const server = new FakeWebSocketServer(
+        config.host,
+        config.port,
+        `/${config.authToken}`,
+        (port) => child.emitStdout(`__PORT__${port}\n`),
+        (message, connectedServer) => connectedServer.sendJson({
+          type: "audio_chunk",
+          requestId: message.requestId,
+          index: 0,
+          total: 1,
+          sampleRate: 24_000,
+          sampleCount: 3,
+          silenceAfterSamples: 0,
+        }),
+      );
+      child.onKill = () => server.close();
+      children.push(child);
+      servers.push(server);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      connectTimeoutMs: 5_000,
+      maxRequestAudioBytes: 8,
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "too much audio" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/8-byte request limit/i);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("preflights the serialized UTF-8 request against the Rust text-frame limit", async () => {
+    const children: FakeChild[] = [];
+    const servers: FakeWebSocketServer[] = [];
+    const spawn = vi.fn((_model: TestModel, config: WebSocketWorkerSpawnRuntimeConfig) => {
+      const child = new FakeChild();
+      const server = new FakeWebSocketServer(
+        config.host,
+        config.port,
+        `/${config.authToken}`,
+        (port) => child.emitStdout(`__PORT__${port}\n`),
+      );
+      child.onKill = () => server.close();
+      children.push(child);
+      servers.push(server);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({
+      spawn,
+      idleEvictMs: 60_000,
+      connectTimeoutMs: 5_000,
+      maxRequestTextBytes: 64,
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "\u0000".repeat(100) },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/64-byte WebSocket text limit/i);
     expect(children[0].killed).toBe(true);
     servers[0].close();
   });
@@ -1077,6 +1308,61 @@ describe("createWebSocketBridgeWorkerPool", () => {
       spawnConfig: SPAWN_CONFIG,
     })).rejects.toThrow(/request id/i);
     expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("rejects malformed failure envelopes and kills the worker", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      server.sendJson({ type: "result", requestId: message.requestId, ok: false });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/malformed failure envelope/i);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("preserves application errors and reuses the healthy worker", async () => {
+    let requestCount = 0;
+    const { pool, children, servers, spawn } = makePool((message, server) => {
+      requestCount += 1;
+      if (requestCount === 1) {
+        server.sendJson({
+          type: "result",
+          requestId: message.requestId,
+          ok: false,
+          error: "Invalid model payload.",
+        });
+        return;
+      }
+      sendAudioChunk(server, message.requestId);
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: { audioChunkCount: 1, sampleRate: 24_000 },
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "bad" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow("Invalid model payload.");
+    expect(children[0].killed).toBe(false);
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r2",
+      payload: { text: "good" },
+      spawnConfig: SPAWN_CONFIG,
+    })).resolves.toMatchObject({ response: { ok: true } });
+    expect(spawn).toHaveBeenCalledTimes(1);
     servers[0].close();
   });
 

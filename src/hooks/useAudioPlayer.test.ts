@@ -25,6 +25,7 @@ class MockAudioBufferSourceNode {
   public playbackRate = { value: 1 };
   public onended: (() => void) | null = null;
   public startedWith: Array<number | undefined> | null = null;
+  public stopped = false;
 
   connect(): void {}
 
@@ -34,12 +35,15 @@ class MockAudioBufferSourceNode {
     this.startedWith = [when, offset];
   }
 
-  stop(): void {}
+  stop(): void {
+    this.stopped = true;
+  }
 }
 
 class MockAudioContext {
   static instances: MockAudioContext[] = [];
   static resumeError: Error | null = null;
+  static resumeGate: Promise<void> | null = null;
 
   public currentTime = 0;
   public state: "running" | "suspended" | "closed" = "suspended";
@@ -49,6 +53,7 @@ class MockAudioContext {
     if (MockAudioContext.resumeError) {
       throw MockAudioContext.resumeError;
     }
+    if (MockAudioContext.resumeGate) await MockAudioContext.resumeGate;
     this.state = "running";
   });
   public readonly suspend = vi.fn(async () => {
@@ -94,6 +99,7 @@ describe("useAudioPlayer", () => {
     animationFrameCallbacks = [];
     MockAudioContext.instances = [];
     MockAudioContext.resumeError = null;
+    MockAudioContext.resumeGate = null;
     vi.stubGlobal("AudioContext", MockAudioContext as unknown as typeof AudioContext);
     vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => {
       animationFrameCallbacks.push(callback);
@@ -107,6 +113,7 @@ describe("useAudioPlayer", () => {
     vi.unstubAllGlobals();
     MockAudioContext.instances = [];
     MockAudioContext.resumeError = null;
+    MockAudioContext.resumeGate = null;
   });
 
   it("does not resume playback when paused and new chunks keep streaming", async () => {
@@ -151,6 +158,24 @@ describe("useAudioPlayer", () => {
     expect(result.current.totalDuration).toBe(950);
     expect(result.current.segments[0]?.startSec).toBe(0);
     expect(result.current.segments[1]?.startSec).toBe(500);
+  });
+
+  it("can roll back streamed chunks to a section checkpoint", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Completed", 4, 4));
+      await result.current.scheduleChunk(makeChunk("Failed partial A", 4, 4));
+      await result.current.scheduleChunk(makeChunk("Failed partial B", 4, 4));
+    });
+    expect(result.current.getAudioChunkCount()).toBe(3);
+
+    act(() => result.current.truncateAudioChunks(1));
+
+    expect(result.current.getAudioChunkCount()).toBe(1);
+    expect(result.current.totalDuration).toBe(1);
+    expect(result.current.segments).toHaveLength(1);
+    expect(result.current.segments[0]?.text).toBe("Completed");
   });
 
   it("serializes and restores cached PCM with timeline metadata and resume position", async () => {
@@ -378,6 +403,80 @@ describe("useAudioPlayer", () => {
     expect(result.current.isPlaying).toBe(false);
     expect(result.current.error).toContain("Audio playback was blocked");
     expect(MockAudioContext.instances[0].resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not revive playback when Stop wins a pending AudioContext resume", async () => {
+    let releaseResume = () => {};
+    MockAudioContext.resumeGate = new Promise<void>((resolve) => {
+      releaseResume = resolve;
+    });
+    const { result } = renderHook(() => useAudioPlayer());
+    let pendingSchedule: Promise<void> | undefined;
+
+    act(() => {
+      pendingSchedule = result.current.scheduleChunk(makeChunk("Pending", 4, 4));
+    });
+    const ctx = MockAudioContext.instances[0];
+    expect(ctx.createdSources).toHaveLength(1);
+
+    act(() => {
+      result.current.stopAll();
+    });
+    releaseResume();
+    await act(async () => {
+      await pendingSchedule;
+    });
+
+    expect(result.current.isPlaying).toBe(false);
+    expect(result.current.currentTime).toBe(0);
+    expect(ctx.createdSources[0]?.stopped).toBe(true);
+  });
+
+  it("replaces every transport chunk in a semantic segment and preserves the later position", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    const firstSection = {
+      text: "First section",
+      index: 1,
+      total: 2,
+      textStart: 0,
+      textEnd: 13,
+    };
+
+    await act(async () => {
+      await result.current.scheduleChunk({ ...makeChunk("First section", 10, 10), ...firstSection });
+      await result.current.scheduleChunk({ ...makeChunk("First section", 10, 10), ...firstSection });
+      await result.current.scheduleChunk({
+        ...makeChunk("Second section", 10, 10),
+        index: 2,
+        total: 2,
+        textStart: 13,
+        textEnd: 27,
+      });
+      await result.current.togglePlay();
+    });
+    flushNextAnimationFrame();
+
+    await act(async () => {
+      result.current.seekTo(2.5);
+      await Promise.resolve();
+    });
+    act(() => {
+      result.current.replaceSegment("segment-1", {
+        ...makeChunk("First retake", 10, 10),
+        index: 1,
+        total: 2,
+        textStart: 0,
+        textEnd: 13,
+      });
+    });
+
+    expect(result.current.totalDuration).toBe(2);
+    expect(result.current.currentTime).toBeCloseTo(1.5, 6);
+    expect(result.current.segments).toEqual([
+      expect.objectContaining({ id: "segment-1", text: "First retake", startSec: 0, endSec: 1 }),
+      expect.objectContaining({ id: "segment-2", text: "Second section", startSec: 1, endSec: 2 }),
+    ]);
+    expect(result.current.getAudioCacheSnapshot()).toHaveLength(2);
   });
 
   it("restarts from the beginning when toggled at the end", async () => {

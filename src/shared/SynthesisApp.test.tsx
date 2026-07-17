@@ -86,6 +86,8 @@ const mock = vi.hoisted(() => {
       download: vi.fn(async () => {}),
       downloadCaptions: vi.fn(),
       replaceSegment: vi.fn(),
+      getAudioChunkCount: vi.fn(() => 0),
+      truncateAudioChunks: vi.fn(),
       getAudioCacheSnapshot: vi.fn(() => []),
       restoreAudioCache: vi.fn(),
       beginStream: vi.fn(),
@@ -489,6 +491,8 @@ function resetMockState() {
     jumpToSegment: vi.fn(),
     download: vi.fn(async () => {}),
     downloadCaptions: vi.fn(),
+    getAudioChunkCount: vi.fn(() => 0),
+    truncateAudioChunks: vi.fn(),
     getAudioCacheSnapshot: vi.fn(() => []),
     restoreAudioCache: vi.fn(),
     beginStream: vi.fn(),
@@ -691,6 +695,8 @@ describe("SynthesisApp", () => {
 
     mock.generation.isGenerationBusy = true;
     rerender(<WebApp />);
+    fireEvent.keyDown(document, { key: " ", code: "Space" });
+    expect(mock.player.togglePlay).toHaveBeenCalledTimes(1);
     fireEvent.keyDown(document, { key: ".", metaKey: true });
     expect(mock.generation.handleStop).toHaveBeenCalledTimes(1);
   });
@@ -790,6 +796,10 @@ describe("SynthesisApp", () => {
 
     const view = render(<WebApp />);
     await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1));
+    expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ currentTime: 0 }),
+    );
 
     mock.readerLibrary.activeDocument = {
       ...document,
@@ -801,11 +811,56 @@ describe("SynthesisApp", () => {
     expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1);
   });
 
+  it("does not overwrite Reader progress while cached audio restore is pending", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const baseDocument = createReaderDocument({
+      id: "pending-reader",
+      text: "Reader progress must survive an asynchronous cache lookup.",
+    });
+    const document: ReaderDocumentRecord = {
+      ...baseDocument,
+      progress: {
+        positionSec: 3,
+        totalDurationSec: 8,
+        textOffset: 20,
+        chapterId: baseDocument.chapters[0]?.id ?? null,
+        percent: 37.5,
+        updatedAt: Date.now(),
+      },
+    };
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    let resolveLoad: ((cache: CachedReaderAudio | null) => void) | undefined;
+    mock.readerLibrary.loadAudio.mockReturnValue(new Promise((resolve) => {
+      resolveLoad = resolve;
+    }));
+
+    render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id));
+    await Promise.resolve();
+
+    expect(mock.readerLibrary.updateProgress).not.toHaveBeenCalled();
+    act(() => resolveLoad?.(null));
+    await Promise.resolve();
+    expect(mock.readerLibrary.updateProgress).not.toHaveBeenCalled();
+  });
+
   it("hides optional navigation pages without removing inline Qwen from Studio", () => {
     Object.defineProperty(window, "electron", {
       value: {
         isElectron: true,
         platform: "darwin",
+        arch: "arm64",
         localTts: mock.localTts,
       },
       configurable: true,
@@ -866,6 +921,7 @@ describe("SynthesisApp", () => {
       value: {
         isElectron: true,
         platform: "darwin",
+        arch: "arm64",
         localTts: mock.localTts,
       },
       configurable: true,
@@ -969,6 +1025,7 @@ describe("SynthesisApp", () => {
       value: {
         isElectron: true,
         platform: "darwin",
+        arch: "arm64",
         documents: { importDocument },
         localTts: mock.localTts,
       },
@@ -1025,6 +1082,7 @@ describe("SynthesisApp", () => {
       value: {
         isElectron: true,
         platform: "darwin",
+        arch: "arm64",
         documents: { importDocument },
         localTts: mock.localTts,
       },
@@ -1049,6 +1107,7 @@ describe("SynthesisApp", () => {
       value: {
         isElectron: true,
         platform: "darwin",
+        arch: "arm64",
         documents: { importDocument },
         localTts: mock.localTts,
       },
@@ -1083,6 +1142,7 @@ describe("SynthesisApp", () => {
       value: {
         isElectron: true,
         platform: "darwin",
+        arch: "arm64",
         localTts: mock.localTts,
       },
       configurable: true,
@@ -1127,6 +1187,10 @@ describe("SynthesisApp", () => {
 
   it("renders local runtime routes", () => {
     showOptionalDesktopModels();
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "neutts",
@@ -1150,6 +1214,10 @@ describe("SynthesisApp", () => {
 
   it("preserves local runtime tab DOM state when switching tabs", () => {
     showOptionalDesktopModels();
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "neutts",

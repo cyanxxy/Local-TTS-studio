@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildQwen3TextUnits, QWEN3_UNIT_MAX_CHARS } from "./qwenChunking";
+import {
+  MAX_LOCAL_TTS_TEXT_LENGTH,
+  countUnicodeScalars,
+} from "../../electron/localTtsLimits";
+import {
+  buildQwen3RequestSections,
+  buildQwen3TextUnits,
+  QWEN3_UNIT_MAX_CHARS,
+} from "./qwenChunking";
 
 describe("buildQwen3TextUnits", () => {
   it("mirrors Rust boundaries and preserves exact source ranges", () => {
@@ -44,5 +52,33 @@ describe("buildQwen3TextUnits", () => {
     expect(units.at(-1)?.end).toBe(text.indexOf(text.trim()) + text.trim().length);
     expect(units.every((unit) => text.slice(unit.start, unit.end) === unit.text)).toBe(true);
     expect(units.every((unit) => Array.from(unit.text).length <= QWEN3_UNIT_MAX_CHARS)).toBe(true);
+  });
+
+  it("groups a long Reader document into ordered IPC-safe requests", () => {
+    const text = `  ${`${"Narrate this Reader sentence naturally. ".repeat(12)}\n`.repeat(45)}  `;
+    const sections = buildQwen3RequestSections(text);
+    const units = buildQwen3TextUnits(text);
+
+    expect(text.trim().length).toBeGreaterThan(MAX_LOCAL_TTS_TEXT_LENGTH * 2);
+    expect(sections.length).toBeGreaterThan(2);
+    expect(sections.map((section) => section.text).join("")).toBe(text.trim());
+    expect(sections.every((section) => (
+      countUnicodeScalars(section.text) <= MAX_LOCAL_TTS_TEXT_LENGTH
+    ))).toBe(true);
+    expect(sections[0].start).toBe(text.indexOf(text.trim()));
+    expect(sections.at(-1)?.end).toBe(text.indexOf(text.trim()) + text.trim().length);
+    expect(sections.flatMap((section) => units.slice(section.unitStart, section.unitEnd))).toEqual(units);
+  });
+
+  it("groups astral Unicode text by Rust-compatible scalar counts", () => {
+    const text = `  ${`${"🙂".repeat(399)}. `.repeat(35)}  `;
+    const sections = buildQwen3RequestSections(text);
+
+    expect(countUnicodeScalars(text.trim())).toBeGreaterThan(MAX_LOCAL_TTS_TEXT_LENGTH * 2);
+    expect(sections.length).toBeGreaterThan(2);
+    expect(sections.map((section) => section.text).join("")).toBe(text.trim());
+    expect(sections.every((section) => (
+      countUnicodeScalars(section.text) <= MAX_LOCAL_TTS_TEXT_LENGTH
+    ))).toBe(true);
   });
 });

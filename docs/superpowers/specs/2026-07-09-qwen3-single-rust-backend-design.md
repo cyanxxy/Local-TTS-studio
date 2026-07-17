@@ -1,5 +1,7 @@
 # Qwen3 Single Rust Backend Design
 
+> **Historical proposal (2026-07-09).** This document records the migration design and may retain pre-implementation names, versions, commands, or acceptance criteria. For the implemented architecture and current operational limits, use [Desktop local runtimes](../../local-runtimes.md) and [Architecture](../../architecture.md).
+
 ## Summary
 
 Replace the current Qwen3 implementation—which combines an in-process Candle path with three nested MLX subprocess paths—with one Electron-facing Rust backend. `open-tts-local-bridge` remains the only process and protocol endpoint used by Electron. It integrates `badlogic/qwen3_tts_rs` revision `288a716ce38a91c826dd67968c75d1dd4b0f07bc` **in-process** via the real working surface `qwen3_tts_rs::inference::TTSInference` (not the high-level `Qwen3TTSModel` stubs) and compiles that library with the fastest platform provider:

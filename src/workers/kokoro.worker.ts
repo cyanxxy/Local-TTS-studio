@@ -8,17 +8,25 @@
 
 import type { KokoroTTS as KokoroTTSInstance } from "kokoro-js";
 import type { InferenceBackend, PronunciationRule, WorkerInMessage, WorkerOutMessage } from "../types";
-import { KOKORO_FALLBACK_VOICES } from "../constants";
+import {
+  KOKORO_FALLBACK_VOICES,
+  KOKORO_MODEL_ID,
+  KOKORO_MODEL_REVISION,
+} from "../constants";
 import { concatFloat32Arrays, createSilence } from "../lib/audio";
 import { normalizeRawAudioOutput } from "../lib/audioOutput";
 import { buildKokoroInferenceUnits, getKokoroMaxInferenceChars } from "../lib/chunking";
 import { KOKORO_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { configureKokoroOnnxRuntime } from "../lib/onnxRuntime";
 import { resolvePauseSeconds, resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
+import {
+  createRevisionPinnedFetch,
+  ensureRevisionScopedCache,
+  ensureRevisionScopedCacheEntries,
+} from "../lib/pinnedModelFetch";
 import { resolveKokoroVoice } from "../lib/voices";
 import { canInitializeWebGPU } from "../lib/webgpu";
 
-const MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 type KokoroDtype = "fp32" | "fp16" | "q8";
 
 const BACKEND_CONFIG: ReadonlyArray<{ backend: InferenceBackend; dtype: KokoroDtype }> = [
@@ -29,6 +37,10 @@ const KOKORO_LOAD_TIMEOUT_MS = 120_000;
 const KOKORO_MAX_WASM_THREADS = 4;
 const SPEED_MIN_SAFE = 0.85;
 const SPEED_MAX_SAFE = 1.15;
+const KOKORO_VOICE_CACHE_NAME = "kokoro-voices";
+const KOKORO_VOICE_CACHE_REVISION_MARKER = `https://huggingface.co/${KOKORO_MODEL_ID}/open-tts-cache-revision`;
+const KOKORO_TRANSFORMERS_CACHE_NAME = "transformers-cache";
+const KOKORO_TRANSFORMERS_CACHE_REVISION_MARKER = `https://huggingface.co/${KOKORO_MODEL_ID}/open-tts-transformers-cache-revision`;
 
 type KokoroModule = typeof import("kokoro-js");
 
@@ -37,6 +49,15 @@ let voices: string[] = [];
 let activeBackend: InferenceBackend | null = null;
 let kokoroModulePromise: Promise<KokoroModule> | null = null;
 let activeGenerationEpoch = 0;
+
+const workerScope = self as typeof self & { fetch?: typeof fetch };
+if (typeof workerScope.fetch === "function") {
+  workerScope.fetch = createRevisionPinnedFetch(
+    workerScope.fetch.bind(workerScope),
+    KOKORO_MODEL_ID,
+    KOKORO_MODEL_REVISION,
+  );
+}
 
 interface KokoroChunkUnit {
   text: string;
@@ -65,6 +86,33 @@ async function loadKokoroModule(): Promise<KokoroModule> {
     kokoroModulePromise = import("kokoro-js");
   }
   return kokoroModulePromise;
+}
+
+async function pinKokoroTransformersRevision(): Promise<void> {
+  const { env } = await import("@huggingface/transformers");
+  env.remoteHost = "https://huggingface.co";
+  // kokoro-js 1.2.1 does not forward a `revision` option to its model and
+  // tokenizer loaders. Pin the worker-local Transformers.js path template
+  // directly; the fetch wrapper above separately covers kokoro-js's hardcoded
+  // voice URLs.
+  env.remotePathTemplate = `/{model}/resolve/${KOKORO_MODEL_REVISION}/`;
+}
+
+async function ensureKokoroCacheRevisions(): Promise<void> {
+  if (typeof caches === "undefined") return;
+  await ensureRevisionScopedCache(
+    caches,
+    KOKORO_VOICE_CACHE_NAME,
+    KOKORO_VOICE_CACHE_REVISION_MARKER,
+    KOKORO_MODEL_REVISION,
+  );
+  await ensureRevisionScopedCacheEntries(
+    caches,
+    KOKORO_TRANSFORMERS_CACHE_NAME,
+    KOKORO_TRANSFORMERS_CACHE_REVISION_MARKER,
+    KOKORO_MODEL_REVISION,
+    (url) => url.includes(KOKORO_MODEL_ID) || url.includes(encodeURIComponent(KOKORO_MODEL_ID)),
+  );
 }
 
 function post(msg: WorkerOutMessage) {
@@ -162,6 +210,8 @@ async function loadModel(forceReload: boolean = false) {
 
   try {
     post({ type: "LOAD_PROGRESS", percent: 0 });
+    await ensureKokoroCacheRevisions();
+    await pinKokoroTransformersRevision();
     const kokoroModule = await loadKokoroModule();
     const { KokoroTTS } = kokoroModule;
     let lastError: unknown = null;
@@ -178,7 +228,7 @@ async function loadModel(forceReload: boolean = false) {
           throw new Error("WebGPU device initialization failed.");
         }
         candidate = await withTimeout(
-          KokoroTTS.from_pretrained(MODEL_ID, {
+          KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
             dtype,
             device: backend,
             progress_callback: (info: Record<string, unknown>) => {

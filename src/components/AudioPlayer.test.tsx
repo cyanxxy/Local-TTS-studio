@@ -255,4 +255,37 @@ describe("AudioPlayer", () => {
     expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuenow", "100");
     expect(screen.getByText("3 sections")).toBeInTheDocument();
   });
+
+  it("carries rounded seconds into the next minute", () => {
+    renderPlayer({
+      currentTime: 59.96,
+      totalDuration: 120,
+      segmentCount: 1,
+    });
+
+    expect(screen.getByText("1:00.0")).toBeInTheDocument();
+    expect(screen.queryByText("0:60.0")).not.toBeInTheDocument();
+  });
+
+  it("seeks safely when a temporarily hidden slider has no width", () => {
+    const onSeek = vi.fn();
+    renderPlayer({ totalDuration: 10, segmentCount: 1, onSeek });
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    slider.getBoundingClientRect = vi.fn(() => ({
+      left: 0,
+      width: 0,
+      top: 0,
+      right: 0,
+      bottom: 0,
+      height: 0,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    }));
+    slider.setPointerCapture = vi.fn();
+
+    fireEvent.pointerDown(slider, { pointerId: 1, clientX: 20 });
+
+    expect(onSeek).toHaveBeenCalledWith(0);
+  });
 });

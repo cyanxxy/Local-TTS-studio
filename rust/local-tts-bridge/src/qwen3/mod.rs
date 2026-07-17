@@ -2,12 +2,12 @@ mod config;
 mod model_files;
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 mod reference;
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 mod runtime;
 mod text;
@@ -18,11 +18,11 @@ pub(super) use config::GenerationControls;
 pub(super) use model_files::ExpectedModelType;
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 pub(super) use runtime::{
-    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneRequest,
-    resolved_provider,
+    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneReference,
+    VoiceCloneRequest, resolved_runtime_target,
 };
 
 #[cfg(test)]

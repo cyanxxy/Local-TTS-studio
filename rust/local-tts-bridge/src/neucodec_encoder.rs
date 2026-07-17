@@ -16,19 +16,19 @@ use anyhow::{Context, Result, bail};
 use rten::Model;
 use rten_tensor::NdTensor;
 use rten_tensor::prelude::*;
+use sha2::{Digest, Sha256};
 
-const ENCODER_MODEL_URL: &str =
-    "https://huggingface.co/ragtag-ai/neucodec-encoder-rten/resolve/main/neucodec_encoder_v2.rten";
+const ENCODER_MODEL_REVISION: &str = "836c82069dba26eaab204a2df951b19facf777e1";
+const ENCODER_MODEL_URL: &str = "https://huggingface.co/ragtag-ai/neucodec-encoder-rten/resolve/836c82069dba26eaab204a2df951b19facf777e1/neucodec_encoder_v2.rten";
 const ENCODER_MODEL_FILENAME: &str = "neucodec_encoder_v2.rten";
+const ENCODER_MODEL_BYTES: u64 = 1_772_018_304;
+const ENCODER_MODEL_SHA256: &str =
+    "155574ffc88ca5f86f0f0849ac2f75ce9b197fc205598698eb5b366081e68d7c";
 /// The exported graph takes a fixed 20-second window at 16 kHz; shorter
 /// references are zero-padded and the resulting code tail is trimmed.
 pub const ENCODER_WINDOW_SAMPLES: usize = neutts::ENCODER_SAMPLE_RATE as usize * 20;
 /// Below ~0.5 s there is not enough voice signal to clone from.
 pub const MIN_REFERENCE_SAMPLES: usize = neutts::ENCODER_SAMPLE_RATE as usize / 2;
-/// The published fp32 export is ~1.77 GB; anything far below that is a
-/// truncated download left over from an interrupted run.
-const MIN_VALID_MODEL_BYTES: u64 = 1_500_000_000;
-
 pub struct NeuCodecRtenEncoder {
     model: Model,
 }
@@ -98,10 +98,17 @@ fn ensure_model_file(cache_dir: &Path, progress: &mut dyn FnMut(String)) -> Resu
     fs::create_dir_all(&dir)
         .with_context(|| format!("Failed to create encoder cache dir {}", dir.display()))?;
     let path = dir.join(ENCODER_MODEL_FILENAME);
-    if let Ok(metadata) = fs::metadata(&path)
-        && metadata.len() >= MIN_VALID_MODEL_BYTES
-    {
-        return Ok(path);
+    if path.exists() {
+        progress(format!(
+            "Verifying cached NeuCodec encoder revision {ENCODER_MODEL_REVISION}..."
+        ));
+        if verify_model_file(&path, ENCODER_MODEL_BYTES, ENCODER_MODEL_SHA256).is_ok() {
+            return Ok(path);
+        }
+        progress(
+            "Cached NeuCodec encoder failed integrity verification; downloading a pinned copy."
+                .to_string(),
+        );
     }
 
     progress("Downloading NeuCodec encoder (~1.8 GB, one-time)...".to_string());
@@ -111,16 +118,33 @@ fn ensure_model_file(cache_dir: &Path, progress: &mut dyn FnMut(String)) -> Resu
     let total_bytes = response
         .header("content-length")
         .and_then(|value| value.parse::<u64>().ok());
+    if total_bytes.is_some_and(|size| size != ENCODER_MODEL_BYTES) {
+        bail!(
+            "NeuCodec encoder response reported an unexpected size (expected {ENCODER_MODEL_BYTES} bytes)."
+        );
+    }
 
     let temp_path = dir.join(format!(
         "{ENCODER_MODEL_FILENAME}.tmp-{}",
         std::process::id()
     ));
-    let result = stream_to_file(response.into_reader(), &temp_path, total_bytes, progress);
+    let result = stream_to_file(
+        response.into_reader(),
+        &temp_path,
+        total_bytes,
+        ENCODER_MODEL_BYTES,
+        ENCODER_MODEL_SHA256,
+        progress,
+    );
     if result.is_err() {
         let _ = fs::remove_file(&temp_path);
     }
     result?;
+    if path.exists() {
+        fs::remove_file(&path).with_context(|| {
+            format!("Failed to replace invalid encoder model {}", path.display())
+        })?;
+    }
     fs::rename(&temp_path, &path).with_context(|| {
         format!(
             "Failed to move downloaded encoder model into place at {}",
@@ -134,6 +158,8 @@ fn stream_to_file(
     mut reader: impl Read,
     path: &Path,
     total_bytes: Option<u64>,
+    expected_bytes: u64,
+    expected_sha256: &str,
     progress: &mut dyn FnMut(String),
 ) -> Result<()> {
     let mut file =
@@ -141,6 +167,7 @@ fn stream_to_file(
     let mut buffer = vec![0u8; 1 << 20];
     let mut written: u64 = 0;
     let mut next_report: u64 = 0;
+    let mut hasher = Sha256::new();
     loop {
         let read = reader
             .read(&mut buffer)
@@ -150,6 +177,7 @@ fn stream_to_file(
         }
         file.write_all(&buffer[..read])
             .with_context(|| format!("Failed writing {}", path.display()))?;
+        hasher.update(&buffer[..read]);
         written += read as u64;
         if written >= next_report {
             let progress_text = match total_bytes {
@@ -164,12 +192,68 @@ fn stream_to_file(
             next_report = written + 100_000_000;
         }
     }
-    if let Some(total) = total_bytes
-        && written != total
-    {
-        bail!("NeuCodec encoder download is incomplete ({written} of {total} bytes).");
+    if written != expected_bytes {
+        bail!(
+            "NeuCodec encoder download has the wrong size ({written} of {expected_bytes} expected bytes)."
+        );
     }
-    file.flush()
-        .with_context(|| format!("Failed flushing {}", path.display()))?;
+    let digest = format!("{:x}", hasher.finalize());
+    if digest != expected_sha256 {
+        bail!("NeuCodec encoder download failed SHA-256 verification.");
+    }
+    file.sync_all()
+        .with_context(|| format!("Failed syncing {}", path.display()))?;
     Ok(())
+}
+
+fn verify_model_file(path: &Path, expected_bytes: u64, expected_sha256: &str) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("Failed reading metadata for {}", path.display()))?;
+    if metadata.len() != expected_bytes {
+        bail!("NeuCodec encoder cache has an unexpected size.");
+    }
+    let mut file =
+        fs::File::open(path).with_context(|| format!("Failed opening {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed reading {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    if digest != expected_sha256 {
+        bail!("NeuCodec encoder cache failed SHA-256 verification.");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn downloaded_encoder_must_match_expected_size_and_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("encoder.rten");
+        let expected_sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let mut progress = |_message: String| {};
+
+        stream_to_file(
+            std::io::Cursor::new(b"abc"),
+            &path,
+            Some(3),
+            3,
+            expected_sha256,
+            &mut progress,
+        )
+        .unwrap();
+        verify_model_file(&path, 3, expected_sha256).unwrap();
+        assert!(verify_model_file(&path, 4, expected_sha256).is_err());
+        assert!(verify_model_file(&path, 3, &"0".repeat(64)).is_err());
+    }
 }

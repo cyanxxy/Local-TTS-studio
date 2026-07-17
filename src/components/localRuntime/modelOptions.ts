@@ -31,12 +31,12 @@ export const QWEN3_LANGUAGE_OPTIONS: LocalRuntimeOption[] = QWEN3_LANGUAGES.map(
   label: language,
 }));
 
-export function getDefaultQwen3Model(platform: string | undefined): string {
-  return getDefaultQwen3Profile(platform).repo;
+export function getDefaultQwen3Model(platform: string | undefined, arch: string | undefined): string {
+  return getDefaultQwen3Profile(platform, arch).repo;
 }
 
-export function getQwen3Options(platform: string | undefined): LocalRuntimeOption[] {
-  return getQwen3Profiles(platform).map((profile) => ({ value: profile.repo, label: profile.label }));
+export function getQwen3Options(platform: string | undefined, arch: string | undefined): LocalRuntimeOption[] {
+  return getQwen3Profiles(platform, arch).map((profile) => ({ value: profile.repo, label: profile.label }));
 }
 
 export function qwen3UsesVoiceClone(model: string): boolean {

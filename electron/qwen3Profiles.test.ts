@@ -24,14 +24,18 @@ describe("Qwen3 profiles", () => {
   });
 
   it("selects MLX profiles on macOS and LibTorch profiles on Windows", () => {
-    expect(getQwen3Profiles("darwin")).toHaveLength(4);
-    expect(getQwen3Profiles("darwin").every((profile) => profile.provider === "mlx")).toBe(true);
-    expect(getQwen3Profiles("win32")).toHaveLength(4);
-    expect(getQwen3Profiles("win32").every((profile) => profile.provider === "libtorch")).toBe(true);
-    expect(getDefaultQwen3Profile("darwin").repo).toBe(
+    expect(getQwen3Profiles("darwin", "arm64")).toHaveLength(4);
+    expect(getQwen3Profiles("darwin", "arm64").every((profile) => profile.provider === "mlx")).toBe(true);
+    expect(getQwen3Profiles("darwin", "x64")).toHaveLength(0);
+    expect(getQwen3Profiles("win32", "x64")).toHaveLength(4);
+    expect(getQwen3Profiles("win32", "x64").every((profile) => profile.provider === "libtorch")).toBe(true);
+    expect(getQwen3Profiles("win32", "arm64")).toHaveLength(0);
+    expect(getQwen3Profiles("linux", "x64")).toHaveLength(0);
+    expect(getDefaultQwen3Profile("darwin", "arm64").repo).toBe(
       "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
     );
-    expect(getDefaultQwen3Profile("win32").repo).toBe("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice");
+    expect(getDefaultQwen3Profile("win32", "x64").repo).toBe("Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice");
+    expect(() => getDefaultQwen3Profile("darwin", "x64")).toThrow("darwin/x64");
   });
 
   it("exposes the complete official language and speaker choices", () => {

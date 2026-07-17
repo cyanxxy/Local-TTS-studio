@@ -29,6 +29,9 @@ const nativeLibraryPattern = process.platform === "win32"
 if (!fs.existsSync(manifestPath)) {
   throw new Error(`Rust bridge manifest not found at ${manifestPath}`);
 }
+if (process.platform === "win32" && process.arch !== "x64") {
+  throw new Error(`Windows desktop packaging supports x64 only (received ${process.arch}).`);
+}
 
 execFileSync("cargo", ["build", "--release", "--manifest-path", manifestPath], {
   cwd: rootDir,
@@ -102,7 +105,7 @@ if (process.platform !== "win32") {
 }
 
 if (process.platform === "darwin") {
-  copyMlxMetallib();
+  if (process.arch === "arm64") copyMlxMetallib();
   makeSelfContainedDarwin(outDir, copiedBinaryPath);
   makeSelfContainedDarwin(outDir, copiedXetDownloaderPath);
 }
@@ -227,7 +230,7 @@ function makeSelfContainedDarwin(bundleDir, binaryPath) {
 
 const allowedArtifact = (name) => name === binaryName
   || name === xetDownloaderBinaryName
-  || (process.platform === "darwin" && name === "mlx.metallib")
+  || (process.platform === "darwin" && process.arch === "arm64" && name === "mlx.metallib")
   || /\.(?:dylib|dll)$/i.test(name)
   || /\.so(?:\.\d+)*$/i.test(name);
 const unexpectedArtifacts = fs.readdirSync(outDir).filter((name) => !allowedArtifact(name));

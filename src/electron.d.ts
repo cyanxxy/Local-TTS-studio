@@ -10,12 +10,17 @@ export interface LocalTtsProbeResult {
   recommendedModelRepo?: string | null;
   recommendedBaseModelRepo?: string | null;
   provider?: string;
+  device?: string;
+  accelerated?: boolean;
   upstreamRevision?: string;
 }
 
 export interface LocalTtsWarmResult {
   warmed: boolean;
   message?: string;
+  provider?: string;
+  device?: string;
+  accelerated?: boolean;
 }
 
 export interface LocalTtsGenerateResult {
@@ -120,18 +125,24 @@ interface DocumentsBridge {
 interface LocalTtsBridge {
   probe: (request: {
     model: LocalTtsModel;
-    requestId?: string;
+    requestId: string;
     payload?: Record<string, unknown>;
   }) => Promise<LocalTtsProbeResult>;
   generate: (request: {
     model: LocalTtsModel;
     requestId: string;
     payload?: Record<string, unknown>;
+    continuation?: {
+      jobId: string;
+      sectionIndex: number;
+      sectionCount: number;
+    };
   }) => Promise<LocalTtsGenerateResult>;
   warm?: (request: {
     model: LocalTtsModel;
     mode?: "customVoice" | "voiceClone";
     modelPath?: string;
+    modelRepo?: string;
   }) => Promise<LocalTtsWarmResult>;
   cancel: (request: {
     model: LocalTtsModel;
@@ -141,7 +152,11 @@ interface LocalTtsBridge {
   clearCache: (request: { model: LocalTtsModel }) => Promise<{ path: string; cleared: boolean }>;
   getQwen3Setup: (request?: { modelRepo?: string }) => Promise<LocalTtsQwen3Setup>;
   downloadQwen3Model: (request: { modelRepo: string }) => Promise<LocalTtsQwen3DownloadResult>;
-  chooseQwen3ModelDir: () => Promise<{ path: string | null }>;
+  chooseQwen3ModelDir: (request: { modelRepo: string }) => Promise<{
+    path: string | null;
+    readiness?: "missing" | "structural" | "verified";
+    reason?: string;
+  }>;
   subscribeQwen3DownloadProgress: (
     listener: (event: LocalTtsQwen3DownloadProgress) => void,
   ) => () => void;
@@ -154,6 +169,7 @@ declare global {
     electron?: {
       isElectron: boolean;
       platform?: string;
+      arch?: string;
       documents?: DocumentsBridge;
       localTts?: LocalTtsBridge;
     };

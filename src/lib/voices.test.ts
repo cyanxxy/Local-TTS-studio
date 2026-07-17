@@ -16,5 +16,9 @@ describe("voices", () => {
 
     expect(voices).toContain("mutated");
     expect(KOKORO_FALLBACK_VOICES).not.toContain("mutated");
+    expect(KOKORO_FALLBACK_VOICES).toHaveLength(28);
+    expect(KOKORO_FALLBACK_VOICES).toEqual(expect.arrayContaining([
+      "am_puck", "am_santa", "bf_alice", "bf_lily",
+    ]));
   });
 });

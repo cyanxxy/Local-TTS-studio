@@ -1,13 +1,20 @@
 import type { CreatorPresetId, ExportAudioFormat, ExportSampleRate } from "./types";
 
+export const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+export const KOKORO_MODEL_REVISION = "1939ad2a8e416c0acfeecc08a694d14ef25f2231";
+export const SUPERTONIC_MODEL_ID = "onnx-community/Supertonic-TTS-2-ONNX";
+export const SUPERTONIC_MODEL_REVISION = "68d4d9420d0e0e51d14656e1ec5c9b091490b49e";
+
 export const MODELS = {
   kokoro: {
-    id: "onnx-community/Kokoro-82M-v1.0-ONNX",
+    id: KOKORO_MODEL_ID,
+    revision: KOKORO_MODEL_REVISION,
     label: "Kokoro",
     defaultVoice: "af_heart",
   },
   supertonic: {
-    id: "onnx-community/Supertonic-TTS-2-ONNX",
+    id: SUPERTONIC_MODEL_ID,
+    revision: SUPERTONIC_MODEL_REVISION,
     label: "Supertonic",
     defaultVoice: "Female",
     voices: [
@@ -20,14 +27,14 @@ export const MODELS = {
 export const KOKORO_FALLBACK_VOICES = [
   "af_heart", "af_alloy", "af_aoede", "af_bella", "af_jessica",
   "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-  "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx",
-  "bf_emma", "bf_isabella", "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+  "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa",
+  "bf_alice", "bf_emma", "bf_isabella", "bf_lily", "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
 ] as const;
 
 // Keep synthesis speed in a voice-stable range.
 export const SPEED_MIN = 0.85;
 export const SPEED_MAX = 1.15;
-export const SPEED_STEP = 0.05;
+export const SPEED_STEP = 0.01;
 export const SPEED_DEFAULT = 1.0;
 
 export const QUALITY_MIN = 1;

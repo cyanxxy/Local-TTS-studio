@@ -9,6 +9,8 @@ import { env, pipeline, TextToAudioPipeline } from "@huggingface/transformers";
 import type { RawAudio } from "@huggingface/transformers";
 import type { InferenceBackend, PronunciationRule, WorkerInMessage, WorkerOutMessage } from "../types";
 import {
+  SUPERTONIC_MODEL_ID,
+  SUPERTONIC_MODEL_REVISION,
   SUPERTONIC_INTER_CHUNK_SILENCE_SEC,
 } from "../constants";
 import { concatFloat32Arrays, createSilence } from "../lib/audio";
@@ -34,8 +36,6 @@ import {
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { configureTransformersOnnxRuntime } from "../lib/onnxRuntime";
 
-const MODEL_ID = "onnx-community/Supertonic-TTS-2-ONNX";
-const MODEL_REVISION = "68d4d9420d0e0e51d14656e1ec5c9b091490b49e";
 const BACKENDS: InferenceBackend[] = ["webgpu", "wasm"];
 const SPEED_MIN_SAFE = 0.85;
 const SPEED_MAX_SAFE = 1.15;
@@ -209,8 +209,8 @@ function resolveModelFileUrl(filename: string): string {
   return buildTransformersRemoteFileUrl({
     remoteHost: env.remoteHost,
     remotePathTemplate: env.remotePathTemplate,
-    modelId: MODEL_ID,
-    revision: MODEL_REVISION,
+    modelId: SUPERTONIC_MODEL_ID,
+    revision: SUPERTONIC_MODEL_REVISION,
     filename,
   });
 }
@@ -329,10 +329,10 @@ async function createPipelineWithFallback(
       if (backend === "webgpu" && !(await canInitializeWebGPU())) {
         throw new Error("WebGPU device initialization failed.");
       }
-      const instance = (await pipeline("text-to-speech", MODEL_ID, {
+      const instance = (await pipeline("text-to-speech", SUPERTONIC_MODEL_ID, {
         device: backend,
         // Model repo only ships fp32 weights — no fp16/q8 variants available.
-        revision: MODEL_REVISION,
+        revision: SUPERTONIC_MODEL_REVISION,
         progress_callback: (info: ProgressInfo) => updateProgress(progressState, info),
         session_options: debugProfiling ? { enableProfiling: true } : {},
       })) as TextToAudioPipeline;

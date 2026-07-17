@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CREATOR_PRESETS, MODELS, QUALITY_MAX, QUALITY_MIN } from "../constants";
 import {
+  analyzePronunciationLexicon,
   DEFAULT_TEXT,
   getCreatorPresetDefaults,
   getInitialAppState,
@@ -127,7 +128,7 @@ describe("appState", () => {
       preset: "custom",
       speed: 1.15,
       pauseCommaSec: 0,
-      pauseSentenceSec: 2,
+      pauseSentenceSec: 1.2,
       pauseParagraphSec: 0.5,
       pronunciationLexicon: "GIF => jif",
       exportFormat: "mp3",
@@ -171,6 +172,39 @@ describe("appState", () => {
       { from: "SQL", to: "sequel" },
       { from: "TTS", to: "tee tee ess" },
     ]);
+  });
+
+  it("reports invalid pronunciation lines while preserving valid rules", () => {
+    expect(analyzePronunciationLexicon(`
+      GIF => jif
+      this is not a rule
+      # ignored comment
+      = missing source
+      SQL=sequel
+    `)).toEqual({
+      rules: [
+        { from: "GIF", to: "jif" },
+        { from: "SQL", to: "sequel" },
+      ],
+      issues: [
+        { line: 3, value: "this is not a rule" },
+        { line: 5, value: "= missing source" },
+      ],
+    });
+  });
+
+  it("snaps persisted MP3 bitrates to values supported by the export control", () => {
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      preset: "custom",
+      exportBitrateKbps: 96,
+    }));
+    expect(getInitialCreatorState().exportBitrateKbps).toBe(128);
+
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      preset: "custom",
+      exportBitrateKbps: 275,
+    }));
+    expect(getInitialCreatorState().exportBitrateKbps).toBe(256);
   });
 
   it("persists app and creator state while tolerating storage failures", () => {

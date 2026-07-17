@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, ensure};
 use qwen3_tts_rs::audio_encoder::AudioEncoder;
@@ -10,7 +11,7 @@ use qwen3_tts_rs::tensor::{Device, Tensor};
 
 use super::config::{GenerationControls, normalize_language, normalize_speaker};
 use super::model_files::{ExpectedModelType, validate_model_dir};
-use super::reference::prepare_reference_wav;
+use super::reference::{DecodedReferenceWav, decode_reference_wav, prepare_decoded_reference_wav};
 use super::text::split_text_units;
 
 const CUSTOM_VOICE_UNIT_CHARS: usize = 400;
@@ -46,12 +47,25 @@ struct ReferenceFeatures {
     codes: Vec<Vec<i64>>,
 }
 
+#[derive(Clone)]
+struct PreparedReference {
+    features: ReferenceFeatures,
+    reference_text: String,
+    truncated: bool,
+}
+
+struct ReferenceCacheEntry {
+    identity: ReferenceCacheKey,
+    session_key: Option<String>,
+    prepared: PreparedReference,
+}
+
 struct NativeQwenHost {
     key: HostKey,
     inference: TTSInference,
     speaker_encoder: Option<SpeakerEncoder>,
     audio_encoder: Option<AudioEncoder>,
-    reference_cache: VecDeque<(ReferenceCacheKey, ReferenceFeatures)>,
+    reference_cache: VecDeque<ReferenceCacheEntry>,
 }
 
 impl NativeQwenHost {
@@ -92,13 +106,14 @@ impl NativeQwenHost {
 
     fn prepare_reference(
         &mut self,
-        wav_bytes: &[u8],
+        decoded: DecodedReferenceWav,
         transcript: &str,
         language: &str,
-    ) -> Result<ReferenceFeatures> {
+        session_key: Option<&str>,
+    ) -> Result<PreparedReference> {
         let sample_rate = self.inference.config().speaker_encoder_config.sample_rate;
         let prepared =
-            prepare_reference_wav(wav_bytes, sample_rate, REFERENCE_MAX_DURATION_SECONDS)?;
+            prepare_decoded_reference_wav(decoded, sample_rate, REFERENCE_MAX_DURATION_SECONDS)?;
         let key = ReferenceCacheKey {
             digest: prepared.digest,
             transcript: transcript.to_owned(),
@@ -107,15 +122,18 @@ impl NativeQwenHost {
         if let Some(index) = self
             .reference_cache
             .iter()
-            .position(|(cached_key, _)| cached_key == &key)
+            .position(|entry| entry.identity == key)
         {
-            let entry = self
+            let mut entry = self
                 .reference_cache
                 .remove(index)
                 .expect("cache index exists");
-            let features = entry.1.clone();
+            if let Some(session_key) = session_key {
+                entry.session_key = Some(session_key.to_owned());
+            }
+            let prepared = entry.prepared.clone();
             self.reference_cache.push_back(entry);
-            return Ok(features);
+            return Ok(prepared);
         }
 
         let speaker_encoder = self
@@ -126,19 +144,42 @@ impl NativeQwenHost {
             .audio_encoder
             .as_ref()
             .context("Qwen3 Base audio encoder was not loaded.")?;
-        let features = ReferenceFeatures {
-            speaker_embedding: speaker_encoder
-                .extract_embedding(&prepared.samples)
-                .context("Failed to extract Qwen3 reference speaker embedding.")?,
-            codes: audio_encoder
-                .encode(&prepared.samples)
-                .context("Failed to encode Qwen3 reference audio.")?,
+        let prepared_reference = PreparedReference {
+            features: ReferenceFeatures {
+                speaker_embedding: speaker_encoder
+                    .extract_embedding(&prepared.samples)
+                    .context("Failed to extract Qwen3 reference speaker embedding.")?,
+                codes: audio_encoder
+                    .encode(&prepared.samples)
+                    .context("Failed to encode Qwen3 reference audio.")?,
+            },
+            reference_text: transcript.to_owned(),
+            truncated: prepared.truncated,
         };
-        self.reference_cache.push_back((key, features.clone()));
+        self.reference_cache.push_back(ReferenceCacheEntry {
+            identity: key,
+            session_key: session_key.map(str::to_owned),
+            prepared: prepared_reference.clone(),
+        });
         while self.reference_cache.len() > REFERENCE_CACHE_ENTRIES {
             self.reference_cache.pop_front();
         }
-        Ok(features)
+        Ok(prepared_reference)
+    }
+
+    fn cached_reference(&mut self, session_key: &str) -> Result<PreparedReference> {
+        let index = self
+            .reference_cache
+            .iter()
+            .position(|entry| entry.session_key.as_deref() == Some(session_key))
+            .context("Qwen3 reference cache entry was not found; resend the reference WAV.")?;
+        let entry = self
+            .reference_cache
+            .remove(index)
+            .expect("cache index exists");
+        let prepared = entry.prepared.clone();
+        self.reference_cache.push_back(entry);
+        Ok(prepared)
     }
 }
 
@@ -213,22 +254,43 @@ impl Qwen3Runtime {
     pub fn generate_voice_clone(
         &mut self,
         model_path: &Path,
-        request: &VoiceCloneRequest<'_>,
+        request: VoiceCloneRequest<'_>,
         sink: &mut dyn AudioSink,
     ) -> Result<GenerationSummary> {
-        let language = normalize_language(request.language)?;
-        ensure!(
-            !request.text.trim().is_empty(),
-            "Qwen3 voice-clone text is empty."
-        );
-        ensure!(
-            !request.reference_text.trim().is_empty(),
-            "Qwen3 reference transcript is empty."
-        );
+        let VoiceCloneRequest {
+            text,
+            language,
+            reference,
+            controls,
+        } = request;
+        let language = normalize_language(language)?;
+        ensure!(!text.trim().is_empty(), "Qwen3 voice-clone text is empty.");
         let host = self.ensure_host(model_path, ExpectedModelType::Base)?;
-        sink.progress("reference_encoding", "Encoding Qwen3 voice reference.")?;
-        let reference =
-            host.prepare_reference(request.reference_wav, request.reference_text, &language)?;
+        let prepared = match reference {
+            VoiceCloneReference::Audio {
+                reference_wav,
+                reference_text,
+                session_key,
+            } => {
+                ensure!(
+                    !reference_text.trim().is_empty(),
+                    "Qwen3 reference transcript is empty."
+                );
+                sink.progress("reference_validation", "Validating Qwen3 voice reference.")?;
+                let decoded_reference =
+                    decode_reference_wav(&reference_wav, REFERENCE_MAX_DURATION_SECONDS)?;
+                drop(reference_wav);
+                sink.progress("reference_encoding", "Encoding Qwen3 voice reference.")?;
+                host.prepare_reference(decoded_reference, reference_text, &language, session_key)?
+            }
+            VoiceCloneReference::Cached { session_key } => {
+                sink.progress(
+                    "reference_cache",
+                    "Reusing the prepared Qwen3 voice reference.",
+                )?;
+                host.cached_reference(session_key)?
+            }
+        };
         sink.progress("inference", "Running Qwen3 voice-clone inference.")?;
 
         let mut sample_rate = None;
@@ -237,14 +299,14 @@ impl Qwen3Runtime {
         let mut sink_error = None;
         host.inference
             .generate_with_icl_streaming(
-                request.text,
-                request.reference_text,
-                &reference.codes,
-                &reference.speaker_embedding,
+                text,
+                &prepared.reference_text,
+                &prepared.features.codes,
+                &prepared.features.speaker_embedding,
                 &language,
-                request.controls.temperature,
-                request.controls.top_k,
-                request.controls.max_new_tokens,
+                controls.temperature,
+                controls.top_k,
+                controls.max_new_tokens,
                 VOICE_CLONE_STREAMING_CHUNK_SIZE,
                 |samples, current_sample_rate| {
                     let cleaned = match clean_audio(samples.to_vec()) {
@@ -286,6 +348,7 @@ impl Qwen3Runtime {
             sample_rate: sample_rate.unwrap_or_default(),
             sample_count,
             audio_chunk_count,
+            reference_truncated: prepared.truncated,
         })
     }
 }
@@ -296,46 +359,102 @@ impl Default for Qwen3Runtime {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct VoiceCloneRequest<'a> {
     pub text: &'a str,
     pub language: &'a str,
-    pub reference_wav: &'a [u8],
-    pub reference_text: &'a str,
+    pub reference: VoiceCloneReference<'a>,
     pub controls: GenerationControls,
 }
 
-pub fn resolved_provider() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    {
-        "mlx"
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if tch::Cuda::is_available() {
-            "cuda"
-        } else {
-            "cpu"
-        }
+#[derive(Debug)]
+pub enum VoiceCloneReference<'a> {
+    Audio {
+        reference_wav: Vec<u8>,
+        reference_text: &'a str,
+        session_key: Option<&'a str>,
+    },
+    Cached {
+        session_key: &'a str,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompiledProvider {
+    #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+    Mlx,
+    #[cfg(any(all(target_os = "windows", target_arch = "x86_64"), test))]
+    LibTorch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeTarget {
+    pub provider: &'static str,
+    pub device: &'static str,
+    pub accelerated: bool,
+    tensor_device: Device,
+}
+
+fn select_runtime_target(provider: CompiledProvider, accelerator_available: bool) -> RuntimeTarget {
+    match (provider, accelerator_available) {
+        #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+        (CompiledProvider::Mlx, true) => RuntimeTarget {
+            provider: "mlx",
+            device: "metal",
+            accelerated: true,
+            tensor_device: Device::Gpu(0),
+        },
+        #[cfg(any(all(target_os = "windows", target_arch = "x86_64"), test))]
+        (CompiledProvider::LibTorch, true) => RuntimeTarget {
+            provider: "libtorch",
+            device: "cuda",
+            accelerated: true,
+            tensor_device: Device::Gpu(0),
+        },
+        #[cfg(any(all(target_os = "macos", target_arch = "aarch64"), test))]
+        (CompiledProvider::Mlx, false) => RuntimeTarget {
+            provider: "mlx",
+            device: "cpu",
+            accelerated: false,
+            tensor_device: Device::Cpu,
+        },
+        #[cfg(any(all(target_os = "windows", target_arch = "x86_64"), test))]
+        (CompiledProvider::LibTorch, false) => RuntimeTarget {
+            provider: "libtorch",
+            device: "cpu",
+            accelerated: false,
+            tensor_device: Device::Cpu,
+        },
     }
 }
 
-fn inference_device() -> Device {
+fn detect_runtime_target() -> RuntimeTarget {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        qwen3_tts_rs::backend::mlx::stream::init_mlx(true);
-        // The pinned MLX tensor adapter ignores this unified enum and executes
-        // on the global Metal stream initialized above.
-        Device::Cpu
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if tch::Cuda::is_available() {
-            Device::Gpu(0)
-        } else {
-            Device::Cpu
+        let mut metal_available = false;
+        unsafe {
+            qwen3_tts_rs::backend::mlx::ffi::mlx_metal_is_available(&mut metal_available);
         }
+        select_runtime_target(CompiledProvider::Mlx, metal_available)
     }
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+    {
+        select_runtime_target(CompiledProvider::LibTorch, tch::Cuda::is_available())
+    }
+}
+
+pub fn resolved_runtime_target() -> RuntimeTarget {
+    static TARGET: OnceLock<RuntimeTarget> = OnceLock::new();
+    *TARGET.get_or_init(detect_runtime_target)
+}
+
+fn inference_device() -> Device {
+    let target = resolved_runtime_target();
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    {
+        qwen3_tts_rs::backend::mlx::stream::init_mlx(target.accelerated);
+    }
+    target.tensor_device
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -358,6 +477,7 @@ pub struct GenerationSummary {
     pub sample_rate: u32,
     pub sample_count: usize,
     pub audio_chunk_count: usize,
+    pub reference_truncated: bool,
 }
 
 pub trait CustomVoiceEngine {
@@ -442,6 +562,7 @@ pub fn generate_custom_voice_units(
         sample_rate: sample_rate.unwrap_or_default(),
         sample_count,
         audio_chunk_count: total,
+        reference_truncated: false,
     })
 }
 
@@ -596,5 +717,32 @@ mod tests {
         assert_eq!(custom, same);
         assert_ne!(custom, base);
         assert_ne!(custom, other);
+    }
+
+    #[test]
+    fn runtime_target_selection_tracks_backend_and_accelerator_availability() {
+        let mlx_gpu = select_runtime_target(CompiledProvider::Mlx, true);
+        assert_eq!(mlx_gpu.provider, "mlx");
+        assert_eq!(mlx_gpu.device, "metal");
+        assert!(mlx_gpu.accelerated);
+        assert_eq!(mlx_gpu.tensor_device, Device::Gpu(0));
+
+        let mlx_cpu = select_runtime_target(CompiledProvider::Mlx, false);
+        assert_eq!(mlx_cpu.provider, "mlx");
+        assert_eq!(mlx_cpu.device, "cpu");
+        assert!(!mlx_cpu.accelerated);
+        assert_eq!(mlx_cpu.tensor_device, Device::Cpu);
+
+        let libtorch_gpu = select_runtime_target(CompiledProvider::LibTorch, true);
+        assert_eq!(libtorch_gpu.provider, "libtorch");
+        assert_eq!(libtorch_gpu.device, "cuda");
+        assert!(libtorch_gpu.accelerated);
+        assert_eq!(libtorch_gpu.tensor_device, Device::Gpu(0));
+
+        let libtorch_cpu = select_runtime_target(CompiledProvider::LibTorch, false);
+        assert_eq!(libtorch_cpu.provider, "libtorch");
+        assert_eq!(libtorch_cpu.device, "cpu");
+        assert!(!libtorch_cpu.accelerated);
+        assert_eq!(libtorch_cpu.tensor_device, Device::Cpu);
     }
 }

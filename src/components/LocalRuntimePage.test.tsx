@@ -7,6 +7,7 @@ import type {
   LocalTtsQwen3Setup,
 } from "../electron";
 import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
+import { MAX_REFERENCE_CODES_FILE_BYTES } from "../../electron/localTtsLimits";
 import { LocalRuntimePage } from "./LocalRuntimePage";
 
 const CUSTOM_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
@@ -82,7 +83,7 @@ const generated: LocalTtsGenerateResult = {
   modelRepo: CUSTOM_REPO,
   durationSec: 0.1,
   elapsedSec: 0.05,
-  device: "mlx",
+  device: "metal",
   phaseTimingsSec: { inferenceSec: 0.05 },
 };
 
@@ -120,7 +121,7 @@ describe("LocalRuntimePage", () => {
     audioListener = null;
     downloadProgressListener = null;
     getQwen3Setup.mockResolvedValue(setup);
-    chooseQwen3ModelDir.mockResolvedValue({ path: "/chosen/model" });
+    chooseQwen3ModelDir.mockResolvedValue({ path: "/chosen/model", readiness: "structural" });
     downloadQwen3Model.mockResolvedValue({
       modelRepo: CUSTOM_REPO,
       revision: setup.profiles[0].revision,
@@ -136,6 +137,8 @@ describe("LocalRuntimePage", () => {
       package: "qwen3-tts-rs",
       packageVersion: "0.2.2",
       provider: "mlx",
+      device: "metal",
+      accelerated: true,
       upstreamRevision: "288a716ce38a91c826dd67968c75d1dd4b0f07bc",
       recommendedModelRepo: CUSTOM_REPO,
       recommendedBaseModelRepo: BASE_REPO,
@@ -158,6 +161,7 @@ describe("LocalRuntimePage", () => {
     window.electron = {
       isElectron: true,
       platform: "darwin",
+      arch: "arm64",
       localTts: {
         probe,
         generate,
@@ -191,11 +195,31 @@ describe("LocalRuntimePage", () => {
   it("shows the native provider and immutable runtime revision", async () => {
     renderPage();
     expect(await screen.findByText("Provider: mlx")).toBeInTheDocument();
+    expect(screen.getByText("Device: metal (accelerated)")).toBeInTheDocument();
     expect(screen.getByText(/Runtime revision: 288a716/)).toBeInTheDocument();
     expect(screen.getByText(/Revision 7dc92af14613/)).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Qwen model ready" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Re-download model" })).toHaveLength(1);
     expect(screen.queryByText(/device map|dtype|attention|top-p|api_server|Candle/i)).not.toBeInTheDocument();
+  });
+
+  it("makes a dynamically resolved CPU fallback visible", async () => {
+    probe.mockResolvedValueOnce({
+      ready: true,
+      message: "Native Qwen3-TTS runtime is ready.",
+      runtime: "rust",
+      package: "qwen3-tts-rs",
+      packageVersion: "0.2.2",
+      provider: "mlx",
+      device: "cpu",
+      accelerated: false,
+      warnings: ["No supported GPU accelerator was detected; Qwen3 will use its local CPU fallback."],
+    });
+
+    renderPage();
+
+    expect(await screen.findByText("Device: cpu (fallback)")).toBeInTheDocument();
+    expect(screen.getAllByText(/No supported GPU accelerator was detected/)).toHaveLength(2);
   });
 
   it("generates from the cross-platform primary-modifier shortcut", async () => {
@@ -206,6 +230,19 @@ describe("LocalRuntimePage", () => {
     fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
 
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+  });
+
+  it("rejects oversized local-runtime text before IPC generation", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
+      target: { value: "x".repeat(6_001) },
+    });
+
+    expect(screen.getByText(/at most 6,000 characters per request/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Generate" })).toBeDisabled();
+    fireEvent.keyDown(document, { key: "Enter", metaKey: true });
+    expect(generate).not.toHaveBeenCalled();
   });
 
   it("shows clear model download progress and file details", async () => {
@@ -343,5 +380,19 @@ describe("LocalRuntimePage", () => {
       referenceCodesBase64: "AQID",
       referenceText: "Exact words",
     }));
+  });
+
+  it("rejects NeuTTS code files above the 64 KiB renderer limit", async () => {
+    probe.mockResolvedValue({ ready: true, message: "NeuTTS ready", runtime: "rust", package: "neutts" });
+    renderPage("neutts");
+    const codes = new File(
+      [new Uint8Array(MAX_REFERENCE_CODES_FILE_BYTES + 1)],
+      "oversized.npy",
+    );
+    const referenceInput = await screen.findByLabelText(/^Reference audio or codes/i);
+    await act(async () => {
+      fireEvent.change(referenceInput, { target: { files: [codes] } });
+    });
+    expect(await screen.findByText(/exceeds the 64 KB upload limit/i)).toBeInTheDocument();
   });
 });

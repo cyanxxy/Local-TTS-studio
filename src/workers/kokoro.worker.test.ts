@@ -63,6 +63,7 @@ async function loadWorkerModule({
   vi.stubGlobal("self", workerGlobal);
 
   const queue = instances ?? [createInstance([createRawAudio()], { af_heart: {}, am_echo: {} })];
+  const transformersEnv: Record<string, unknown> = {};
   const fromPretrained = vi.fn(async (_modelId: string, options: { progress_callback?: (info: unknown) => void }) => {
     options.progress_callback?.({ file: "model.onnx", status: "progress", loaded: 5, total: 10 });
     options.progress_callback?.({ file: "model.onnx", status: "done" });
@@ -77,6 +78,9 @@ async function loadWorkerModule({
       from_pretrained: fromPretrained,
     },
   }));
+  vi.doMock("@huggingface/transformers", () => ({
+    env: transformersEnv,
+  }));
   vi.doMock("../lib/onnxWasmAssets", () => ({
     KOKORO_ONNX_WASM_ASSETS: { mjs: "ort.mjs", wasm: "ort.wasm" },
   }));
@@ -85,6 +89,8 @@ async function loadWorkerModule({
   }));
   vi.doMock("../constants", () => ({
     KOKORO_FALLBACK_VOICES: fallbackVoices,
+    KOKORO_MODEL_ID: "onnx-community/Kokoro-82M-v1.0-ONNX",
+    KOKORO_MODEL_REVISION: "1939ad2a8e416c0acfeecc08a694d14ef25f2231",
     KOKORO_WEBGPU_MAX_INFERENCE_CHARS: 520,
     KOKORO_WASM_MAX_INFERENCE_CHARS: 280,
     MAX_CHUNK_LENGTH: 1000,
@@ -111,6 +117,7 @@ async function loadWorkerModule({
     dispatch,
     fromPretrained,
     postedMessages,
+    transformersEnv,
     workerGlobal,
   };
 }
@@ -126,7 +133,7 @@ describe("kokoro.worker", () => {
 
   it("falls back to wasm, reports progress, and lists dynamic voices", async () => {
     const instance = createInstance([createRawAudio()], { af_heart: {}, af_bella: {} });
-    const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ instances: [instance] });
+    const { dispatch, fromPretrained, postedMessages, transformersEnv } = await loadWorkerModule({ instances: [instance] });
 
     dispatch({ type: "LOAD" });
 
@@ -136,6 +143,10 @@ describe("kokoro.worker", () => {
       dtype: "q8",
       device: "wasm",
     }));
+    expect(transformersEnv).toMatchObject({
+      remoteHost: "https://huggingface.co",
+      remotePathTemplate: "/{model}/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231/",
+    });
     expect(postedMessages).toContainEqual({ type: "LOAD_PROGRESS", percent: 0 });
     expect(postedMessages).toContainEqual({ type: "LOAD_PROGRESS", percent: 50 });
     expect(postedMessages.at(-1)).toEqual({

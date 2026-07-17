@@ -1,26 +1,13 @@
 import { MODELS } from "../constants";
 import type { InferenceBackend, ModelType, WorkerInMessage, WorkerOutMessage } from "../types";
 import { getWebGPUStatus, type WebGPUStatus } from "../lib/webgpu";
+import {
+  parseInferenceSpeedOptions,
+  type ParsedInferenceSpeedOptions,
+} from "./inferenceSpeedOptions";
 
 const RESULT_PREFIX = "INFERENCE_SPEED_RESULT_JSON:";
 const ERROR_PREFIX = "INFERENCE_SPEED_ERROR_JSON:";
-
-const DEFAULT_TEXT = [
-  "Local text to speech should feel immediate even when the model is running entirely on device.",
-  "This benchmark measures warm model generation throughput through the same worker path used by the app.",
-  "It includes several sentences so chunking, batching, and worker transfer costs are visible in the result.",
-  "The output is designed for repeatable speed comparisons after runtime changes.",
-].join(" ");
-
-interface ParsedOptions {
-  model: ModelType | "both";
-  iterations: number;
-  warmups: number;
-  quality: number;
-  speed: number;
-  timeoutMs: number;
-  text: string;
-}
 
 interface IterationResult {
   iteration: number;
@@ -35,6 +22,8 @@ interface IterationResult {
 
 interface ModelBenchmarkResult {
   model: ModelType;
+  modelId: string;
+  modelRevision: string;
   backend: InferenceBackend | null;
   loadMs: number | null;
   voice: string;
@@ -56,32 +45,12 @@ interface BenchmarkResult {
     userAgent: string;
     crossOriginIsolated: boolean;
   };
-  options: ParsedOptions;
+  options: ParsedInferenceSpeedOptions;
   webgpu: WebGPUStatus;
   models: ModelBenchmarkResult[];
 }
 
-function readNumber(params: URLSearchParams, name: string, fallback: number): number {
-  const value = Number(params.get(name));
-  return Number.isFinite(value) && value > 0 ? value : fallback;
-}
-
-function parseOptions(): ParsedOptions {
-  const params = new URLSearchParams(window.location.search);
-  const model = params.get("model");
-
-  return {
-    model: model === "kokoro" || model === "supertonic" ? model : "both",
-    iterations: Math.max(1, Math.floor(readNumber(params, "iterations", 3))),
-    warmups: Math.max(0, Math.floor(readNumber(params, "warmups", 1))),
-    quality: Math.max(1, Math.floor(readNumber(params, "quality", 5))),
-    speed: readNumber(params, "speed", 1),
-    timeoutMs: readNumber(params, "timeoutMs", 15 * 60 * 1000),
-    text: params.get("text")?.trim() || DEFAULT_TEXT,
-  };
-}
-
-function modelList(model: ParsedOptions["model"]): ModelType[] {
+function modelList(model: ParsedInferenceSpeedOptions["model"]): ModelType[] {
   return model === "both" ? ["kokoro", "supertonic"] : [model];
 }
 
@@ -140,7 +109,7 @@ function waitForLoad(
 
 function generateOnce(
   worker: Worker,
-  options: ParsedOptions,
+  options: ParsedInferenceSpeedOptions,
   voice: string,
   iteration: number,
   warmup: boolean,
@@ -237,7 +206,7 @@ function summarize(iterations: IterationResult[]): ModelBenchmarkResult["summary
   };
 }
 
-async function benchmarkModel(model: ModelType, options: ParsedOptions): Promise<ModelBenchmarkResult> {
+async function benchmarkModel(model: ModelType, options: ParsedInferenceSpeedOptions): Promise<ModelBenchmarkResult> {
   const worker = createWorker(model);
   try {
     const loaded = await waitForLoad(worker, model, options.timeoutMs);
@@ -258,6 +227,8 @@ async function benchmarkModel(model: ModelType, options: ParsedOptions): Promise
 
     return {
       model,
+      modelId: MODELS[model].id,
+      modelRevision: MODELS[model].revision,
       backend: loaded.backend,
       loadMs: loaded.loadMs,
       voice,
@@ -267,6 +238,8 @@ async function benchmarkModel(model: ModelType, options: ParsedOptions): Promise
   } catch (error) {
     return {
       model,
+      modelId: MODELS[model].id,
+      modelRevision: MODELS[model].revision,
       backend: null,
       loadMs: null,
       voice: model === "kokoro" ? MODELS.kokoro.defaultVoice : MODELS.supertonic.defaultVoice,
@@ -285,7 +258,7 @@ function setStatus(value: string): void {
 }
 
 async function main(): Promise<void> {
-  const options = parseOptions();
+  const options = parseInferenceSpeedOptions(window.location.search);
   const webgpu = await getWebGPUStatus();
   const models: ModelBenchmarkResult[] = [];
 

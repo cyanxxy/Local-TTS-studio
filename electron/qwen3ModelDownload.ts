@@ -10,13 +10,14 @@ export const QWEN3_MODEL_MANIFEST = "open-tts-model.json";
 export const IDLE_DOWNLOAD_TIMEOUT_MS = 120_000;
 const REQUEST_IDLE_TIMEOUT_MS = 30_000;
 
-export type UrlRequest = (url: string) => Promise<IncomingMessage>;
+export type UrlRequest = (url: string, signal?: AbortSignal) => Promise<IncomingMessage>;
 export type HuggingFaceXetDownloader = (input: {
   modelRepo: string;
   revision: string;
   fileName: string;
   destination: string;
   onProgress: (downloadedBytes: number, totalBytes?: number) => void;
+  signal?: AbortSignal;
 }) => Promise<boolean>;
 export type Qwen3ModelReadiness = "missing" | "structural" | "verified";
 
@@ -138,9 +139,21 @@ export function isAllowedHuggingFaceDownloadHost(hostname: string): boolean {
     || host.endsWith(".hf.co");
 }
 
-export function requestUrl(url: string, redirectCount = 0): Promise<IncomingMessage> {
+function downloadCancelledError(): Error {
+  return new Error("Qwen3 model download cancelled.");
+}
+
+function throwIfDownloadCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw downloadCancelledError();
+}
+
+export function requestUrl(url: string, signal?: AbortSignal, redirectCount = 0): Promise<IncomingMessage> {
   if (redirectCount > 8) return Promise.reject(new Error(`Too many redirects while downloading ${url}`));
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(downloadCancelledError());
+      return;
+    }
     const parsed = new URL(url);
     if (parsed.protocol !== "https:") {
       reject(new Error(`Refusing to download over insecure protocol: ${url}`));
@@ -154,34 +167,60 @@ export function requestUrl(url: string, redirectCount = 0): Promise<IncomingMess
       headers: { "User-Agent": "Open-TTS/1.0" },
       timeout: REQUEST_IDLE_TIMEOUT_MS,
     }, (response) => {
+      signal?.removeEventListener("abort", abortRequest);
       const location = response.headers.location;
       if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && location) {
         response.resume();
-        void requestUrl(new URL(location, url).toString(), redirectCount + 1).then(resolve, reject);
+        void requestUrl(new URL(location, url).toString(), signal, redirectCount + 1).then(resolve, reject);
         return;
       }
       resolve(response);
     });
+    const abortRequest = () => request.destroy(downloadCancelledError());
+    signal?.addEventListener("abort", abortRequest, { once: true });
     request.on("timeout", () => request.destroy(new Error(`Timed out connecting to ${url}`)));
-    request.on("error", reject);
+    request.on("error", (error) => {
+      signal?.removeEventListener("abort", abortRequest);
+      reject(error);
+    });
+    // Abort can happen after the initial guard but before listener
+    // registration. Re-check only after the listener is installed so either
+    // this branch or the event always destroys the request.
+    if (signal?.aborted) {
+      abortRequest();
+      return;
+    }
     request.end();
   });
 }
 
-async function readUrlJson(url: string, request: UrlRequest): Promise<unknown> {
-  const response = await request(url);
+async function readUrlJson(url: string, request: UrlRequest, signal?: AbortSignal): Promise<unknown> {
+  throwIfDownloadCancelled(signal);
+  const response = await request(url, signal);
+  if (signal?.aborted) {
+    response.destroy();
+    throw downloadCancelledError();
+  }
   if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
     response.resume();
     throw new Error(`Hugging Face request failed with status ${response.statusCode ?? "unknown"}.`);
   }
   const chunks: Buffer[] = [];
   let totalBytes = 0;
-  for await (const chunk of response) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    totalBytes += buffer.byteLength;
-    if (totalBytes > 25_000_000) throw new Error("Hugging Face model metadata response was too large.");
-    chunks.push(buffer);
+  const abortResponse = () => response.destroy(downloadCancelledError());
+  signal?.addEventListener("abort", abortResponse, { once: true });
+  try {
+    for await (const chunk of response) {
+      throwIfDownloadCancelled(signal);
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalBytes += buffer.byteLength;
+      if (totalBytes > 25_000_000) throw new Error("Hugging Face model metadata response was too large.");
+      chunks.push(buffer);
+    }
+  } finally {
+    signal?.removeEventListener("abort", abortResponse);
   }
+  throwIfDownloadCancelled(signal);
   return JSON.parse(Buffer.concat(chunks).toString("utf-8"));
 }
 
@@ -189,9 +228,13 @@ function encodedRepo(repo: string): string {
   return repo.split("/").map(encodeURIComponent).join("/");
 }
 
-async function getRequiredHubFiles(profile: Qwen3Profile, request: UrlRequest): Promise<HubFile[]> {
+async function getRequiredHubFiles(
+  profile: Qwen3Profile,
+  request: UrlRequest,
+  signal?: AbortSignal,
+): Promise<HubFile[]> {
   const url = `https://huggingface.co/api/models/${encodedRepo(profile.repo)}/revision/${profile.revision}?blobs=true`;
-  const info = await readUrlJson(url, request) as HuggingFaceModelInfo;
+  const info = await readUrlJson(url, request, signal) as HuggingFaceModelInfo;
   if (!Array.isArray(info.siblings)) throw new Error("Hugging Face model metadata did not include file listings.");
   const siblings = new Map<string, HuggingFaceSibling>();
   for (const sibling of info.siblings) {
@@ -211,13 +254,15 @@ async function getRequiredHubFiles(profile: Qwen3Profile, request: UrlRequest): 
   });
 }
 
-async function hashFile(filePath: string): Promise<{ sizeBytes: number; sha256: string }> {
+async function hashFile(filePath: string, signal?: AbortSignal): Promise<{ sizeBytes: number; sha256: string }> {
+  throwIfDownloadCancelled(signal);
   const handle = await fs.open(filePath, "r");
   const hash = createHash("sha256");
   let sizeBytes = 0;
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
     for (;;) {
+      throwIfDownloadCancelled(signal);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, null);
       if (bytesRead === 0) break;
       hash.update(buffer.subarray(0, bytesRead));
@@ -235,8 +280,14 @@ export async function downloadHuggingFaceFile(
   onProgress: (downloadedBytes: number, totalBytes?: number) => void,
   request: UrlRequest = requestUrl,
   expected: { sizeBytes?: number; sha256?: string } = {},
+  signal?: AbortSignal,
 ): Promise<DownloadedFile> {
-  const response = await request(url);
+  throwIfDownloadCancelled(signal);
+  const response = await request(url, signal);
+  if (signal?.aborted) {
+    response.destroy();
+    throw downloadCancelledError();
+  }
   if (!response.statusCode || response.statusCode < 200 || response.statusCode >= 300) {
     response.resume();
     throw new HuggingFaceDownloadStatusError(response.statusCode, url);
@@ -253,23 +304,34 @@ export async function downloadHuggingFaceFile(
   try {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
+      let finished = false;
+      let failure: Error | undefined;
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
-      const settle = (error?: Error) => {
+      const complete = (error?: Error) => {
         if (settled) return;
         settled = true;
         if (idleTimer) clearTimeout(idleTimer);
-        if (error) {
-          response.destroy();
-          output.destroy();
-          reject(error);
-        } else {
-          resolve();
-        }
+        signal?.removeEventListener("abort", abortDownload);
+        if (error) reject(error);
+        else resolve();
       };
+      const fail = (error: Error) => {
+        if (settled || failure) return;
+        failure = error;
+        if (idleTimer) clearTimeout(idleTimer);
+        response.destroy();
+        output.destroy();
+      };
+      const abortDownload = () => fail(downloadCancelledError());
+      signal?.addEventListener("abort", abortDownload, { once: true });
+      if (signal?.aborted) {
+        abortDownload();
+        return;
+      }
       const armIdle = () => {
         if (idleTimer) clearTimeout(idleTimer);
         idleTimer = setTimeout(
-          () => settle(new Error(`Download stalled for ${IDLE_DOWNLOAD_TIMEOUT_MS / 1000}s: ${url}`)),
+          () => fail(new Error(`Download stalled for ${IDLE_DOWNLOAD_TIMEOUT_MS / 1000}s: ${url}`)),
           IDLE_DOWNLOAD_TIMEOUT_MS,
         );
         idleTimer.unref?.();
@@ -282,10 +344,15 @@ export async function downloadHuggingFaceFile(
         armIdle();
         onProgress(downloadedBytes, totalBytes);
       });
-      response.on("aborted", () => settle(new Error(`Download connection closed early: ${url}`)));
-      response.on("error", settle);
-      output.on("error", settle);
-      output.on("finish", () => settle());
+      response.on("aborted", () => fail(new Error(`Download connection closed early: ${url}`)));
+      response.on("error", fail);
+      output.on("error", fail);
+      output.on("finish", () => {
+        finished = true;
+      });
+      output.on("close", () => {
+        complete(failure ?? (finished ? undefined : new Error(`Download output closed early: ${url}`)));
+      });
       response.pipe(output);
     });
     if (typeof contentLength === "number" && Number.isFinite(contentLength) && downloadedBytes !== contentLength) {
@@ -298,6 +365,7 @@ export async function downloadHuggingFaceFile(
     if (expected.sha256 && sha256 !== expected.sha256) {
       throw new Error(`Download digest mismatch for ${url}.`);
     }
+    throwIfDownloadCancelled(signal);
     await fs.rename(temporaryPath, destination);
     return { downloaded: true, sizeBytes: downloadedBytes, sha256 };
   } catch (error) {
@@ -322,7 +390,10 @@ function isManifest(value: unknown): value is Qwen3ModelManifest {
     ));
 }
 
-async function isStructurallyValid(modelDir: string, profile: Qwen3Profile): Promise<boolean> {
+export async function isStructurallyValidQwen3ModelDir(
+  modelDir: string,
+  profile: Qwen3Profile,
+): Promise<boolean> {
   try {
     for (const fileName of profile.requiredFiles) {
       const stat = await fs.stat(resolveDownloadDestination(modelDir, fileName));
@@ -338,8 +409,10 @@ async function isStructurallyValid(modelDir: string, profile: Qwen3Profile): Pro
 export async function inspectQwen3ModelDir(
   modelDir: string,
   profile: Qwen3Profile,
+  signal?: AbortSignal,
 ): Promise<Qwen3ModelInspection> {
-  if (!(await isStructurallyValid(modelDir, profile))) {
+  throwIfDownloadCancelled(signal);
+  if (!(await isStructurallyValidQwen3ModelDir(modelDir, profile))) {
     return { readiness: "missing", reason: "Required model files are missing or do not match the profile." };
   }
   let decoded: unknown;
@@ -353,10 +426,11 @@ export async function inspectQwen3ModelDir(
   }
   const byPath = new Map(decoded.files.map((file) => [file.path, file]));
   for (const requiredPath of profile.requiredFiles) {
+    throwIfDownloadCancelled(signal);
     const expected = byPath.get(requiredPath);
     if (!expected) return { readiness: "structural", reason: `Manifest is missing ${requiredPath}.` };
     try {
-      const actual = await hashFile(resolveDownloadDestination(modelDir, requiredPath));
+      const actual = await hashFile(resolveDownloadDestination(modelDir, requiredPath), signal);
       if (actual.sizeBytes !== expected.sizeBytes || actual.sha256 !== expected.sha256) {
         return { readiness: "structural", reason: `${requiredPath} does not match its manifest digest.` };
       }
@@ -400,15 +474,21 @@ export async function downloadQwen3Model(
   onProgress: (progress: Qwen3ModelDownloadProgress) => void,
   request: UrlRequest = requestUrl,
   xetDownloader?: HuggingFaceXetDownloader,
+  signal?: AbortSignal,
 ): Promise<Qwen3ModelDownloadResult> {
+  throwIfDownloadCancelled(signal);
   await fs.mkdir(modelDir, { recursive: true });
-  const hubFiles = await getRequiredHubFiles(profile, request);
+  const hubFiles = await getRequiredHubFiles(profile, request, signal);
   const manifestFiles: Qwen3ModelManifestFile[] = [];
   let downloadedFiles = 0;
   let skippedFiles = 0;
   for (const [index, file] of hubFiles.entries()) {
+    throwIfDownloadCancelled(signal);
     const destination = resolveDownloadDestination(modelDir, file.path);
-    const existing = await hashFile(destination).catch(() => undefined);
+    const existing = await hashFile(destination, signal).catch(() => {
+      throwIfDownloadCancelled(signal);
+      return undefined;
+    });
     if (
       existing
       && (file.sizeBytes == null || existing.sizeBytes === file.sizeBytes)
@@ -443,7 +523,7 @@ export async function downloadQwen3Model(
     };
     let result: DownloadedFile;
     try {
-      result = await downloadHuggingFaceFile(url, destination, reportProgress, request, file);
+      result = await downloadHuggingFaceFile(url, destination, reportProgress, request, file, signal);
     } catch (error) {
       const shouldUseXet = xetDownloader
         && error instanceof HuggingFaceDownloadStatusError
@@ -457,8 +537,10 @@ export async function downloadQwen3Model(
         fileName: file.path,
         destination,
         onProgress: reportProgress,
+        signal,
       });
-      const verified = await hashFile(destination);
+      throwIfDownloadCancelled(signal);
+      const verified = await hashFile(destination, signal);
       if (file.sizeBytes != null && verified.sizeBytes !== file.sizeBytes) {
         throw new Error(`Xet download size mismatch for ${file.path}.`);
       }
@@ -470,13 +552,14 @@ export async function downloadQwen3Model(
     downloadedFiles += result.downloaded ? 1 : 0;
     manifestFiles.push({ path: file.path, sizeBytes: result.sizeBytes, sha256: result.sha256 });
   }
+  throwIfDownloadCancelled(signal);
   await writeManifest(modelDir, {
     schemaVersion: 1,
     repo: profile.repo,
     revision: profile.revision,
     files: manifestFiles,
   });
-  const readiness = (await inspectQwen3ModelDir(modelDir, profile)).readiness;
+  const readiness = (await inspectQwen3ModelDir(modelDir, profile, signal)).readiness;
   if (readiness !== "verified") throw new Error("Downloaded Qwen3 model failed manifest verification.");
   return { modelRepo: profile.repo, revision: profile.revision, modelDir, downloadedFiles, skippedFiles, readiness };
 }

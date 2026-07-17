@@ -32,6 +32,30 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitFor(assertion: () => boolean): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (assertion()) return;
+    await delay(10);
+  }
+  throw new Error("Timed out waiting for condition.");
+}
+
+function waitForChildExit(child: ChildProcessWithoutNullStreams, timeoutMs = 2_000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.off("exit", handleExit);
+      reject(new Error("Timed out waiting for Rust bridge to exit."));
+    }, timeoutMs);
+    const handleExit = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
+    child.once("exit", handleExit);
+  });
+}
+
 function waitForBridgePort(child: ChildProcessWithoutNullStreams, readStderr: () => string): Promise<number> {
   return new Promise((resolve, reject) => {
     let stdoutLineBuffer = "";
@@ -186,16 +210,17 @@ async function withServeWsBridge<T>(
   run: (context: { port: number; child: ChildProcessWithoutNullStreams; readStderr: () => string }) => Promise<T>,
 ): Promise<T> {
   const cacheDir = makeTempDir();
-  const child = spawn(BRIDGE_BINARY, [
+  const args = [
     "--action", "serve-ws",
     "--model", model,
     "--cache-dir", cacheDir,
     "--host", "127.0.0.1",
     "--port", "0",
-    "--auth-token", "test-token",
-  ], {
+  ];
+  const child = spawn(BRIDGE_BINARY, args, {
     cwd: ROOT_DIR,
     stdio: ["pipe", "pipe", "pipe"],
+    env: { ...process.env, OPEN_TTS_WS_AUTH_TOKEN: "test-token" },
   });
   let stderr = "";
   child.stderr.on("data", (chunk: Buffer) => {
@@ -206,7 +231,13 @@ async function withServeWsBridge<T>(
     const port = await waitForBridgePort(child, () => stderr);
     return await run({ port, child, readStderr: () => stderr });
   } finally {
-    child.kill();
+    if (child.exitCode === null && child.signalCode === null) {
+      child.stdin.end();
+      await waitForChildExit(child, 500).catch(async () => {
+        child.kill();
+        await waitForChildExit(child, 1_000).catch(() => undefined);
+      });
+    }
     fs.rmSync(cacheDir, { recursive: true, force: true });
   }
 }
@@ -253,9 +284,13 @@ describe("open-tts-local-bridge", () => {
           package: "qwen3-tts-rs",
           packageVersion: "0.2.2",
           upstreamRevision: "288a716ce38a91c826dd67968c75d1dd4b0f07bc",
-          provider: process.platform === "darwin" ? "mlx" : expect.stringMatching(/^(cuda|cpu)$/),
+          provider: process.platform === "darwin" ? "mlx" : "libtorch",
+          device: process.platform === "darwin" ? expect.stringMatching(/^(metal|cpu)$/) : expect.stringMatching(/^(cuda|cpu)$/),
+          accelerated: expect.any(Boolean),
         },
       });
+      const runtime = parsed.result as { device: string; accelerated: boolean };
+      expect(runtime.accelerated).toBe(runtime.device !== "cpu");
     } finally {
       fs.rmSync(cacheDir, { recursive: true, force: true });
     }
@@ -272,6 +307,65 @@ describe("open-tts-local-bridge", () => {
       "qwen_tts::",
     ]) {
       expect(source).not.toContain(obsolete);
+    }
+  });
+
+  it("accepts the production environment-token path and rejects a missing token", async () => {
+    await withServeWsBridge("qwen3", async ({ port, child }) => {
+      const socket = await openWebSocketWithRetry(`ws://127.0.0.1:${port}/test-token`, child);
+      socket.close();
+      await waitForChildExit(child);
+    });
+
+    const cacheDir = makeTempDir();
+    try {
+      const completed = spawnSync(BRIDGE_BINARY, [
+        "--action", "serve-ws",
+        "--model", "qwen3",
+        "--cache-dir", cacheDir,
+      ], {
+        cwd: ROOT_DIR,
+        encoding: "utf-8",
+        env: { ...process.env, OPEN_TTS_WS_AUTH_TOKEN: "" },
+      });
+      expect(completed.status).not.toBe(0);
+      expect(completed.stdout).toMatch(/requires a non-empty authentication token/i);
+
+      const legacyCli = spawnSync(BRIDGE_BINARY, [
+        "--action", "serve-ws",
+        "--model", "qwen3",
+        "--cache-dir", cacheDir,
+        "--auth-token", "test-token",
+      ], {
+        cwd: ROOT_DIR,
+        encoding: "utf-8",
+      });
+      expect(legacyCli.status).not.toBe(0);
+      expect(legacyCli.stderr).toMatch(/unexpected argument.*--auth-token/i);
+    } finally {
+      fs.rmSync(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a non-loopback WebSocket bind host before announcing a port", () => {
+    const cacheDir = makeTempDir();
+    try {
+      const completed = spawnSync(BRIDGE_BINARY, [
+        "--action", "serve-ws",
+        "--model", "neutts",
+        "--cache-dir", cacheDir,
+        "--host", "0.0.0.0",
+        "--port", "0",
+      ], {
+        cwd: ROOT_DIR,
+        encoding: "utf-8",
+        env: { ...process.env, OPEN_TTS_WS_AUTH_TOKEN: "test-token" },
+      });
+      expect(completed.status).not.toBe(0);
+      expect(completed.stdout).toMatch(/must resolve only to loopback addresses/i);
+      expect(completed.stdout).not.toContain(PORT_PREFIX);
+    } finally {
+      fs.rmSync(cacheDir, { recursive: true, force: true });
     }
   });
 
@@ -324,6 +418,50 @@ describe("open-tts-local-bridge", () => {
       expect(String(result.error)).toMatch(/Invalid Qwen3 payload/i);
       socket.send(JSON.stringify({ command: "shutdown" }));
       socket.close();
+    });
+  });
+
+  it("returns typed protocol errors for malformed JSON, missing ids, and unknown commands", async () => {
+    await withServeWsBridge("qwen3", async ({ port, child }) => {
+      const socket = await openWebSocketWithRetry(`ws://127.0.0.1:${port}/test-token`, child);
+      const results: Array<Record<string, unknown>> = [];
+      socket.addEventListener("message", (event) => {
+        if (event.data instanceof ArrayBuffer) return;
+        const parsed = JSON.parse(String(event.data)) as Record<string, unknown>;
+        if (parsed.type === "result") results.push(parsed);
+      });
+
+      socket.send("{");
+      await waitFor(() => results.length === 1);
+      expect(results[0]).toMatchObject({ requestId: "", ok: false });
+      expect(String(results[0].error)).toMatch(/Invalid WebSocket request JSON/i);
+
+      socket.send(JSON.stringify({ payload: {} }));
+      await waitFor(() => results.length === 2);
+      expect(String(results[1].error)).toMatch(/non-empty requestId/i);
+
+      socket.send(JSON.stringify({ requestId: "bad-command", command: "typo", payload: {} }));
+      await waitFor(() => results.length === 3);
+      expect(results[2]).toMatchObject({ requestId: "bad-command", ok: false });
+      expect(String(results[2].error)).toMatch(/Unsupported WebSocket command/i);
+      socket.close();
+    });
+  });
+
+  it("exits when its authenticated owner disconnects", async () => {
+    await withServeWsBridge("qwen3", async ({ port, child }) => {
+      const socket = await openWebSocketWithRetry(`ws://127.0.0.1:${port}/test-token`, child);
+      socket.close();
+      await waitForChildExit(child);
+      expect(child.exitCode).toBe(0);
+    });
+  });
+
+  it("exits when the parent-process pipe closes", async () => {
+    await withServeWsBridge("qwen3", async ({ child }) => {
+      child.stdin.end();
+      await waitForChildExit(child);
+      expect(child.exitCode).toBe(0);
     });
   });
 

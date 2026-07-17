@@ -74,8 +74,9 @@ function formatPlaybackRate(rate: number): string {
 }
 
 function formatTime(secs: number): string {
-  const m = Math.floor(secs / 60);
-  const s = (secs % 60).toFixed(1);
+  const totalTenths = Math.round(Math.max(0, Number.isFinite(secs) ? secs : 0) * 10);
+  const m = Math.floor(totalTenths / 600);
+  const s = ((totalTenths % 600) / 10).toFixed(1);
   return `${m}:${s.padStart(4, "0")}`;
 }
 
@@ -184,6 +185,7 @@ export function AudioPlayer({
   const getSeekPct = useCallback((clientX: number): number => {
     if (!barRef.current) return 0;
     const rect = barRef.current.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
     return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
   }, []);
 

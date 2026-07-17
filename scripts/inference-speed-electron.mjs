@@ -18,6 +18,9 @@ if (!targetUrl) {
 }
 
 app.commandLine.appendSwitch("enable-unsafe-webgpu");
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("enable-features", "Vulkan");
+}
 
 app.whenReady().then(async () => {
   session.defaultSession.webRequest.onHeadersReceived(
@@ -42,6 +45,7 @@ app.whenReady().then(async () => {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      backgroundThrottling: false,
     },
   });
 

@@ -36,6 +36,7 @@ export interface Qwen3RuntimeSettings {
   maxNewTokens: number;
   referenceAudioName: string;
   referenceAudioBase64: string | null;
+  referenceAudioSignature: string;
   referenceText: string;
 }
 
@@ -56,7 +57,7 @@ interface Qwen3RuntimeContextValue extends Qwen3RuntimeSettings {
   setTemperature: (temperature: number) => void;
   setTopK: (topK: number) => void;
   setMaxNewTokens: (maxNewTokens: number) => void;
-  setReferenceAudio: (name: string, base64: string | null) => void;
+  setReferenceAudio: (name: string, base64: string | null, signature?: string) => void;
   setReferenceText: (text: string) => void;
   refreshSetup: () => Promise<void>;
   downloadModel: () => Promise<void>;
@@ -76,14 +77,15 @@ function errorMessage(error: unknown): string {
 
 export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const platform = window.electron?.platform;
-  const profiles = useMemo(() => getQwen3Profiles(platform), [platform]);
+  const arch = window.electron?.arch;
+  const profiles = useMemo(() => getQwen3Profiles(platform, arch), [arch, platform]);
   const initialProfile = useMemo(() => {
     try {
-      return getDefaultQwen3Profile(platform);
+      return getDefaultQwen3Profile(platform, arch);
     } catch {
-      return getQwen3Profiles("darwin")[0];
+      return getDefaultQwen3Profile("darwin", "arm64");
     }
-  }, [platform]);
+  }, [arch, platform]);
   const [profile, setProfile] = useState<Qwen3Profile>(initialProfile);
   const [modelPath, setModelPathState] = useState("");
   const [readiness, setReadiness] = useState<Qwen3RuntimeSettings["readiness"]>("missing");
@@ -95,6 +97,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const [maxNewTokens, setMaxNewTokensState] = useState(QWEN3_DEFAULT_MAX_NEW_TOKENS);
   const [referenceAudioName, setReferenceAudioName] = useState("");
   const [referenceAudioBase64, setReferenceAudioBase64] = useState<string | null>(null);
+  const [referenceAudioSignature, setReferenceAudioSignature] = useState("");
   const [referenceText, setReferenceText] = useState("");
   const [setup, setSetup] = useState<LocalTtsQwen3Setup | null>(null);
   const [setupBusy, setSetupBusy] = useState(false);
@@ -103,6 +106,8 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
   const setupVersionRef = useRef(0);
+  const modelPathOperationVersionRef = useRef(0);
+  const downloadVersionRef = useRef(0);
 
   const available = !!window.electron?.localTts && profiles.length > 0;
   const profileSetup = useMemo(
@@ -160,9 +165,13 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     const next = getQwen3Profile(repo);
     if (!next || !profiles.some((candidate) => candidate.repo === repo)) return;
     setupVersionRef.current += 1;
+    modelPathOperationVersionRef.current += 1;
+    downloadVersionRef.current += 1;
+    setDownloadBusy(false);
     setProfile(next);
     setReferenceAudioName("");
     setReferenceAudioBase64(null);
+    setReferenceAudioSignature("");
     setReferenceText("");
     const entry = setup?.profiles.find((candidate) => candidate.repo === repo);
     setModelPathState(entry?.modelDir ?? "");
@@ -172,6 +181,8 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   }, [profiles, setup]);
 
   const setModelPath = useCallback((nextPath: string) => {
+    setupVersionRef.current += 1;
+    modelPathOperationVersionRef.current += 1;
     setModelPathState(nextPath);
     const bundledPath = setup?.profiles.find((candidate) => candidate.repo === profile.repo)?.modelDir;
     setReadiness(nextPath.trim() && nextPath !== bundledPath ? "structural" : profileSetup?.readiness ?? "missing");
@@ -180,35 +191,54 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const downloadModel = useCallback(async () => {
     const bridge = window.electron?.localTts;
     if (!bridge?.downloadQwen3Model) return;
+    const operationVersion = ++modelPathOperationVersionRef.current;
+    const downloadVersion = ++downloadVersionRef.current;
+    setupVersionRef.current += 1;
     setDownloadBusy(true);
     setDownloadProgress(null);
     setError(null);
     try {
       const result = await bridge.downloadQwen3Model({ modelRepo: profile.repo });
-      if (!mountedRef.current) return;
+      if (
+        !mountedRef.current
+        || operationVersion !== modelPathOperationVersionRef.current
+        || downloadVersion !== downloadVersionRef.current
+      ) return;
       setModelPathState(result.modelDir);
       setReadiness(result.readiness);
       await refreshSetup();
     } catch (nextError) {
-      if (mountedRef.current) setError(errorMessage(nextError));
+      if (mountedRef.current && downloadVersion === downloadVersionRef.current) {
+        setError(errorMessage(nextError));
+      }
     } finally {
-      if (mountedRef.current) setDownloadBusy(false);
+      if (mountedRef.current && downloadVersion === downloadVersionRef.current) {
+        setDownloadBusy(false);
+      }
     }
   }, [profile.repo, refreshSetup]);
 
   const chooseModelPath = useCallback(async () => {
     const bridge = window.electron?.localTts;
     if (!bridge?.chooseQwen3ModelDir) return;
+    const operationVersion = ++modelPathOperationVersionRef.current;
+    setupVersionRef.current += 1;
     try {
-      const result = await bridge.chooseQwen3ModelDir();
-      if (!mountedRef.current || !result.path) return;
+      const result = await bridge.chooseQwen3ModelDir({ modelRepo: profile.repo });
+      if (
+        !mountedRef.current
+        || operationVersion !== modelPathOperationVersionRef.current
+        || !result.path
+      ) return;
       setModelPathState(result.path);
-      setReadiness("structural");
-      setError(null);
+      setReadiness(result.readiness ?? "missing");
+      setError(result.readiness === "missing" ? result.reason ?? "The selected folder is not a compatible model." : null);
     } catch (nextError) {
-      if (mountedRef.current) setError(errorMessage(nextError));
+      if (mountedRef.current && operationVersion === modelPathOperationVersionRef.current) {
+        setError(errorMessage(nextError));
+      }
     }
-  }, []);
+  }, [profile.repo]);
 
   const setSpeaker = useCallback((nextSpeaker: string) => {
     if (QWEN3_SPEAKERS.includes(nextSpeaker as typeof QWEN3_SPEAKERS[number])) setSpeakerState(nextSpeaker);
@@ -222,9 +252,10 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     (value: number) => setMaxNewTokensState((current) => Math.round(clamp(value, current, 64, 8_192))),
     [],
   );
-  const setReferenceAudio = useCallback((name: string, base64: string | null) => {
+  const setReferenceAudio = useCallback((name: string, base64: string | null, signature = "") => {
     setReferenceAudioName(name);
     setReferenceAudioBase64(base64);
+    setReferenceAudioSignature(base64 ? signature : "");
   }, []);
 
   const value = useMemo<Qwen3RuntimeContextValue>(() => ({
@@ -247,6 +278,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     maxNewTokens,
     referenceAudioName,
     referenceAudioBase64,
+    referenceAudioSignature,
     referenceText,
     setProfileRepo,
     setModelPath,
@@ -265,7 +297,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   }), [
     available, chooseModelPath, downloadBusy, downloadModel, downloadProgress, error, instruct, language,
     maxNewTokens, modelPath, profile, profileSetup, profiles, readiness, referenceAudioBase64,
-    referenceAudioName, referenceText, refreshSetup, setLanguage, setMaxNewTokens, setModelPath,
+    referenceAudioName, referenceAudioSignature, referenceText, refreshSetup, setLanguage, setMaxNewTokens, setModelPath,
     setProfileRepo, setReferenceAudio, setSpeaker, setTemperature, setTopK, setup, setupBusy, speaker,
     temperature, topK,
   ]);

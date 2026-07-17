@@ -64,4 +64,48 @@ describe("generateRateLimiter", () => {
     now.mockReturnValue(1_600);
     await expect(limiter.run("qwen3", async () => "third")).resolves.toBe("third");
   });
+
+  it("allows only the exact next section of one job to run back-to-back", async () => {
+    const now = vi.fn(() => 1_000);
+    const limiter = createGenerateRateLimiter<"qwen3">({
+      rateWindowMs: 500,
+      now,
+    });
+
+    await expect(limiter.run("qwen3", async () => "first", {
+      jobId: "reader-job-1",
+      sectionIndex: 0,
+      sectionCount: 2,
+    })).resolves.toBe("first");
+    await expect(limiter.run("qwen3", async () => "second", {
+      jobId: "reader-job-1",
+      sectionIndex: 1,
+      sectionCount: 2,
+    })).resolves.toBe("second");
+
+    await expect(limiter.run("qwen3", async () => "unrelated", {
+      jobId: "reader-job-2",
+      sectionIndex: 0,
+      sectionCount: 2,
+    })).rejects.toThrow("Too many generation requests");
+  });
+
+  it("does not let a skipped or mismatched section impersonate a continuation", async () => {
+    const limiter = createGenerateRateLimiter<"qwen3">({
+      rateWindowMs: 500,
+      now: () => 1_000,
+    });
+
+    await limiter.run("qwen3", async () => undefined, {
+      jobId: "reader-job",
+      sectionIndex: 0,
+      sectionCount: 3,
+    });
+
+    await expect(limiter.run("qwen3", async () => undefined, {
+      jobId: "reader-job",
+      sectionIndex: 2,
+      sectionCount: 3,
+    })).rejects.toThrow("Too many generation requests");
+  });
 });

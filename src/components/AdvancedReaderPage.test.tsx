@@ -5,6 +5,7 @@ import { AdvancedReaderPage } from "./AdvancedReaderPage";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { GenerationStats, ModelState } from "../types";
 import { createReaderDocument } from "../lib/readerDocument";
+import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 
 vi.mock("./ModelToggle", () => ({
   ModelToggle: ({ desktopModelOptions = [] }: {
@@ -217,6 +218,79 @@ describe("AdvancedReaderPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /Qwen3-TTS/i }));
 
     expect(onSelectQwen3).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses request-sized preview sections for Qwen voice cloning", () => {
+    const text = "A sentence for local voice cloning. ".repeat(420);
+    renderReader({
+      text,
+      desktopQwenMode: "voiceClone",
+      desktopModelOptions: [{
+        key: "qwen3",
+        label: "Qwen3-TTS",
+        badge: "Electron",
+        detail: "0.6B Base MLX",
+        selected: true,
+        onSelect: vi.fn(),
+      }],
+    });
+
+    const props = audioPlayerMock.mock.lastCall?.[0] as { sectionPreviewCount?: number };
+    expect(props.sectionPreviewCount).toBe(buildQwen3RequestSections(text).length);
+    expect(props.sectionPreviewCount).toBeLessThan(buildQwen3TextUnits(text).length);
+  });
+
+  it("keeps every Qwen preview section visible while audio is still streaming", () => {
+    const text = "Reader section with a natural boundary. ".repeat(45);
+    const units = buildQwen3TextUnits(text);
+    const first = units[0];
+    const { container } = renderReader({
+      text,
+      isGenerating: true,
+      segments: [createSegment({
+        text: first.text,
+        textStart: first.start,
+        textEnd: first.end,
+        endSec: 2,
+      })],
+      desktopModelOptions: [{
+        key: "qwen3",
+        label: "Qwen3-TTS",
+        badge: "Electron",
+        detail: "0.6B CustomVoice MLX",
+        selected: true,
+        onSelect: vi.fn(),
+      }],
+    });
+
+    const tintedText = [...container.querySelectorAll(".reader-section-even, .reader-section-odd")]
+      .map((element) => element.textContent ?? "")
+      .join("");
+    expect(units.length).toBeGreaterThan(1);
+    expect(tintedText).toBe(text.trim());
+  });
+
+  it("seeks by generated audio ranges without coupling them to preview boundaries", () => {
+    const onJumpToSegment = vi.fn();
+    renderReader({
+      text: "First sentence. Second sentence.",
+      segments: [
+        createSegment({ text: "First sentence.", textStart: 0, textEnd: 15 }),
+        createSegment({
+          id: "segment-2",
+          text: " Second sentence.",
+          index: 2,
+          textStart: 15,
+          textEnd: 32,
+        }),
+      ],
+      onJumpToSegment,
+    });
+
+    const textarea = screen.getByLabelText("Reading Text") as HTMLTextAreaElement;
+    textarea.setSelectionRange(20, 20);
+    fireEvent.mouseUp(textarea);
+    expect(onJumpToSegment).toHaveBeenCalledWith("segment-2");
   });
 
   it("highlights the estimated current word inside the active audio segment", () => {

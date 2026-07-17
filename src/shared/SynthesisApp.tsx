@@ -120,9 +120,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const { preferences, updatePreferences, resetPreferences } = useAppPreferences();
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const qwen3Settings = useQwen3Runtime();
-  const qwen3ProviderDetail = window.electron?.platform === "win32"
-    ? `${qwen3Settings.profile.parameters} ${qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : "Voice clone"} · LibTorch`
-    : `${qwen3Settings.profile.parameters} ${qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : "Voice clone"} · Apple MLX`;
+  const qwen3ProviderDetail = `${qwen3Settings.profile.parameters} ${qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : "Voice clone"} · ${qwen3Settings.profile.provider === "mlx" ? "Apple MLX" : "LibTorch"}`;
   const debugProfiling = useMemo(
     () => typeof window !== "undefined"
       && import.meta.env.DEV
@@ -151,9 +149,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   );
   const availableTabs = useMemo(() => routeTabs.filter((tab) => {
     if (tab.key === "neutts") return preferences.showNeuTTS;
-    if (tab.key === "qwen3") return preferences.showQwen3TTS;
+    if (tab.key === "qwen3") return preferences.showQwen3TTS && qwen3Settings.available;
     return true;
-  }), [preferences.showNeuTTS, preferences.showQwen3TTS, routeTabs]);
+  }), [preferences.showNeuTTS, preferences.showQwen3TTS, qwen3Settings.available, routeTabs]);
 
   const [text, setText] = useState(initialState.text);
   const [activeModel, setActiveModel] = useState<ModelType>(() => (
@@ -183,6 +181,13 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     }
   }, [activePage, navigateToPage, preferences.showNeuTTS]);
 
+  useEffect(() => {
+    if (qwen3Settings.available) return;
+    setStudioDesktopModel(null);
+    setReaderDesktopModel(null);
+    if (activePage === "qwen3") navigateToPage("studio");
+  }, [activePage, navigateToPage, qwen3Settings.available]);
+
   const {
     kokoroState,
     supertonicState,
@@ -202,9 +207,42 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   const isReaderUsingQwen3 = isReaderPage && readerDesktopModel === "qwen3";
   const isStudioUsingQwen3 = isStudioPage && studioDesktopModel === "qwen3";
   const isUsingQwen3Inline = isReaderUsingQwen3 || isStudioUsingQwen3;
+  // The SHA-256 is calculated asynchronously from the selected file once.
+  // Avoid re-scanning a potentially 60 MB Base64 string on the render thread.
+  const qwenReferenceAudioSignature = qwen3Settings.profile.mode === "voiceClone"
+    ? qwen3Settings.referenceAudioSignature
+    : "";
+  const qwenPlaybackSignature = useMemo(() => JSON.stringify({
+    repo: qwen3Settings.profile.repo,
+    revision: qwen3Settings.profile.revision,
+    mode: qwen3Settings.profile.mode,
+    speaker: qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : null,
+    language: qwen3Settings.language,
+    instruct: qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.instruct : null,
+    temperature: qwen3Settings.temperature,
+    topK: qwen3Settings.topK,
+    maxNewTokens: qwen3Settings.maxNewTokens,
+    referenceAudio: qwenReferenceAudioSignature,
+    referenceText: qwen3Settings.profile.mode === "voiceClone"
+      ? qwen3Settings.referenceText.trim()
+      : null,
+  }), [
+    qwen3Settings.instruct,
+    qwen3Settings.language,
+    qwen3Settings.maxNewTokens,
+    qwen3Settings.profile.mode,
+    qwen3Settings.profile.repo,
+    qwen3Settings.profile.revision,
+    qwen3Settings.referenceText,
+    qwen3Settings.speaker,
+    qwen3Settings.temperature,
+    qwen3Settings.topK,
+    qwenReferenceAudioSignature,
+  ]);
   const qwen3LocalRuntime = useQwen3LocalRuntime({
-    enabled: enableDesktopRuntimes && isElectronRuntime && isUsingQwen3Inline,
+    enabled: enableDesktopRuntimes && isElectronRuntime && qwen3Settings.available && isUsingQwen3Inline,
     text,
+    allowLongText: isUsingQwen3Inline,
     player,
     setShowPlayer,
   });
@@ -563,7 +601,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   }, [readerDesktopModel, selectInlineDesktopModel]);
 
   const studioDesktopModelOptions = useMemo(() => (
-    enableDesktopRuntimes && isElectronRuntime
+    enableDesktopRuntimes && isElectronRuntime && qwen3Settings.available
       ? [{
           key: "qwen3",
           label: "Qwen3-TTS",
@@ -573,10 +611,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
           onSelect: () => handleStudioDesktopModelSelect("qwen3"),
         }]
       : []
-  ), [enableDesktopRuntimes, handleStudioDesktopModelSelect, isElectronRuntime, qwen3ProviderDetail, studioDesktopModel]);
+  ), [enableDesktopRuntimes, handleStudioDesktopModelSelect, isElectronRuntime, qwen3ProviderDetail, qwen3Settings.available, studioDesktopModel]);
 
   const readerDesktopModelOptions = useMemo(() => (
-    enableDesktopRuntimes && isElectronRuntime
+    enableDesktopRuntimes && isElectronRuntime && qwen3Settings.available
       ? [{
           key: "qwen3",
           label: "Qwen3-TTS",
@@ -586,7 +624,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
           onSelect: () => handleReaderDesktopModelSelect("qwen3"),
         }]
       : []
-  ), [enableDesktopRuntimes, handleReaderDesktopModelSelect, isElectronRuntime, qwen3ProviderDetail, readerDesktopModel]);
+  ), [enableDesktopRuntimes, handleReaderDesktopModelSelect, isElectronRuntime, qwen3ProviderDetail, qwen3Settings.available, readerDesktopModel]);
 
   const mountedLocalRuntimePages = useMemo(() => {
     if (!enableDesktopRuntimes) return [];
@@ -762,7 +800,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
       if (isLocalRuntimePage(activePage) || isEditableShortcutTarget(event.target)) return;
 
-      if (!primaryModifier && !event.altKey && event.code === "Space" && player.totalDuration > 0) {
+      const canTogglePlayback = player.totalDuration > 0
+        && (!isStudioPage || !studioGenerationBusy);
+      if (!primaryModifier && !event.altKey && event.code === "Space" && canTogglePlayback) {
         event.preventDefault();
         void player.togglePlay();
         return;
@@ -812,7 +852,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
   const lastReaderProgressUpdateRef = useRef(0);
   const readerAudioSaveTimerRef = useRef<number | null>(null);
+  const readerRestorePendingRef = useRef(false);
+  const readerRestoreVersionRef = useRef(0);
   const activeReaderDocument = readerLibrary.activeDocument;
+  const activeReaderDocumentText = activeReaderDocument?.text ?? null;
   const activeReaderDocumentId = activeReaderDocument?.id ?? null;
   const activeReaderDocumentRef = useRef(activeReaderDocument);
   activeReaderDocumentRef.current = activeReaderDocument;
@@ -833,15 +876,27 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     reset: resetGeneratedAudio,
     restore: restoreReaderAudio,
   };
-  const activeReaderAudioSignature = activeReaderDocument
-    ? buildAudioSignature({
-        text: activeReaderDocument.text,
-        model: isReaderUsingQwen3 ? "qwen3" : activeModel,
-        voice: isReaderUsingQwen3 ? qwen3Settings.speaker : voice,
-        quality,
-        tuning: creator.generationSettings,
-      })
-    : null;
+  // Hashing a long document is linear in its size. Memoize it so the player's
+  // animation-frame currentTime updates do not re-hash an entire book.
+  const activeReaderAudioSignature = useMemo(() => (
+    activeReaderDocumentText !== null
+      ? buildAudioSignature({
+          text: activeReaderDocumentText,
+          model: isReaderUsingQwen3 ? "qwen3" : activeModel,
+          voice: isReaderUsingQwen3 ? qwenPlaybackSignature : voice,
+          quality,
+          tuning: creator.generationSettings,
+        })
+      : null
+  ), [
+    activeModel,
+    activeReaderDocumentText,
+    creator.generationSettings,
+    isReaderUsingQwen3,
+    quality,
+    qwenPlaybackSignature,
+    voice,
+  ]);
   const qwenReaderControlsRef = useRef({
     cancel: qwen3LocalRuntime.cancelActiveGeneration,
     reset: qwen3LocalRuntime.resetGeneratedAudio,
@@ -862,9 +917,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
   };
 
   useEffect(() => {
+    const restoreVersion = ++readerRestoreVersionRef.current;
+    readerRestorePendingRef.current = false;
     const document = activeReaderDocumentRef.current;
     if (!isReaderPage || !document || document.id !== activeReaderDocumentId) return;
     let cancelled = false;
+    readerRestorePendingRef.current = true;
 
     readerAudioActionsRef.current.cancel(true);
     qwenReaderControlsRef.current.cancel();
@@ -875,20 +933,29 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     setImportError(null);
 
     const restore = async () => {
-      const cache = await readerAudioActionsRef.current.load(document.id);
-      if (cancelled || !cache) return;
-      if (!activeReaderAudioSignature || cache.signature !== activeReaderAudioSignature) return;
-      readerAudioActionsRef.current.restore(cache.chunks, {
-        currentTime: document.progress.positionSec || cache.currentTime,
-        playbackRate: cache.playbackRate,
-      });
-      setShowPlayer(cache.chunks.length > 0);
+      try {
+        const cache = await readerAudioActionsRef.current.load(document.id);
+        if (cancelled || !cache) return;
+        if (!activeReaderAudioSignature || cache.signature !== activeReaderAudioSignature) return;
+        readerAudioActionsRef.current.restore(cache.chunks, {
+          // A saved 0 is meaningful (the user stopped or rewound). Falling back
+          // with `||` resurrected an older non-zero cache position.
+          currentTime: document.progress.positionSec,
+          playbackRate: cache.playbackRate,
+        });
+        setShowPlayer(cache.chunks.length > 0);
+      } finally {
+        if (readerRestoreVersionRef.current === restoreVersion) {
+          readerRestorePendingRef.current = false;
+        }
+      }
     };
     void restore().catch((cause) => {
       if (!cancelled) setImportError(cause instanceof Error ? cause.message : String(cause));
     });
     return () => {
       cancelled = true;
+      readerRestorePendingRef.current = false;
     };
   }, [
     activeReaderDocumentId,
@@ -898,6 +965,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
   useEffect(() => {
     if (!isReaderPage || !activeReaderDocument) return;
+    // Switching Reader documents resets the shared player before IndexedDB
+    // audio has loaded. Never persist that temporary zero state over a real
+    // resume point, and do not create progress from an empty transport.
+    if (readerRestorePendingRef.current || player.segments.length === 0 || player.totalDuration <= 0) return;
     const now = Date.now();
     const atEnd = player.totalDuration > 0 && player.currentTime >= player.totalDuration;
     if (atEnd && activeReaderDocument.progress.percent >= 99.999) return;
@@ -930,7 +1001,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
 
   useEffect(() => {
     const documentId = activeReaderDocumentId;
-    if (!isReaderPage || !documentId || player.segments.length === 0) return;
+    const documentText = activeReaderDocumentText;
+    if (!isReaderPage || !documentId || documentText === null || player.segments.length === 0) return;
     if (readerAudioSaveTimerRef.current !== null) window.clearTimeout(readerAudioSaveTimerRef.current);
     readerAudioSaveTimerRef.current = window.setTimeout(() => {
       const chunks = getReaderAudioSnapshot();
@@ -939,9 +1011,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
       void saveReaderAudio({
         documentId,
         signature: buildAudioSignature({
-          text,
+          text: documentText,
           model: isReaderUsingQwen3 ? "qwen3" : activeModel,
-          voice: isReaderUsingQwen3 ? qwen3Settings.speaker : voice,
+          voice: isReaderUsingQwen3 ? qwenPlaybackSignature : voice,
           quality,
           tuning: creator.generationSettings,
         }),
@@ -963,13 +1035,15 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
     creator.generationSettings,
     isReaderPage,
     isReaderUsingQwen3,
-    qwen3Settings.speaker,
+    qwenPlaybackSignature,
     activeReaderDocumentId,
+    activeReaderDocumentText,
     getReaderAudioSnapshot,
-    player.segments.length,
+    // Segment identity changes for appended transport chunks and same-count
+    // retakes. Watching only length could persist a partial Reader stream.
+    player.segments,
     quality,
     saveReaderAudio,
-    text,
     voice,
   ]);
   const activeSegmentIndex = player.activeSegmentId
@@ -1215,6 +1289,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "" }: Synt
               activeModel={activeModel}
               onModelChange={handleReaderModelChange}
               desktopModelOptions={readerDesktopModelOptions}
+              desktopQwenMode={isReaderUsingQwen3 ? qwen3Settings.profile.mode : undefined}
               desktopVoiceLabel={isReaderUsingQwen3 ? qwen3Settings.speaker.replace(/_/g, " ") : undefined}
               desktopModelSettings={isReaderUsingQwen3 ? (
                 <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />

@@ -115,7 +115,8 @@ export function LocalRuntimeQwenSetup(props: QwenModelSetupProps) {
         <select
           value={props.qwen3Profile.repo}
           onChange={(event) => props.onQwen3ProfileChange(event.target.value)}
-          className="min-h-[44px] rounded-lg border border-black/10 bg-white/55 px-3 py-2 text-sm normal-case text-text-primary backdrop-blur-sm"
+          disabled={props.qwen3DownloadBusy || props.qwen3SetupBusy}
+          className="min-h-[44px] rounded-lg border border-black/10 bg-white/55 px-3 py-2 text-sm normal-case text-text-primary backdrop-blur-sm disabled:cursor-not-allowed disabled:opacity-50"
         >
           {props.qwen3Profiles.map((profile) => <option key={profile.repo} value={profile.repo}>{profile.label}</option>)}
         </select>
@@ -220,9 +221,9 @@ export function LocalRuntimeQwenSetup(props: QwenModelSetupProps) {
             <div className="flex flex-col gap-2 sm:flex-row">
               <input
                 value={props.qwen3ModelPath}
-                onChange={(event) => props.onQwen3ModelPathChange(event.target.value)}
+                readOnly
                 className="min-w-0 flex-1 rounded-lg border border-black/10 bg-white/55 px-3 py-2 text-sm normal-case text-text-primary backdrop-blur-sm"
-                placeholder="/path/to/Qwen3-TTS-model"
+                placeholder="Choose a compatible Qwen3-TTS model folder"
               />
               <button
                 type="button"

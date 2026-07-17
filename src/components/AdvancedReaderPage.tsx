@@ -31,7 +31,7 @@ import { getMeaningfulTextLength } from "../lib/textValidation";
 import type { ModelState, ModelType, GenerationStats } from "../types";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
-import { buildQwen3TextUnits } from "../lib/qwenChunking";
+import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import {
   estimateWordRanges,
   type ReaderDocumentRecord,
@@ -69,6 +69,7 @@ interface AdvancedReaderPageProps {
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
+  desktopQwenMode?: "customVoice" | "voiceClone";
   desktopVoiceLabel?: string;
   desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
@@ -126,11 +127,28 @@ interface OverlayPart {
 interface SectionBoundary {
   start: number;
   end: number;
-  id: string | null;
 }
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function findSegmentForTextOffset(
+  segments: readonly AudioSegment[],
+  targetOffset: number,
+): AudioSegment | undefined {
+  return segments.find((segment) => (
+    typeof segment.textStart === "number"
+    && typeof segment.textEnd === "number"
+    && targetOffset >= segment.textStart
+    && targetOffset < segment.textEnd
+  ))
+    ?? segments.find((segment) => (
+      typeof segment.textStart === "number" && segment.textStart >= targetOffset
+    ))
+    ?? [...segments].reverse().find((segment) => (
+      typeof segment.textEnd === "number" && segment.textEnd <= targetOffset
+    ));
 }
 
 /** "af_heart" → "Heart" */
@@ -320,6 +338,7 @@ export function AdvancedReaderPage({
   activeModel,
   onModelChange,
   desktopModelOptions = [],
+  desktopQwenMode = "customVoice",
   desktopVoiceLabel,
   desktopModelSettings,
   kokoroState,
@@ -430,9 +449,11 @@ export function AdvancedReaderPage({
 
   const previewChunks = useMemo(
     () => selectedDesktopModel?.key === "qwen3"
-      ? buildQwen3TextUnits(text)
+      ? desktopQwenMode === "voiceClone"
+        ? buildQwen3RequestSections(text)
+        : buildQwen3TextUnits(text)
       : chunkTextForModelDetailed(text, activeModel, { runtime: { backend: runtimeBackend, quality } }),
-    [activeModel, quality, runtimeBackend, selectedDesktopModel?.key, text],
+    [activeModel, desktopQwenMode, quality, runtimeBackend, selectedDesktopModel?.key, text],
   );
 
   const activeSegmentIndex = useMemo(
@@ -486,25 +507,16 @@ export function AdvancedReaderPage({
     return activeWord ? { start: activeWord.start, end: activeWord.end } : null;
   }, [currentTime, estimatedWords]);
 
-  const sectionBoundaries = useMemo((): SectionBoundary[] => {
-    if (segments.length > 0) {
-      return segments.map((seg, index) => {
-        // Fall back to the matching preview chunk range when a segment lacks
-        // offsets, so a missing boundary never expands to span the whole text.
-        const fallback = previewChunks[index];
-        return {
-          start: seg.textStart ?? fallback?.start ?? 0,
-          end: seg.textEnd ?? fallback?.end ?? text.length,
-          id: seg.id,
-        };
-      });
-    }
-    return previewChunks.map((chunk) => ({
+  // Visual sections must remain stable while audio streams in. Generated
+  // segments are a partial, time-based view and may also be transport-split;
+  // using them as document boundaries makes future sections disappear or
+  // flicker. Click-to-seek resolves against `segments` separately below.
+  const sectionBoundaries = useMemo((): SectionBoundary[] => (
+    previewChunks.map((chunk) => ({
       start: chunk.start,
       end: chunk.end,
-      id: null,
-    }));
-  }, [segments, previewChunks, text.length]);
+    }))
+  ), [previewChunks]);
 
   const overlayParts = useMemo(
     () => buildOverlayParts(text, sectionBoundaries, activeRange, activeWordRange),
@@ -637,12 +649,7 @@ export function AdvancedReaderPage({
     if (typeof positionSec === "number" && totalDuration > 0) {
       onSeek(clamp(positionSec / totalDuration, 0, 1));
     } else {
-      const targetSegment = segments.find((segment) => (
-        typeof segment.textStart === "number"
-        && typeof segment.textEnd === "number"
-        && targetOffset >= segment.textStart
-        && targetOffset < segment.textEnd
-      )) ?? segments.find((segment) => typeof segment.textStart === "number" && segment.textStart >= targetOffset);
+      const targetSegment = findSegmentForTextOffset(segments, targetOffset);
       if (targetSegment) onJumpToSegment(targetSegment.id);
     }
 
@@ -1019,10 +1026,8 @@ export function AdvancedReaderPage({
               const ta = event.currentTarget;
               if (ta.selectionStart !== ta.selectionEnd) return;
               const pos = ta.selectionStart;
-              const boundary = sectionBoundaries.find(
-                (b) => b.id !== null && pos >= b.start && pos < b.end,
-              );
-              if (boundary?.id) onJumpToSegment(boundary.id);
+              const targetSegment = findSegmentForTextOffset(segments, pos);
+              if (targetSegment) onJumpToSegment(targetSegment.id);
             }}
             placeholder="Type or paste long-form text to read aloud…"
             className={`absolute inset-0 z-10 h-full w-full resize-none bg-transparent text-transparent caret-text-primary placeholder:font-sans placeholder:text-text-muted focus:outline-none ${DOCUMENT_TEXT_CLASSES} ${documentPadding(fullScreen)}`}

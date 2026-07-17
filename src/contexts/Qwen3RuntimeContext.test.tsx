@@ -51,6 +51,7 @@ describe("Qwen3RuntimeProvider", () => {
     window.electron = {
       isElectron: true,
       platform: "darwin",
+      arch: "arm64",
       localTts: {
         getQwen3Setup: vi.fn().mockResolvedValue(setupResult()),
         subscribeQwen3DownloadProgress: vi.fn(() => () => undefined),
@@ -72,6 +73,7 @@ describe("Qwen3RuntimeProvider", () => {
     window.electron = {
       isElectron: true,
       platform: "darwin",
+      arch: "arm64",
       localTts: {
         getQwen3Setup: vi.fn().mockResolvedValue(setupResult()),
         subscribeQwen3DownloadProgress: vi.fn(() => () => undefined),
@@ -106,5 +108,58 @@ describe("Qwen3RuntimeProvider", () => {
       render(<Qwen3RuntimeProvider><Availability /></Qwen3RuntimeProvider>);
     });
     expect(screen.getByRole("status")).toHaveTextContent("false");
+  });
+
+  it("does not apply an old profile download after the selected profile changes", async () => {
+    let finishDownload!: (value: {
+      modelRepo: string;
+      revision: string;
+      modelDir: string;
+      downloadedFiles: number;
+      skippedFiles: number;
+      readiness: "verified";
+    }) => void;
+    const download = new Promise<Parameters<typeof finishDownload>[0]>((resolve) => {
+      finishDownload = resolve;
+    });
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        getQwen3Setup: vi.fn().mockResolvedValue(setupResult()),
+        downloadQwen3Model: vi.fn(() => download),
+        subscribeQwen3DownloadProgress: vi.fn(() => () => undefined),
+      },
+    } as never;
+    function RaceConsumer() {
+      const state = useQwen3Runtime();
+      return (
+        <>
+          <output>{`${state.profile.repo}|${state.modelPath}`}</output>
+          <button onClick={() => void state.downloadModel()}>download</button>
+          <button onClick={() => state.setProfileRepo(BASE_REPO)}>base</button>
+        </>
+      );
+    }
+    render(<Qwen3RuntimeProvider><RaceConsumer /></Qwen3RuntimeProvider>);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("/models/custom"));
+    fireEvent.click(screen.getByText("download"));
+    fireEvent.click(screen.getByText("base"));
+
+    await act(async () => {
+      finishDownload({
+        modelRepo: CUSTOM_REPO,
+        revision: "a".repeat(40),
+        modelDir: "/downloaded/old-custom",
+        downloadedFiles: 1,
+        skippedFiles: 0,
+        readiness: "verified",
+      });
+      await download;
+    });
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(`${BASE_REPO}|/models/base`));
+    expect(screen.getByRole("status")).not.toHaveTextContent("/downloaded/old-custom");
   });
 });

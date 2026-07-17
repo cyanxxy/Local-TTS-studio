@@ -1,9 +1,11 @@
 use rten::Model;
-use rten_tensor::prelude::*;
 use rten_tensor::NdTensor;
+use rten_tensor::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::args().nth(1).expect("usage: probe_encoder <model.rten> [wav]");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: probe_encoder <model.rten> [wav]");
     let model = Model::load_file(&path)?;
     for (kind, ids) in [("input", model.input_ids()), ("output", model.output_ids())] {
         for &id in ids {
@@ -38,7 +40,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let resampled = neutts::codec::resample(&mono, spec.sample_rate, 16_000);
         real_len = resampled.len().min(window);
         samples[..real_len].copy_from_slice(&resampled[..real_len]);
-        println!("loaded {wav_path}: {real_len} samples at 16 kHz ({:.2}s)", real_len as f32 / 16_000.0);
+        println!(
+            "loaded {wav_path}: {real_len} samples at 16 kHz ({:.2}s)",
+            real_len as f32 / 16_000.0
+        );
     } else {
         // 2-second 220Hz sine in a 20s zero-padded window, 16 kHz mono.
         for (i, s) in samples.iter_mut().enumerate().take(real_len) {
@@ -49,7 +54,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = NdTensor::from_data([1usize, 1, window], samples);
     let started = std::time::Instant::now();
     let output = model.run_one(input.into(), None)?;
-    println!("ran in {:?}; output: {:?}", started.elapsed(), output.dtype());
+    println!(
+        "ran in {:?}; output: {:?}",
+        started.elapsed(),
+        output.dtype()
+    );
     match output {
         rten::Value::Int32Tensor(t) => {
             let shape = t.shape().to_vec();

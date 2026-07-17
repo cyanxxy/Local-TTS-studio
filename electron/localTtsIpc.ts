@@ -1,24 +1,25 @@
 import type { IpcMainInvokeEvent } from "electron";
+import type { GenerationContinuation } from "./generateRateLimiter";
 import {
   getQwen3Profile,
+  qwen3ProfileSupportsRuntime,
   QWEN3_LANGUAGES,
   QWEN3_SPEAKERS,
   type Qwen3Mode,
 } from "./qwen3Profiles";
+import {
+  MAX_LOCAL_TTS_TEXT_LENGTH,
+  MAX_REFERENCE_AUDIO_BASE64_LENGTH,
+  MAX_REFERENCE_CODES_BASE64_LENGTH,
+  exceedsUnicodeScalarLimit,
+} from "./localTtsLimits";
 import { isAllowedAppUrl } from "./security";
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
 export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
 export const LOCAL_MODELS = ["neutts", "qwen3"] as const;
 
-const MAX_TEXT_LENGTH = 6000;
-// Keep this aligned with MAX_READER_TEXT_CHARS. Qwen CustomVoice splits the
-// request into 400-code-point units inside the native runtime and streams each
-// unit, so Reader documents can safely cross the generic single-utterance cap.
-const MAX_QWEN3_CUSTOM_VOICE_TEXT_LENGTH = 1_500_000;
 const MAX_REFERENCE_TEXT_LENGTH = 2000;
-const MAX_REFERENCE_CODES_BASE64_LENGTH = 25_000_000;
-const MAX_REFERENCE_AUDIO_BASE64_LENGTH = 60_000_000;
 
 const ALLOWED_NEUTTS_MODELS = new Set([
   "neuphonic/neutts-nano-q4-gguf",
@@ -41,6 +42,7 @@ const QWEN3_GENERATE_FIELDS = new Set([
   "modelPath",
   "referenceAudioBase64",
   "referenceText",
+  "referenceCacheKey",
   "speaker",
   "language",
   "instruct",
@@ -70,6 +72,7 @@ export interface ValidatedLocalBridgeRequest {
   model: LocalModel;
   requestId?: string;
   payload: Record<string, unknown>;
+  continuation?: GenerationContinuation;
 }
 
 export interface BridgeProbeResult {
@@ -82,17 +85,23 @@ export interface BridgeProbeResult {
   recommendedModelRepo?: string | null;
   recommendedBaseModelRepo?: string | null;
   provider?: string;
+  device?: string;
+  accelerated?: boolean;
   upstreamRevision?: string;
 }
 
 export interface WarmRequest {
   model: LocalModel;
   payload: Record<string, unknown>;
+  modelRepo?: string;
 }
 
 export interface BridgeWarmResult {
   warmed: boolean;
   message?: string;
+  provider?: string;
+  device?: string;
+  accelerated?: boolean;
 }
 
 export interface BridgeGenerateResult {
@@ -136,11 +145,17 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function parseRequiredText(value: unknown, field: string, maxLength: number = MAX_TEXT_LENGTH): string {
+export function parseRequiredText(
+  value: unknown,
+  field: string,
+  maxLength: number = MAX_LOCAL_TTS_TEXT_LENGTH,
+): string {
   if (typeof value !== "string") throw new Error(`\`${field}\` must be a string.`);
   const text = value.trim();
   if (!text) throw new Error(`\`${field}\` is required.`);
-  if (text.length > maxLength) throw new Error(`\`${field}\` exceeds ${maxLength} characters.`);
+  if (exceedsUnicodeScalarLimit(text, maxLength)) {
+    throw new Error(`\`${field}\` exceeds ${maxLength} characters.`);
+  }
   return text;
 }
 
@@ -151,11 +166,49 @@ export function parseOptionalString(
 ): string | undefined {
   if (value == null) return undefined;
   if (typeof value !== "string") throw new Error(`\`${field}\` must be a string.`);
+  if (value.length > maxLength) throw new Error(`\`${field}\` exceeds ${maxLength} characters.`);
   const text = value.trim();
   if (!text) return undefined;
   if (text.length > maxLength) throw new Error(`\`${field}\` exceeds ${maxLength} characters.`);
   if (pattern && !pattern.test(text)) throw new Error(`\`${field}\` has an invalid format.`);
   return text;
+}
+
+function parseOptionalBase64(value: unknown, field: string, maxLength: number): string | undefined {
+  const encoded = parseOptionalString(value, field, { maxLength });
+  if (!encoded) return undefined;
+  if (encoded.length % 4 !== 0) throw new Error(`\`${field}\` must be canonical padded base64.`);
+  const padding = encoded.endsWith("==") ? 2 : encoded.endsWith("=") ? 1 : 0;
+  const contentLength = encoded.length - padding;
+  for (let index = 0; index < contentLength; index += 1) {
+    const code = encoded.charCodeAt(index);
+    const allowed = (code >= 65 && code <= 90)
+      || (code >= 97 && code <= 122)
+      || (code >= 48 && code <= 57)
+      || code === 43
+      || code === 47;
+    if (!allowed) throw new Error(`\`${field}\` must be canonical padded base64.`);
+  }
+  for (let index = contentLength; index < encoded.length; index += 1) {
+    if (encoded.charCodeAt(index) !== 61) {
+      throw new Error(`\`${field}\` must be canonical padded base64.`);
+    }
+  }
+  const finalCode = encoded.charCodeAt(contentLength - 1);
+  const finalSextet = finalCode >= 65 && finalCode <= 90
+    ? finalCode - 65
+    : finalCode >= 97 && finalCode <= 122
+      ? finalCode - 97 + 26
+      : finalCode >= 48 && finalCode <= 57
+        ? finalCode - 48 + 52
+        : finalCode === 43
+          ? 62
+          : 63;
+  if ((padding === 1 && (finalSextet & 0b11) !== 0)
+    || (padding === 2 && (finalSextet & 0b1111) !== 0)) {
+    throw new Error(`\`${field}\` must be canonical padded base64.`);
+  }
+  return encoded;
 }
 
 export function parseOptionalNumber(
@@ -202,6 +255,7 @@ export function parseRequestId(value: unknown, { required = false }: { required?
     return undefined;
   }
   if (typeof value !== "string") throw new Error("`requestId` must be a string.");
+  if (value.length > 120) throw new Error("`requestId` exceeds 120 characters.");
   const requestId = value.trim();
   if (!requestId) {
     if (required) throw new Error("`requestId` is required.");
@@ -217,20 +271,52 @@ export function parseRequestId(value: unknown, { required = false }: { required?
   return requestId;
 }
 
+export function sanitizeGenerationContinuation(value: unknown): GenerationContinuation | undefined {
+  if (value == null) return undefined;
+  if (!isRecord(value)) throw new Error("`continuation` must be an object.");
+  const unknownField = Object.keys(value).find((field) => (
+    !["jobId", "sectionIndex", "sectionCount"].includes(field)
+  ));
+  if (unknownField) throw new Error(`Unknown generation continuation field: \`${unknownField}\`.`);
+  const jobId = parseRequestId(value.jobId, { required: true })!;
+  const sectionIndex = parseOptionalInteger(value.sectionIndex, "sectionIndex", {
+    min: 0,
+    max: 100_000,
+  });
+  const sectionCount = parseOptionalInteger(value.sectionCount, "sectionCount", {
+    min: 1,
+    max: 100_000,
+  });
+  if (sectionIndex == null || sectionCount == null) {
+    throw new Error("Generation continuation requires `sectionIndex` and `sectionCount`.");
+  }
+  if (sectionIndex >= sectionCount) {
+    throw new Error("Generation continuation `sectionIndex` must be smaller than `sectionCount`.");
+  }
+  return { jobId, sectionIndex, sectionCount };
+}
+
 export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown> {
   if (!isRecord(payload)) throw new Error("NeuTTS payload must be an object.");
 
   const text = parseRequiredText(payload.text, "text");
   const referenceText = parseRequiredText(payload.referenceText, "referenceText", MAX_REFERENCE_TEXT_LENGTH);
 
-  const referenceCodesBase64 = parseOptionalString(payload.referenceCodesBase64, "referenceCodesBase64", {
-    maxLength: MAX_REFERENCE_CODES_BASE64_LENGTH,
-  });
-  const referenceAudioBase64 = parseOptionalString(payload.referenceAudioBase64, "referenceAudioBase64", {
-    maxLength: MAX_REFERENCE_AUDIO_BASE64_LENGTH,
-  });
+  const referenceCodesBase64 = parseOptionalBase64(
+    payload.referenceCodesBase64,
+    "referenceCodesBase64",
+    MAX_REFERENCE_CODES_BASE64_LENGTH,
+  );
+  const referenceAudioBase64 = parseOptionalBase64(
+    payload.referenceAudioBase64,
+    "referenceAudioBase64",
+    MAX_REFERENCE_AUDIO_BASE64_LENGTH,
+  );
   if (!referenceCodesBase64 && !referenceAudioBase64) {
     throw new Error("A `referenceCodesBase64` (.npy) or `referenceAudioBase64` (WAV) payload is required.");
+  }
+  if (referenceCodesBase64 && referenceAudioBase64) {
+    throw new Error("Provide either `referenceCodesBase64` or `referenceAudioBase64`, not both.");
   }
 
   const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
@@ -250,6 +336,7 @@ export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown>
 export function sanitizeQwen3Payload(
   payload: unknown,
   platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
 ): Record<string, unknown> {
   if (!isRecord(payload)) throw new Error("Qwen3 payload must be an object.");
   const unknownField = Object.keys(payload).find((field) => !QWEN3_GENERATE_FIELDS.has(field));
@@ -262,7 +349,7 @@ export function sanitizeQwen3Payload(
   const text = parseRequiredText(
     payload.text,
     "text",
-    mode === "customVoice" ? MAX_QWEN3_CUSTOM_VOICE_TEXT_LENGTH : MAX_TEXT_LENGTH,
+    MAX_LOCAL_TTS_TEXT_LENGTH,
   );
   const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
   if (!modelRepo) throw new Error("`modelRepo` is required for Qwen3-TTS.");
@@ -270,8 +357,8 @@ export function sanitizeQwen3Payload(
   if (!profile) {
     throw new Error("Unsupported Qwen3-TTS model repository.");
   }
-  if (!profile.platforms.includes(platform as "darwin" | "win32")) {
-    throw new Error(`Qwen3-TTS profile is unavailable on ${platform}.`);
+  if (!qwen3ProfileSupportsRuntime(profile, platform, arch)) {
+    throw new Error(`Qwen3-TTS profile is unavailable on ${platform}/${arch}.`);
   }
   if (profile.mode !== mode) throw new Error("Qwen3-TTS model repository does not match the requested mode.");
 
@@ -295,15 +382,30 @@ export function sanitizeQwen3Payload(
   const referenceText = parseOptionalString(payload.referenceText, "referenceText", {
     maxLength: MAX_REFERENCE_TEXT_LENGTH,
   });
-  const referenceAudioBase64 = parseOptionalString(payload.referenceAudioBase64, "referenceAudioBase64", {
-    maxLength: MAX_REFERENCE_AUDIO_BASE64_LENGTH,
+  const referenceAudioBase64 = parseOptionalBase64(
+    payload.referenceAudioBase64,
+    "referenceAudioBase64",
+    MAX_REFERENCE_AUDIO_BASE64_LENGTH,
+  );
+  const referenceCacheKey = parseOptionalString(payload.referenceCacheKey, "referenceCacheKey", {
+    maxLength: 120,
+    pattern: /^(?!.*\.\.)[A-Za-z0-9._-]+$/,
   });
 
   if (mode === "voiceClone") {
-    if (!referenceText) throw new Error("`referenceText` is required for Qwen3-TTS voice cloning.");
-    if (!referenceAudioBase64) {
-      throw new Error("A WAV `referenceAudioBase64` payload is required for Qwen3-TTS voice cloning.");
+    if (speaker || instruct) {
+      throw new Error("Qwen3-TTS voice cloning does not accept `speaker` or `instruct`.");
     }
+    const hasReferenceWav = !!referenceAudioBase64;
+    const hasReferenceText = !!referenceText;
+    if (hasReferenceWav !== hasReferenceText) {
+      throw new Error("Qwen3-TTS voice cloning requires `referenceText` together with `referenceAudioBase64`.");
+    }
+    if (!hasReferenceWav && !referenceCacheKey) {
+      throw new Error("Qwen3-TTS voice cloning requires a reference WAV or `referenceCacheKey`.");
+    }
+  } else if (referenceText || referenceAudioBase64 || referenceCacheKey) {
+    throw new Error("Qwen3-TTS CustomVoice does not accept voice-clone reference fields.");
   }
 
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
@@ -317,6 +419,7 @@ export function sanitizeQwen3Payload(
     modelPath,
     ...(referenceText ? { referenceText } : {}),
     ...(referenceAudioBase64 ? { referenceAudioBase64 } : {}),
+    ...(referenceCacheKey ? { referenceCacheKey } : {}),
     speaker,
     language,
     instruct,
@@ -330,15 +433,20 @@ export function sanitizeGeneratePayload(
   model: LocalModel,
   payload: unknown,
   platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
 ): Record<string, unknown> {
-  return model === "neutts" ? sanitizeNeuttsPayload(payload) : sanitizeQwen3Payload(payload, platform);
+  return model === "neutts" ? sanitizeNeuttsPayload(payload) : sanitizeQwen3Payload(payload, platform, arch);
 }
 
-export function sanitizeWarmRequest(request: unknown): WarmRequest {
+export function sanitizeWarmRequest(
+  request: unknown,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): WarmRequest {
   if (!isRecord(request)) throw new Error("Invalid warm request payload.");
   const model = assertLocalModel(String(request.model));
   if (model !== "qwen3") return { model, payload: {} };
-  const unknownField = Object.keys(request).find((field) => !["model", "mode", "modelPath"].includes(field));
+  const unknownField = Object.keys(request).find((field) => !["model", "mode", "modelPath", "modelRepo"].includes(field));
   if (unknownField) throw new Error(`Unknown Qwen3-TTS warm-up field: \`${unknownField}\`.`);
   const mode = parseOptionalString(request.mode, "mode", { maxLength: 32 });
   if (!mode || !ALLOWED_QWEN3_MODES.has(mode as Qwen3Mode)) throw new Error("Unsupported Qwen3-TTS mode.");
@@ -347,8 +455,15 @@ export function sanitizeWarmRequest(request: unknown): WarmRequest {
     pattern: /^[^\0]+$/,
   });
   if (!modelPath) throw new Error("`modelPath` is required for Qwen3-TTS warm-up.");
+  const modelRepo = parseOptionalString(request.modelRepo, "modelRepo", { maxLength: 128 });
+  if (!modelRepo) throw new Error("`modelRepo` is required for Qwen3-TTS warm-up.");
+  const profile = getQwen3Profile(modelRepo);
+  if (!profile || profile.mode !== mode || !qwen3ProfileSupportsRuntime(profile, platform, arch)) {
+    throw new Error("Unsupported Qwen3-TTS warm-up profile for this runtime.");
+  }
   return {
     model,
+    modelRepo,
     payload: { mode, modelPath },
   };
 }
@@ -408,6 +523,16 @@ export function parseBridgeProbeResult(result: unknown): BridgeProbeResult {
     if (typeof result.provider !== "string") throw new Error("Probe response has invalid `provider`.");
     parsed.provider = result.provider;
   }
+  if (result.device != null) {
+    if (typeof result.device !== "string") throw new Error("Probe response has invalid `device`.");
+    parsed.device = result.device;
+  }
+  if (result.accelerated != null) {
+    if (typeof result.accelerated !== "boolean") {
+      throw new Error("Probe response has invalid `accelerated` marker.");
+    }
+    parsed.accelerated = result.accelerated;
+  }
   if (result.upstreamRevision != null) {
     if (typeof result.upstreamRevision !== "string") {
       throw new Error("Probe response has invalid `upstreamRevision`.");
@@ -434,6 +559,11 @@ export function parseBridgeWarmResult(decoded: unknown): BridgeWarmResult {
   return {
     warmed: decoded.result.warmed,
     ...(typeof decoded.result.message === "string" ? { message: decoded.result.message } : {}),
+    ...(typeof decoded.result.provider === "string" ? { provider: decoded.result.provider } : {}),
+    ...(typeof decoded.result.device === "string" ? { device: decoded.result.device } : {}),
+    ...(typeof decoded.result.accelerated === "boolean"
+      ? { accelerated: decoded.result.accelerated }
+      : {}),
   };
 }
 

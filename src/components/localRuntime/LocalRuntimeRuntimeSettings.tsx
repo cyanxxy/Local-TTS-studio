@@ -36,6 +36,12 @@ export function LocalRuntimeRuntimeSettings({
         {runtime?.package && <p>Package: {runtime.package}</p>}
         {runtime?.packageVersion && <p>Package version: {runtime.packageVersion}</p>}
         {runtime?.provider && <p>Provider: {runtime.provider}</p>}
+        {runtime?.device && (
+          <p>
+            Device: {runtime.device}
+            {runtime.accelerated === true ? " (accelerated)" : runtime.accelerated === false ? " (fallback)" : ""}
+          </p>
+        )}
         {runtime?.upstreamRevision && <p className="break-all">Runtime revision: {runtime.upstreamRevision}</p>}
         {runtime?.recommendedModelRepo && <p className="break-all">Recommended model: {runtime.recommendedModelRepo}</p>}
         {runtime?.recommendedBaseModelRepo && <p className="break-all">Recommended Base model: {runtime.recommendedBaseModelRepo}</p>}

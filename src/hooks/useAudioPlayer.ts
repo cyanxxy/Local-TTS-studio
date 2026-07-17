@@ -36,6 +36,8 @@ export interface UseAudioPlayerReturn {
   download: (options?: AudioExportOptions) => Promise<void>;
   downloadCaptions: (format: CaptionExportFormat) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
+  getAudioChunkCount: () => number;
+  truncateAudioChunks: (count: number) => void;
   getAudioCacheSnapshot: () => CachedReaderAudioChunk[];
   restoreAudioCache: (
     chunks: readonly CachedReaderAudioChunk[],
@@ -85,6 +87,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const segmentCounterRef = useRef(0);
   const autoPlayOnChunkRef = useRef(true);
   const streamCompleteRef = useRef(true);
+  const playbackOperationRef = useRef(0);
   const timelineUiFlushCancelRef = useRef<CancelScheduledUiFlush | null>(null);
   const timelineSegmentsDirtyRef = useRef(false);
   const timelineDurationDirtyRef = useRef(false);
@@ -101,6 +104,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     setIsPlaying(false);
     isPlayingRef.current = false;
     interruptedRef.current = false;
+    autoPlayOnChunkRef.current = false;
   }, []);
 
   const flushTimelineState = useCallback(() => {
@@ -296,6 +300,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const replayFromOffset = useCallback(async (seekTimeSec: number, shouldPlay: boolean) => {
     const ctx = getContext();
     const clampedSeek = clamp(seekTimeSec, 0, totalDurationRef.current);
+    const operation = ++playbackOperationRef.current;
 
     interruptedRef.current = true;
     stopAllNodes();
@@ -321,20 +326,26 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       return;
     }
 
-    nextPlayTimeRef.current = ctx.currentTime;
-    scheduleBufferedChunks(ctx, clampedSeek);
-
     if (ctx.state === "suspended") {
       try {
         await ctx.resume();
       } catch {
-        failPlaybackStart();
+        if (operation === playbackOperationRef.current) failPlaybackStart();
         return;
       }
     }
 
-    setError(null);
+    // Stop/Reset, a newer seek, or another transport action may have happened
+    // while AudioContext.resume() was pending. Never let the stale continuation
+    // revive playback or replace the newer schedule.
+    if (operation !== playbackOperationRef.current) return;
+
+    nextPlayTimeRef.current = ctx.currentTime;
+    timelineAnchorRef.current = clampedSeek;
     contextAnchorRef.current = ctx.currentTime;
+    scheduleBufferedChunks(ctx, clampedSeek);
+
+    setError(null);
     setIsPlaying(true);
     isPlayingRef.current = true;
     interruptedRef.current = false;
@@ -382,6 +393,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const scheduleChunk = useCallback(async (chunk: AudioChunkData) => {
     const ctx = getContext();
+    const operation = playbackOperationRef.current;
 
     samplingRateRef.current = chunk.samplingRate;
     const chunkDuration = getChunkDuration(chunk);
@@ -447,10 +459,17 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       try {
         await ctx.resume();
       } catch {
-        failPlaybackStart();
+        if (operation === playbackOperationRef.current) {
+          stopAllNodes();
+          nextPlayTimeRef.current = 0;
+          scheduleCursorRef.current = findChunkIndexAtTime(currentTimeRef.current);
+          failPlaybackStart();
+        }
         return;
       }
     }
+
+    if (operation !== playbackOperationRef.current || !autoPlayOnChunkRef.current) return;
 
     setError(null);
     if (!isPlayingRef.current) {
@@ -463,6 +482,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     getContext,
     queueTimelineStateFlush,
     scheduleBufferedChunks,
+    stopAllNodes,
     syncTotalDuration,
   ]);
 
@@ -470,6 +490,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     const ctx = getContext();
 
     if (isPlayingRef.current) {
+      playbackOperationRef.current += 1;
       autoPlayOnChunkRef.current = false;
       const snapshot = syncCurrentTime(getLiveTimelineTime());
       timelineAnchorRef.current = snapshot;
@@ -482,12 +503,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }
 
     autoPlayOnChunkRef.current = true;
+    const operation = ++playbackOperationRef.current;
     try {
       await ctx.resume();
     } catch {
-      failPlaybackStart();
+      if (operation === playbackOperationRef.current) failPlaybackStart();
       return;
     }
+    if (operation !== playbackOperationRef.current) return;
     setError(null);
 
     if (currentTimeRef.current >= totalDurationRef.current && totalDurationRef.current > 0) {
@@ -585,21 +608,43 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     const index = allChunksRef.current.findIndex((chunk) => chunk.segmentId === segmentId);
     if (index < 0) return;
 
+    let endIndex = index + 1;
+    while (
+      endIndex < allChunksRef.current.length
+      && allChunksRef.current[endIndex].segmentId === segmentId
+    ) {
+      endIndex += 1;
+    }
+
     const current = allChunksRef.current[index];
-    allChunksRef.current[index] = {
+    const previousEndSec = allChunksRef.current[endIndex - 1].endSec;
+    const previousDuration = previousEndSec - current.startSec;
+    const replacementDuration = getChunkDuration(replacement);
+    const replacementChunk: StoredAudioChunk = {
       ...current,
       ...replacement,
       segmentId: current.segmentId,
       startSec: current.startSec,
-      endSec: current.endSec,
+      endSec: current.startSec + replacementDuration,
       audioBuffer: undefined,
     };
+    // One visible/semantic section can consist of several bounded transport
+    // chunks (notably Qwen). A retake replaces the whole section, not only its
+    // first transport chunk.
+    allChunksRef.current.splice(index, endIndex - index, replacementChunk);
 
     allChunksRef.current = retimeStoredChunks(allChunksRef.current);
     const nextDuration = allChunksRef.current.at(-1)?.endSec ?? 0;
 
     samplingRateRef.current = replacement.samplingRate;
-    const playbackSnapshot = currentTimeRef.current;
+    const previousPlaybackTime = currentTimeRef.current;
+    const playbackSnapshot = previousPlaybackTime >= previousEndSec
+      ? previousPlaybackTime + replacementDuration - previousDuration
+      : previousPlaybackTime > current.startSec && previousDuration > 0
+        ? current.startSec + (
+            ((previousPlaybackTime - current.startSec) / previousDuration) * replacementDuration
+          )
+        : previousPlaybackTime;
     syncTotalDuration(nextDuration);
     rebuildSegmentState();
     syncCurrentTime(playbackSnapshot);
@@ -628,10 +673,39 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }))
   ), []);
 
+  const getAudioChunkCount = useCallback(() => allChunksRef.current.length, []);
+
+  const truncateAudioChunks = useCallback((count: number) => {
+    const retainedCount = clamp(Math.floor(Number.isFinite(count) ? count : 0), 0, allChunksRef.current.length);
+    if (retainedCount >= allChunksRef.current.length) return;
+
+    const wasPlaying = isPlayingRef.current;
+    const playbackSnapshot = wasPlaying ? getLiveTimelineTime() : currentTimeRef.current;
+    playbackOperationRef.current += 1;
+    allChunksRef.current = allChunksRef.current.slice(0, retainedCount);
+    segmentCounterRef.current = new Set(allChunksRef.current.map((chunk) => chunk.segmentId)).size;
+    const nextDuration = allChunksRef.current.at(-1)?.endSec ?? 0;
+    const nextTime = clamp(playbackSnapshot, 0, nextDuration);
+    syncTotalDuration(nextDuration);
+    rebuildSegmentState();
+    syncCurrentTime(nextTime);
+    autoPlayOnChunkRef.current = wasPlaying && nextTime < nextDuration;
+    void replayFromOffset(nextTime, autoPlayOnChunkRef.current);
+    pruneBufferedAudio();
+  }, [
+    getLiveTimelineTime,
+    pruneBufferedAudio,
+    rebuildSegmentState,
+    replayFromOffset,
+    syncCurrentTime,
+    syncTotalDuration,
+  ]);
+
   const restoreAudioCache = useCallback((
     chunks: readonly CachedReaderAudioChunk[],
     options: { currentTime?: number; playbackRate?: number } = {},
   ) => {
+    playbackOperationRef.current += 1;
     stopAllNodes();
     cancelTimelineStateFlush();
     segmentCounterRef.current = 0;
@@ -700,6 +774,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       && totalDurationRef.current > 0
       && allChunksRef.current.length > 0
     ) {
+      playbackOperationRef.current += 1;
       setIsPlaying(false);
       isPlayingRef.current = false;
       syncCurrentTime(totalDurationRef.current);
@@ -708,6 +783,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   }, [stopAllNodes, syncCurrentTime]);
 
   const reset = useCallback(() => {
+    playbackOperationRef.current += 1;
     stopAllNodes();
     cancelTimelineStateFlush();
 
@@ -732,6 +808,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   }, [cancelTimelineStateFlush, stopAllNodes, syncCurrentTime, syncTotalDuration]);
 
   const stopAll = useCallback(() => {
+    playbackOperationRef.current += 1;
     stopAllNodes();
     nextPlayTimeRef.current = 0;
     scheduleCursorRef.current = 0;
@@ -749,6 +826,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   useEffect(() => {
     return () => {
+      playbackOperationRef.current += 1;
       cancelAnimationFrame(animFrameRef.current);
       cancelTimelineStateFlush();
       stopAllNodes();
@@ -776,6 +854,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     download,
     downloadCaptions,
     replaceSegment,
+    getAudioChunkCount,
+    truncateAudioChunks,
     getAudioCacheSnapshot,
     restoreAudioCache,
     beginStream,

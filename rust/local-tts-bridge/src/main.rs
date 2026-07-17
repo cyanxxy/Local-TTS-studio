@@ -1,5 +1,6 @@
 mod neucodec_encoder;
 mod qwen3;
+mod reference_audio;
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
@@ -8,7 +9,7 @@ use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
@@ -21,22 +22,37 @@ use tungstenite::{Message, WebSocket};
 
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 use qwen3::{
-    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneRequest,
-    resolved_provider,
+    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneReference,
+    VoiceCloneRequest, resolved_runtime_target,
 };
 use qwen3::{ExpectedModelType, GenerationControls};
+use reference_audio::decode_bounded_mono_wav;
 
 const RESULT_PREFIX: &str = "__RESULT__";
 const PORT_PREFIX: &str = "__PORT__";
-const MAX_WEBSOCKET_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
+// Electron accepts reference-audio base64 strings up to 60,000,000 bytes. Keep
+// the transport ceiling above that payload plus its bounded JSON envelope.
+const MAX_WEBSOCKET_TEXT_FRAME_BYTES: usize = 64 * 1024 * 1024;
 const MAX_WEBSOCKET_HANDSHAKE_BYTES: usize = 64 * 1024;
 const MAX_AUDIO_CHUNK_SAMPLES: usize = 262_144;
 const WEBSOCKET_READ_TIMEOUT_SEC: u64 = 10;
 const WEBSOCKET_HANDSHAKE_DEADLINE_SEC: u64 = 10;
 const WEBSOCKET_IDLE_READ_TIMEOUT_SEC: u64 = 30 * 60;
+const WEBSOCKET_WRITE_TIMEOUT_SEC: u64 = 30;
+const MAX_WEBSOCKET_WRITE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LOCAL_TTS_TEXT_CHARS: usize = 6_000;
+const MAX_REFERENCE_TEXT_CHARS: usize = 2_000;
+const MAX_REFERENCE_CACHE_KEY_CHARS: usize = 120;
+const MAX_REFERENCE_AUDIO_BASE64_CHARS: usize = 60_000_000;
+const NEUTTS_REFERENCE_MAX_DURATION_SECONDS: u32 = 20;
+const MAX_NEUTTS_REFERENCE_CODES: usize = 1_000;
+const MAX_NEUTTS_REFERENCE_CODE_VALUE: i32 = 65_535;
+const MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES: usize = 64 * 1_024;
+const MAX_NEUTTS_REFERENCE_CODES_BASE64_CHARS: usize =
+    ((MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES + 2) / 3) * 4;
 const NEUTTS_DEFAULT_MODEL: &str = "neuphonic/neutts-nano-q4-gguf";
 const QWEN3_MLX_CUSTOMVOICE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const QWEN3_MLX_BASE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
@@ -56,8 +72,6 @@ struct Cli {
     host: String,
     #[arg(long, default_value_t = 0)]
     port: u16,
-    #[arg(long)]
-    auth_token: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -75,7 +89,7 @@ enum LocalModel {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct WebSocketRequest {
     request_id: Option<String>,
     payload: Option<Value>,
@@ -91,6 +105,7 @@ struct Qwen3Payload {
     model_path: String,
     reference_audio_base64: Option<String>,
     reference_text: Option<String>,
+    reference_cache_key: Option<String>,
     speaker: Option<String>,
     language: Option<String>,
     instruct: Option<String>,
@@ -107,7 +122,7 @@ struct Qwen3WarmPayload {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct NeuttsPayload {
     text: String,
     reference_text: String,
@@ -126,7 +141,7 @@ struct RuntimeState {
     cache_dir: PathBuf,
     #[cfg(any(
         all(target_os = "macos", target_arch = "aarch64"),
-        target_os = "windows"
+        all(target_os = "windows", target_arch = "x86_64")
     ))]
     qwen3: Qwen3Runtime,
     neutts: Option<NeuttsHost>,
@@ -198,9 +213,10 @@ fn run_probe(cli: &Cli) -> Result<()> {
 
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 fn qwen3_probe_result() -> Value {
+    let target = resolved_runtime_target();
     let (recommended_model, recommended_base_model) = if cfg!(target_os = "macos") {
         (QWEN3_MLX_CUSTOMVOICE_06B_MODEL, QWEN3_MLX_BASE_06B_MODEL)
     } else {
@@ -209,6 +225,11 @@ fn qwen3_probe_result() -> Value {
             QWEN3_LIBTORCH_BASE_06B_MODEL,
         )
     };
+    let warnings: Vec<&str> = if target.accelerated {
+        Vec::new()
+    } else {
+        vec!["No supported GPU accelerator was detected; Qwen3 will use its local CPU fallback."]
+    };
     json!({
         "ready": true,
         "message": "Native Qwen3-TTS runtime is ready. Download or select a validated model directory before generation.",
@@ -216,16 +237,18 @@ fn qwen3_probe_result() -> Value {
         "package": "qwen3-tts-rs",
         "packageVersion": "0.2.2",
         "upstreamRevision": qwen3::UPSTREAM_REVISION,
-        "provider": resolved_provider(),
+        "provider": target.provider,
+        "device": target.device,
+        "accelerated": target.accelerated,
         "recommendedModelRepo": recommended_model,
         "recommendedBaseModelRepo": recommended_base_model,
-        "warnings": [],
+        "warnings": warnings,
     })
 }
 
 #[cfg(not(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 )))]
 fn qwen3_probe_result() -> Value {
     json!({
@@ -236,16 +259,17 @@ fn qwen3_probe_result() -> Value {
         "packageVersion": "0.2.2",
         "upstreamRevision": qwen3::UPSTREAM_REVISION,
         "provider": "unsupported",
+        "device": "unavailable",
+        "accelerated": false,
         "warnings": ["This platform has no packaged Qwen3 tensor provider."],
     })
 }
 
 fn run_websocket_server(cli: &Cli) -> Result<()> {
-    let auth_token = cli
-        .auth_token
-        .as_deref()
+    let auth_token = std::env::var("OPEN_TTS_WS_AUTH_TOKEN")
+        .ok()
         .filter(|token| !token.is_empty())
-        .context("WebSocket bridge requires a non-empty --auth-token.")?;
+        .context("WebSocket bridge requires a non-empty authentication token.")?;
     std::fs::create_dir_all(&cli.cache_dir).with_context(|| {
         format!(
             "Failed to create cache directory {}",
@@ -253,27 +277,33 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         )
     })?;
 
-    let listener = TcpListener::bind((cli.host.as_str(), cli.port)).with_context(|| {
+    let bind_addresses = resolve_loopback_bind_addresses(&cli.host, cli.port)?;
+    let listener = TcpListener::bind(bind_addresses.as_slice()).with_context(|| {
         format!(
             "Failed to bind WebSocket bridge on {}:{}",
             cli.host, cli.port
         )
     })?;
-    let port = listener
+    let local_address = listener
         .local_addr()
-        .context("Failed reading WebSocket bridge listener address")?
-        .port();
+        .context("Failed reading WebSocket bridge listener address")?;
+    ensure!(
+        local_address.ip().is_loopback(),
+        "WebSocket bridge must bind to a loopback address."
+    );
+    let port = local_address.port();
     println!("{PORT_PREFIX}{port}");
     std::io::stdout()
         .flush()
         .context("Failed announcing WebSocket bridge port")?;
+    exit_when_parent_pipe_closes();
 
     let mut state = RuntimeState {
         model: cli.model,
         cache_dir: cli.cache_dir.clone(),
         #[cfg(any(
             all(target_os = "macos", target_arch = "aarch64"),
-            target_os = "windows"
+            all(target_os = "windows", target_arch = "x86_64")
         ))]
         qwen3: Qwen3Runtime::new(),
         neutts: None,
@@ -285,26 +315,57 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
             .accept()
             .context("Failed accepting WebSocket client")?;
         let _ = stream.set_nodelay(true);
-        let mut websocket = match WebSocketConnection::accept(stream, auth_token) {
+        let mut websocket = match WebSocketConnection::accept(stream, &auth_token) {
             Ok(connection) => connection,
             Err(err) => {
                 eprintln!("WebSocket bridge rejected connection: {err}");
                 continue;
             }
         };
-        let should_shutdown = match serve_websocket_connection(&mut websocket, &mut state) {
-            Ok(should_shutdown) => should_shutdown,
+        match serve_websocket_connection(&mut websocket, &mut state) {
+            Ok(_) => {}
             Err(err) if is_client_disconnect(&err) => {
                 eprintln!("WebSocket bridge client disconnected: {err:#}");
-                false
             }
             Err(err) => return Err(err),
-        };
-        let _ = websocket.close();
-        if should_shutdown {
-            return Ok(());
         }
+        let _ = websocket.close();
+        // One authenticated connection owns this process. Electron never
+        // reconnects to an existing child, so exit when that owner disconnects
+        // instead of leaving an unreachable loopback listener orphaned.
+        return Ok(());
     }
+}
+
+fn resolve_loopback_bind_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
+    let addresses = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("Failed to resolve WebSocket bridge host '{host}'"))?
+        .collect::<Vec<_>>();
+    ensure!(
+        !addresses.is_empty(),
+        "WebSocket bridge host '{host}' resolved to no addresses."
+    );
+    ensure!(
+        addresses.iter().all(|address| address.ip().is_loopback()),
+        "WebSocket bridge host must resolve only to loopback addresses."
+    );
+    Ok(addresses)
+}
+
+fn exit_when_parent_pipe_closes() {
+    thread::spawn(|| {
+        let mut input = std::io::stdin().lock();
+        let mut byte = [0_u8; 1];
+        loop {
+            match input.read(&mut byte) {
+                Ok(0) => std::process::exit(0),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => std::process::exit(0),
+            }
+        }
+    });
 }
 
 fn serve_websocket_connection(
@@ -322,6 +383,11 @@ fn serve_websocket_connection(
             Ok(value) => value,
             Err(err) => {
                 eprintln!("WebSocket bridge rejected invalid request JSON: {err}");
+                send_request_error(
+                    websocket,
+                    "",
+                    &anyhow::anyhow!("Invalid WebSocket request JSON."),
+                )?;
                 continue;
             }
         };
@@ -330,6 +396,14 @@ fn serve_websocket_connection(
         }
 
         let request_id = request.request_id.unwrap_or_default();
+        if request_id.trim().is_empty() {
+            send_request_error(
+                websocket,
+                &request_id,
+                &anyhow::anyhow!("WebSocket requests require a non-empty requestId."),
+            )?;
+            continue;
+        }
         let payload = request.payload.unwrap_or(Value::Null);
         if request.command.as_deref() == Some("warm") {
             let outcome = {
@@ -337,6 +411,14 @@ fn serve_websocket_connection(
                 state.warm(payload)
             };
             send_request_outcome(websocket, &request_id, outcome)?;
+            continue;
+        }
+        if request.command.is_some() {
+            send_request_error(
+                websocket,
+                &request_id,
+                &anyhow::anyhow!("Unsupported WebSocket command."),
+            )?;
             continue;
         }
 
@@ -412,9 +494,10 @@ impl RuntimeState {
 
     #[cfg(any(
         all(target_os = "macos", target_arch = "aarch64"),
-        target_os = "windows"
+        all(target_os = "windows", target_arch = "x86_64")
     ))]
     fn warm_qwen3(&mut self, payload: Value) -> Result<Value> {
+        let target = resolved_runtime_target();
         let payload: Qwen3WarmPayload =
             serde_json::from_value(payload).context("Invalid Qwen3 warm payload")?;
         let model_type = parse_model_type(&payload.mode)?;
@@ -423,13 +506,15 @@ impl RuntimeState {
         Ok(json!({
             "warmed": true,
             "message": "Qwen3 model is loaded in the resident Rust bridge.",
-            "provider": resolved_provider(),
+            "provider": target.provider,
+            "device": target.device,
+            "accelerated": target.accelerated,
         }))
     }
 
     #[cfg(not(any(
         all(target_os = "macos", target_arch = "aarch64"),
-        target_os = "windows"
+        all(target_os = "windows", target_arch = "x86_64")
     )))]
     fn warm_qwen3(&mut self, _payload: Value) -> Result<Value> {
         bail!("Qwen3 is unavailable on this platform.")
@@ -449,7 +534,7 @@ impl RuntimeState {
 
     #[cfg(any(
         all(target_os = "macos", target_arch = "aarch64"),
-        target_os = "windows"
+        all(target_os = "windows", target_arch = "x86_64")
     ))]
     fn generate_qwen3(
         &mut self,
@@ -457,18 +542,36 @@ impl RuntimeState {
         payload: Value,
         websocket: &mut WebSocketConnection,
     ) -> Result<GenerationOutput> {
-        let payload: Qwen3Payload =
+        let mut payload: Qwen3Payload =
             serde_json::from_value(payload).context("Invalid Qwen3 payload")?;
         ensure!(
             payload.temperature.is_none_or(f64::is_finite),
             "Qwen3 temperature must be finite."
         );
+        let trimmed_text = payload.text.trim();
+        ensure!(
+            !trimmed_text.is_empty() && trimmed_text.chars().count() <= MAX_LOCAL_TTS_TEXT_CHARS,
+            "Qwen3 text must contain between 1 and {MAX_LOCAL_TTS_TEXT_CHARS} characters."
+        );
+        payload.text = trimmed_text.to_owned();
         let model_type = parse_model_type(payload.mode.as_deref().unwrap_or("customVoice"))?;
         let repo_is_base = payload.model_repo.contains("-Base");
         ensure!(
             repo_is_base == (model_type == ExpectedModelType::Base),
             "Qwen3 model repository does not match the requested mode."
         );
+        match model_type {
+            ExpectedModelType::Base => ensure!(
+                payload.speaker.is_none() && payload.instruct.is_none(),
+                "Qwen3 voice cloning does not accept speaker or instruct."
+            ),
+            ExpectedModelType::CustomVoice => ensure!(
+                payload.reference_text.is_none()
+                    && payload.reference_audio_base64.is_none()
+                    && payload.reference_cache_key.is_none(),
+                "Qwen3 CustomVoice does not accept voice-clone reference fields."
+            ),
+        }
         let controls = GenerationControls::new(
             payload.temperature.unwrap_or(0.9),
             payload.top_k.unwrap_or(50),
@@ -480,8 +583,9 @@ impl RuntimeState {
             request_id,
             websocket,
             started,
+            audio_chunk_count: 0,
         };
-        let summary = match model_type {
+        let mut summary = match model_type {
             ExpectedModelType::CustomVoice => self.qwen3.generate_custom_voice(
                 Path::new(&payload.model_path),
                 &CustomVoiceRequest {
@@ -494,36 +598,55 @@ impl RuntimeState {
                 &mut sink,
             )?,
             ExpectedModelType::Base => {
-                let reference_text = payload
-                    .reference_text
-                    .as_deref()
-                    .context("Qwen3 voice cloning requires referenceText.")?;
-                let encoded = payload
-                    .reference_audio_base64
-                    .as_deref()
-                    .context("Qwen3 voice cloning requires referenceAudioBase64.")?;
-                let reference_wav = BASE64
-                    .decode(encoded.trim())
-                    .context("Failed to decode Qwen3 reference WAV.")?;
+                let reference_text = payload.reference_text.take();
+                let reference_cache_key = payload.reference_cache_key.take();
+                if let Some(cache_key) = reference_cache_key.as_deref() {
+                    validate_qwen_reference_cache_key(cache_key)?;
+                }
+                let reference = if let Some(encoded) = payload.reference_audio_base64.take() {
+                    let reference_text = reference_text.as_deref().context(
+                        "Qwen3 voice cloning requires referenceText with a reference WAV.",
+                    )?;
+                    validate_qwen_reference_fields(reference_text, &encoded)?;
+                    let reference_wav = BASE64
+                        .decode(encoded.trim())
+                        .context("Failed to decode Qwen3 reference WAV.")?;
+                    drop(encoded);
+                    VoiceCloneReference::Audio {
+                        reference_wav,
+                        reference_text,
+                        session_key: reference_cache_key.as_deref(),
+                    }
+                } else {
+                    ensure!(
+                        reference_text.is_none(),
+                        "Qwen3 cached voice references do not accept referenceText without referenceAudioBase64."
+                    );
+                    VoiceCloneReference::Cached {
+                        session_key: reference_cache_key
+                            .as_deref()
+                            .context("Qwen3 voice cloning requires referenceAudioBase64 or referenceCacheKey.")?,
+                    }
+                };
                 self.qwen3.generate_voice_clone(
                     Path::new(&payload.model_path),
-                    &VoiceCloneRequest {
+                    VoiceCloneRequest {
                         text: &payload.text,
                         language: payload.language.as_deref().unwrap_or("Auto"),
-                        reference_wav: &reference_wav,
-                        reference_text,
+                        reference,
                         controls,
                     },
                     &mut sink,
                 )?
             }
         };
+        summary.audio_chunk_count = sink.audio_chunk_count;
         qwen_generation_output(summary, payload.model_repo, inference_started.elapsed())
     }
 
     #[cfg(not(any(
         all(target_os = "macos", target_arch = "aarch64"),
-        target_os = "windows"
+        all(target_os = "windows", target_arch = "x86_64")
     )))]
     fn generate_qwen3(
         &mut self,
@@ -540,15 +663,55 @@ impl RuntimeState {
         payload: Value,
         websocket: &mut WebSocketConnection,
     ) -> Result<GenerationOutput> {
-        let payload: NeuttsPayload =
+        let mut payload: NeuttsPayload =
             serde_json::from_value(payload).context("Invalid NeuTTS payload")?;
         ensure!(
             !payload.text.trim().is_empty(),
             "Text to synthesize is empty."
         );
+        ensure!(
+            payload.text.chars().count() <= MAX_LOCAL_TTS_TEXT_CHARS,
+            "NeuTTS text exceeds {MAX_LOCAL_TTS_TEXT_CHARS} characters."
+        );
+        ensure!(
+            !payload.reference_text.trim().is_empty()
+                && payload.reference_text.chars().count() <= MAX_REFERENCE_TEXT_CHARS,
+            "NeuTTS reference text must contain between 1 and {MAX_REFERENCE_TEXT_CHARS} characters."
+        );
         let started = Instant::now();
         let mut phase_timings = serde_json::Map::new();
         let model_repo = normalize_neutts_model(payload.model_repo.as_deref())?;
+
+        enum PreparedReference {
+            Codes(Vec<i32>),
+            Audio { samples: Vec<f32>, truncated: bool },
+        }
+
+        let reference_started = Instant::now();
+        let reference_codes = payload
+            .reference_codes_base64
+            .take()
+            .filter(|encoded| !encoded.trim().is_empty());
+        let reference_audio = payload
+            .reference_audio_base64
+            .take()
+            .filter(|encoded| !encoded.trim().is_empty());
+        let prepared_reference = match (reference_codes, reference_audio) {
+            (Some(_), Some(_)) => {
+                bail!("Provide either NeuTTS reference codes or reference audio, not both.")
+            }
+            (Some(encoded), None) => {
+                PreparedReference::Codes(decode_neutts_reference_codes(&encoded)?)
+            }
+            (None, Some(audio)) => {
+                let (samples, truncated) = prepare_neutts_reference_samples(&audio)?;
+                PreparedReference::Audio { samples, truncated }
+            }
+            (None, None) => bail!(
+                "Provide a reference: either pre-encoded .npy codes (referenceCodesBase64) or a WAV clip (referenceAudioBase64)."
+            ),
+        };
+        let reference_validation_elapsed = reference_started.elapsed();
 
         websocket.send_progress(
             request_id,
@@ -563,26 +726,16 @@ impl RuntimeState {
             json!(round_secs(load_started.elapsed().as_secs_f64())),
         );
 
-        let reference_started = Instant::now();
+        let reference_encoding_started = Instant::now();
         let mut warnings = Vec::new();
-        let reference_codes = match (
-            payload
-                .reference_codes_base64
-                .as_deref()
-                .filter(|encoded| !encoded.trim().is_empty()),
-            payload
-                .reference_audio_base64
-                .as_deref()
-                .filter(|encoded| !encoded.trim().is_empty()),
-        ) {
-            (Some(encoded), _) => decode_neutts_reference_codes(encoded)?,
-            (None, Some(audio)) => {
+        let reference_codes = match prepared_reference {
+            PreparedReference::Codes(codes) => codes,
+            PreparedReference::Audio { samples, truncated } => {
                 let mut progress = |message: String| {
                     let _ =
                         websocket.send_progress(request_id, "reference_encoding", message, started);
                 };
                 progress("Encoding WAV reference with NeuCodec...".to_string());
-                let (samples, truncated) = prepare_neutts_reference_samples(audio)?;
                 if truncated {
                     warnings.push(
                         "Reference audio is longer than 20 seconds; only the first 20 seconds were used."
@@ -592,13 +745,11 @@ impl RuntimeState {
                 self.ensure_neutts_encoder(&mut progress)?
                     .encode(&samples)?
             }
-            (None, None) => bail!(
-                "Provide a reference: either pre-encoded .npy codes (referenceCodesBase64) or a WAV clip (referenceAudioBase64)."
-            ),
         };
+        let reference_elapsed = reference_validation_elapsed + reference_encoding_started.elapsed();
         phase_timings.insert(
             "referenceEncodingSec".to_string(),
-            json!(round_secs(reference_started.elapsed().as_secs_f64())),
+            json!(round_secs(reference_elapsed.as_secs_f64())),
         );
 
         websocket.send_progress(
@@ -656,13 +807,14 @@ impl RuntimeState {
 
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 fn qwen_generation_output(
     summary: GenerationSummary,
     model_repo: String,
     inference_elapsed: Duration,
 ) -> Result<GenerationOutput> {
+    let target = resolved_runtime_target();
     ensure!(
         summary.sample_rate > 0,
         "Qwen3 returned an invalid sample rate."
@@ -676,8 +828,12 @@ fn qwen_generation_output(
         samples: Vec::new(),
         sample_rate: usize::try_from(summary.sample_rate).context("Invalid Qwen3 sample rate")?,
         model_repo,
-        device: Some(resolved_provider().to_string()),
-        warnings: Vec::new(),
+        device: Some(target.device.to_string()),
+        warnings: if summary.reference_truncated {
+            vec!["Qwen3 used only the first 20 seconds of the reference WAV.".to_string()]
+        } else {
+            Vec::new()
+        },
         streamed_audio: Some(StreamedAudioSummary {
             sample_count: summary.sample_count,
             audio_chunk_count: summary.audio_chunk_count,
@@ -696,17 +852,18 @@ fn parse_model_type(mode: &str) -> Result<ExpectedModelType> {
 
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 struct WebSocketQwenSink<'a> {
     request_id: &'a str,
     websocket: &'a mut WebSocketConnection,
     started: Instant,
+    audio_chunk_count: usize,
 }
 
 #[cfg(any(
     all(target_os = "macos", target_arch = "aarch64"),
-    target_os = "windows"
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 impl AudioSink for WebSocketQwenSink<'_> {
     fn progress(&mut self, phase: &str, message: &str) -> Result<()> {
@@ -722,21 +879,29 @@ impl AudioSink for WebSocketQwenSink<'_> {
         total: usize,
         silence_after_samples: usize,
     ) -> Result<()> {
-        let mut metadata = json!({
-            "type": "audio_chunk",
-            "requestId": self.request_id,
-            "index": index,
-            "total": total,
-            "sampleRate": sample_rate,
-            "sampleCount": samples.len(),
-            "silenceAfterSamples": silence_after_samples,
-        });
-        if total > 0 {
-            metadata["textUnitIndex"] = json!(index);
-            metadata["textUnitTotal"] = json!(total);
+        for (part_index, chunk) in samples.chunks(MAX_AUDIO_CHUNK_SAMPLES).enumerate() {
+            let is_last_part = (part_index + 1) * MAX_AUDIO_CHUNK_SAMPLES >= samples.len();
+            let mut metadata = json!({
+                "type": "audio_chunk",
+                "requestId": self.request_id,
+                "index": self.audio_chunk_count,
+                // The final transport chunk count is not known while Qwen is
+                // streaming. The result envelope supplies the authoritative
+                // count after generation completes.
+                "total": 0,
+                "sampleRate": sample_rate,
+                "sampleCount": chunk.len(),
+                "silenceAfterSamples": if is_last_part { silence_after_samples } else { 0 },
+            });
+            if total > 0 {
+                metadata["textUnitIndex"] = json!(index);
+                metadata["textUnitTotal"] = json!(total);
+            }
+            self.websocket.send_json(&metadata)?;
+            self.websocket.send_binary(float32_to_le_bytes(chunk))?;
+            self.audio_chunk_count = self.audio_chunk_count.saturating_add(1);
         }
-        self.websocket.send_json(&metadata)?;
-        self.websocket.send_binary(&float32_to_le_bytes(samples))
+        Ok(())
     }
 }
 
@@ -789,7 +954,7 @@ fn send_generation_result(
                 "sampleCount": chunk.len(),
                 "silenceAfterSamples": 0,
             }))?;
-            websocket.send_binary(&float32_to_le_bytes(chunk))?;
+            websocket.send_binary(float32_to_le_bytes(chunk))?;
         }
         output.phase_timings.insert(
             "transportEncodingSec".to_string(),
@@ -848,90 +1013,212 @@ fn float32_to_le_bytes(samples: &[f32]) -> Vec<u8> {
 }
 
 fn decode_neutts_reference_codes(encoded: &str) -> Result<Vec<i32>> {
+    let encoded = encoded.trim();
+    ensure!(
+        encoded.len() <= MAX_NEUTTS_REFERENCE_CODES_BASE64_CHARS,
+        "NeuTTS reference-code payload exceeds the {MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES}-byte .npy limit."
+    );
     let bytes = BASE64
-        .decode(encoded.trim())
+        .decode(encoded)
         .context("Failed to decode NeuTTS reference codes")?;
-    neutts::npy::parse_npy(&bytes)
-        .context("Failed to parse NeuTTS reference .npy")?
-        .into_i32()
-        .context("NeuTTS reference .npy must contain integer NeuCodec codes")
-}
+    prevalidate_neutts_npy(&bytes)?;
 
-fn wav_reader_as_f32<R: Read>(
-    mut reader: hound::WavReader<R>,
-    what: &str,
-) -> Result<(Vec<f32>, usize)> {
-    let spec = reader.spec();
-    let channels = usize::from(spec.channels);
-    ensure!(channels > 0, "{what} has zero channels.");
-    let sample_rate = usize::try_from(spec.sample_rate).context("Invalid WAV sample rate")?;
-    let samples = match spec.sample_format {
-        hound::SampleFormat::Float => {
-            let raw = reader
-                .samples::<f32>()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .with_context(|| format!("Failed reading float {what} samples"))?;
-            downmix_interleaved(raw, channels)
-        }
-        hound::SampleFormat::Int if spec.bits_per_sample <= 16 => {
-            let raw = reader
-                .samples::<i16>()
-                .map(|sample| sample.map(|value| value as f32 / 32_768.0))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .with_context(|| format!("Failed reading int16 {what} samples"))?;
-            downmix_interleaved(raw, channels)
-        }
-        hound::SampleFormat::Int => {
-            let denominator = 2_f32.powi(i32::from(spec.bits_per_sample.saturating_sub(1)));
-            let raw = reader
-                .samples::<i32>()
-                .map(|sample| sample.map(|value| value as f32 / denominator))
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .with_context(|| format!("Failed reading int32 {what} samples"))?;
-            downmix_interleaved(raw, channels)
+    let parsed = neutts::npy::parse_npy(&bytes).context("Failed to parse NeuTTS reference .npy")?;
+    let codes = match parsed {
+        neutts::npy::NpyData::Int32 { data, .. } => data,
+        neutts::npy::NpyData::Float32 { data, .. } => {
+            let mut codes = Vec::with_capacity(data.len());
+            for code in data {
+                ensure!(
+                    code.is_finite() && code.fract() == 0.0,
+                    "NeuTTS reference .npy float codes must be finite whole numbers."
+                );
+                ensure!(
+                    (0.0..=MAX_NEUTTS_REFERENCE_CODE_VALUE as f32).contains(&code),
+                    "NeuTTS reference codes must be between 0 and {MAX_NEUTTS_REFERENCE_CODE_VALUE}."
+                );
+                codes.push(code as i32);
+            }
+            codes
         }
     };
-    Ok((samples, sample_rate))
+    ensure!(
+        (1..=MAX_NEUTTS_REFERENCE_CODES).contains(&codes.len()),
+        "NeuTTS reference .npy must contain between 1 and {MAX_NEUTTS_REFERENCE_CODES} codes."
+    );
+    ensure!(
+        codes
+            .iter()
+            .all(|code| (0..=MAX_NEUTTS_REFERENCE_CODE_VALUE).contains(code)),
+        "NeuTTS reference codes must be between 0 and {MAX_NEUTTS_REFERENCE_CODE_VALUE}."
+    );
+    Ok(codes)
+}
+
+fn prevalidate_neutts_npy(raw: &[u8]) -> Result<()> {
+    ensure!(
+        raw.len() <= MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES,
+        "NeuTTS reference .npy exceeds the {MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES}-byte limit."
+    );
+    ensure!(
+        raw.len() >= 10 && &raw[..6] == b"\x93NUMPY",
+        "NeuTTS reference is not a valid .npy file."
+    );
+
+    let (header_len, header_start) = match raw[6] {
+        1 => (u16::from_le_bytes([raw[8], raw[9]]) as usize, 10usize),
+        2 => {
+            ensure!(
+                raw.len() >= 12,
+                "NeuTTS reference .npy v2 header is truncated."
+            );
+            (
+                u32::from_le_bytes([raw[8], raw[9], raw[10], raw[11]]) as usize,
+                12usize,
+            )
+        }
+        major => bail!("Unsupported NeuTTS reference .npy version {major}."),
+    };
+    let header_end = header_start
+        .checked_add(header_len)
+        .context("NeuTTS reference .npy header length overflowed")?;
+    ensure!(
+        header_end <= raw.len(),
+        "NeuTTS reference .npy header is truncated."
+    );
+    let header = std::str::from_utf8(&raw[header_start..header_end])
+        .context("NeuTTS reference .npy header is not valid UTF-8")?;
+    let shape = extract_npy_header_field(header, "shape")
+        .context("NeuTTS reference .npy header is missing 'shape'")?;
+    let shape = shape
+        .strip_prefix('(')
+        .and_then(|value| value.strip_suffix(')'))
+        .context("NeuTTS reference .npy shape must be a tuple")?;
+
+    let mut element_count = 1usize;
+    for dimension in shape
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let dimension = dimension.parse::<usize>().with_context(|| {
+            format!("Invalid NeuTTS reference .npy shape dimension '{dimension}'")
+        })?;
+        element_count = element_count
+            .checked_mul(dimension)
+            .context("NeuTTS reference .npy shape dimensions overflowed")?;
+    }
+    ensure!(
+        (1..=MAX_NEUTTS_REFERENCE_CODES).contains(&element_count),
+        "NeuTTS reference .npy must contain between 1 and {MAX_NEUTTS_REFERENCE_CODES} codes."
+    );
+
+    // The only dtypes accepted by neutts::npy are four bytes wide. Checking
+    // this before calling its parser guarantees its internal shape products
+    // and byte-size arithmetic cannot overflow, even for hostile headers.
+    let data_bytes = element_count
+        .checked_mul(4)
+        .context("NeuTTS reference .npy data size overflowed")?;
+    let required_len = header_end
+        .checked_add(data_bytes)
+        .context("NeuTTS reference .npy total size overflowed")?;
+    ensure!(
+        required_len <= raw.len(),
+        "NeuTTS reference .npy data section is truncated."
+    );
+    Ok(())
+}
+
+fn extract_npy_header_field<'a>(header: &'a str, field: &str) -> Option<&'a str> {
+    let single_quoted_key = format!("'{field}':");
+    let double_quoted_key = format!("\"{field}\":");
+    let start = header
+        .find(&single_quoted_key)
+        .map(|position| position + single_quoted_key.len())
+        .or_else(|| {
+            header
+                .find(&double_quoted_key)
+                .map(|position| position + double_quoted_key.len())
+        })?;
+    let value = header[start..].trim_start();
+    if value.starts_with('(') {
+        let end = value.find(')')?;
+        Some(&value[..=end])
+    } else {
+        None
+    }
 }
 
 fn prepare_neutts_reference_samples(encoded: &str) -> Result<(Vec<f32>, bool)> {
+    ensure_reference_audio_base64_len(encoded.trim().len())?;
     let bytes = BASE64
         .decode(encoded.trim())
         .context("Failed to decode NeuTTS reference WAV")?;
     let reader = hound::WavReader::new(std::io::Cursor::new(bytes))
         .context("NeuTTS reference must be a valid WAV file")?;
-    let (samples, sample_rate) = wav_reader_as_f32(reader, "NeuTTS reference WAV")?;
+    let decoded = decode_bounded_mono_wav(
+        reader,
+        "NeuTTS reference WAV",
+        NEUTTS_REFERENCE_MAX_DURATION_SECONDS,
+    )?;
     ensure!(
-        !samples.is_empty(),
+        !decoded.samples.is_empty(),
         "NeuTTS reference WAV contains no audio."
     );
     let mut samples = neutts::codec::resample(
-        &samples,
-        u32::try_from(sample_rate).context("Invalid WAV sample rate")?,
+        &decoded.samples,
+        decoded.sample_rate,
         neutts::ENCODER_SAMPLE_RATE,
     );
-    let truncated = samples.len() > neucodec_encoder::ENCODER_WINDOW_SAMPLES;
+    for sample in &mut samples {
+        *sample = if sample.is_finite() {
+            sample.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+    let truncated = decoded.truncated || samples.len() > neucodec_encoder::ENCODER_WINDOW_SAMPLES;
     samples.truncate(neucodec_encoder::ENCODER_WINDOW_SAMPLES);
+    ensure!(
+        samples.len() >= neucodec_encoder::MIN_REFERENCE_SAMPLES,
+        "Reference audio is too short; provide at least half a second of speech."
+    );
     Ok((samples, truncated))
 }
 
-fn downmix_interleaved(samples: Vec<f32>, channels: usize) -> Vec<f32> {
-    if channels <= 1 {
-        return samples
-            .into_iter()
-            .map(|sample| if sample.is_finite() { sample } else { 0.0 })
-            .collect();
-    }
-    samples
-        .chunks_exact(channels)
-        .map(|frame| {
-            frame
-                .iter()
-                .map(|value| if value.is_finite() { *value } else { 0.0 })
-                .sum::<f32>()
-                / channels as f32
-        })
-        .collect()
+fn validate_qwen_reference_fields(reference_text: &str, encoded_audio: &str) -> Result<()> {
+    let reference_text = reference_text.trim();
+    ensure!(
+        !reference_text.is_empty() && reference_text.chars().count() <= MAX_REFERENCE_TEXT_CHARS,
+        "Qwen3 reference text must contain between 1 and {MAX_REFERENCE_TEXT_CHARS} characters."
+    );
+    let encoded_audio = encoded_audio.trim();
+    ensure!(
+        !encoded_audio.is_empty(),
+        "Qwen3 voice cloning requires non-empty referenceAudioBase64."
+    );
+    ensure_reference_audio_base64_len(encoded_audio.len())
+}
+
+fn validate_qwen_reference_cache_key(cache_key: &str) -> Result<()> {
+    ensure!(
+        !cache_key.is_empty()
+            && cache_key.len() <= MAX_REFERENCE_CACHE_KEY_CHARS
+            && cache_key
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            && !cache_key.contains(".."),
+        "Qwen3 referenceCacheKey has an invalid format."
+    );
+    Ok(())
+}
+
+fn ensure_reference_audio_base64_len(encoded_len: usize) -> Result<()> {
+    ensure!(
+        encoded_len <= MAX_REFERENCE_AUDIO_BASE64_CHARS,
+        "Reference audio payload exceeds the {MAX_REFERENCE_AUDIO_BASE64_CHARS}-character base64 limit."
+    );
+    Ok(())
 }
 
 fn normalize_neutts_model(input: Option<&str>) -> Result<String> {
@@ -1024,6 +1311,7 @@ impl WebSocketConnection {
         let config = WebSocketConfig::default()
             .max_message_size(Some(MAX_WEBSOCKET_TEXT_FRAME_BYTES))
             .max_frame_size(Some(MAX_WEBSOCKET_TEXT_FRAME_BYTES))
+            .max_write_buffer_size(MAX_WEBSOCKET_WRITE_BUFFER_BYTES)
             .accept_unmasked_frames(false);
         let (request, tail) = read_websocket_upgrade(&mut stream)?;
         if !websocket_request_path_is_authorized(&request, auth_token) {
@@ -1039,6 +1327,9 @@ impl WebSocketConnection {
         stream
             .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_IDLE_READ_TIMEOUT_SEC)))
             .context("Failed to set WebSocket idle read timeout")?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(WEBSOCKET_WRITE_TIMEOUT_SEC)))
+            .context("Failed to set WebSocket write timeout")?;
         let socket = WebSocket::from_partially_read(stream, tail, Role::Server, Some(config));
         Ok(Self { socket })
     }
@@ -1092,8 +1383,8 @@ impl WebSocketConnection {
         Ok(())
     }
 
-    fn send_binary(&mut self, payload: &[u8]) -> Result<()> {
-        self.socket.send(Message::Binary(payload.to_vec().into()))?;
+    fn send_binary(&mut self, payload: Vec<u8>) -> Result<()> {
+        self.socket.send(Message::Binary(payload.into()))?;
         Ok(())
     }
 
@@ -1186,9 +1477,9 @@ fn write_websocket_error_response(stream: &mut TcpStream, status: StatusCode) ->
 mod tests {
     use super::*;
 
-    fn wav_base64(sample_rate: u32, samples: &[i16]) -> String {
+    fn wav_base64_with_channels(channels: u16, sample_rate: u32, samples: &[i16]) -> String {
         let spec = hound::WavSpec {
-            channels: 1,
+            channels,
             sample_rate,
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
@@ -1202,6 +1493,33 @@ mod tests {
             writer.finalize().unwrap();
         }
         BASE64.encode(cursor.into_inner())
+    }
+
+    fn wav_base64(sample_rate: u32, samples: &[i16]) -> String {
+        wav_base64_with_channels(1, sample_rate, samples)
+    }
+
+    fn npy_base64_with_header(header: &str, data: &[u8]) -> String {
+        let header_len = u16::try_from(header.len()).unwrap();
+        let mut bytes = Vec::with_capacity(10 + header.len() + data.len());
+        bytes.extend_from_slice(b"\x93NUMPY");
+        bytes.extend_from_slice(&[1, 0]);
+        bytes.extend_from_slice(&header_len.to_le_bytes());
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(data);
+        BASE64.encode(bytes)
+    }
+
+    fn npy_base64_i32(codes: &[i32]) -> String {
+        let header = format!(
+            "{{'descr': '<i4', 'fortran_order': False, 'shape': ({},), }}\n",
+            codes.len()
+        );
+        let data = codes
+            .iter()
+            .flat_map(|code| code.to_le_bytes())
+            .collect::<Vec<_>>();
+        npy_base64_with_header(&header, &data)
     }
 
     fn output_with(
@@ -1232,6 +1550,26 @@ mod tests {
     }
 
     #[test]
+    fn qwen_reference_fields_enforce_rust_transport_limits() {
+        assert!(validate_qwen_reference_fields("matching words", "AQID").is_ok());
+        assert!(
+            validate_qwen_reference_fields(&"x".repeat(MAX_REFERENCE_TEXT_CHARS + 1), "AQID")
+                .unwrap_err()
+                .to_string()
+                .contains("between 1 and 2000 characters")
+        );
+        assert!(
+            ensure_reference_audio_base64_len(MAX_REFERENCE_AUDIO_BASE64_CHARS + 1)
+                .unwrap_err()
+                .to_string()
+                .contains("60000000-character")
+        );
+        assert!(validate_qwen_reference_cache_key("reader-job-1").is_ok());
+        assert!(validate_qwen_reference_cache_key("bad/key").is_err());
+        assert!(validate_qwen_reference_cache_key(&"x".repeat(121)).is_err());
+    }
+
+    #[test]
     fn prepare_neutts_reference_samples_resamples_to_encoder_rate() {
         let encoded = wav_base64(48_000, &vec![1_000_i16; 48_000]);
         let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
@@ -1251,6 +1589,70 @@ mod tests {
     fn prepare_neutts_reference_samples_rejects_invalid_input() {
         assert!(prepare_neutts_reference_samples("not base64!").is_err());
         assert!(prepare_neutts_reference_samples(&BASE64.encode(b"not a wav file")).is_err());
+        let too_slow = wav_base64(1, &[0]);
+        assert!(
+            prepare_neutts_reference_samples(&too_slow)
+                .unwrap_err()
+                .to_string()
+                .contains("between 8000 and 192000")
+        );
+        let too_fast = wav_base64(192_001, &[0]);
+        assert!(prepare_neutts_reference_samples(&too_fast).is_err());
+        let three_channels = wav_base64_with_channels(3, 24_000, &[0, 0, 0]);
+        assert!(prepare_neutts_reference_samples(&three_channels).is_err());
+        let too_short = wav_base64(16_000, &vec![0; 7_999]);
+        assert!(
+            prepare_neutts_reference_samples(&too_short)
+                .unwrap_err()
+                .to_string()
+                .contains("at least half a second")
+        );
+    }
+
+    #[test]
+    fn decode_neutts_reference_codes_accepts_bounded_integer_codes() {
+        let encoded = npy_base64_i32(&[0, 42, MAX_NEUTTS_REFERENCE_CODE_VALUE]);
+        assert_eq!(
+            decode_neutts_reference_codes(&encoded).unwrap(),
+            vec![0, 42, MAX_NEUTTS_REFERENCE_CODE_VALUE]
+        );
+    }
+
+    #[test]
+    fn decode_neutts_reference_codes_rejects_shape_overflow() {
+        let header = format!(
+            "{{'descr': '<i4', 'fortran_order': False, 'shape': ({}, 2), }}\n",
+            usize::MAX
+        );
+        let encoded = npy_base64_with_header(&header, &[]);
+        assert!(
+            decode_neutts_reference_codes(&encoded)
+                .unwrap_err()
+                .to_string()
+                .contains("shape dimensions overflowed")
+        );
+    }
+
+    #[test]
+    fn decode_neutts_reference_codes_rejects_oversized_valid_array() {
+        let encoded = npy_base64_i32(&vec![0; MAX_NEUTTS_REFERENCE_CODES + 1]);
+        assert!(
+            decode_neutts_reference_codes(&encoded)
+                .unwrap_err()
+                .to_string()
+                .contains("between 1 and 1000 codes")
+        );
+    }
+
+    #[test]
+    fn decode_neutts_reference_codes_rejects_out_of_range_values() {
+        let encoded = npy_base64_i32(&[-1, MAX_NEUTTS_REFERENCE_CODE_VALUE + 1]);
+        assert!(
+            decode_neutts_reference_codes(&encoded)
+                .unwrap_err()
+                .to_string()
+                .contains("between 0 and 65535")
+        );
     }
 
     #[test]
@@ -1310,10 +1712,39 @@ mod tests {
     }
 
     #[test]
+    fn websocket_bind_host_must_resolve_only_to_loopback() {
+        let ipv4 = resolve_loopback_bind_addresses("127.0.0.1", 0).unwrap();
+        assert!(ipv4.iter().all(|address| address.ip().is_loopback()));
+        let ipv6 = resolve_loopback_bind_addresses("::1", 0).unwrap();
+        assert!(ipv6.iter().all(|address| address.ip().is_loopback()));
+
+        for host in ["0.0.0.0", "::", "192.0.2.1"] {
+            assert!(
+                resolve_loopback_bind_addresses(host, 0)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("loopback")
+            );
+        }
+    }
+
+    #[test]
     fn constant_time_eq_compares_bytes() {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"secreT"));
         assert!(!constant_time_eq(b"secret", b"secre"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn websocket_frame_limit_covers_electron_reference_audio_payload() {
+        assert!(MAX_WEBSOCKET_TEXT_FRAME_BYTES > 60_000_000);
+    }
+
+    #[test]
+    fn qwen_transport_chunks_fit_the_websocket_write_buffer() {
+        assert!(
+            MAX_AUDIO_CHUNK_SAMPLES * std::mem::size_of::<f32>() < MAX_WEBSOCKET_WRITE_BUFFER_BYTES
+        );
     }
 }

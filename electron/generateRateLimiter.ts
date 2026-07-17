@@ -1,6 +1,7 @@
 interface GenerateRateState {
-  lastCallMs: number;
+  lastCompletedMs: number;
   inFlight: number;
+  nextContinuation: GenerationContinuation | null;
 }
 
 interface CreateGenerateRateLimiterOptions {
@@ -9,7 +10,28 @@ interface CreateGenerateRateLimiterOptions {
 }
 
 export interface GenerateRateLimiter<TModel extends string> {
-  run: <T>(model: TModel, task: () => Promise<T>) => Promise<T>;
+  run: <T>(
+    model: TModel,
+    task: () => Promise<T>,
+    continuation?: GenerationContinuation,
+  ) => Promise<T>;
+}
+
+export interface GenerationContinuation {
+  jobId: string;
+  sectionIndex: number;
+  sectionCount: number;
+}
+
+function isExpectedContinuation(
+  expected: GenerationContinuation | null,
+  received: GenerationContinuation | undefined,
+): boolean {
+  return !!expected
+    && !!received
+    && expected.jobId === received.jobId
+    && expected.sectionIndex === received.sectionIndex
+    && expected.sectionCount === received.sectionCount;
 }
 
 export function createGenerateRateLimiter<TModel extends string>({
@@ -19,25 +41,38 @@ export function createGenerateRateLimiter<TModel extends string>({
   const state = new Map<TModel, GenerateRateState>();
 
   return {
-    async run<T>(model: TModel, task: () => Promise<T>): Promise<T> {
+    async run<T>(
+      model: TModel,
+      task: () => Promise<T>,
+      continuation?: GenerationContinuation,
+    ): Promise<T> {
       const currentTime = now();
-      const current = state.get(model) ?? { lastCallMs: 0, inFlight: 0 };
+      const current = state.get(model) ?? {
+        lastCompletedMs: 0,
+        inFlight: 0,
+        nextContinuation: null,
+      };
+      const continuingSameJob = isExpectedContinuation(current.nextContinuation, continuation);
 
       if (current.inFlight > 0) {
         throw new Error(`A ${model} generation is already running.`);
       }
-      if (currentTime - current.lastCallMs < rateWindowMs) {
+      if (!continuingSameJob && currentTime - current.lastCompletedMs < rateWindowMs) {
         throw new Error("Too many generation requests. Please wait a moment and try again.");
       }
 
       current.inFlight += 1;
-      current.lastCallMs = currentTime;
+      if (!continuingSameJob) current.nextContinuation = null;
       state.set(model, current);
 
       let succeeded = false;
       try {
         const result = await task();
         succeeded = true;
+        current.lastCompletedMs = now();
+        current.nextContinuation = continuation && continuation.sectionIndex + 1 < continuation.sectionCount
+          ? { ...continuation, sectionIndex: continuation.sectionIndex + 1 }
+          : null;
         return result;
       } finally {
         current.inFlight = Math.max(0, current.inFlight - 1);
@@ -45,7 +80,8 @@ export function createGenerateRateLimiter<TModel extends string>({
         // cancelled attempt clears it so the user can retry immediately instead
         // of hitting a confusing "Too many generation requests" error.
         if (!succeeded) {
-          current.lastCallMs = 0;
+          current.lastCompletedMs = 0;
+          current.nextContinuation = null;
         }
         state.set(model, current);
       }

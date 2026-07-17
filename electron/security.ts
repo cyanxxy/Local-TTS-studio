@@ -8,6 +8,7 @@ const HUGGING_FACE_CONNECT_SOURCES = [
   "https://cdn-lfs.huggingface.co",
   "https://cdn-lfs-us-1.hf.co",
   "https://cdn-lfs-eu-1.hf.co",
+  "https://cas-bridge.xethub.hf.co",
   "https://hf.co",
 ];
 const SAFE_EXTERNAL_HOSTS = new Set([

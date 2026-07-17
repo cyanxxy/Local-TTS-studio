@@ -142,15 +142,36 @@ export const QWEN3_PROFILES = [
   },
 ] as const satisfies readonly Qwen3Profile[];
 
-export function getQwen3Profiles(platform: string | undefined): readonly Qwen3Profile[] {
+export function qwen3ProfileSupportsRuntime(
+  profile: Qwen3Profile,
+  platform: string | undefined,
+  arch: string | undefined,
+): boolean {
+  if (!(profile.platforms as readonly string[]).includes(platform ?? "")) return false;
+  // The MLX backend and bundled Metal library are Apple-Silicon-only.
+  if (platform === "darwin") return arch === "arm64";
+  // The pinned LibTorch distribution/toolchain is Windows x64-only.
+  if (platform === "win32") return arch === "x64";
+  return false;
+}
+
+export function getQwen3Profiles(
+  platform: string | undefined,
+  arch: string | undefined,
+): readonly Qwen3Profile[] {
   return QWEN3_PROFILES.filter((profile) => (
-    (profile.platforms as readonly Qwen3Platform[]).includes(platform as Qwen3Platform)
+    qwen3ProfileSupportsRuntime(profile, platform, arch)
   ));
 }
 
-export function getDefaultQwen3Profile(platform: string | undefined): Qwen3Profile {
-  const profile = getQwen3Profiles(platform)[0];
-  if (!profile) throw new Error(`Qwen3 is unavailable on platform: ${platform ?? "unknown"}`);
+export function getDefaultQwen3Profile(
+  platform: string | undefined,
+  arch: string | undefined,
+): Qwen3Profile {
+  const profile = getQwen3Profiles(platform, arch)[0];
+  if (!profile) {
+    throw new Error(`Qwen3 is unavailable on platform: ${platform ?? "unknown"}/${arch ?? "unknown"}`);
+  }
   return profile;
 }
 

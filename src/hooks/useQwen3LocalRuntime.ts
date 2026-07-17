@@ -8,14 +8,19 @@ import type {
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { TextChunk } from "../lib/chunking";
-import { buildQwen3TextUnits } from "../lib/qwenChunking";
+import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import type { GenerationStats, ModelState } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import {
+  MAX_LOCAL_TTS_TEXT_LENGTH,
+  exceedsUnicodeScalarLimit,
+} from "../../electron/localTtsLimits";
 
 interface UseQwen3LocalRuntimeOptions {
   enabled: boolean;
   text: string;
+  allowLongText?: boolean;
   player: UseAudioPlayerReturn;
   setShowPlayer: (showPlayer: boolean) => void;
 }
@@ -43,8 +48,9 @@ interface UseQwen3LocalRuntimeReturn {
 }
 
 const LOCAL_MODEL = "qwen3";
+const QWEN_SECTION_JOIN_PAUSE_SEC = 0.2;
 
-function requestId(kind: "probe" | "generate"): string {
+function requestId(kind: "probe" | "generate" | "job"): string {
   return `${LOCAL_MODEL}-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
@@ -62,22 +68,36 @@ function message(error: unknown): string {
   return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }
 
-function wholeTextUnit(text: string): TextChunk[] {
-  const trimmed = text.trim();
-  if (!trimmed) return [];
-  const start = text.indexOf(trimmed);
-  return [{
-    text: trimmed,
-    start,
-    end: start + trimmed.length,
-    pauseAfterSec: 0,
-    pauseKind: "none",
-  }];
+function mergeGenerateResults(
+  current: LocalTtsGenerateResult | null,
+  next: LocalTtsGenerateResult,
+): LocalTtsGenerateResult {
+  if (!current) return next;
+  if (current.sampleRate !== next.sampleRate) {
+    throw new Error("Qwen3 returned inconsistent sample rates between Reader sections.");
+  }
+
+  const phaseTimingsSec = { ...current.phaseTimingsSec };
+  for (const [phase, seconds] of Object.entries(next.phaseTimingsSec)) {
+    phaseTimingsSec[phase] = (phaseTimingsSec[phase] ?? 0) + seconds;
+  }
+  const warnings = [...new Set([...(current.warnings ?? []), ...(next.warnings ?? [])])];
+
+  return {
+    ...current,
+    ...next,
+    durationSec: current.durationSec + next.durationSec,
+    elapsedSec: current.elapsedSec + next.elapsedSec,
+    audioChunkCount: current.audioChunkCount + next.audioChunkCount,
+    phaseTimingsSec,
+    ...(warnings.length > 0 ? { warnings } : { warnings: undefined }),
+  };
 }
 
 export function useQwen3LocalRuntime({
   enabled,
   text,
+  allowLongText = false,
   player,
   setShowPlayer,
 }: UseQwen3LocalRuntimeOptions): UseQwen3LocalRuntimeReturn {
@@ -86,7 +106,8 @@ export function useQwen3LocalRuntime({
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
   const [generateBusy, setGenerateBusy] = useState(false);
-  const [progress, setProgress] = useState<LocalTtsProgressEvent | null>(null);
+  const [generationProgress, setGenerationProgress] = useState(0);
+  const [, setProgress] = useState<LocalTtsProgressEvent | null>(null);
   const [result, setResult] = useState<LocalTtsGenerateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const mountedRef = useRef(true);
@@ -98,18 +119,22 @@ export function useQwen3LocalRuntime({
   const chunksRef = useRef<ReceivedAudioChunk[]>([]);
   const sampleRateRef = useRef<number | null>(null);
   const scheduledCountRef = useRef(0);
+  const activeRequestUnitOffsetRef = useRef(0);
+  const activeRequestUnitCountRef = useRef(1);
   const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const cancelProgressFlushRef = useRef<(() => void) | null>(null);
   const warmedKeyRef = useRef<string | null>(null);
+  const warmingKeyRef = useRef<string | null>(null);
   const activeTextUnitsRef = useRef<TextChunk[]>([]);
   const bridge = window.electron?.localTts;
   const electronAvailable = enabled && !!bridge;
   const beginStream = player.beginStream;
   const endStream = player.endStream;
+  const getAudioChunkCount = player.getAudioChunkCount;
   const resetPlayer = player.reset;
   const scheduleChunk = player.scheduleChunk;
   const stopAll = player.stopAll;
-  const selectedModelKey = `${settings.profile.repo}:${settings.modelPath.trim()}`;
+  const truncateAudioChunks = player.truncateAudioChunks;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -120,10 +145,13 @@ export function useQwen3LocalRuntime({
     chunksRef.current = [];
     sampleRateRef.current = null;
     scheduledCountRef.current = 0;
+    activeRequestUnitOffsetRef.current = 0;
+    activeRequestUnitCountRef.current = 1;
     activeTextUnitsRef.current = [];
     resetPlayer();
     setResult(null);
     setProgress(null);
+    setGenerationProgress(0);
   }, [resetPlayer]);
 
   const cancelActiveGeneration = useCallback(() => {
@@ -142,11 +170,12 @@ export function useQwen3LocalRuntime({
     setShowPlayer(false);
     setError(null);
     setGenerateBusy(false);
+    setGenerationProgress(0);
   }, [cancelActiveGeneration, clearGeneratedResult, setShowPlayer]);
 
-  // A load/generation error belongs to the model path that produced it. Do
-  // not carry that stale error into a newly selected profile: it would leave
-  // the new model behind "Retry Model Load" even when its files are valid.
+  // Generated audio and errors belong to the exact synthesis configuration
+  // that produced them. Clear the shared player when any audible Qwen setting
+  // changes so old speech is never presented as the newly selected voice.
   useEffect(() => {
     generationVersionRef.current += 1;
     cancelActiveGeneration();
@@ -156,15 +185,25 @@ export function useQwen3LocalRuntime({
     cancelProgressFlushRef.current?.();
     cancelProgressFlushRef.current = null;
     setGenerateBusy(false);
-    setProgress(null);
-    setResult(null);
     setError(null);
-    chunksRef.current = [];
-    sampleRateRef.current = null;
-    scheduledCountRef.current = 0;
-    activeTextUnitsRef.current = [];
-    stopAll();
-  }, [cancelActiveGeneration, selectedModelKey, stopAll]);
+    clearGeneratedResult();
+    setShowPlayer(false);
+  }, [
+    cancelActiveGeneration,
+    clearGeneratedResult,
+    setShowPlayer,
+    settings.instruct,
+    settings.language,
+    settings.maxNewTokens,
+    settings.modelPath,
+    settings.profile.mode,
+    settings.profile.repo,
+    settings.referenceAudioBase64,
+    settings.referenceText,
+    settings.speaker,
+    settings.temperature,
+    settings.topK,
+  ]);
 
   const runProbe = useCallback(async () => {
     if (!enabled || !bridge) return;
@@ -210,6 +249,7 @@ export function useQwen3LocalRuntime({
     activeProbeRef.current = null;
     setRuntimeBusy(false);
     setGenerateBusy(false);
+    setGenerationProgress(0);
     setProgress(null);
   }, [cancelActiveGeneration, enabled, retryLoad]);
 
@@ -218,13 +258,20 @@ export function useQwen3LocalRuntime({
     const path = settings.modelPath.trim();
     if (!path || settings.readiness === "missing") return;
     const key = `${settings.profile.repo}:${path}`;
-    if (warmedKeyRef.current === key) return;
-    warmedKeyRef.current = key;
+    if (warmedKeyRef.current === key || warmingKeyRef.current === key) return;
+    warmingKeyRef.current = key;
+    let active = true;
     void bridge.warm({
       model: LOCAL_MODEL,
       mode: settings.profile.mode,
       modelPath: path,
-    }).catch(() => undefined);
+      modelRepo: settings.profile.repo,
+    }).then((result) => {
+      if (active && result.warmed) warmedKeyRef.current = key;
+    }).catch(() => undefined).finally(() => {
+      if (warmingKeyRef.current === key) warmingKeyRef.current = null;
+    });
+    return () => { active = false; };
   }, [bridge, electronAvailable, generateBusy, settings.modelPath, settings.profile, settings.readiness]);
 
   useEffect(() => {
@@ -265,9 +312,13 @@ export function useQwen3LocalRuntime({
         const index = scheduledCountRef.current++;
         const chunk = contiguous[index];
         const reportedUnitIndex = chunk.textUnitIndex
-          ?? (event.total > 0 ? index : activeTextUnitsRef.current.length === 1 ? 0 : index);
-        const textUnitIndex = Math.min(
+          ?? (event.total > 0 ? index : activeRequestUnitCountRef.current === 1 ? 0 : index);
+        const localTextUnitIndex = Math.min(
           Math.max(0, reportedUnitIndex),
+          Math.max(0, activeRequestUnitCountRef.current - 1),
+        );
+        const textUnitIndex = Math.min(
+          activeRequestUnitOffsetRef.current + localTextUnitIndex,
           Math.max(0, activeTextUnitsRef.current.length - 1),
         );
         const textUnit = activeTextUnitsRef.current[textUnitIndex];
@@ -276,7 +327,7 @@ export function useQwen3LocalRuntime({
           samplingRate: event.sampleRate,
           text: textUnit?.text ?? text,
           index: textUnitIndex + 1,
-          total: (chunk.textUnitTotal ?? activeTextUnitsRef.current.length) || 1,
+          total: activeTextUnitsRef.current.length || 1,
           textStart: textUnit?.start ?? 0,
           textEnd: textUnit?.end ?? text.length,
           pauseAfterSec: chunk.silenceAfterSamples / event.sampleRate,
@@ -297,8 +348,13 @@ export function useQwen3LocalRuntime({
     && (settings.profile.mode !== "voiceClone"
       || (!!settings.referenceAudioBase64 && settings.referenceText.trim().length > 0));
   const ready = electronAvailable && (runtime?.ready ?? false) && settingsReady;
+  const textTooLong = !allowLongText
+    && exceedsUnicodeScalarLimit(text, MAX_LOCAL_TTS_TEXT_LENGTH);
   const combinedError = error
     ?? settings.error
+    ?? (enabled && textTooLong
+      ? `Qwen3 accepts at most ${MAX_LOCAL_TTS_TEXT_LENGTH.toLocaleString()} characters per request. Split this job into smaller sections.`
+      : null)
     ?? (enabled && runtime?.ready && !settingsReady && !settings.setupBusy
       ? "Select or download a valid Qwen3 model directory before generating."
       : null);
@@ -309,7 +365,10 @@ export function useQwen3LocalRuntime({
     error: combinedError,
     backend: null,
   }), [combinedError, enabled, ready, runtimeBusy, settings.setupBusy]);
-  const canGenerate = ready && !generateBusy && text.trim().length >= MIN_TEXT_LENGTH;
+  const canGenerate = ready
+    && !generateBusy
+    && !textTooLong
+    && text.trim().length >= MIN_TEXT_LENGTH;
 
   const stats = useMemo<GenerationStats>(() => {
     const processingTime = result?.elapsedSec ?? 0;
@@ -326,26 +385,25 @@ export function useQwen3LocalRuntime({
   const handleGenerate = useCallback(() => {
     if (!canGenerate || !bridge) return;
     const version = generationVersionRef.current;
-    const id = requestId("generate");
+    const requestSections = buildQwen3RequestSections(text);
+    if (requestSections.length === 0) return;
     clearGeneratedResult();
     activeTextUnitsRef.current = settings.profile.mode === "customVoice"
       ? buildQwen3TextUnits(text)
-      : wholeTextUnit(text);
+      : requestSections.map((section) => ({
+        text: section.text,
+        start: section.start,
+        end: section.end,
+        pauseAfterSec: section.pauseAfterSec,
+        pauseKind: section.pauseKind,
+      }));
     setShowPlayer(true);
     beginStream();
     setGenerateBusy(true);
+    setGenerationProgress(0);
     setError(null);
-    setProgress({
-      requestId: id,
-      model: LOCAL_MODEL,
-      phase: "queued",
-      message: `Starting Qwen3 ${settings.profile.label} with ${settings.profile.provider}.`,
-      elapsedSec: 0,
-    });
-    activeRequestRef.current = id;
-    activeRequestVersionRef.current = version;
-    const payload: Record<string, unknown> = {
-      text: text.trim(),
+    const jobId = requestId("job");
+    const basePayload: Record<string, unknown> = {
       mode: settings.profile.mode,
       modelRepo: settings.profile.repo,
       modelPath: settings.modelPath.trim(),
@@ -355,44 +413,201 @@ export function useQwen3LocalRuntime({
       maxNewTokens: settings.maxNewTokens,
     };
     if (settings.profile.mode === "customVoice") {
-      payload.speaker = settings.speaker;
-      payload.instruct = settings.instruct;
-    } else {
-      payload.referenceAudioBase64 = settings.referenceAudioBase64;
-      payload.referenceText = settings.referenceText.trim();
+      basePayload.speaker = settings.speaker;
+      basePayload.instruct = settings.instruct;
     }
-    void bridge.generate({ model: LOCAL_MODEL, requestId: id, payload }).then((generated) => {
-      if (!mountedRef.current || activeRequestRef.current !== id || generationVersionRef.current !== version) return;
-      if (chunksRef.current.filter(Boolean).length !== generated.audioChunkCount) {
-        throw new Error("Generation returned incomplete streamed audio.");
+
+    const runSections = async () => {
+      let combinedResult: LocalTtsGenerateResult | null = null;
+      let activeSectionIndex = 0;
+      let activeSectionChunkCheckpoint = 0;
+      let activeSectionCompleted = false;
+      try {
+        for (let sectionIndex = 0; sectionIndex < requestSections.length; sectionIndex += 1) {
+          activeSectionIndex = sectionIndex;
+          activeSectionCompleted = false;
+          if (!mountedRef.current || generationVersionRef.current !== version) return;
+          const section = requestSections[sectionIndex];
+          let id = requestId("generate");
+          activeRequestUnitOffsetRef.current = settings.profile.mode === "customVoice"
+            ? section.unitStart
+            : sectionIndex;
+          activeRequestUnitCountRef.current = settings.profile.mode === "customVoice"
+            ? section.unitEnd - section.unitStart
+            : 1;
+          activeSectionChunkCheckpoint = getAudioChunkCount();
+
+          const activateRequest = (nextId: string, progressMessage: string) => {
+            id = nextId;
+            chunksRef.current = [];
+            scheduledCountRef.current = 0;
+            activeRequestRef.current = nextId;
+            activeRequestVersionRef.current = version;
+            setProgress({
+              requestId: nextId,
+              model: LOCAL_MODEL,
+              phase: "queued",
+              message: progressMessage,
+              elapsedSec: 0,
+            });
+          };
+          const generateSection = (uploadReference: boolean) => bridge.generate({
+            model: LOCAL_MODEL,
+            requestId: id,
+            continuation: {
+              jobId,
+              sectionIndex,
+              sectionCount: requestSections.length,
+            },
+            payload: {
+              ...basePayload,
+              text: section.text,
+              ...(settings.profile.mode === "voiceClone"
+                ? uploadReference
+                  ? {
+                      referenceAudioBase64: settings.referenceAudioBase64,
+                      referenceText: settings.referenceText.trim(),
+                      referenceCacheKey: jobId,
+                    }
+                  : { referenceCacheKey: jobId }
+                : {}),
+            },
+          });
+
+          const sectionMessage = requestSections.length > 1
+            ? `Generating Reader section ${sectionIndex + 1} of ${requestSections.length}.`
+            : `Starting Qwen3 ${settings.profile.label} with ${settings.profile.provider}.`;
+          const initiallyUploadsReference = settings.profile.mode === "voiceClone" && sectionIndex === 0;
+          activateRequest(id, sectionMessage);
+          let generated: LocalTtsGenerateResult;
+          try {
+            generated = await generateSection(initiallyUploadsReference);
+          } catch (sectionError: unknown) {
+            const canRestoreReference = settings.profile.mode === "voiceClone"
+              && !initiallyUploadsReference
+              && /reference cache entry was not found/i.test(message(sectionError))
+              && mountedRef.current
+              && generationVersionRef.current === version
+              && activeRequestRef.current === id;
+            if (!canRestoreReference) throw sectionError;
+
+            // A crash or eviction can replace the resident worker between
+            // sections. Roll back anything attributed to the failed attempt,
+            // then seed the new worker's cache once and retry this section.
+            truncateAudioChunks(activeSectionChunkCheckpoint);
+            activateRequest(
+              requestId("generate"),
+              `Restoring the voice reference for section ${sectionIndex + 1} of ${requestSections.length}.`,
+            );
+            generated = await generateSection(true);
+          }
+          if (
+            !mountedRef.current
+            || generationVersionRef.current !== version
+            || activeRequestRef.current !== id
+          ) return;
+          if (chunksRef.current.filter(Boolean).length !== generated.audioChunkCount) {
+            throw new Error("Generation returned incomplete streamed audio.");
+          }
+          combinedResult = mergeGenerateResults(combinedResult, generated);
+          activeSectionCompleted = true;
+
+          // Rust only knows whether a unit is final within one IPC request.
+          // The renderer owns the multi-request job, so it restores the natural
+          // inter-unit pause between non-final request sections for both
+          // CustomVoice and voice-clone streaming.
+          if (sectionIndex < requestSections.length - 1) {
+            const textUnitIndex = settings.profile.mode === "customVoice"
+              ? Math.max(section.unitStart, section.unitEnd - 1)
+              : sectionIndex;
+            const textUnit = activeTextUnitsRef.current[textUnitIndex];
+            const pauseSamples = Math.max(
+              1,
+              Math.round(generated.sampleRate * QWEN_SECTION_JOIN_PAUSE_SEC),
+            );
+            await scheduleChunk({
+              audio: new Float32Array(pauseSamples),
+              samplingRate: generated.sampleRate,
+              text: textUnit?.text ?? section.text,
+              index: textUnitIndex + 1,
+              total: activeTextUnitsRef.current.length || 1,
+              textStart: textUnit?.start ?? section.start,
+              textEnd: textUnit?.end ?? section.end,
+              pauseAfterSec: QWEN_SECTION_JOIN_PAUSE_SEC,
+              pauseKind: "sentence",
+            });
+            combinedResult = {
+              ...combinedResult,
+              durationSec: combinedResult.durationSec + QWEN_SECTION_JOIN_PAUSE_SEC,
+            };
+          }
+          setGenerationProgress(((sectionIndex + 1) / requestSections.length) * 100);
+        }
+
+        if (!combinedResult) throw new Error("Qwen3 did not return any generated audio.");
+        setResult(combinedResult);
+        endStream();
+        setProgress(null);
+      } catch (nextError: unknown) {
+        if (!mountedRef.current || generationVersionRef.current !== version) return;
+        endStream();
+        const nextMessage = message(nextError);
+        const cancelled = /cancelled/i.test(nextMessage);
+        if (!cancelled && !activeSectionCompleted) {
+          truncateAudioChunks(activeSectionChunkCheckpoint);
+        }
+        if (combinedResult && !cancelled) {
+          setResult(combinedResult);
+          setProgress(null);
+          setShowPlayer(true);
+          setError(
+            requestSections.length > 1
+              ? `Qwen3 stopped at section ${activeSectionIndex + 1} of ${requestSections.length}: ${nextMessage}`
+              : nextMessage,
+          );
+        } else {
+          clearGeneratedResult();
+          setError(cancelled ? null : nextMessage);
+        }
+      } finally {
+        if (mountedRef.current && generationVersionRef.current === version) {
+          activeRequestRef.current = null;
+          activeRequestVersionRef.current = null;
+          setGenerateBusy(false);
+        }
       }
-      setResult(generated);
-      endStream();
-      setProgress(null);
-    }).catch((nextError: unknown) => {
-      if (!mountedRef.current || activeRequestRef.current !== id) return;
-      endStream();
-      clearGeneratedResult();
-      const text = message(nextError);
-      setError(/cancelled/i.test(text) ? null : text);
-    }).finally(() => {
-      if (!mountedRef.current || activeRequestRef.current !== id) return;
-      activeRequestRef.current = null;
-      activeRequestVersionRef.current = null;
-      setGenerateBusy(false);
-    });
-  }, [beginStream, bridge, canGenerate, clearGeneratedResult, endStream, setShowPlayer, settings, text]);
+    };
+    void runSections();
+  }, [
+    beginStream,
+    bridge,
+    canGenerate,
+    clearGeneratedResult,
+    endStream,
+    getAudioChunkCount,
+    scheduleChunk,
+    setShowPlayer,
+    settings,
+    text,
+    truncateAudioChunks,
+  ]);
 
   const handleStop = useCallback(() => {
+    generationVersionRef.current += 1;
     cancelActiveGeneration();
-    stopAll();
-  }, [cancelActiveGeneration, stopAll]);
+    activeRequestRef.current = null;
+    activeRequestVersionRef.current = null;
+    endStream();
+    clearGeneratedResult();
+    setGenerateBusy(false);
+    setError(null);
+  }, [cancelActiveGeneration, clearGeneratedResult, endStream]);
 
   return {
     modelState,
     canGenerate,
     isGenerating: generateBusy,
-    generationProgress: progress ? 0 : 0,
+    generationProgress,
     stats,
     error: combinedError,
     handleGenerate,

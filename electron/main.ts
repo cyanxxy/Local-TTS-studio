@@ -1,4 +1,16 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, net, protocol, session, shell, type IpcMainInvokeEvent } from "electron";
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  ipcMain,
+  Menu,
+  net,
+  protocol,
+  session,
+  shell,
+  type IpcMainInvokeEvent,
+  type WebContents,
+} from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
@@ -19,6 +31,7 @@ import {
   createSafeProgressSender,
   downloadQwen3Model,
   inspectQwen3ModelDir,
+  isStructurallyValidQwen3ModelDir,
   requestUrl,
   type Qwen3ModelDownloadResult,
 } from "./qwen3ModelDownload";
@@ -26,6 +39,7 @@ import {
   getDefaultQwen3Profile,
   getQwen3Profile,
   getQwen3Profiles,
+  qwen3ProfileSupportsRuntime,
   type Qwen3Profile,
 } from "./qwen3Profiles";
 import {
@@ -52,6 +66,7 @@ import {
   sanitizeCacheRequest,
   sanitizeCancelRequest,
   sanitizeGeneratePayload,
+  sanitizeGenerationContinuation,
   sanitizeWarmRequest,
   type BridgeAction,
   type LocalCacheInfo,
@@ -79,13 +94,13 @@ function stageEpubTransfer(senderId: number, bytes: Uint8Array): string {
   pendingEpubTransfers.set(id, { senderId, bytes, expires });
   return id;
 }
-// Generation (model download + inference) can legitimately run for many minutes,
-// so the WebSocket worker request uses an inactivity watchdog instead of an
-// absolute deadline. The Rust bridge emits a periodic stderr heartbeat for the
-// duration of each request, and any child output (stdout/stderr) or socket frame
-// re-arms this timer, so it only fires when the worker goes fully silent (i.e. is
-// genuinely stuck) rather than during a slow first-run download or CPU inference.
+// Generation (model download + inference) can legitimately run for many minutes.
+// A short liveness watchdog is extended by Rust heartbeats or socket traffic.
+// A second, longer protocol-progress deadline is extended only by WebSocket
+// frames, so a live heartbeat thread cannot mask a permanently stuck inference
+// while long Reader synthesis can continue unit-by-unit.
 const RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
+const RUST_BRIDGE_GENERATE_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000;
 // On the WebSocket path stdout/stderr are diagnostic-only (results travel over
 // the socket), so keep modest caps that still tolerate native-provider startup logs.
 const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES = 2 * 1024 * 1024;
@@ -117,22 +132,117 @@ protocol.registerSchemesAsPrivileged([
 // force-killed by handleCancel/before-quit. Generation runs on the WebSocket
 // worker pool, which owns its own cancellation.
 const activeBridgeProcesses = new Map<string, ChildProcessWithoutNullStreams>();
+interface ActiveBridgeRequestOwner {
+  model: LocalModel;
+  senderId: number;
+  kind: BridgeAction | "warm";
+}
+const activeBridgeRequestOwners = new Map<string, ActiveBridgeRequestOwner>();
+const cancelledBridgeRequests = new Set<string>();
+const monitoredBridgeSenders = new WeakSet<WebContents>();
+let bridgeShuttingDown = false;
 const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
   rateWindowMs: GENERATE_RATE_WINDOW_MS,
 });
 let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
+const qwen3DownloadAbortController = new AbortController();
+const activeQwenModelDownloads = new Set<Promise<unknown>>();
 
 // Best-effort Qwen model warm-up. At most one
 // warm-up runs per model; a generate request that arrives while one is in
 // flight waits for it (the warm-up is doing exactly the model load the
 // generation would otherwise pay) instead of failing with "already running".
-const pendingWarmups = new Map<LocalModel, { requestId: string; promise: Promise<void> }>();
+interface PendingWarmup {
+  requestId: string;
+  targetKey: string;
+  promise: Promise<void>;
+}
+const pendingWarmups = new Map<LocalModel, PendingWarmup>();
 // Generate requests currently waiting on a warm-up, so cancel can reach them
 // before they are registered with the worker pool.
 const warmWaiters = new Map<string, LocalModel>();
 const cancelledWarmWaiters = new Set<string>();
 
+function warmTargetKey(model: LocalModel, payload: Record<string, unknown>): string {
+  if (model === "qwen3") {
+    return [model, payload.mode, payload.modelRepo, payload.modelPath].map(String).join("\0");
+  }
+  return [model, payload.modelRepo ?? "neuphonic/neutts-nano-q4-gguf"].map(String).join("\0");
+}
+
+function cancelPendingWarmup(pending: PendingWarmup): void {
+  cancelledBridgeRequests.add(pending.requestId);
+  cancelBridgeRequestNow(pending.requestId);
+}
+
+function assertBridgeAcceptingRequests(): void {
+  if (bridgeShuttingDown) throw new Error("The local runtime is shutting down.");
+}
+
+function cancelBridgeRequestNow(requestId: string): void {
+  const warmModel = warmWaiters.get(requestId);
+  if (warmModel !== undefined) {
+    cancelledWarmWaiters.add(requestId);
+    const pendingWarm = pendingWarmups.get(warmModel);
+    if (pendingWarm) {
+      cancelledBridgeRequests.add(pendingWarm.requestId);
+      webSocketBridgeWorkers?.cancel(pendingWarm.requestId);
+    }
+  }
+  if (webSocketBridgeWorkers?.cancel(requestId)) return;
+  const child = activeBridgeProcesses.get(requestId);
+  if (child) terminateBridgeChild(child);
+}
+
+function cancelBridgeRequestsForSender(senderId: number): void {
+  for (const [requestId, owner] of activeBridgeRequestOwners) {
+    if (owner.senderId !== senderId) continue;
+    cancelledBridgeRequests.add(requestId);
+    cancelBridgeRequestNow(requestId);
+  }
+}
+
+function monitorBridgeSender(sender: WebContents): void {
+  if (monitoredBridgeSenders.has(sender)) return;
+  monitoredBridgeSenders.add(sender);
+  const senderId = sender.id;
+  const cancelOwnedRequests = () => cancelBridgeRequestsForSender(senderId);
+  const cancelForNavigation = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
+    if (details.isMainFrame && !details.isSameDocument) cancelOwnedRequests();
+  };
+  sender.on("render-process-gone", cancelOwnedRequests);
+  sender.on("did-start-navigation", cancelForNavigation);
+  sender.once("destroyed", () => {
+    cancelOwnedRequests();
+    sender.removeListener("render-process-gone", cancelOwnedRequests);
+    sender.removeListener("did-start-navigation", cancelForNavigation);
+  });
+}
+
+function registerBridgeRequestOwner(
+  requestId: string,
+  model: LocalModel,
+  kind: ActiveBridgeRequestOwner["kind"],
+  event?: IpcMainInvokeEvent,
+): ActiveBridgeRequestOwner {
+  if (activeBridgeRequestOwners.has(requestId)) {
+    throw new Error(`A request with id ${requestId} is already running.`);
+  }
+  if (event) monitorBridgeSender(event.sender);
+  const owner = { model, senderId: event?.sender.id ?? -1, kind };
+  activeBridgeRequestOwners.set(requestId, owner);
+  return owner;
+}
+
+function releaseBridgeRequestOwner(requestId: string, owner: ActiveBridgeRequestOwner): void {
+  if (activeBridgeRequestOwners.get(requestId) === owner) {
+    activeBridgeRequestOwners.delete(requestId);
+  }
+  cancelledBridgeRequests.delete(requestId);
+}
+
 function getWebSocketBridgeWorkers(): WebSocketBridgeWorkerPool<LocalModel> {
+  assertBridgeAcceptingRequests();
   if (!webSocketBridgeWorkers) {
     webSocketBridgeWorkers = createWebSocketBridgeWorkerPool<LocalModel>({
       idleEvictMs: RUST_BRIDGE_WORKER_IDLE_EVICT_MS,
@@ -151,10 +261,12 @@ function getWebSocketBridgeWorkers(): WebSocketBridgeWorkerPool<LocalModel> {
             host,
             "--port",
             String(port),
-            "--auth-token",
-            authToken,
           ],
-          { stdio: ["pipe", "pipe", "pipe"], env, cwd: cacheDir },
+          {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: { ...env, OPEN_TTS_WS_AUTH_TOKEN: authToken },
+            cwd: cacheDir,
+          },
         ),
     });
   }
@@ -278,14 +390,23 @@ async function sanitizeLocalBridgeRequest(
 ): Promise<ValidatedLocalBridgeRequest> {
   if (!isRecord(request)) throw new Error("Invalid IPC request payload.");
   const model = assertLocalModel(String(request.model));
-  const requestId = action === "generate"
-    ? parseRequestId(request.requestId, { required: true })
-    : parseRequestId(request.requestId);
+  const requestId = parseRequestId(request.requestId, { required: true });
   const payload = action === "generate"
-    ? sanitizeGeneratePayload(model, request.payload)
+    ? sanitizeGeneratePayload(model, request.payload, process.platform, process.arch)
     : {};
+  const continuation = action === "generate"
+    ? sanitizeGenerationContinuation(request.continuation)
+    : undefined;
 
-  return { model, requestId, payload };
+  if (action === "generate" && model === "qwen3") {
+    const profile = getQwen3Profile(String(payload.modelRepo));
+    const modelPath = String(payload.modelPath);
+    if (!profile || !(await isStructurallyValidQwen3ModelDir(modelPath, profile))) {
+      throw new Error("The selected Qwen3 model directory is missing required files or does not match the selected profile.");
+    }
+  }
+
+  return { model, requestId, payload, ...(continuation ? { continuation } : {}) };
 }
 
 function getCacheDir(model: LocalModel): string {
@@ -377,9 +498,9 @@ async function resolveQwen3ModelDir(profile: Qwen3Profile): Promise<string> {
 function getRequestedQwen3Profile(request: unknown): Qwen3Profile {
   const repo = isRecord(request) && typeof request.modelRepo === "string"
     ? request.modelRepo.trim()
-    : getDefaultQwen3Profile(process.platform).repo;
+    : getDefaultQwen3Profile(process.platform, process.arch).repo;
   const profile = getQwen3Profile(repo);
-  if (!profile || !profile.platforms.includes(process.platform as "darwin" | "win32")) {
+  if (!profile || !qwen3ProfileSupportsRuntime(profile, process.platform, process.arch)) {
     throw new Error("Unsupported Qwen3 model profile for this platform.");
   }
   return profile;
@@ -391,14 +512,16 @@ const qwen3ModelDownloads = createQwen3ModelDownloadCoordinator(
     modelDir,
     onProgress,
     requestUrl,
-    ({ revision, fileName, destination, onProgress: reportFileProgress }) => runHfXetDownloader({
+    ({ revision, fileName, destination, onProgress: reportFileProgress, signal }) => runHfXetDownloader({
       binaryPath: getHfXetDownloaderBinaryPath(),
       modelRepo: profile.repo,
       revision,
       fileName,
       destination,
       onProgress: reportFileProgress,
+      signal,
     }),
+    qwen3DownloadAbortController.signal,
   ),
 );
 
@@ -409,7 +532,7 @@ async function handleQwen3Setup(request: unknown): Promise<{
   recommendedModelDir: string;
 }> {
   const selected = getRequestedQwen3Profile(request);
-  const profiles = await Promise.all(getQwen3Profiles(process.platform).map(async (profile) => {
+  const profiles = await Promise.all(getQwen3Profiles(process.platform, process.arch).map(async (profile) => {
     const modelDir = await resolveQwen3ModelDir(profile);
     const inspection = await inspectQwen3ModelDir(modelDir, profile);
     return { ...profile, modelDir, ...inspection };
@@ -426,17 +549,29 @@ async function handleDownloadQwen3Model(
   request: unknown,
   event: IpcMainInvokeEvent,
 ): Promise<Qwen3ModelDownloadResult> {
+  assertBridgeAcceptingRequests();
   assertTrustedIpcSender(event, { allowDevServer: isDev });
   const profile = getRequestedQwen3Profile(request);
   const modelDir = await resolveQwen3ModelDir(profile);
-  return qwen3ModelDownloads.download(
+  const download = qwen3ModelDownloads.download(
     profile,
     modelDir,
     createSafeProgressSender(event.sender, "local-tts:qwen3-download-progress"),
   );
+  activeQwenModelDownloads.add(download);
+  void download.then(
+    () => activeQwenModelDownloads.delete(download),
+    () => activeQwenModelDownloads.delete(download),
+  );
+  return download;
 }
 
-async function handleChooseQwen3ModelDir(): Promise<{ path: string | null }> {
+async function handleChooseQwen3ModelDir(request: unknown): Promise<{
+  path: string | null;
+  readiness?: "missing" | "structural" | "verified";
+  reason?: string;
+}> {
+  const profile = getRequestedQwen3Profile(request);
   const result = await dialog.showOpenDialog({
     title: "Choose Qwen3 model directory",
     properties: ["openDirectory"],
@@ -444,7 +579,14 @@ async function handleChooseQwen3ModelDir(): Promise<{ path: string | null }> {
   if (result.canceled || result.filePaths.length === 0) {
     return { path: null };
   }
-  return { path: result.filePaths[0] };
+  const modelPath = result.filePaths[0];
+  const inspection = await inspectQwen3ModelDir(modelPath, profile);
+  if (inspection.readiness === "missing") return { path: modelPath, ...inspection };
+  return {
+    path: modelPath,
+    readiness: "structural",
+    reason: "The selected manual folder passed structural checks but is not a managed, revision-verified download.",
+  };
 }
 
 // LiteParse ships ESM-only exports (no "require" condition), so the CommonJS
@@ -528,7 +670,14 @@ async function runRustBridge(
   request: unknown,
   event?: IpcMainInvokeEvent,
 ): Promise<unknown> {
+  assertBridgeAcceptingRequests();
+  if (!isRecord(request)) throw new Error("Invalid IPC request payload.");
+  const requestedModel = assertLocalModel(String(request.model));
+  const requestedId = parseRequestId(request.requestId, { required: true })!;
+  const owner = registerBridgeRequestOwner(requestedId, requestedModel, action, event);
+  try {
   const sanitized = await sanitizeLocalBridgeRequest(action, request);
+  if (cancelledBridgeRequests.has(requestedId)) throw new Error("Generation cancelled.");
   const model = sanitized.model;
   const cacheDir = getCacheDir(model);
   const bridgeBinary = getRustBridgeBinaryPath();
@@ -550,9 +699,17 @@ async function runRustBridge(
     try {
       await fs.access(bridgeBinary);
       await fs.mkdir(cacheDir, { recursive: true });
+      if (cancelledBridgeRequests.has(generateRequestId)) {
+        throw new Error("Generation cancelled.");
+      }
 
-      const pendingWarm = pendingWarmups.get(model);
-      if (pendingWarm) {
+      const generateWarmTarget = warmTargetKey(model, sanitized.payload);
+      for (;;) {
+        const pendingWarm = pendingWarmups.get(model);
+        if (!pendingWarm) break;
+        if (pendingWarm.targetKey !== generateWarmTarget) {
+          cancelPendingWarmup(pendingWarm);
+        }
         await pendingWarm.promise;
       }
       if (cancelledWarmWaiters.has(generateRequestId)) {
@@ -560,7 +717,7 @@ async function runRustBridge(
       }
 
     const onProgress = (payload: unknown) => {
-      if (!event) return;
+      if (!event || event.sender.isDestroyed()) return;
       try {
         const progress = parseBridgeProgressResult(payload);
         event.sender.send("local-tts:progress", { requestId: generateRequestId, model, ...progress });
@@ -582,7 +739,7 @@ async function runRustBridge(
       textUnitTotal?: number;
       audio: ArrayBuffer;
     }) => {
-      if (!event) return;
+      if (!event || event.sender.isDestroyed()) return;
       event.sender.send("local-tts:audio-chunk", { model, ...payload });
     };
 
@@ -593,6 +750,7 @@ async function runRustBridge(
         payload: sanitized.payload,
         spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
         idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
+        progressTimeoutMs: RUST_BRIDGE_GENERATE_PROGRESS_TIMEOUT_MS,
         maxStdoutBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES,
         maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
         onProgress,
@@ -612,6 +770,7 @@ async function runRustBridge(
   const runProbeBridge = async () => {
     await fs.access(bridgeBinary);
     await fs.mkdir(cacheDir, { recursive: true });
+    if (cancelledBridgeRequests.has(requestId!)) throw new Error("Generation cancelled.");
 
     if (requestId && activeBridgeProcesses.has(requestId)) {
       throw new Error(`A request with id ${requestId} is already running.`);
@@ -749,9 +908,12 @@ async function runRustBridge(
   };
 
   const task = useWebSocketWorker ? runWebSocketGenerate : runProbeBridge;
-  return shouldRateLimit
-    ? generateRateLimiter.run(model, task)
-    : task();
+  return await (shouldRateLimit
+    ? generateRateLimiter.run(model, task, sanitized.continuation)
+    : task());
+  } finally {
+    releaseBridgeRequestOwner(requestedId, owner);
+  }
 }
 
 async function getDirectorySizeBytes(dirPath: string): Promise<number> {
@@ -815,82 +977,85 @@ async function handleClearCache(request: unknown): Promise<{ path: string; clear
 // WebSocket worker so the first generation skips the model load. Failures
 // degrade to `warmed: false` — warm-up must never surface an error the
 // generation path would explain better.
-async function handleWarm(request: unknown): Promise<{ warmed: boolean; message?: string }> {
-  const { model, payload } = sanitizeWarmRequest(request);
-  if (pendingWarmups.has(model)) {
-    return { warmed: false, message: "A warm-up is already in flight." };
+async function handleWarm(
+  request: unknown,
+  event: IpcMainInvokeEvent,
+): Promise<{ warmed: boolean; message?: string }> {
+  assertBridgeAcceptingRequests();
+  const { model, modelRepo, payload } = sanitizeWarmRequest(request, process.platform, process.arch);
+  const targetKey = warmTargetKey(model, { ...payload, ...(modelRepo ? { modelRepo } : {}) });
+  for (;;) {
+    const pendingWarm = pendingWarmups.get(model);
+    if (!pendingWarm) break;
+    if (pendingWarm.targetKey === targetKey) {
+      return { warmed: false, message: "This model is already warming." };
+    }
+    cancelPendingWarmup(pendingWarm);
+    await pendingWarm.promise;
   }
-
-  const cacheDir = getCacheDir(model);
-  const bridgeBinary = getRustBridgeBinaryPath();
+  const warmRequestId = `${model}-warm-${randomUUID()}`;
+  let resolveWarmCompletion!: () => void;
+  const warmCompletion = new Promise<void>((resolve) => {
+    resolveWarmCompletion = resolve;
+  });
+  const reservation = { requestId: warmRequestId, targetKey, promise: warmCompletion };
+  pendingWarmups.set(model, reservation);
+  const owner = registerBridgeRequestOwner(warmRequestId, model, "warm", event);
   try {
+    if (model === "qwen3") {
+      const profile = modelRepo ? getQwen3Profile(modelRepo) : undefined;
+      const modelPath = String(payload.modelPath ?? "");
+      if (!profile || !(await isStructurallyValidQwen3ModelDir(modelPath, profile))) {
+        return { warmed: false, message: "The selected Qwen3 model directory is incomplete or incompatible." };
+      }
+    }
+    if (cancelledBridgeRequests.has(warmRequestId)) {
+      return { warmed: false, message: "Warm-up cancelled." };
+    }
+
+    const cacheDir = getCacheDir(model);
+    const bridgeBinary = getRustBridgeBinaryPath();
     await fs.access(bridgeBinary);
     await fs.mkdir(cacheDir, { recursive: true });
-  } catch (err) {
-    return { warmed: false, message: err instanceof Error ? err.message : String(err) };
-  }
+    if (cancelledBridgeRequests.has(warmRequestId)) {
+      return { warmed: false, message: "Warm-up cancelled." };
+    }
 
-  const warmRequestId = `${model}-warm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  const runPromise = getWebSocketBridgeWorkers().run(model, {
-    requestId: warmRequestId,
-    payload,
-    command: "warm",
-    spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
-    idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
-    maxStdoutBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES,
-    maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
-    onProgress: () => {},
-    onAudioChunk: () => {},
-  });
-  pendingWarmups.set(model, {
-    requestId: warmRequestId,
-    promise: runPromise.then(() => undefined, () => undefined),
-  });
-
-  try {
+    const runPromise = getWebSocketBridgeWorkers().run(model, {
+      requestId: warmRequestId,
+      payload,
+      command: "warm",
+      spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
+      idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
+      progressTimeoutMs: RUST_BRIDGE_GENERATE_PROGRESS_TIMEOUT_MS,
+      maxStdoutBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES,
+      maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
+      onProgress: () => {},
+      onAudioChunk: () => {},
+    });
     const { response } = await runPromise;
     return parseBridgeWarmResult(response);
   } catch (err) {
     return { warmed: false, message: err instanceof Error ? err.message : String(err) };
   } finally {
-    pendingWarmups.delete(model);
+    resolveWarmCompletion();
+    if (pendingWarmups.get(model) === reservation) pendingWarmups.delete(model);
+    releaseBridgeRequestOwner(warmRequestId, owner);
   }
 }
 
-async function handleCancel(request: unknown): Promise<{ cancelled: boolean }> {
-  const { requestId } = sanitizeCancelRequest(request);
-
-  // A generate request waiting on a warm-up is not yet known to the worker
-  // pool; mark it cancelled and abort the warm-up so the wait ends promptly.
-  const warmModel = warmWaiters.get(requestId);
-  if (warmModel !== undefined) {
-    cancelledWarmWaiters.add(requestId);
-    const pendingWarm = pendingWarmups.get(warmModel);
-    if (pendingWarm) {
-      webSocketBridgeWorkers?.cancel(pendingWarm.requestId);
-    }
-    return { cancelled: true };
+async function handleCancel(
+  request: unknown,
+  event: IpcMainInvokeEvent,
+): Promise<{ cancelled: boolean }> {
+  const { model, requestId } = sanitizeCancelRequest(request);
+  const owner = activeBridgeRequestOwners.get(requestId);
+  if (!owner) return { cancelled: false };
+  if (owner.model !== model || owner.senderId !== event.sender.id) {
+    throw new Error("Cancellation request does not own the active local-runtime request.");
   }
-
-  // Generation always runs on the WebSocket worker pool, so killing the worker
-  // is the only generation cancel path: its exit rejects the in-flight request
-  // as cancelled and the next request respawns. The activeBridgeProcesses
-  // fallback only ever matches an in-flight probe subprocess.
-  if (webSocketBridgeWorkers?.cancel(requestId)) {
-    return { cancelled: true };
-  }
-
-  const child = activeBridgeProcesses.get(requestId);
-  if (!child) {
-    return { cancelled: false };
-  }
-
-  try {
-    terminateBridgeChild(child);
-  } catch {
-    throw new Error("Failed to cancel local generation.");
-  }
-
+  cancelledBridgeRequests.add(requestId);
+  cancelBridgeRequestNow(requestId);
   return { cancelled: true };
 }
 
@@ -925,12 +1090,12 @@ app.whenReady().then(() => {
 
   ipcMain.handle("local-tts:warm", (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    return handleWarm(request);
+    return handleWarm(request, event);
   });
 
   ipcMain.handle("local-tts:cancel", (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    return handleCancel(request);
+    return handleCancel(request, event);
   });
 
   ipcMain.handle("local-tts:cache-info", (event, request: unknown) => {
@@ -953,9 +1118,9 @@ app.whenReady().then(() => {
     return handleDownloadQwen3Model(request, event);
   });
 
-  ipcMain.handle("local-tts:choose-qwen3-model-dir", (event) => {
+  ipcMain.handle("local-tts:choose-qwen3-model-dir", (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    return handleChooseQwen3ModelDir();
+    return handleChooseQwen3ModelDir(request);
   });
 
   ipcMain.handle("document:import", async (event) => {
@@ -1015,9 +1180,15 @@ app.whenReady().then(() => {
   });
 });
 
-let bridgeShutdownStarted = false;
 app.on("before-quit", (event) => {
+  if (bridgeShuttingDown) return;
+  bridgeShuttingDown = true;
+  qwen3DownloadAbortController.abort();
+  for (const requestId of activeBridgeRequestOwners.keys()) {
+    cancelledBridgeRequests.add(requestId);
+  }
   const probeChildren = [...activeBridgeProcesses.values()];
+  const modelDownloads = [...activeQwenModelDownloads];
   for (const child of probeChildren) {
     terminateBridgeChild(child);
   }
@@ -1027,8 +1198,7 @@ app.on("before-quit", (event) => {
   // children (SIGTERM + SIGKILL escalation) have a bounded window to run;
   // otherwise the unref'd kill timers die with the process and a
   // SIGTERM-ignoring child survives.
-  if (bridgeShutdownStarted || (!webSocketBridgeWorkers && probeChildren.length === 0)) return;
-  bridgeShutdownStarted = true;
+  if (!webSocketBridgeWorkers && probeChildren.length === 0 && modelDownloads.length === 0) return;
   event.preventDefault();
   const probeExits = probeChildren.map((child) =>
     child.exitCode !== null || child.signalCode !== null
@@ -1039,7 +1209,11 @@ app.on("before-quit", (event) => {
     setTimeout(resolve, RUST_CANCEL_KILL_AFTER_MS + 500);
   });
   void Promise.race([
-    Promise.all([webSocketBridgeWorkers?.shutdownAll() ?? Promise.resolve(), ...probeExits]),
+    Promise.all([
+      webSocketBridgeWorkers?.shutdownAll() ?? Promise.resolve(),
+      ...probeExits,
+      Promise.allSettled(modelDownloads).then(() => undefined),
+    ]),
     timeout,
   ]).then(() => app.quit(), () => app.quit());
 });

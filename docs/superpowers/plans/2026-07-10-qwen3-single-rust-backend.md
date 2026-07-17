@@ -1,5 +1,7 @@
 # Qwen3 Single Rust Backend Implementation Plan
 
+> **Historical implementation plan (2026-07-10).** This checklist preserves the plan as written and is not the current runtime contract or release status. For the implemented architecture and current operational limits, use [Desktop local runtimes](../../local-runtimes.md) and [Architecture](../../architecture.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace every Qwen subprocess/Candle path with one in-process Qwen3 runtime inside `open-tts-local-bridge`, using MLX on Apple Silicon and LibTorch CUDA/CPU on Windows, with one Electron contract and one shared renderer controller.

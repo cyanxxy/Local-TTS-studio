@@ -5,8 +5,13 @@ type LocalModel = "neutts" | "qwen3";
 
 interface LocalBridgeRequest {
   model: LocalModel;
-  requestId?: string;
+  requestId: string;
   payload?: Record<string, unknown>;
+  continuation?: {
+    jobId: string;
+    sectionIndex: number;
+    sectionCount: number;
+  };
 }
 
 interface CacheRequest {
@@ -76,6 +81,7 @@ async function importDocument() {
 contextBridge.exposeInMainWorld("electron", {
   isElectron: true,
   platform: process.platform,
+  arch: process.arch,
   documents: {
     importDocument,
     importUrl: (url: string) => ipcRenderer.invoke("document:import-url", { url }),
@@ -83,7 +89,7 @@ contextBridge.exposeInMainWorld("electron", {
   localTts: {
     probe: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:probe", request),
     generate: (request: LocalBridgeRequest) => ipcRenderer.invoke("local-tts:generate", request),
-    warm: (request: { model: LocalModel; mode?: string; modelPath?: string }) => (
+    warm: (request: { model: LocalModel; mode?: string; modelPath?: string; modelRepo?: string }) => (
       ipcRenderer.invoke("local-tts:warm", request)
     ),
     cancel: (request: CancelRequest) => ipcRenderer.invoke("local-tts:cancel", request),
@@ -93,7 +99,9 @@ contextBridge.exposeInMainWorld("electron", {
     downloadQwen3Model: (request: { modelRepo: string }) => (
       ipcRenderer.invoke("local-tts:download-qwen3-model", request)
     ),
-    chooseQwen3ModelDir: () => ipcRenderer.invoke("local-tts:choose-qwen3-model-dir"),
+    chooseQwen3ModelDir: (request: { modelRepo: string }) => (
+      ipcRenderer.invoke("local-tts:choose-qwen3-model-dir", request)
+    ),
     subscribeQwen3DownloadProgress: (listener: (event: unknown) => void) => {
       const wrapped = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
       ipcRenderer.on("local-tts:qwen3-download-progress", wrapped);

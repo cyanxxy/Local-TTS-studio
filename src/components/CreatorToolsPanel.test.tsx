@@ -50,6 +50,13 @@ describe("CreatorToolsPanel", () => {
     const selects = screen.getAllByRole("combobox");
     const sliders = screen.getAllByRole("slider");
 
+    expect(screen.getByRole("button", { name: /Creator Toolkit/i })).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByLabelText("Base Speed")).toBe(sliders[0]);
+    expect(screen.getByLabelText("Base Speed")).toHaveAttribute("step", "0.01");
+    expect(screen.getByLabelText("Comma pause")).toBe(sliders[1]);
+    expect(screen.getByLabelText("Sentence pause")).toBe(sliders[2]);
+    expect(screen.getByLabelText("Paragraph pause")).toBe(sliders[3]);
+
     fireEvent.change(selects[0], { target: { value: "custom" } });
     fireEvent.change(sliders[0], { target: { value: "1.1" } });
     fireEvent.change(sliders[1], { target: { value: "0.2" } });
@@ -101,5 +108,24 @@ describe("CreatorToolsPanel", () => {
     expect(screen.getAllByRole("combobox")).toHaveLength(3);
     expect(screen.getByRole("button", { name: /Audio/i })).toBeDisabled();
     expect(screen.getByRole("button", { name: /SRT/i })).toBeDisabled();
+    expect(screen.getByText("Generate audio to enable downloads.")).toBeInTheDocument();
+  });
+
+  it("validates and previews pronunciation rules before synthesis", () => {
+    const props = renderPanel({
+      pronunciationLexicon: "GIF=jif\nnot a valid rule\nSQL=sequel",
+    });
+
+    const lexicon = screen.getByLabelText("Pronunciation");
+    expect(lexicon).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByText(/Invalid rule on line 2/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Test pronunciation rules"), {
+      target: { value: "GIF and SQL" },
+    });
+
+    expect(screen.getByText("jif and sequel")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Clear rules" }));
+    expect(props.onPronunciationLexiconChange).toHaveBeenCalledWith("");
   });
 });

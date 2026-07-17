@@ -2,9 +2,13 @@ import {
   CREATOR_PRESETS,
   DEFAULT_CREATOR_PRESET,
   MODELS,
+  PAUSE_MAX,
+  PAUSE_MIN,
   QUALITY_DEFAULT,
   QUALITY_MAX,
   QUALITY_MIN,
+  SPEED_MAX,
+  SPEED_MIN,
 } from "../constants";
 import type {
   CreatorPresetId,
@@ -61,6 +65,18 @@ export interface CreatorState {
   masteringEnabled: boolean;
 }
 
+export interface PronunciationLexiconIssue {
+  line: number;
+  value: string;
+}
+
+export interface PronunciationLexiconDiagnostics {
+  rules: PronunciationRule[];
+  issues: PronunciationLexiconIssue[];
+}
+
+const EXPORT_BITRATE_OPTIONS = [128, 192, 256, 320] as const;
+
 function isModelType(value: unknown): value is ModelType {
   return value === "kokoro" || value === "supertonic";
 }
@@ -93,6 +109,14 @@ function isExportSampleRate(value: unknown): value is ExportSampleRate {
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function normalizeExportBitrate(value: unknown, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
+
+  return EXPORT_BITRATE_OPTIONS.reduce((closest, option) => (
+    Math.abs(option - value) < Math.abs(closest - value) ? option : closest
+  ));
 }
 
 function getLegacyModelSelection(): ModelType | null {
@@ -182,15 +206,17 @@ export function getInitialCreatorState(): CreatorState {
 
     return {
       preset,
-      speed: typeof parsed.speed === "number" ? clamp(parsed.speed, 0.85, 1.15) : presetDefaults.speed,
-      pauseCommaSec: typeof parsed.pauseCommaSec === "number"
-        ? clamp(parsed.pauseCommaSec, 0, 2)
+      speed: typeof parsed.speed === "number" && Number.isFinite(parsed.speed)
+        ? clamp(parsed.speed, SPEED_MIN, SPEED_MAX)
+        : presetDefaults.speed,
+      pauseCommaSec: typeof parsed.pauseCommaSec === "number" && Number.isFinite(parsed.pauseCommaSec)
+        ? clamp(parsed.pauseCommaSec, PAUSE_MIN, PAUSE_MAX)
         : presetDefaults.pauseCommaSec,
-      pauseSentenceSec: typeof parsed.pauseSentenceSec === "number"
-        ? clamp(parsed.pauseSentenceSec, 0, 2)
+      pauseSentenceSec: typeof parsed.pauseSentenceSec === "number" && Number.isFinite(parsed.pauseSentenceSec)
+        ? clamp(parsed.pauseSentenceSec, PAUSE_MIN, PAUSE_MAX)
         : presetDefaults.pauseSentenceSec,
-      pauseParagraphSec: typeof parsed.pauseParagraphSec === "number"
-        ? clamp(parsed.pauseParagraphSec, 0, 2)
+      pauseParagraphSec: typeof parsed.pauseParagraphSec === "number" && Number.isFinite(parsed.pauseParagraphSec)
+        ? clamp(parsed.pauseParagraphSec, PAUSE_MIN, PAUSE_MAX)
         : presetDefaults.pauseParagraphSec,
       pronunciationLexicon: typeof parsed.pronunciationLexicon === "string"
         ? parsed.pronunciationLexicon
@@ -201,9 +227,10 @@ export function getInitialCreatorState(): CreatorState {
       exportSampleRate: isExportSampleRate(parsed.exportSampleRate)
         ? parsed.exportSampleRate
         : presetDefaults.exportSampleRate,
-      exportBitrateKbps: typeof parsed.exportBitrateKbps === "number"
-        ? clamp(Math.round(parsed.exportBitrateKbps), 96, 320)
-        : presetDefaults.exportBitrateKbps,
+      exportBitrateKbps: normalizeExportBitrate(
+        parsed.exportBitrateKbps,
+        presetDefaults.exportBitrateKbps,
+      ),
       masteringEnabled: typeof parsed.masteringEnabled === "boolean"
         ? parsed.masteringEnabled
         : presetDefaults.masteringEnabled,
@@ -214,19 +241,29 @@ export function getInitialCreatorState(): CreatorState {
 }
 
 export function parsePronunciationRules(lexicon: string): PronunciationRule[] {
-  return lexicon
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !line.startsWith("#"))
-    .map((line) => {
-      const match = line.match(/^(.+?)(?:=>|->|=)(.+)$/);
-      if (!match) return null;
-      const from = match[1].trim();
-      const to = match[2].trim();
-      if (!from || !to) return null;
-      return { from, to };
-    })
-    .filter((value): value is PronunciationRule => value !== null);
+  return analyzePronunciationLexicon(lexicon).rules;
+}
+
+export function analyzePronunciationLexicon(lexicon: string): PronunciationLexiconDiagnostics {
+  const rules: PronunciationRule[] = [];
+  const issues: PronunciationLexiconIssue[] = [];
+
+  lexicon.split(/\r?\n/).forEach((rawLine, index) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) return;
+
+    const match = line.match(/^(.+?)(?:=>|->|=)(.+)$/);
+    const from = match?.[1]?.trim() ?? "";
+    const to = match?.[2]?.trim() ?? "";
+    if (!from || !to) {
+      issues.push({ line: index + 1, value: line });
+      return;
+    }
+
+    rules.push({ from, to });
+  });
+
+  return { rules, issues };
 }
 
 export function persistAppState(state: PersistedAppState): void {

@@ -53,6 +53,7 @@ describe("buildContentSecurityPolicy", () => {
     expect(policy).toContain("style-src 'self' 'unsafe-inline'");
     expect(policy).toContain("script-src 'self' 'wasm-unsafe-eval'");
     expect(policy).toContain("https://huggingface.co");
+    expect(connectDirective?.split(/\s+/)).toContain("https://cas-bridge.xethub.hf.co");
   });
 
   it("does not allow arbitrary https image origins in production (no exfil beacon channel)", () => {

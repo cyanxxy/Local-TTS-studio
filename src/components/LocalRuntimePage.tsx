@@ -27,8 +27,16 @@ import {
   qwen3UsesVoiceClone,
 } from "./localRuntime/modelOptions";
 import {
+  MAX_LOCAL_TTS_TEXT_LENGTH,
+  MAX_REFERENCE_AUDIO_FILE_BYTES,
+  MAX_REFERENCE_CODES_FILE_BYTES,
+  exceedsUnicodeScalarLimit,
+} from "../../electron/localTtsLimits";
+import {
   arrayBufferToBase64,
   float32ChunksToWavUrl,
+  formatBytes,
+  sha256Hex,
   type StatusTone,
 } from "./localRuntime/utils";
 
@@ -339,18 +347,26 @@ export function LocalRuntimePage({
 
   // Pre-warm the selected model inside the resident Rust worker.
   const warmedKeyRef = useRef<string | null>(null);
+  const warmingKeyRef = useRef<string | null>(null);
   useEffect(() => {
     if (model !== "qwen3" || !electronAvailable || generateBusy) return;
     const modelPath = qwen3.modelPath.trim();
     if (!modelPath || qwen3.readiness === "missing") return;
     const warmKey = `${qwen3.profile.repo}:${modelPath}`;
-    if (warmedKeyRef.current === warmKey) return;
-    warmedKeyRef.current = warmKey;
+    if (warmedKeyRef.current === warmKey || warmingKeyRef.current === warmKey) return;
+    warmingKeyRef.current = warmKey;
+    let active = true;
     void window.electron?.localTts?.warm?.({
       model,
       mode: qwen3.profile.mode,
       modelPath,
-    }).catch(() => undefined);
+      modelRepo: qwen3.profile.repo,
+    }).then((result) => {
+      if (active && result.warmed) warmedKeyRef.current = warmKey;
+    }).catch(() => undefined).finally(() => {
+      if (warmingKeyRef.current === warmKey) warmingKeyRef.current = null;
+    });
+    return () => { active = false; };
   }, [electronAvailable, generateBusy, model, qwen3.modelPath, qwen3.profile, qwen3.readiness]);
 
   useEffect(() => {
@@ -457,6 +473,7 @@ export function LocalRuntimePage({
 
   const canGenerate = useMemo(() => {
     if (text.trim().length < 10) return false;
+    if (exceedsUnicodeScalarLimit(text, MAX_LOCAL_TTS_TEXT_LENGTH)) return false;
     if (model === "neutts") {
       return referenceText.trim().length > 0 && (!!referenceCodesBase64 || !!referenceWavBase64);
     }
@@ -567,11 +584,17 @@ export function LocalRuntimePage({
     }
 
     try {
-      const buffer = await file.arrayBuffer();
       const lowerName = file.name.toLowerCase();
       if (!lowerName.endsWith(".npy") && !lowerName.endsWith(".wav")) {
         throw new Error("NeuTTS references must be a WAV clip or pre-encoded .npy code file.");
       }
+      const maxBytes = lowerName.endsWith(".npy")
+        ? MAX_REFERENCE_CODES_FILE_BYTES
+        : MAX_REFERENCE_AUDIO_FILE_BYTES;
+      if (file.size > maxBytes) {
+        throw new Error(`The reference file exceeds the ${formatBytes(maxBytes)} upload limit.`);
+      }
+      const buffer = await file.arrayBuffer();
 
       if (!isCurrentPageVersion(pageVersion)) return;
       if (lowerName.endsWith(".npy")) {
@@ -611,9 +634,15 @@ export function LocalRuntimePage({
       if (!file.name.toLowerCase().endsWith(".wav")) {
         throw new Error("Qwen3 Base voice cloning requires a WAV reference file.");
       }
+      if (file.size > MAX_REFERENCE_AUDIO_FILE_BYTES) {
+        throw new Error(
+          `The reference WAV exceeds the ${formatBytes(MAX_REFERENCE_AUDIO_FILE_BYTES)} upload limit.`,
+        );
+      }
       const buffer = await file.arrayBuffer();
+      const signature = await sha256Hex(buffer);
       if (!isCurrentPageVersion(pageVersion)) return;
-      qwen3.setReferenceAudio(file.name, arrayBufferToBase64(buffer));
+      qwen3.setReferenceAudio(file.name, arrayBufferToBase64(buffer), signature);
       setQwen3ReferenceAudioGuidance({ tone: "success", text: "Reference WAV loaded." });
       setStatus({ tone: "info", text: `Loaded Qwen3 reference WAV: ${file.name}. Enter its exact transcript before generating.` });
     } catch (err) {
@@ -914,6 +943,11 @@ export function LocalRuntimePage({
             className="w-full min-h-32 px-3 py-2 rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
             placeholder="Type or paste text to synthesize…"
           />
+          {exceedsUnicodeScalarLimit(text, MAX_LOCAL_TTS_TEXT_LENGTH) && (
+            <p className="text-xs text-danger" role="status">
+              Local runtimes accept at most {MAX_LOCAL_TTS_TEXT_LENGTH.toLocaleString()} characters per request. Split longer text into smaller sections.
+            </p>
+          )}
         </div>
 
         {(model === "neutts" || model === "qwen3") && (

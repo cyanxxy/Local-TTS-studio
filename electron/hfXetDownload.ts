@@ -13,11 +13,13 @@ interface RunHfXetDownloaderOptions {
   fileName: string;
   destination: string;
   onProgress: (downloadedBytes: number, totalBytes?: number) => void;
+  signal?: AbortSignal;
+  spawnProcess?: typeof spawn;
 }
 
 const MAX_DIAGNOSTIC_BYTES = 64 * 1024;
 const OUTPUT_INACTIVITY_TIMEOUT_MS = 2 * 60 * 1000;
-const KILL_GRACE_MS = 5_000;
+const KILL_GRACE_MS = 2_000;
 
 export function parseHfXetProgressLine(line: string): HfXetProgress | null {
   try {
@@ -46,11 +48,17 @@ export function runHfXetDownloader({
   fileName,
   destination,
   onProgress,
+  signal,
+  spawnProcess = spawn,
 }: RunHfXetDownloaderOptions): Promise<boolean> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("Qwen3 model download cancelled."));
+      return;
+    }
     let child: ChildProcessByStdio<null, Readable, Readable>;
     try {
-      child = spawn(binaryPath, [
+      child = spawnProcess(binaryPath, [
         "--repo", modelRepo,
         "--revision", revision,
         "--file", fileName,
@@ -70,20 +78,17 @@ export function runHfXetDownloader({
     let childClosed = false;
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
     let killTimer: ReturnType<typeof setTimeout> | null = null;
+    let terminationError: Error | null = null;
 
     const clearInactivityTimer = () => {
       if (inactivityTimer) clearTimeout(inactivityTimer);
       inactivityTimer = null;
     };
     const armInactivityTimer = () => {
+      if (terminationError) return;
       clearInactivityTimer();
       inactivityTimer = setTimeout(() => {
-        child.kill("SIGTERM");
-        killTimer = setTimeout(() => {
-          if (!childClosed) child.kill("SIGKILL");
-        }, KILL_GRACE_MS);
-        killTimer.unref?.();
-        finish(new Error("Hugging Face Xet download stopped responding."));
+        terminate(new Error("Hugging Face Xet download stopped responding."));
       }, OUTPUT_INACTIVITY_TIMEOUT_MS);
       inactivityTimer.unref?.();
     };
@@ -91,9 +96,21 @@ export function runHfXetDownloader({
       if (settled) return;
       settled = true;
       clearInactivityTimer();
+      signal?.removeEventListener("abort", abortDownload);
       if (error) reject(error);
       else resolve(true);
     };
+    const terminate = (error: Error) => {
+      if (settled || terminationError) return;
+      terminationError = error;
+      clearInactivityTimer();
+      child.kill("SIGTERM");
+      killTimer = setTimeout(() => {
+        if (!childClosed) child.kill("SIGKILL");
+      }, KILL_GRACE_MS);
+      killTimer.unref?.();
+    };
+    const abortDownload = () => terminate(new Error("Qwen3 model download cancelled."));
     const consumeLine = (line: string) => {
       const progress = parseHfXetProgressLine(line.trim());
       if (progress) onProgress(progress.downloadedBytes, progress.totalBytes);
@@ -122,18 +139,24 @@ export function runHfXetDownloader({
     child.on("error", (error) => {
       childClosed = true;
       if (killTimer) clearTimeout(killTimer);
-      finish(error);
+      finish(terminationError ?? error);
     });
-    child.on("close", (code, signal) => {
+    child.on("close", (code, exitSignal) => {
       childClosed = true;
       if (killTimer) clearTimeout(killTimer);
+      if (terminationError) {
+        finish(terminationError);
+        return;
+      }
       if (stdoutBuffer.trim()) consumeLine(stdoutBuffer);
       if (code === 0) {
         finish();
         return;
       }
-      const detail = stderr.trim() || `process exited with code ${code ?? "unknown"}${signal ? ` (${signal})` : ""}`;
+      const detail = stderr.trim() || `process exited with code ${code ?? "unknown"}${exitSignal ? ` (${exitSignal})` : ""}`;
       finish(new Error(`Hugging Face Xet download failed: ${detail}`));
     });
+    signal?.addEventListener("abort", abortDownload, { once: true });
+    if (signal?.aborted) abortDownload();
   });
 }

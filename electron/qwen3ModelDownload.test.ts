@@ -115,6 +115,22 @@ describe("safe progress and Hub URLs", () => {
     await expect(requestUrl("http://huggingface.co/model")).rejects.toThrow(/insecure/);
     await expect(requestUrl("https://127.0.0.1/model")).rejects.toThrow(/non-HuggingFace/);
   });
+
+  it("catches an abort that lands while the HTTPS request listener is being registered", async () => {
+    let abortedChecks = 0;
+    const signal = {
+      get aborted() {
+        abortedChecks += 1;
+        return abortedChecks > 1;
+      },
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as AbortSignal;
+
+    await expect(requestUrl("https://huggingface.co/model/resolve/main/config.json", signal))
+      .rejects.toThrow(/cancelled/i);
+    expect(signal.addEventListener).toHaveBeenCalledWith("abort", expect.any(Function), { once: true });
+  });
 });
 
 describe("downloadQwen3Model", () => {
@@ -260,6 +276,26 @@ describe("download stream integrity", () => {
     for (let index = 0; index < 20; index += 1) await new Promise((resolve) => setImmediate(resolve));
     await vi.advanceTimersByTimeAsync(IDLE_DOWNLOAD_TIMEOUT_MS + 1);
     await expect(promise).rejects.toThrow(/stalled/);
+  });
+
+  it("aborts an in-flight download and removes its temporary file", async () => {
+    const destination = path.join(makeTempDir(), "model.safetensors");
+    const stalled = new Readable({ read() {} }) as unknown as IncomingMessage;
+    Object.assign(stalled, { statusCode: 200, headers: {} });
+    const controller = new AbortController();
+    const promise = downloadHuggingFaceFile(
+      url,
+      destination,
+      () => {},
+      () => Promise.resolve(stalled),
+      {},
+      controller.signal,
+    );
+
+    controller.abort();
+    await expect(promise).rejects.toThrow(/cancelled/i);
+    expect(fs.existsSync(destination)).toBe(false);
+    expect(fs.existsSync(`${destination}.download`)).toBe(false);
   });
 });
 
