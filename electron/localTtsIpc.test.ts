@@ -197,7 +197,7 @@ describe("localTtsIpc request sanitizers", () => {
       temperature: 0.75,
       topK: 64,
       maxNewTokens: 2304,
-    }, "darwin")).toEqual({
+    }, "darwin", "arm64")).toEqual({
       text: "Hello from Qwen.",
       mode: "customVoice",
       modelRepo: customRepo,
@@ -217,7 +217,7 @@ describe("localTtsIpc request sanitizers", () => {
       modelPath: " /models/qwen3-customvoice-6bit ",
       speaker: "Ryan",
       language: "Russian",
-    }, "darwin")).toMatchObject({
+    }, "darwin", "arm64")).toMatchObject({
       text: "Built-in speaker.",
       mode: "customVoice",
       modelRepo: customRepo,
@@ -236,7 +236,7 @@ describe("localTtsIpc request sanitizers", () => {
       referenceCacheKey: "reader-job-1",
       language: "Portuguese",
       topK: 30,
-    }, "darwin")).toMatchObject({
+    }, "darwin", "arm64")).toMatchObject({
       text: "Clone this.",
       mode: "voiceClone",
       modelRepo: baseRepo,
@@ -255,7 +255,7 @@ describe("localTtsIpc request sanitizers", () => {
       modelPath: "/models/qwen3-base-6bit",
       referenceCacheKey: "reader-job-1",
       language: "Portuguese",
-    }, "darwin")).toMatchObject({
+    }, "darwin", "arm64")).toMatchObject({
       text: "Continue cloning.",
       referenceCacheKey: "reader-job-1",
     });
@@ -293,7 +293,7 @@ describe("localTtsIpc request sanitizers", () => {
     expect(() => sanitizeGeneratePayload("qwen3", {
       ...valid,
       text: "x".repeat(6_001),
-    }, "darwin")).toThrow("exceeds 6000 characters");
+    }, "darwin", "arm64")).toThrow("exceeds 6000 characters");
     expect(sanitizeGeneratePayload("qwen3", {
       ...valid,
       text: "🙂".repeat(6_000),
@@ -309,20 +309,20 @@ describe("localTtsIpc request sanitizers", () => {
       modelPath: "/model",
       referenceText: "Exact reference words.",
       referenceAudioBase64: "AQID",
-    }, "darwin")).toThrow("exceeds 6000 characters");
+    }, "darwin", "arm64")).toThrow("exceeds 6000 characters");
     for (const removedField of ["deviceMap", "dtype", "attnImplementation", "topP", "baseModelPath"]) {
-      expect(() => sanitizeGeneratePayload("qwen3", { ...valid, [removedField]: "removed" }, "darwin"))
+      expect(() => sanitizeGeneratePayload("qwen3", { ...valid, [removedField]: "removed" }, "darwin", "arm64"))
         .toThrow(`Unknown Qwen3-TTS field: \`${removedField}\``);
     }
-    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, topK: 1001 }, "darwin"))
+    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, topK: 1001 }, "darwin", "arm64"))
       .toThrow("between 0 and 1000");
-    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, mode: "voiceClone" }, "darwin"))
+    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, mode: "voiceClone" }, "darwin", "arm64"))
       .toThrow("does not match");
     expect(() => sanitizeGeneratePayload("qwen3", {
       ...valid,
       referenceText: "unused",
       referenceAudioBase64: "AQID",
-    }, "darwin")).toThrow("does not accept voice-clone reference fields");
+    }, "darwin", "arm64")).toThrow("does not accept voice-clone reference fields");
     expect(() => sanitizeGeneratePayload("qwen3", {
       text: "Clone this",
       mode: "voiceClone",
@@ -331,7 +331,7 @@ describe("localTtsIpc request sanitizers", () => {
       referenceText: "Reference",
       referenceAudioBase64: "AQID",
       speaker: "Ryan",
-    }, "darwin")).toThrow("does not accept `speaker`");
+    }, "darwin", "arm64")).toThrow("does not accept `speaker`");
     expect(() => sanitizeGeneratePayload("qwen3", {
       text: "Clone this",
       mode: "voiceClone",
@@ -339,19 +339,19 @@ describe("localTtsIpc request sanitizers", () => {
       modelPath: "/model",
       referenceText: "Reference without audio",
       referenceCacheKey: "reader-job-1",
-    }, "darwin")).toThrow("together with `referenceAudioBase64`");
+    }, "darwin", "arm64")).toThrow("together with `referenceAudioBase64`");
     expect(() => sanitizeGeneratePayload("qwen3", {
       text: "Clone this",
       mode: "voiceClone",
       modelRepo: baseRepo,
       modelPath: "/model",
       referenceCacheKey: "bad/key",
-    }, "darwin")).toThrow("invalid format");
+    }, "darwin", "arm64")).toThrow("invalid format");
     expect(() => sanitizeGeneratePayload("qwen3", valid, "win32"))
       .toThrow("unavailable on win32");
     expect(() => sanitizeGeneratePayload("qwen3", valid, "darwin", "x64"))
       .toThrow("unavailable on darwin/x64");
-    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, extra: true }, "darwin"))
+    expect(() => sanitizeGeneratePayload("qwen3", { ...valid, extra: true }, "darwin", "arm64"))
       .toThrow("Unknown Qwen3-TTS field");
   });
 

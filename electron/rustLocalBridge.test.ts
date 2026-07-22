@@ -32,6 +32,53 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function runCommand(
+  command: string,
+  args: string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv },
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill();
+      reject(new Error(`${command} timed out after ${timeoutMs}ms.`));
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf-8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf-8");
+    });
+    child.once("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (code === 0) {
+        resolve();
+      } else {
+        reject(new Error(stderr || stdout || `${command} exited with status ${code}.`));
+      }
+    });
+  });
+}
+
 async function waitFor(assertion: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
@@ -242,13 +289,11 @@ async function withServeWsBridge<T>(
   }
 }
 
-beforeAll(() => {
-  const completed = spawnSync("cargo", ["build", "--quiet", "--manifest-path", MANIFEST_PATH], {
+beforeAll(async () => {
+  await runCommand("cargo", ["build", "--quiet", "--manifest-path", MANIFEST_PATH], {
     cwd: ROOT_DIR,
-    encoding: "utf-8",
     env: { ...process.env, CARGO_TARGET_DIR: RUST_TARGET_DIR },
-  });
-  expect(completed.status, completed.stderr || completed.stdout).toBe(0);
+  }, 600_000);
 
   if (process.platform === "darwin") {
     spawnSync("install_name_tool", ["-add_rpath", "@executable_path", BRIDGE_BINARY], {
@@ -256,7 +301,7 @@ beforeAll(() => {
       encoding: "utf-8",
     });
   }
-}, 120_000);
+}, 610_000);
 
 describe("open-tts-local-bridge", () => {
   it("emits Rust-only probe metadata", () => {
