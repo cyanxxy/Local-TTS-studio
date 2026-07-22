@@ -343,21 +343,26 @@ describe("open-tts-local-bridge", () => {
       const resultLine = completed.stdout.split(/\r?\n/).find((line) => line.startsWith(RESULT_PREFIX));
       expect(resultLine).toBeTruthy();
       const parsed = JSON.parse(resultLine!.slice(RESULT_PREFIX.length)) as Record<string, unknown>;
+      const supportedPlatform = process.platform === "darwin" || process.platform === "win32";
       expect(parsed).toMatchObject({
         ok: true,
         result: {
-          ready: true,
+          ready: supportedPlatform,
           runtime: "rust",
           package: "qwen3-tts-rs",
           packageVersion: "0.2.2",
           upstreamRevision: "288a716ce38a91c826dd67968c75d1dd4b0f07bc",
-          provider: process.platform === "darwin" ? "mlx" : "libtorch",
-          device: process.platform === "darwin" ? expect.stringMatching(/^(metal|cpu)$/) : expect.stringMatching(/^(cuda|cpu)$/),
+          provider: process.platform === "darwin"
+            ? "mlx"
+            : process.platform === "win32" ? "libtorch" : "unsupported",
+          device: process.platform === "darwin"
+            ? expect.stringMatching(/^(metal|cpu)$/)
+            : process.platform === "win32" ? expect.stringMatching(/^(cuda|cpu)$/) : "unavailable",
           accelerated: expect.any(Boolean),
         },
       });
       const runtime = parsed.result as { device: string; accelerated: boolean };
-      expect(runtime.accelerated).toBe(runtime.device !== "cpu");
+      expect(runtime.accelerated).toBe(supportedPlatform && runtime.device !== "cpu");
     } finally {
       fs.rmSync(cacheDir, { recursive: true, force: true });
     }
@@ -482,7 +487,11 @@ describe("open-tts-local-bridge", () => {
         requestId: "rust-ws-invalid",
         ok: false,
       });
-      expect(String(result.error)).toMatch(/Invalid Qwen3 payload/i);
+      expect(String(result.error)).toMatch(
+        process.platform === "darwin" || process.platform === "win32"
+          ? /Invalid Qwen3 payload/i
+          : /Qwen3 is unavailable on this platform/i,
+      );
       socket.send(JSON.stringify({ command: "shutdown" }));
       socket.close();
     });
