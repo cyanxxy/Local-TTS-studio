@@ -79,6 +79,20 @@ function runCommand(
   });
 }
 
+function findNativeLibraryDir(rootDir: string, libraryName: string): string | undefined {
+  const pending = [rootDir];
+  while (pending.length > 0) {
+    const currentDir = pending.shift()!;
+    for (const entry of fs.readdirSync(currentDir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if ((entry.isFile() || entry.isSymbolicLink()) && entry.name === libraryName) {
+        return currentDir;
+      }
+      if (entry.isDirectory()) pending.push(path.join(currentDir, entry.name));
+    }
+  }
+  return undefined;
+}
+
 async function waitFor(assertion: () => boolean): Promise<void> {
   const deadline = Date.now() + 2_000;
   while (Date.now() < deadline) {
@@ -294,6 +308,14 @@ beforeAll(async () => {
     cwd: ROOT_DIR,
     env: { ...process.env, CARGO_TARGET_DIR: RUST_TARGET_DIR },
   }, 600_000);
+
+  if (process.platform === "linux") {
+    const nativeLibraryDir = findNativeLibraryDir(RUST_TARGET_DIR, "libllama.so.0");
+    expect(nativeLibraryDir, "Cargo did not emit libllama.so.0 for the bridge integration tests.").toBeTruthy();
+    process.env.LD_LIBRARY_PATH = [nativeLibraryDir, process.env.LD_LIBRARY_PATH]
+      .filter((value): value is string => !!value)
+      .join(path.delimiter);
+  }
 
   if (process.platform === "darwin") {
     spawnSync("install_name_tool", ["-add_rpath", "@executable_path", BRIDGE_BINARY], {
