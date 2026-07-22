@@ -110,7 +110,7 @@ Shortcuts work while Open TTS is the active application. Space remains normal te
 | **Supertonic TTS 2** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` | Yes | No | Legacy 44.1 kHz web/iOS model; replaced by Supertonic 3 in Electron |
 | **Supertonic 3** | Revision-pinned `Supertone/supertonic-3` ONNX assets | `/desktop/studio`, `/desktop/reader` | No | Yes | Electron-only renderer worker; 99M parameters, 10 voices, 31 languages, expression tags, WebGPU/WASM |
 | **NeuTTS Nano / Air** | Neuphonic GGUF variants via Rust `neutts` | `/desktop/neutts` | No | Yes | Nano Q4 for English, German, French, and Spanish, plus higher-quality Air 0.7B Q4/Q8 for English; accepts a reference WAV or pre-encoded `.npy` codes plus its matching transcript |
-| **Qwen3-TTS Native** | Pinned `qwen3-tts-rs` inside the Rust bridge: MLX on Apple Silicon and LibTorch on Windows x64 | `/desktop/studio`, `/desktop/reader`, `/desktop/qwen3` | No | Yes | One resident inference process; CustomVoice, Base voice cloning, and VoiceDesign 1.7B share revision-pinned downloads and one renderer settings state. The GitHub Windows installer is CPU-only and remains experimental; custom CUDA builds are supported but not distributed there |
+| **Qwen3-TTS Native** | Pinned `qwen3-tts-rs` inside the Rust bridge: MLX on Apple Silicon and LibTorch on Windows x64 | `/desktop/studio`, `/desktop/reader`, `/desktop/qwen3` | No | Yes | One resident inference process; CustomVoice, Base voice cloning, and VoiceDesign 1.7B share revision-pinned downloads and one renderer settings state. Windows remains available for custom builds but is not distributed in GitHub Releases |
 
 > The deployed web app exposes browser Studio and Reader only. Desktop routes live under `/desktop/*` and are opened by Electron.
 
@@ -171,7 +171,7 @@ The bridge has two actions:
 
 For generation, Electron starts the bridge with `--host 127.0.0.1 --port 0` and passes a random, memory-only per-process capability in `OPEN_TTS_WS_AUTH_TOKEN`, keeping it out of the command line. Rust does not accept a token CLI flag. The capability prevents unrelated browser pages or local clients from controlling a predictable localhost service; it is regenerated for each bridge launch and is never an account credential. Rust rejects any host that resolves outside loopback, verifies the bound listener, prints `__PORT__<actual-port>` on stdout, and accepts WebSocket traffic only on `/<token>` through the maintained `tungstenite` protocol stack. Metadata travels as JSON frames, while audio streams as raw Float32 binary chunks. The renderer schedules those chunks with Web Audio and owns WAV normalization/export.
 
-Qwen inference is compiled into that same process. Each target package contains its supported tensor provider, while the bridge resolves the actual device at runtime: Apple Silicon asks MLX whether Metal is available and otherwise uses MLX CPU; Windows builds linked to CUDA-enabled LibTorch use CUDA when available and otherwise use LibTorch CPU. The GitHub Windows installer deliberately carries the smaller CPU-only LibTorch distribution so it fits GitHub Release limits. Probe, warm-up, generation results, and the UI report the resolved provider/device and whether it is accelerated. Requests expose only model, voice/language, reference data, and supported sampling controls.
+Qwen inference is compiled into that same process. Each target package contains its supported tensor provider, while the bridge resolves the actual device at runtime: Apple Silicon asks MLX whether Metal is available and otherwise uses MLX CPU; Windows custom builds linked to CUDA-enabled LibTorch use CUDA when available and otherwise use LibTorch CPU. Probe, warm-up, generation results, and the UI report the resolved provider/device and whether it is accelerated. Requests expose only model, voice/language, reference data, and supported sampling controls.
 
 The resident host loads a selected model once and reuses it across requests. CustomVoice emits completed text units immediately as raw Float32 WebSocket chunks; Base voice cloning uploads its WAV/transcript once per worker session and reuses prepared reference features by a short-lived job key. Text units are split by Unicode scalar count—not byte offsets—so dense CJK, emoji, combining marks, and long unbroken text cannot be sliced through UTF-8 boundaries.
 
@@ -181,7 +181,7 @@ Model downloads are immutable: each approved profile names an exact Hugging Face
 
 Existing installations are migrated without another multi-gigabyte download: when Open TTS finds a structurally valid pre-1.1 Qwen cache directory, it atomically adopts it into the revision-scoped layout. Studio, Reader, and the Qwen setup page then use the same model path and the same in-memory voice settings. Switching the exact speaker does not reload the model host; switching to an undownloaded model profile requires downloading or selecting that profile first.
 
-`npm run build:rust` copies two narrowly scoped executables into `dist-rust/`: the resident `open-tts-local-bridge` and `open-tts-hf-xet-downloader`. The Xet helper is short-lived and is launched only when an approved, revision-pinned Qwen safetensors download needs Hugging Face's Xet transport; it is never an inference backend. Packaging also includes provider resources and native libraries. On Apple Silicon this includes `mlx.metallib`; on Windows x64 it includes the selected LibTorch 2.7.0 distribution DLL set. The release workflow selects the CPU distribution.
+`npm run build:rust` copies two narrowly scoped executables into `dist-rust/`: the resident `open-tts-local-bridge` and `open-tts-hf-xet-downloader`. The Xet helper is short-lived and is launched only when an approved, revision-pinned Qwen safetensors download needs Hugging Face's Xet transport; it is never an inference backend. Packaging also includes provider resources and native libraries. On Apple Silicon this includes `mlx.metallib`; Windows custom builds include the selected LibTorch 2.7.0 distribution DLL set.
 
 ---
 
@@ -207,10 +207,9 @@ The release gate is `npm run lint`, `npm run test`, and `npm run build`. Desktop
 
 Installers are attached to the [latest GitHub Release](https://github.com/cyanxxy/Local-TTS-studio/releases/latest):
 
-- **macOS 26+ on Apple Silicon:** notarized DMG, plus a ZIP build.
-- **Windows 10/11 x64:** signed NSIS installer with the CPU-only LibTorch runtime. Windows support remains experimental.
+- **macOS 26+ on Apple Silicon:** unsigned DMG, plus an unsigned ZIP build.
 
-Model weights are not bundled; the app downloads the selected model on first use and verifies its pinned revision. Intel Macs, Windows on Arm, and Linux are not packaged. Release maintainers can find the signing-secret and tagging procedure in [Desktop release process](./docs/releasing.md).
+These builds are not signed or notarized. macOS may require Control-clicking the app, choosing **Open**, and confirming the security prompt on first launch. Model weights are not bundled; the app downloads the selected model on first use and verifies its pinned revision. Intel Macs, Windows, and Linux are not attached to GitHub Releases. Release maintainers can find the packaging and tagging procedure in [Desktop release process](./docs/releasing.md).
 
 ---
 
@@ -255,7 +254,7 @@ Use the top-right Settings button to choose the theme, accent, interface size, i
 | `npm run test:rust` | Rust bridge unit tests |
 | `npm run eval:inference` | Reproducible inference-speed benchmark (see [docs](./docs/performance.md)) |
 
-Packaged desktop builds bundle the Electron shell, the Rust local bridge, and its scoped Xet download helper. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the build makes both Rust executables self-contained — their native libraries are bundled into `dist-rust/` and relinked to `@rpath` — so they run without Homebrew. Tagged releases require a Developer ID signature and notarization on macOS and Authenticode signing on Windows. There is no adapter script, interpreter discovery, or managed virtual environment setup; see [local runtime setup](./docs/local-runtimes.md).
+Packaged desktop builds bundle the Electron shell, the Rust local bridge, and its scoped Xet download helper. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the build makes both Rust executables self-contained — their native libraries are bundled into `dist-rust/` and relinked to `@rpath` — so they run without Homebrew. Current tagged releases contain unsigned macOS 26 Apple Silicon builds; Windows packages remain available only through custom builds. There is no adapter script, interpreter discovery, or managed virtual environment setup; see [local runtime setup](./docs/local-runtimes.md).
 
 ---
 
@@ -296,7 +295,7 @@ src/
 
 - [Architecture](./docs/architecture.md) — source map, worker protocol, and audio path
 - [Desktop local runtimes](./docs/local-runtimes.md) — Rust bridge protocol, setup, and troubleshooting
-- [Desktop release process](./docs/releasing.md) — signed macOS/Windows packaging and tagging
+- [Desktop release process](./docs/releasing.md) — unsigned macOS packaging and tagging
 - [Performance benchmarks](./docs/performance.md) — reproducible inference-speed eval
 - [Design system](./docs/design-system.md) — tokens, typography, and color
 

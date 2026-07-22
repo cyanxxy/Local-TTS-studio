@@ -86,11 +86,12 @@
     "appId": "com.opentts.desktop",
     "productName": "Open TTS",
     "mac": {
-      "artifactName": "Open-TTS-${version}-macOS-${arch}.${ext}",
+      "artifactName": "Open-TTS-${version}-macOS-${arch}-unsigned.${ext}",
       "category": "public.app-category.productivity",
       "minimumSystemVersion": "26.0",
-      "hardenedRuntime": true,
-      "notarize": true,
+      "identity": null,
+      "hardenedRuntime": false,
+      "notarize": false,
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "target": [

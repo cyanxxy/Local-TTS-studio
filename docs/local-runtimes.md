@@ -147,7 +147,7 @@ The first WAV reference can trigger a one-time NeuCodec RTen encoder download of
 | Platform | Qwen3 status | Provider |
 |---|---|---|
 | macOS 26+ on Apple Silicon (`arm64`) | Supported and locally verified | MLX; Metal when available, CPU fallback otherwise |
-| Windows x64 | Experimental; GitHub installer is CPU-only; native CPU generation and clean-VM validation remain release gates | LibTorch 2.7.0 via `tch` 0.20 |
+| Windows x64 | Experimental custom builds only; no Windows package is attached to GitHub Releases | LibTorch 2.7.0 via `tch` 0.20 |
 | Intel macOS, Windows on Arm, and Linux | Unavailable | No packaged Qwen provider |
 
 Kokoro remains available in Electron when Qwen3 is unavailable. The legacy Supertonic 2 browser runtime is intentionally omitted from Electron and replaced by Supertonic 3; NeuTTS is independent of the Qwen provider matrix.
@@ -163,7 +163,7 @@ npm run dist
 `build:rust` emits two executables in `dist-rust/`: the resident bridge and the scoped Xet downloader, plus required native resources:
 
 - macOS: MLX `mlx.metallib`, the linked GGML/llama dylibs used by NeuTTS, and their external dylib closure relinked to `@rpath`;
-- Windows x64: the linked native bridge libraries and the selected LibTorch 2.7.0 DLL set from `LIBTORCH`; tagged GitHub releases use the CPU distribution.
+- Windows x64: the linked native bridge libraries and the selected LibTorch 2.7.0 DLL set from `LIBTORCH`; Windows packages are custom-build outputs only.
 
 No upstream Qwen inference executables are packaged. Model weights are never bundled.
 
@@ -175,7 +175,7 @@ npm run test
 npm run build:desktop
 ```
 
-The tagged-release workflow builds on native Apple Silicon macOS 26 and Windows x64 runners. It verifies signatures, notarization, portable Mach-O dependencies, deployment targets, and packaged bridge probes before publishing. Real Windows CPU generation and a clean-VM install remain required before removing the experimental label; CUDA generation applies to separately built CUDA packages and is not claimed by the GitHub installer.
+The tagged-release workflow builds an unsigned package on a native Apple Silicon macOS 26 runner. It verifies portable Mach-O dependencies, deployment targets, and the packaged bridge probe before publishing. Windows CPU/CUDA packages remain custom-build outputs and are not attached to GitHub Releases.
 
 ## Troubleshooting
 

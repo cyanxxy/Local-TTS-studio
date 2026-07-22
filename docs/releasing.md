@@ -1,29 +1,18 @@
 # Desktop release process
 
-Tagged releases are built natively by `.github/workflows/release-desktop.yml`. The workflow creates a draft GitHub Release, builds both platforms, verifies the packaged native bridges and signatures, uploads the installers, and publishes only after both jobs succeed.
+Tagged releases are built natively by `.github/workflows/release-desktop.yml`. The workflow creates a draft GitHub Release, builds an unsigned macOS package, verifies the packaged native bridge, uploads the artifacts, and publishes after the macOS job succeeds.
 
 ## Release outputs
 
-- macOS 26+ Apple Silicon: signed and notarized DMG and ZIP.
-- Windows 10/11 x64: signed NSIS installer with LibTorch 2.7.0 CPU.
+- macOS 26+ Apple Silicon: unsigned DMG and ZIP.
 
-The Windows source can be built against CUDA-enabled LibTorch, but that runtime is not attached to GitHub Releases: the official CUDA 12.6 archive is already larger than GitHub's 2 GiB per-file release limit before packaging.
+Windows remains available as a custom build target but is not attached to GitHub Releases.
 
-## Repository secrets
+## Signing status
 
-Configure these Actions secrets before pushing a version tag:
+Current release artifacts are intentionally unsigned and unnotarized. Users may need to Control-click **Open** and approve the first launch in macOS security settings. No signing secrets are required by the workflow.
 
-| Secret | Value |
-|---|---|
-| `MACOS_CSC_LINK` | Base64-encoded Developer ID Application `.p12` |
-| `MACOS_CSC_KEY_PASSWORD` | Password for the `.p12` |
-| `MACOS_API_KEY_BASE64` | Base64-encoded App Store Connect API `.p8` |
-| `MACOS_API_KEY_ID` | App Store Connect API key ID |
-| `MACOS_API_ISSUER` | App Store Connect API issuer ID |
-| `WINDOWS_CSC_LINK` | Base64-encoded Windows code-signing `.pfx` |
-| `WINDOWS_CSC_KEY_PASSWORD` | Password for the `.pfx` |
-
-The workflow intentionally fails instead of publishing an unsigned or unnotarized installer.
+Signing and notarization should be restored before presenting the download as a trusted Gatekeeper-ready distribution.
 
 ## Cut a release
 
@@ -31,6 +20,6 @@ The workflow intentionally fails instead of publishing an unsigned or unnotarize
 2. Run `npm run lint`, `npm run test`, and `npm run build`.
 3. Commit every release input, including `rust/vendor/`; CI cannot build an untracked path dependency.
 4. Create and push an annotated `vMAJOR.MINOR.PATCH` tag.
-5. Watch **Release desktop installers**. A draft remains unpublished if either platform fails.
+5. Watch **Release desktop installers**. A draft remains unpublished if the macOS package fails verification.
 
-The macOS job sets `MACOSX_DEPLOYMENT_TARGET=26.0`, builds on an Apple Silicon macOS 26 runner, rejects Homebrew paths and newer deployment targets, then verifies Developer ID signing and notarization. The Windows job downloads the pinned CPU LibTorch archive, forces Authenticode signing, removes build-only environment paths, and probes the packaged bridge using only system paths.
+The macOS job sets `MACOSX_DEPLOYMENT_TARGET=26.0`, builds on an Apple Silicon macOS 26 runner, disables signing discovery, rejects Homebrew paths and newer deployment targets, and probes the packaged bridge before publishing.
