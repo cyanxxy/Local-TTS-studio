@@ -49,8 +49,9 @@ jobs:
       - name: Create draft if needed
         shell: bash
         run: |
-          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
               --draft \
               --generate-notes \
@@ -120,7 +121,7 @@ jobs:
           fi
       - name: Upload macOS release assets
         shell: bash
-        run: gh release upload "$GITHUB_REF_NAME" release/Open-TTS-*.dmg release/Open-TTS-*.zip --clobber
+        run: gh release upload "$GITHUB_REF_NAME" release/Open-TTS-*.dmg release/Open-TTS-*.zip --clobber --repo "$GITHUB_REPOSITORY"
 
   publish-release:
     name: Publish release
@@ -130,4 +131,4 @@ jobs:
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Publish completed desktop release
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest --repo "$GITHUB_REPOSITORY"
