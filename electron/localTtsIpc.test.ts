@@ -100,24 +100,24 @@ describe("localTtsIpc request sanitizers", () => {
       text: "  Hello from NeuTTS. ",
       referenceText: " Reference transcript. ",
       referenceCodesBase64: " AQID ",
-      modelRepo: "neuphonic/neutts-nano-q8-gguf",
+      modelRepo: "neuphonic/neutts-nano-q4-gguf",
     })).toEqual({
       text: "Hello from NeuTTS.",
       referenceText: "Reference transcript.",
       referenceCodesBase64: "AQID",
-      modelRepo: "neuphonic/neutts-nano-q8-gguf",
+      modelRepo: "neuphonic/neutts-nano-q4-gguf",
     });
 
     expect(sanitizeGeneratePayload("neutts", {
       text: "Hello from NeuTTS.",
       referenceText: "Reference transcript.",
       referenceAudioBase64: " UklGRg== ",
-      modelRepo: "neuphonic/neutts-nano-q8-gguf",
+      modelRepo: "neuphonic/neutts-nano-q4-gguf",
     })).toEqual({
       text: "Hello from NeuTTS.",
       referenceText: "Reference transcript.",
       referenceAudioBase64: "UklGRg==",
-      modelRepo: "neuphonic/neutts-nano-q8-gguf",
+      modelRepo: "neuphonic/neutts-nano-q4-gguf",
     });
 
     expect(() => sanitizeGeneratePayload("neutts", {
@@ -146,6 +146,25 @@ describe("localTtsIpc request sanitizers", () => {
       referenceCodesBase64: "AQID",
       modelRepo: "neuphonic/neutts-nano",
     })).toThrow("Unsupported NeuTTS");
+    expect(sanitizeGeneratePayload("neutts", {
+      text: "Hello from Air",
+      referenceText: "Reference",
+      referenceCodesBase64: "AQID",
+      modelRepo: "neuphonic/neutts-air-q4-gguf",
+    })).toMatchObject({ modelRepo: "neuphonic/neutts-air-q4-gguf" });
+    for (const [modelRepo, replacement] of [
+      ["neuphonic/neutts-nano-q8-gguf", "neuphonic/neutts-nano-q4-gguf"],
+      ["neuphonic/neutts-nano-german-q8-gguf", "neuphonic/neutts-nano-german-q4-gguf"],
+      ["neuphonic/neutts-nano-french-q8-gguf", "neuphonic/neutts-nano-french-q4-gguf"],
+      ["neuphonic/neutts-nano-spanish-q8-gguf", "neuphonic/neutts-nano-spanish-q4-gguf"],
+    ]) {
+      expect(() => sanitizeGeneratePayload("neutts", {
+        text: "Hello",
+        referenceText: "Reference",
+        referenceCodesBase64: "AQID",
+        modelRepo,
+      })).toThrow(`Legacy NeuTTS Nano Q8 model \`${modelRepo}\` is no longer supported. Select \`${replacement}\` instead.`);
+    }
     expect(() => sanitizeGeneratePayload("neutts", {
       text: "x".repeat(6_001),
       referenceText: "ref",
@@ -166,6 +185,7 @@ describe("localTtsIpc request sanitizers", () => {
   it("sanitizes Qwen3 Rust payloads", () => {
     const customRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
     const baseRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
+    const voiceDesignRepo = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit";
     expect(sanitizeGeneratePayload("qwen3", {
       text: "  Hello from Qwen. ",
       mode: "customVoice",
@@ -239,6 +259,35 @@ describe("localTtsIpc request sanitizers", () => {
       text: "Continue cloning.",
       referenceCacheKey: "reader-job-1",
     });
+
+    expect(sanitizeGeneratePayload("qwen3", {
+      text: "Design this voice.",
+      mode: "voiceDesign",
+      modelRepo: voiceDesignRepo,
+      modelPath: "/models/qwen3-voice-design",
+      language: "English",
+      instruct: "A calm, mature documentary narrator.",
+    }, "darwin", "arm64")).toMatchObject({
+      mode: "voiceDesign",
+      modelRepo: voiceDesignRepo,
+      instruct: "A calm, mature documentary narrator.",
+    });
+    expect(() => sanitizeGeneratePayload("qwen3", {
+      text: "Design this voice.",
+      mode: "voiceDesign",
+      modelRepo: voiceDesignRepo,
+      modelPath: "/models/qwen3-voice-design",
+      speaker: "Ryan",
+    }, "darwin", "arm64")).toThrow("does not accept a predefined speaker");
+    for (const instruct of [undefined, "   "]) {
+      expect(() => sanitizeGeneratePayload("qwen3", {
+        text: "Design this voice.",
+        mode: "voiceDesign",
+        modelRepo: voiceDesignRepo,
+        modelPath: "/models/qwen3-voice-design",
+        instruct,
+      }, "darwin", "arm64")).toThrow("requires a non-empty `instruct` voice description");
+    }
 
     const valid = { text: "Hello", mode: "customVoice", modelRepo: customRepo, modelPath: "/model" };
     expect(() => sanitizeGeneratePayload("qwen3", {

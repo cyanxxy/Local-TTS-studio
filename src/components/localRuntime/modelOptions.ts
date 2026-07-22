@@ -12,13 +12,11 @@ export interface LocalRuntimeOption {
 
 export const NEUTTS_OPTIONS: LocalRuntimeOption[] = [
   { value: "neuphonic/neutts-nano-q4-gguf", label: "English · neutts-nano · Q4 GGUF" },
-  { value: "neuphonic/neutts-nano-q8-gguf", label: "English · neutts-nano · Q8 GGUF" },
+  { value: "neuphonic/neutts-air-q4-gguf", label: "English · neutts-air · Q4 GGUF · 0.7B" },
+  { value: "neuphonic/neutts-air-q8-gguf", label: "English · neutts-air · Q8 GGUF · 0.7B" },
   { value: "neuphonic/neutts-nano-german-q4-gguf", label: "German · neutts-nano · Q4 GGUF" },
-  { value: "neuphonic/neutts-nano-german-q8-gguf", label: "German · neutts-nano · Q8 GGUF" },
   { value: "neuphonic/neutts-nano-french-q4-gguf", label: "French · neutts-nano · Q4 GGUF" },
-  { value: "neuphonic/neutts-nano-french-q8-gguf", label: "French · neutts-nano · Q8 GGUF" },
   { value: "neuphonic/neutts-nano-spanish-q4-gguf", label: "Spanish · neutts-nano · Q4 GGUF" },
-  { value: "neuphonic/neutts-nano-spanish-q8-gguf", label: "Spanish · neutts-nano · Q8 GGUF" },
 ];
 
 export const QWEN3_SPEAKER_OPTIONS: LocalRuntimeOption[] = QWEN3_SPEAKERS.map((speaker) => ({
@@ -41,6 +39,10 @@ export function getQwen3Options(platform: string | undefined, arch: string | und
 
 export function qwen3UsesVoiceClone(model: string): boolean {
   return model.includes("-Base");
+}
+
+export function qwen3UsesVoiceDesign(model: string): boolean {
+  return model.includes("-VoiceDesign");
 }
 
 export function qwen3SupportsInstruct(model: string): boolean {

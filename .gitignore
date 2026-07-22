@@ -38,6 +38,14 @@ vendor/qwen3_tts_rs/
 .env.*
 *.local
 
+# Local databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+
 # macOS
 .DS_Store
 .AppleDouble

@@ -210,6 +210,32 @@ impl CustomVoiceEngine for TTSInference {
     }
 }
 
+impl VoiceDesignEngine for TTSInference {
+    fn generate_voice_design(
+        &mut self,
+        text: &str,
+        language: &str,
+        instruct: &str,
+        controls: GenerationControls,
+    ) -> Result<GeneratedAudio> {
+        let (samples, sample_rate) = self
+            .generate_with_instruct(
+                text,
+                "",
+                language,
+                instruct,
+                controls.temperature,
+                controls.top_k,
+                controls.max_new_tokens,
+            )
+            .context("Qwen3 VoiceDesign inference failed.")?;
+        Ok(GeneratedAudio {
+            samples,
+            sample_rate,
+        })
+    }
+}
+
 pub struct Qwen3Runtime {
     host: Option<NativeQwenHost>,
 }
@@ -249,6 +275,16 @@ impl Qwen3Runtime {
     ) -> Result<GenerationSummary> {
         let host = self.ensure_host(model_path, ExpectedModelType::CustomVoice)?;
         generate_custom_voice_units(&mut host.inference, request, sink)
+    }
+
+    pub fn generate_voice_design(
+        &mut self,
+        model_path: &Path,
+        request: &VoiceDesignRequest<'_>,
+        sink: &mut dyn AudioSink,
+    ) -> Result<GenerationSummary> {
+        let host = self.ensure_host(model_path, ExpectedModelType::VoiceDesign)?;
+        generate_voice_design_units(&mut host.inference, request, sink)
     }
 
     pub fn generate_voice_clone(
@@ -472,6 +508,14 @@ pub struct CustomVoiceRequest<'a> {
     pub controls: GenerationControls,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct VoiceDesignRequest<'a> {
+    pub text: &'a str,
+    pub language: &'a str,
+    pub instruct: &'a str,
+    pub controls: GenerationControls,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GenerationSummary {
     pub sample_rate: u32,
@@ -485,6 +529,16 @@ pub trait CustomVoiceEngine {
         &mut self,
         text: &str,
         speaker: &str,
+        language: &str,
+        instruct: &str,
+        controls: GenerationControls,
+    ) -> Result<GeneratedAudio>;
+}
+
+pub trait VoiceDesignEngine {
+    fn generate_voice_design(
+        &mut self,
+        text: &str,
         language: &str,
         instruct: &str,
         controls: GenerationControls,
@@ -566,6 +620,65 @@ pub fn generate_custom_voice_units(
     })
 }
 
+pub fn generate_voice_design_units(
+    engine: &mut impl VoiceDesignEngine,
+    request: &VoiceDesignRequest<'_>,
+    sink: &mut dyn AudioSink,
+) -> Result<GenerationSummary> {
+    let units = split_text_units(request.text, CUSTOM_VOICE_UNIT_CHARS)?;
+    let language = normalize_language(request.language)?;
+    let total = units.len();
+    let mut sample_rate = None;
+    let mut sample_count = 0usize;
+
+    for (index, unit) in units.iter().enumerate() {
+        sink.progress(
+            "inference",
+            &format!(
+                "Generating Qwen3 VoiceDesign section {} of {total}.",
+                index + 1
+            ),
+        )?;
+        let generated =
+            engine.generate_voice_design(unit, &language, request.instruct, request.controls)?;
+        ensure!(
+            generated.sample_rate > 0,
+            "Qwen3 returned an invalid sample rate."
+        );
+        if let Some(expected) = sample_rate {
+            ensure!(
+                generated.sample_rate == expected,
+                "Qwen3 returned inconsistent sample rates."
+            );
+        } else {
+            sample_rate = Some(generated.sample_rate);
+        }
+        let samples = clean_audio(generated.samples)?;
+        let silence_after_samples = if index + 1 == total {
+            0
+        } else {
+            usize::try_from(generated.sample_rate / 5).unwrap_or_default()
+        };
+        sample_count = sample_count
+            .saturating_add(samples.len())
+            .saturating_add(silence_after_samples);
+        sink.audio_chunk(
+            &samples,
+            generated.sample_rate,
+            index,
+            total,
+            silence_after_samples,
+        )?;
+    }
+
+    Ok(GenerationSummary {
+        sample_rate: sample_rate.unwrap_or_default(),
+        sample_count,
+        audio_chunk_count: total,
+        reference_truncated: false,
+    })
+}
+
 pub fn clean_audio(mut samples: Vec<f32>) -> Result<Vec<f32>> {
     ensure!(!samples.is_empty(), "Qwen3 generated empty audio.");
     for sample in &mut samples {
@@ -592,6 +705,28 @@ mod tests {
     #[derive(Default)]
     struct RecordingEngine {
         calls: Vec<Call>,
+    }
+
+    impl VoiceDesignEngine for RecordingEngine {
+        fn generate_voice_design(
+            &mut self,
+            text: &str,
+            language: &str,
+            instruct: &str,
+            controls: GenerationControls,
+        ) -> Result<GeneratedAudio> {
+            self.calls.push(Call {
+                text: text.to_owned(),
+                speaker: String::new(),
+                language: language.to_owned(),
+                instruct: instruct.to_owned(),
+                controls,
+            });
+            Ok(GeneratedAudio {
+                samples: vec![0.25],
+                sample_rate: 24_000,
+            })
+        }
     }
 
     impl CustomVoiceEngine for RecordingEngine {
@@ -706,6 +841,29 @@ mod tests {
                 .iter()
                 .all(|chunk| chunk.4 == 4_800)
         );
+    }
+
+    #[test]
+    fn voice_design_uses_instruction_without_a_speaker() {
+        let mut engine = RecordingEngine::default();
+        let mut sink = RecordingSink::default();
+        let controls = GenerationControls::new(0.8, 40, 512);
+        let summary = generate_voice_design_units(
+            &mut engine,
+            &VoiceDesignRequest {
+                text: "A short designed voice sample.",
+                language: "English",
+                instruct: "A warm, low, reassuring narrator",
+                controls,
+            },
+            &mut sink,
+        )
+        .unwrap();
+
+        assert_eq!(summary.audio_chunk_count, 1);
+        assert_eq!(engine.calls[0].speaker, "");
+        assert_eq!(engine.calls[0].language, "english");
+        assert_eq!(engine.calls[0].instruct, "A warm, low, reassuring narrator");
     }
 
     #[test]

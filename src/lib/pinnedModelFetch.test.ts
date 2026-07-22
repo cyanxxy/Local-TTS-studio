@@ -4,6 +4,7 @@ import {
   ensureRevisionScopedCache,
   ensureRevisionScopedCacheEntries,
   pinHuggingFaceModelUrl,
+  verifyPinnedAssetIntegrity,
 } from "./pinnedModelFetch";
 
 describe("revision-pinned model fetch", () => {
@@ -116,5 +117,25 @@ describe("revision-pinned model fetch", () => {
     expect(entries.has(staleModel.url)).toBe(false);
     expect(entries.has(unrelated.url)).toBe(true);
     expect(await (await cache.match(marker))?.text()).toBe(revision);
+  });
+
+  it("verifies pinned assets by size and repository hash", async () => {
+    const bytes = new TextEncoder().encode("hello").buffer;
+    await expect(verifyPinnedAssetIntegrity(bytes, {
+      byteLength: 5,
+      sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    })).resolves.toBe(true);
+    await expect(verifyPinnedAssetIntegrity(bytes, {
+      byteLength: 5,
+      gitBlobSha1: "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0",
+    })).resolves.toBe(true);
+    await expect(verifyPinnedAssetIntegrity(bytes, {
+      byteLength: 4,
+      sha256: "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    })).resolves.toBe(false);
+    await expect(verifyPinnedAssetIntegrity(bytes, {
+      byteLength: 5,
+      sha256: "0".repeat(64),
+    })).resolves.toBe(false);
   });
 });

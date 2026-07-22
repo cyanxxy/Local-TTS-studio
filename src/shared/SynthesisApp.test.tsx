@@ -3,12 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import WebApp from "../apps/web/WebApp";
 import { SynthesisApp } from "./SynthesisApp";
+import { useGenerationControl } from "../hooks/useGenerationControl";
+import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { ModelState } from "../types";
 import {
   buildAudioSignature,
+  buildReaderSections,
+  createReaderAudioCacheKey,
   createReaderDocument,
+  getReaderSectionText,
   type CachedReaderAudio,
   type ReaderDocumentRecord,
+  type ReaderSection,
 } from "../lib/readerDocument";
 
 const mock = vi.hoisted(() => {
@@ -74,7 +80,7 @@ const mock = vi.hoisted(() => {
       currentTime: 0,
       totalDuration: 4,
       playbackRate: 1,
-      segments: [{ id: "seg-1", text: "Segment", startSec: 0, endSec: 4, index: 1, total: 1 }],
+      segments: [{ id: "seg-1", text: "Segment", startSec: 0, endSec: 4, index: 1, total: 1 }] as AudioSegment[],
       activeSegmentId: "seg-1",
       scheduleChunk: vi.fn(async () => {}),
       togglePlay: vi.fn(),
@@ -88,7 +94,7 @@ const mock = vi.hoisted(() => {
       replaceSegment: vi.fn(),
       getAudioChunkCount: vi.fn(() => 0),
       truncateAudioChunks: vi.fn(),
-      getAudioCacheSnapshot: vi.fn(() => []),
+      getAudioCacheSnapshot: vi.fn((): CachedReaderAudio["chunks"] => []),
       restoreAudioCache: vi.fn(),
       beginStream: vi.fn(),
       endStream: vi.fn(),
@@ -182,6 +188,7 @@ const mock = vi.hoisted(() => {
       openDocument: vi.fn(async () => undefined),
       deleteDocument: vi.fn(async () => undefined),
       updateActiveText: vi.fn(),
+      finalizeActiveTextEdit: vi.fn(),
       updateActiveMetadata: vi.fn(),
       updateProgress: vi.fn(),
       addBookmark: vi.fn(),
@@ -272,13 +279,17 @@ vi.mock("../components/TextInput", () => ({
 vi.mock("../components/ModelToggle", () => ({
   ModelToggle: ({
     onModelChange,
+    visibleModels = ["kokoro", "supertonic"],
     desktopModelOptions = [],
   }: {
     onModelChange: (model: "kokoro" | "supertonic") => void;
+    visibleModels?: readonly ("kokoro" | "supertonic")[];
     desktopModelOptions?: Array<{ key: string; selected?: boolean; onSelect: () => void }>;
   }) => (
     <div>
-      <button type="button" onClick={() => onModelChange("supertonic")}>switch-supertonic</button>
+      {visibleModels.includes("supertonic") && (
+        <button type="button" onClick={() => onModelChange("supertonic")}>switch-supertonic</button>
+      )}
       {desktopModelOptions.map((option) => (
         <button key={option.key} type="button" onClick={option.onSelect}>
           studio-desktop-{option.key}{option.selected ? "-selected" : ""}
@@ -384,6 +395,11 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     desktopModelOptions = [],
     desktopVoiceLabel,
     desktopModelSettings,
+    activeSection,
+    nextSection,
+    onNavigateToOffset,
+    onEditStart,
+    onEditEnd,
   }: {
     text: string;
     onTextChange: (value: string) => void;
@@ -403,9 +419,15 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     desktopModelOptions?: Array<{ key: string; label: string; selected?: boolean; onSelect: () => void }>;
     desktopVoiceLabel?: string;
     desktopModelSettings?: React.ReactNode;
+    activeSection?: ReaderSection | null;
+    nextSection?: ReaderSection | null;
+    onNavigateToOffset?: (offset: number, positionSec?: number) => void;
+    onEditStart?: () => void;
+    onEditEnd?: () => void;
   }) => (
     <div>
       <div data-testid="reader-text-value">{text}</div>
+      <div data-testid="reader-section-id">{activeSection?.id ?? "none"}</div>
       {desktopVoiceLabel && <div data-testid="reader-desktop-voice">{desktopVoiceLabel}</div>}
       {desktopModelSettings}
       {onImportDocument && (
@@ -416,6 +438,16 @@ vi.mock("../components/AdvancedReaderPage", () => ({
       {onImportFile && <button type="button">reader-file-import</button>}
       {onImportUrl && <button type="button" onClick={() => onImportUrl("https://example.com")}>reader-url-import</button>}
       <button type="button" onClick={() => onTextChange("Reader text with enough length.")}>reader-text</button>
+      <button type="button" onClick={onEditStart}>reader-edit-start</button>
+      <button
+        type="button"
+        onClick={() => {
+          onTextChange("CHAPTER REPLACED   \n\n\n\n\nDraft ending.   ");
+          onEditEnd?.();
+        }}
+      >
+        reader-edit-finish
+      </button>
       <button type="button" onClick={() => onModelChange("supertonic")}>reader-model</button>
       <button type="button" onClick={() => onVoiceChange("af_bella")}>reader-voice</button>
       <button type="button" onClick={() => onQualityChange(6)}>reader-quality</button>
@@ -426,6 +458,11 @@ vi.mock("../components/AdvancedReaderPage", () => ({
       <button type="button" onClick={() => onRetakeSegment("seg-1")}>reader-retake</button>
       <button type="button" onClick={() => onJumpToSegment("seg-1")}>reader-jump</button>
       <button type="button" onClick={() => onJumpToSegment("")}>reader-empty-jump</button>
+      {nextSection && (
+        <button type="button" onClick={() => onNavigateToOffset?.(nextSection.start)}>
+          reader-next-section
+        </button>
+      )}
       {desktopModelOptions.map((option) => (
         <button key={option.key} type="button" onClick={option.onSelect}>
           reader-desktop-{option.key}{option.selected ? "-selected" : ""}
@@ -481,7 +518,11 @@ function resetMockState() {
   };
   mock.player = {
     ...mock.player,
+    isPlaying: false,
+    error: null,
+    currentTime: 0,
     totalDuration: 4,
+    playbackRate: 1,
     segments: [{ id: "seg-1", text: "Segment", startSec: 0, endSec: 4, index: 1, total: 1 }],
     activeSegmentId: "seg-1",
     scheduleChunk: vi.fn(async () => {}),
@@ -497,6 +538,8 @@ function resetMockState() {
     restoreAudioCache: vi.fn(),
     beginStream: vi.fn(),
     endStream: vi.fn(),
+    reset: vi.fn(),
+    stopAll: vi.fn(),
   };
   mock.tts = {
     ...mock.tts,
@@ -541,6 +584,7 @@ function resetMockState() {
     openDocument: vi.fn(async () => undefined),
     deleteDocument: vi.fn(async () => undefined),
     updateActiveText: vi.fn(),
+    finalizeActiveTextEdit: vi.fn(),
     updateActiveMetadata: vi.fn(),
     updateProgress: vi.fn(),
     addBookmark: vi.fn(),
@@ -619,6 +663,7 @@ describe("SynthesisApp", () => {
     render(<WebApp />);
 
     expect(screen.getByText("Open TTS")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "studio-desktop-supertonic3" })).not.toBeInTheDocument();
     await waitFor(() => expect(screen.getByText("No GPU available")).toBeInTheDocument());
     expect(screen.getByText("CPU mode")).toBeInTheDocument();
 
@@ -666,6 +711,198 @@ describe("SynthesisApp", () => {
 
     await waitFor(() => expect(mock.persistAppState).toHaveBeenCalled());
     await waitFor(() => expect(mock.persistCreatorState).toHaveBeenCalled());
+  });
+
+  it("keeps the Studio script separate while entering and editing Reader", () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    const readerDocument = createReaderDocument({
+      id: "separate-reader",
+      title: "Reader Book",
+      text: "The Reader keeps its own document text.",
+    });
+    mock.readerLibrary.documents = [readerDocument];
+    mock.readerLibrary.activeDocument = readerDocument;
+    const view = render(<WebApp />);
+    const studio = screen.getByRole("textbox", { name: "script" });
+    fireEvent.change(studio, { target: { value: "A new Studio-only script." } });
+
+    mock.routing = {
+      ...mock.routing,
+      activePage: "reader",
+      isReaderPage: true,
+      isStudioPage: false,
+    };
+    view.rerender(<WebApp />);
+    expect(screen.getByTestId("reader-text-value")).toHaveTextContent(readerDocument.text);
+    fireEvent.click(screen.getByRole("button", { name: "reader-text" }));
+    expect(mock.readerLibrary.updateActiveText).toHaveBeenCalledWith(
+      "Reader text with enough length.",
+      { preserveText: true, deferStructure: false },
+    );
+
+    mock.routing = {
+      ...mock.routing,
+      activePage: "studio",
+      isReaderPage: false,
+      isStudioPage: true,
+    };
+    view.rerender(<WebApp />);
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("A new Studio-only script.");
+  });
+
+  it("splices an edit into its frozen section even when chapter and section ids churn", () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const before = "FRONT MATTER   \n\n\n\n\n";
+    const originalSection = "CHAPTER ONE\nOriginal section.\n";
+    const after = "\nCHAPTER TWO\nKeep-after   \n\n\n\n\nTail   ";
+    const text = `${before}${originalSection}${after}`;
+    const base = createReaderDocument({ id: "frozen-edit-reader", text: "Temporary." });
+    const chapters = [
+      {
+        id: "original-chapter",
+        title: "Chapter One",
+        order: 0,
+        start: before.length,
+        end: before.length + originalSection.length,
+        level: 1,
+      },
+      {
+        id: "following-chapter",
+        title: "Chapter Two",
+        order: 1,
+        start: before.length + originalSection.length,
+        end: text.length,
+        level: 1,
+      },
+    ];
+    const originalSectionRecord = buildReaderSections(text, chapters)[0];
+    const document: ReaderDocumentRecord = {
+      ...base,
+      text,
+      chapters,
+      progress: {
+        ...base.progress,
+        textOffset: originalSectionRecord.start,
+        chapterId: originalSectionRecord.chapterId,
+        sectionId: originalSectionRecord.id,
+      },
+    };
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+
+    const view = render(<WebApp />);
+    fireEvent.click(screen.getByRole("button", { name: "reader-edit-start" }));
+
+    const churnedDocument: ReaderDocumentRecord = {
+      ...document,
+      chapters: [{
+        id: "replacement-chapter",
+        title: "Replacement",
+        order: 0,
+        start: 0,
+        end: text.length,
+        level: 1,
+      }],
+    };
+    mock.readerLibrary.documents = [churnedDocument];
+    mock.readerLibrary.activeDocument = churnedDocument;
+    view.rerender(<WebApp />);
+    expect(screen.getByTestId("reader-section-id")).toHaveTextContent("replacement-chapter:section-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "reader-edit-finish" }));
+
+    const normalizedDraft = "CHAPTER REPLACED\n\n\nDraft ending.   ";
+    expect(mock.readerLibrary.updateActiveText).toHaveBeenCalledWith(
+      `${before}${normalizedDraft}${after}`,
+      { preserveText: true, deferStructure: true },
+    );
+    expect(mock.readerLibrary.clearAudio).toHaveBeenCalledWith(document.id, originalSectionRecord.id);
+    expect(mock.readerLibrary.finalizeActiveTextEdit).toHaveBeenCalledWith(document.id);
+    expect(mock.readerLibrary.updateActiveText.mock.invocationCallOrder[0])
+      .toBeLessThan(mock.readerLibrary.finalizeActiveTextEdit.mock.invocationCallOrder[0]);
+  });
+
+  it("exposes Supertonic 3 only when the Electron entry supplies its worker", () => {
+    mock.browserSupport = {
+      ...mock.browserSupport,
+      supportedModels: ["kokoro"],
+    };
+    Object.defineProperty(window, "electron", {
+      value: {
+        isElectron: true,
+        platform: "darwin",
+        arch: "arm64",
+        localTts: mock.localTts,
+      },
+      configurable: true,
+    });
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    const createSupertonic3Worker = vi.fn(() => worker);
+
+    const { unmount } = render(
+      <SynthesisApp
+        enableDesktopRuntimes
+        routeBasePath="/desktop"
+        createSupertonic3Worker={createSupertonic3Worker}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: "studio-desktop-supertonic3" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "switch-supertonic" })).not.toBeInTheDocument();
+    expect(createSupertonic3Worker).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(worker.terminate).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects Supertonic 3 from Reader when the desktop entry supplies its worker", async () => {
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    mock.browserSupport = {
+      ...mock.browserSupport,
+      supportedModels: ["kokoro"],
+    };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+
+    render(
+      <SynthesisApp
+        enableDesktopRuntimes
+        routeBasePath="/desktop"
+        createSupertonic3Worker={() => worker}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-supertonic3" }));
+
+    expect(screen.getByRole("button", { name: "reader-desktop-supertonic3-selected" })).toBeInTheDocument();
+    await waitFor(() => expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false }));
   });
 
   it("supports macOS and Windows keyboard shortcuts without hijacking text entry", () => {
@@ -754,7 +991,7 @@ describe("SynthesisApp", () => {
     expect(mock.player.jumpToSegment).not.toHaveBeenCalledWith("");
   });
 
-  it("restores matching cached Reader audio once while progress records update", async () => {
+  it("renders and synthesizes only the active bounded section of a long book", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "reader",
@@ -767,13 +1004,189 @@ describe("SynthesisApp", () => {
       navigateToPage: vi.fn(),
     };
     const document = createReaderDocument({
+      id: "bounded-reader",
+      title: "Bounded Reader",
+      text: "A long paragraph for bounded synthesis. ".repeat(900),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const section = sections[1];
+    const activeDocument: ReaderDocumentRecord = {
+      ...document,
+      progress: {
+        ...document.progress,
+        textOffset: section.start,
+        chapterId: section.chapterId,
+        sectionId: section.id,
+        percent: (section.start / document.text.length) * 100,
+      },
+    };
+    mock.readerLibrary.documents = [activeDocument];
+    mock.readerLibrary.activeDocument = activeDocument;
+
+    render(<WebApp />);
+
+    const sectionText = getReaderSectionText(document.text, section);
+    expect(screen.getByTestId("reader-text-value").textContent).toBe(sectionText);
+    expect(screen.getByTestId("reader-section-id")).toHaveTextContent(section.id);
+    await waitFor(() => {
+      const options = vi.mocked(useGenerationControl).mock.calls.at(-1)?.[0];
+      expect(options?.text).toBe(sectionText);
+    });
+    expect(sectionText.length).toBeLessThan(document.text.length);
+  });
+
+  it("maps section-local playback ranges onto stable whole-book progress", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const document = createReaderDocument({
+      id: "global-progress-reader",
+      text: "Progress stays relative to the complete book. ".repeat(900),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const section = sections[1];
+    const activeDocument: ReaderDocumentRecord = {
+      ...document,
+      progress: {
+        ...document.progress,
+        textOffset: section.start,
+        chapterId: section.chapterId,
+        sectionId: section.id,
+        percent: (section.start / document.text.length) * 100,
+      },
+    };
+    mock.readerLibrary.documents = [activeDocument];
+    mock.readerLibrary.activeDocument = activeDocument;
+    mock.player.currentTime = 1;
+    mock.player.totalDuration = 4;
+    mock.player.activeSegmentId = "section-segment";
+    mock.player.segments = [{
+      id: "section-segment",
+      text: "section range",
+      startSec: 0,
+      endSec: 4,
+      index: 1,
+      total: 1,
+      textStart: 100,
+      textEnd: 200,
+    }];
+
+    const view = render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, section.id));
+    mock.readerLibrary.updateProgress.mockClear();
+    mock.player.currentTime = 2;
+    view.rerender(<WebApp />);
+
+    await waitFor(() => expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith({
+      positionSec: 2,
+      totalDurationSec: 4,
+      textOffset: section.start + 150,
+    }));
+  });
+
+  it("flushes a finished section before automatically continuing", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    localStorage.setItem("open-tts-reader-view-v1", JSON.stringify({ autoAdvance: true }));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const document = createReaderDocument({
+      id: "auto-reader",
+      text: "Automatic continuation keeps section audio. ".repeat(900),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    const cachedAudio = new Float32Array([0.2, -0.2]).buffer;
+    mock.player.currentTime = 3;
+    mock.player.totalDuration = 4;
+    mock.player.activeSegmentId = "ending-segment";
+    mock.player.segments = [{
+      id: "ending-segment",
+      text: "ending range",
+      startSec: 0,
+      endSec: 4,
+      index: 1,
+      total: 1,
+      textStart: 0,
+      textEnd: sections[0].end - sections[0].start,
+    }];
+    mock.player.getAudioCacheSnapshot.mockReturnValue([{
+      audio: cachedAudio,
+      samplingRate: 24_000,
+      text: "ending range",
+      index: 0,
+      total: 1,
+    }]);
+
+    const view = render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
+    mock.readerLibrary.updateProgress.mockClear();
+    mock.readerLibrary.saveAudio.mockClear();
+    mock.player.currentTime = 4;
+    view.rerender(<WebApp />);
+
+    await waitFor(() => expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith(
+      expect.objectContaining({ textOffset: sections[1].start, positionSec: 0 }),
+    ));
+    expect(mock.readerLibrary.saveAudio).toHaveBeenCalledWith(expect.objectContaining({
+      documentId: document.id,
+      sectionId: sections[0].id,
+      chapterId: sections[0].chapterId,
+      byteLength: cachedAudio.byteLength,
+    }));
+  });
+
+  it("restores matching cached Reader audio once while progress records update", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const baseDocument = createReaderDocument({
       id: "cached-reader",
       text: "Cached Reader text with enough length.",
     });
+    const section = buildReaderSections(baseDocument.text, baseDocument.chapters)[0];
+    const document: ReaderDocumentRecord = {
+      ...baseDocument,
+      progress: {
+        ...baseDocument.progress,
+        positionSec: 3,
+        totalDurationSec: 4,
+        textOffset: 20,
+        sectionId: section.id,
+      },
+    };
     mock.readerLibrary.documents = [document];
     mock.readerLibrary.activeDocument = document;
+    const cachedAudio = new Float32Array([0.1, -0.1]).buffer;
     mock.readerLibrary.loadAudio.mockResolvedValue({
+      cacheKey: createReaderAudioCacheKey(document.id, section.id),
       documentId: document.id,
+      chapterId: section.chapterId,
+      sectionId: section.id,
       signature: buildAudioSignature({
         text: document.text,
         model: "kokoro",
@@ -782,12 +1195,13 @@ describe("SynthesisApp", () => {
         tuning: mock.creator.generationSettings,
       }),
       chunks: [{
-        audio: new Float32Array([0.1, -0.1]).buffer,
+        audio: cachedAudio,
         samplingRate: 24_000,
         text: document.text,
         index: 0,
         total: 1,
       }],
+      byteLength: cachedAudio.byteLength,
       currentTime: 2,
       playbackRate: 1,
       totalDuration: 4,
@@ -798,7 +1212,7 @@ describe("SynthesisApp", () => {
     await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1));
     expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
       expect.any(Array),
-      expect.objectContaining({ currentTime: 0 }),
+      expect.objectContaining({ currentTime: 3 }),
     );
 
     mock.readerLibrary.activeDocument = {
@@ -809,6 +1223,119 @@ describe("SynthesisApp", () => {
     await Promise.resolve();
 
     expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores a revisited section from its clamped cached time instead of another section's progress", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const document = createReaderDocument({
+      id: "revisited-reader",
+      text: "A paragraph with enough words for bounded Reader sections. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    expect(sections.length).toBeGreaterThan(1);
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    const cachedAudio = new Float32Array([0.1, -0.1]).buffer;
+    const sectionText = getReaderSectionText(document.text, sections[1]);
+    mock.readerLibrary.loadAudio
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        cacheKey: createReaderAudioCacheKey(document.id, sections[1].id),
+        documentId: document.id,
+        chapterId: sections[1].chapterId,
+        sectionId: sections[1].id,
+        signature: buildAudioSignature({
+          text: sectionText,
+          model: "kokoro",
+          voice: "af_heart",
+          quality: 5,
+          tuning: mock.creator.generationSettings,
+        }),
+        chunks: [{
+          audio: cachedAudio,
+          samplingRate: 24_000,
+          text: sectionText,
+          index: 0,
+          total: 1,
+        }],
+        byteLength: cachedAudio.byteLength,
+        currentTime: 9,
+        playbackRate: 1,
+        totalDuration: 4,
+        updatedAt: Date.now(),
+      });
+
+    const view = render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
+    fireEvent.click(screen.getByRole("button", { name: "reader-next-section" }));
+
+    const revisitedDocument: ReaderDocumentRecord = {
+      ...document,
+      progress: {
+        ...document.progress,
+        positionSec: 0,
+        totalDurationSec: 0,
+        textOffset: sections[1].start,
+        chapterId: sections[1].chapterId,
+        sectionId: sections[1].id,
+      },
+    };
+    mock.readerLibrary.documents = [revisitedDocument];
+    mock.readerLibrary.activeDocument = revisitedDocument;
+    view.rerender(<WebApp />);
+
+    await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ currentTime: 4 }),
+    ));
+  });
+
+  it("does not reopen IndexedDB audio when text changes inside the active section", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const document = createReaderDocument({
+      id: "edit-reader",
+      title: "Stable Reader",
+      text: "Original Reader section text.",
+    });
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    const view = render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledTimes(1));
+
+    const edited = createReaderDocument({
+      id: document.id,
+      title: document.title,
+      text: "Edited Reader section text.",
+      now: document.createdAt,
+    });
+    mock.readerLibrary.documents = [edited];
+    mock.readerLibrary.activeDocument = edited;
+    view.rerender(<WebApp />);
+    await Promise.resolve();
+
+    expect(buildReaderSections(edited.text, edited.chapters)[0].id)
+      .toBe(buildReaderSections(document.text, document.chapters)[0].id);
+    expect(mock.readerLibrary.loadAudio).toHaveBeenCalledTimes(1);
   });
 
   it("does not overwrite Reader progress while cached audio restore is pending", async () => {
@@ -834,6 +1361,7 @@ describe("SynthesisApp", () => {
         totalDurationSec: 8,
         textOffset: 20,
         chapterId: baseDocument.chapters[0]?.id ?? null,
+        sectionId: baseDocument.progress.sectionId,
         percent: 37.5,
         updatedAt: Date.now(),
       },
@@ -846,7 +1374,10 @@ describe("SynthesisApp", () => {
     }));
 
     render(<WebApp />);
-    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id));
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(
+      document.id,
+      document.progress.sectionId,
+    ));
     await Promise.resolve();
 
     expect(mock.readerLibrary.updateProgress).not.toHaveBeenCalled();
@@ -1201,7 +1732,7 @@ describe("SynthesisApp", () => {
     };
 
     const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
-    expect(screen.getByText("NeuTTS Nano (Neuphonic)")).toBeInTheDocument();
+    expect(screen.getByText("NeuTTS Nano / Air (Neuphonic)")).toBeInTheDocument();
 
     mock.routing = {
       ...mock.routing,

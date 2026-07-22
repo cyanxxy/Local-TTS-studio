@@ -4,6 +4,7 @@ import { QWEN3_LANGUAGE_OPTIONS, QWEN3_SPEAKER_OPTIONS } from "./localRuntime/mo
 export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const qwen = useQwen3Runtime();
   const voiceClone = qwen.profile.mode === "voiceClone";
+  const voiceDesign = qwen.profile.mode === "voiceDesign";
   const profileReadiness = new Map(qwen.setup?.profiles.map((profile) => [profile.repo, profile.readiness]) ?? []);
   const inputClass = "w-full rounded-lg border border-black/10 bg-white/55 px-3 py-2 text-sm text-text-primary backdrop-blur-sm";
 
@@ -46,7 +47,7 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
         </div>
       )}
 
-      {!voiceClone && (
+      {!voiceClone && !voiceDesign && (
         <fieldset>
           <legend className="text-xs font-medium text-text-secondary">Exact speaker</legend>
           <div className="mt-1.5 grid grid-cols-3 gap-1.5">
@@ -84,10 +85,17 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
         </p>
       )}
 
+      {voiceDesign && (
+        <label className="block text-xs font-medium text-text-secondary">
+          Voice description
+          <textarea aria-label="Qwen voice description" value={qwen.instruct} onChange={(event) => qwen.setInstruct(event.target.value)} className={`mt-1 min-h-20 ${inputClass}`} placeholder="A warm, low, reassuring narrator with measured pacing…" />
+        </label>
+      )}
+
       <details className="group">
         <summary className="cursor-pointer text-xs font-semibold text-text-secondary">Advanced voice controls</summary>
         <div className="mt-3 space-y-3">
-          {!voiceClone && (
+          {!voiceClone && !voiceDesign && (
             <label className="block text-xs font-medium text-text-secondary">
               Voice instruction
               <textarea aria-label="Qwen voice instruction" value={qwen.instruct} onChange={(event) => qwen.setInstruct(event.target.value)} className={`mt-1 min-h-16 ${inputClass}`} placeholder="Warm, calm, conversational…" />

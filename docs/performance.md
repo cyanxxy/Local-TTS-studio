@@ -1,6 +1,6 @@
 # Performance Benchmarks
 
-Open TTS includes a reproducible inference-speed benchmark that runs the same browser Web Worker inference path used by the app. It currently covers Kokoro and Supertonic; it does not benchmark the Electron-only native Qwen or NeuTTS runtimes.
+Open TTS includes a reproducible inference-speed benchmark that runs the same browser Web Worker inference path used by the app. It currently covers Kokoro and Supertonic 2; it does not benchmark the Electron-only Supertonic 3, Qwen, or NeuTTS runtimes.
 
 ```bash
 npm run eval:inference

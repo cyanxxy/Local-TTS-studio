@@ -343,8 +343,11 @@ export function useQwen3LocalRuntime({
     cancelActiveGeneration();
   }, [cancelActiveGeneration]);
 
+  const voiceDesignDescriptionMissing = settings.profile.mode === "voiceDesign"
+    && settings.instruct.trim().length === 0;
   const settingsReady = settings.modelPath.trim().length > 0
     && settings.readiness !== "missing"
+    && !voiceDesignDescriptionMissing
     && (settings.profile.mode !== "voiceClone"
       || (!!settings.referenceAudioBase64 && settings.referenceText.trim().length > 0));
   const ready = electronAvailable && (runtime?.ready ?? false) && settingsReady;
@@ -354,6 +357,9 @@ export function useQwen3LocalRuntime({
     ?? settings.error
     ?? (enabled && textTooLong
       ? `Qwen3 accepts at most ${MAX_LOCAL_TTS_TEXT_LENGTH.toLocaleString()} characters per request. Split this job into smaller sections.`
+      : null)
+    ?? (enabled && runtime?.ready && voiceDesignDescriptionMissing && !settings.setupBusy
+      ? "Describe the VoiceDesign voice before generating."
       : null)
     ?? (enabled && runtime?.ready && !settingsReady && !settings.setupBusy
       ? "Select or download a valid Qwen3 model directory before generating."
@@ -388,7 +394,7 @@ export function useQwen3LocalRuntime({
     const requestSections = buildQwen3RequestSections(text);
     if (requestSections.length === 0) return;
     clearGeneratedResult();
-    activeTextUnitsRef.current = settings.profile.mode === "customVoice"
+    activeTextUnitsRef.current = settings.profile.mode !== "voiceClone"
       ? buildQwen3TextUnits(text)
       : requestSections.map((section) => ({
         text: section.text,
@@ -415,6 +421,8 @@ export function useQwen3LocalRuntime({
     if (settings.profile.mode === "customVoice") {
       basePayload.speaker = settings.speaker;
       basePayload.instruct = settings.instruct;
+    } else if (settings.profile.mode === "voiceDesign") {
+      basePayload.instruct = settings.instruct;
     }
 
     const runSections = async () => {
@@ -429,10 +437,10 @@ export function useQwen3LocalRuntime({
           if (!mountedRef.current || generationVersionRef.current !== version) return;
           const section = requestSections[sectionIndex];
           let id = requestId("generate");
-          activeRequestUnitOffsetRef.current = settings.profile.mode === "customVoice"
+          activeRequestUnitOffsetRef.current = settings.profile.mode !== "voiceClone"
             ? section.unitStart
             : sectionIndex;
-          activeRequestUnitCountRef.current = settings.profile.mode === "customVoice"
+          activeRequestUnitCountRef.current = settings.profile.mode !== "voiceClone"
             ? section.unitEnd - section.unitStart
             : 1;
           activeSectionChunkCheckpoint = getAudioChunkCount();
@@ -517,7 +525,7 @@ export function useQwen3LocalRuntime({
           // inter-unit pause between non-final request sections for both
           // CustomVoice and voice-clone streaming.
           if (sectionIndex < requestSections.length - 1) {
-            const textUnitIndex = settings.profile.mode === "customVoice"
+            const textUnitIndex = settings.profile.mode !== "voiceClone"
               ? Math.max(section.unitStart, section.unitEnd - 1)
               : sectionIndex;
             const textUnit = activeTextUnitsRef.current[textUnitIndex];

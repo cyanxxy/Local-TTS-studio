@@ -26,7 +26,7 @@ use tungstenite::{Message, WebSocket};
 ))]
 use qwen3::{
     AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneReference,
-    VoiceCloneRequest, resolved_runtime_target,
+    VoiceCloneRequest, VoiceDesignRequest, resolved_runtime_target,
 };
 use qwen3::{ExpectedModelType, GenerationControls};
 use reference_audio::decode_bounded_mono_wav;
@@ -555,9 +555,15 @@ impl RuntimeState {
         );
         payload.text = trimmed_text.to_owned();
         let model_type = parse_model_type(payload.mode.as_deref().unwrap_or("customVoice"))?;
-        let repo_is_base = payload.model_repo.contains("-Base");
+        let repo_model_type = if payload.model_repo.contains("-Base") {
+            ExpectedModelType::Base
+        } else if payload.model_repo.contains("-VoiceDesign") {
+            ExpectedModelType::VoiceDesign
+        } else {
+            ExpectedModelType::CustomVoice
+        };
         ensure!(
-            repo_is_base == (model_type == ExpectedModelType::Base),
+            repo_model_type == model_type,
             "Qwen3 model repository does not match the requested mode."
         );
         match model_type {
@@ -570,6 +576,13 @@ impl RuntimeState {
                     && payload.reference_audio_base64.is_none()
                     && payload.reference_cache_key.is_none(),
                 "Qwen3 CustomVoice does not accept voice-clone reference fields."
+            ),
+            ExpectedModelType::VoiceDesign => ensure!(
+                payload.speaker.is_none()
+                    && payload.reference_text.is_none()
+                    && payload.reference_audio_base64.is_none()
+                    && payload.reference_cache_key.is_none(),
+                "Qwen3 VoiceDesign does not accept a speaker or voice-clone reference fields."
             ),
         }
         let controls = GenerationControls::new(
@@ -592,6 +605,16 @@ impl RuntimeState {
                     text: &payload.text,
                     speaker: payload.speaker.as_deref().unwrap_or("Ryan"),
                     language: payload.language.as_deref().unwrap_or("English"),
+                    instruct: payload.instruct.as_deref().unwrap_or(""),
+                    controls,
+                },
+                &mut sink,
+            )?,
+            ExpectedModelType::VoiceDesign => self.qwen3.generate_voice_design(
+                Path::new(&payload.model_path),
+                &VoiceDesignRequest {
+                    text: &payload.text,
+                    language: payload.language.as_deref().unwrap_or("Auto"),
                     instruct: payload.instruct.as_deref().unwrap_or(""),
                     controls,
                 },
@@ -846,6 +869,7 @@ fn parse_model_type(mode: &str) -> Result<ExpectedModelType> {
     match mode {
         "customVoice" => Ok(ExpectedModelType::CustomVoice),
         "voiceClone" => Ok(ExpectedModelType::Base),
+        "voiceDesign" => Ok(ExpectedModelType::VoiceDesign),
         _ => bail!("Unsupported Qwen3 mode: {mode}"),
     }
 }
@@ -1225,13 +1249,11 @@ fn normalize_neutts_model(input: Option<&str>) -> Result<String> {
     let model = input.unwrap_or(NEUTTS_DEFAULT_MODEL);
     let allowed = [
         "neuphonic/neutts-nano-q4-gguf",
-        "neuphonic/neutts-nano-q8-gguf",
+        "neuphonic/neutts-air-q4-gguf",
+        "neuphonic/neutts-air-q8-gguf",
         "neuphonic/neutts-nano-german-q4-gguf",
-        "neuphonic/neutts-nano-german-q8-gguf",
         "neuphonic/neutts-nano-french-q4-gguf",
-        "neuphonic/neutts-nano-french-q8-gguf",
         "neuphonic/neutts-nano-spanish-q4-gguf",
-        "neuphonic/neutts-nano-spanish-q8-gguf",
     ];
     if allowed.contains(&model) {
         Ok(model.to_string())
@@ -1658,7 +1680,17 @@ mod tests {
     #[test]
     fn normalize_neutts_model_enforces_allowlist() {
         assert_eq!(normalize_neutts_model(None).unwrap(), NEUTTS_DEFAULT_MODEL);
-        assert!(normalize_neutts_model(Some("neuphonic/neutts-nano-q8-gguf")).is_ok());
+        assert!(normalize_neutts_model(Some("neuphonic/neutts-nano-q4-gguf")).is_ok());
+        assert!(normalize_neutts_model(Some("neuphonic/neutts-air-q4-gguf")).is_ok());
+        assert!(normalize_neutts_model(Some("neuphonic/neutts-air-q8-gguf")).is_ok());
+        for model in [
+            "neuphonic/neutts-nano-q8-gguf",
+            "neuphonic/neutts-nano-german-q8-gguf",
+            "neuphonic/neutts-nano-french-q8-gguf",
+            "neuphonic/neutts-nano-spanish-q8-gguf",
+        ] {
+            assert!(normalize_neutts_model(Some(model)).is_err());
+        }
         assert!(normalize_neutts_model(Some("evil/model")).is_err());
     }
 

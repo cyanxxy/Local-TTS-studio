@@ -432,8 +432,8 @@ export function AppSettingsDialog({
                 <div className="mt-5 divide-y divide-border/70">
                   <SettingsCheckbox
                     checked={preferences.showNeuTTS}
-                    title="Show NeuTTS Nano"
-                    description="Add the NeuTTS Nano setup page to the app navigation."
+                    title="Show NeuTTS Nano / Air"
+                    description="Add the NeuTTS Nano and Air setup page to the app navigation."
                     onChange={(checked) => onChange({ showNeuTTS: checked })}
                   />
                   <SettingsCheckbox

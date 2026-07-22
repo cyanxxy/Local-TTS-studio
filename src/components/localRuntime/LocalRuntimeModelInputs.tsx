@@ -287,9 +287,10 @@ export function LocalRuntimeModelInputs(props: Props) {
 
   if (props.model !== "qwen3") return null;
   const voiceClone = props.qwen3Profile.mode === "voiceClone";
+  const voiceDesign = props.qwen3Profile.mode === "voiceDesign";
   return (
     <div className="space-y-4">
-      {!voiceClone && (
+      {!voiceClone && !voiceDesign && (
         <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
           Speaker
           <select
@@ -343,11 +344,12 @@ export function LocalRuntimeModelInputs(props: Props) {
 
       {!voiceClone && (
         <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
-          Instruction (optional)
+          {voiceDesign ? "Voice description" : "Instruction (optional)"}
           <textarea
             value={props.qwen3Instruct}
             onChange={(event) => props.onQwen3InstructChange(event.target.value)}
             className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 backdrop-blur-sm text-sm normal-case text-text-primary"
+            placeholder={voiceDesign ? "A warm, low, reassuring narrator with measured pacing…" : "Warm, calm, conversational…"}
           />
         </label>
       )}

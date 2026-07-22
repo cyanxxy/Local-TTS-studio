@@ -1,6 +1,6 @@
 # Electron local runtimes
 
-Electron exposes NeuTTS Nano and Qwen3-TTS through one resident compiled inference process: `open-tts-local-bridge`. The desktop package also contains the short-lived `open-tts-hf-xet-downloader`, used only as a scoped transport fallback for approved, revision-pinned Qwen safetensors files. It is not an inference backend. The package does not require Python or launch model-specific adapter programs. Model weights remain per-user downloads.
+Electron exposes NeuTTS Nano/Air and Qwen3-TTS through one resident compiled inference process: `open-tts-local-bridge`. Supertonic 3 runs separately in an Electron-renderer Web Worker using its official ONNX graph. The desktop package also contains the short-lived `open-tts-hf-xet-downloader`, used only as a scoped transport fallback for approved, revision-pinned Qwen safetensors files. It is not an inference backend. The package does not require Python or launch model-specific adapter programs. Model weights remain per-user downloads.
 
 ## Architecture
 
@@ -15,7 +15,7 @@ Electron main process
   │    ├─ NeuTTS / GGUF
   │    └─ Qwen3-TTS / pinned qwen3-tts-rs
   │         ├─ Apple Silicon: MLX + Metal
-  │         └─ Windows x64: LibTorch CUDA, then LibTorch CPU
+  │         └─ Windows x64: LibTorch (CPU in GitHub releases; CUDA in custom builds)
   └─ open-tts-hf-xet-downloader (download-only, short-lived when needed)
 ```
 
@@ -29,6 +29,8 @@ The bridge supports exactly two process actions:
 There is no one-shot generation action and no stdout/base64 audio fallback.
 
 ## Qwen3 profiles
+
+In addition to CustomVoice and Base voice-clone profiles, each supported platform exposes Qwen3-TTS 1.7B VoiceDesign: MLX 6-bit revision `ffc6545dc9cb086950aa46c6cd3db490e6ece3e1` on Apple Silicon and official safetensors revision `5ecdb67327fd37bb2e042aab12ff7391903235d3` on Windows x64. VoiceDesign omits a predefined speaker token and conditions generation on the supplied natural-language voice description.
 
 `electron/qwen3Profiles.ts` is the authoritative profile table. It contains four Apple MLX profiles and four Windows x64 LibTorch profiles: CustomVoice and Base, each at 0.6B and 1.7B. Every profile fixes:
 
@@ -88,7 +90,7 @@ Warm-up uses only `{mode, modelRepo, modelPath}` and never downloads weights. Th
 
 The Rust dependency is pinned by Git revision in `rust/local-tts-bridge/Cargo.toml`. Production generation uses the low-level `TTSInference`, `AudioEncoder`, and `SpeakerEncoder` APIs.
 
-The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; the bridge selects CUDA only when LibTorch reports it available and otherwise selects CPU. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
+The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; a CUDA-enabled custom build selects CUDA when LibTorch reports it available and otherwise selects CPU. The GitHub Release installer uses CPU-only LibTorch because the official CUDA archive is larger than GitHub's per-asset release limit. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
 
 CustomVoice splits accepted text at Unicode-scalar-safe sentence or clause boundaries. It never slices arbitrary UTF-8 byte positions. Each completed text unit is streamed through one or more bounded Float32 transport chunks; repeated `textUnitIndex`/`textUnitTotal` metadata keeps those chunks associated with the source unit, and 0.2 seconds of inter-unit silence is declared only on that unit's final transport chunk.
 
@@ -132,7 +134,11 @@ These are safety ceilings, not recommended working sizes. The IPC and Rust bound
 
 ## NeuTTS
 
-NeuTTS remains in the same bridge and is keyed by model repository. It accepts either pre-encoded `.npy` reference codes or a WAV clip plus its matching transcript, but never both in one request. WAV input is downmixed/resampled for a 16 kHz encoder window, must contain at least 0.5 seconds of speech, and is truncated to 20 seconds when longer.
+NeuTTS remains in the same bridge and is keyed by model repository. Alongside Nano, Electron exposes Air Q4 (`008555972590ff2c599dd43736ba31c81df3f0bf` at review time) and Air Q8 (`3c0f88293e3533ca0168905e75ef03be1c5aa906`) for richer English prosody. It accepts either pre-encoded `.npy` reference codes or a WAV clip plus its matching transcript, but never both in one request. WAV input is downmixed/resampled for a 16 kHz encoder window, must contain at least 0.5 seconds of speech, and is truncated to 20 seconds when longer.
+
+## Supertonic 3
+
+Supertonic 3 is Electron-only even though it uses a renderer worker. The desktop entry is the only entry that imports that worker; the web app neither lists nor initializes it. Assets come from `Supertone/supertonic-3` revision `3cadd1ee6394adea1bd021217a0e650ede09a323`, are cached after first use, and run through WebGPU with a WASM fallback. The runtime exposes ten preset styles, 31 languages, and the model's `<laugh>`, `<breath>`, and `<sigh>` expression tags.
 
 The first WAV reference can trigger a one-time NeuCodec RTen encoder download of about 1.8 GB. Open TTS pins Hugging Face revision `836c82069dba26eaab204a2df951b19facf777e1` and verifies the 1,772,018,304-byte artifact against SHA-256 `155574ffc88ca5f86f0f0849ac2f75ce9b197fc205598698eb5b366081e68d7c` before use. The default file lives under the NeuTTS cache at `neucodec-encoder/neucodec_encoder_v2.rten`; a custom local file can be supplied to development builds with `OPEN_TTS_NEUCODEC_ENCODER=/absolute/path/to/neucodec_encoder_v2.rten`. The encoder is retained in the resident process after loading. Supplying pre-encoded `.npy` codes avoids this download. NeuTTS produces whole-text audio, split only when transport chunk limits require it.
 
@@ -140,11 +146,11 @@ The first WAV reference can trigger a one-time NeuCodec RTen encoder download of
 
 | Platform | Qwen3 status | Provider |
 |---|---|---|
-| macOS on Apple Silicon (`arm64`) | Supported and locally verified | MLX; Metal when available, CPU fallback otherwise |
-| Windows x64 | Experimental; native CUDA, GPU-less CPU fallback, and clean-VM package validation remain release gates | LibTorch 2.7.0 via `tch` 0.20 |
+| macOS 26+ on Apple Silicon (`arm64`) | Supported and locally verified | MLX; Metal when available, CPU fallback otherwise |
+| Windows x64 | Experimental; GitHub installer is CPU-only; native CPU generation and clean-VM validation remain release gates | LibTorch 2.7.0 via `tch` 0.20 |
 | Intel macOS, Windows on Arm, and Linux | Unavailable | No packaged Qwen provider |
 
-Kokoro and Supertonic browser runtimes remain available according to browser support even when Qwen3 is unavailable. NeuTTS is independent of the Qwen provider matrix.
+Kokoro remains available in Electron when Qwen3 is unavailable. The legacy Supertonic 2 browser runtime is intentionally omitted from Electron and replaced by Supertonic 3; NeuTTS is independent of the Qwen provider matrix.
 
 ## Build and packaging
 
@@ -157,7 +163,7 @@ npm run dist
 `build:rust` emits two executables in `dist-rust/`: the resident bridge and the scoped Xet downloader, plus required native resources:
 
 - macOS: MLX `mlx.metallib`, the linked GGML/llama dylibs used by NeuTTS, and their external dylib closure relinked to `@rpath`;
-- Windows x64: the linked native bridge libraries and the LibTorch 2.7.0/CUDA distribution DLL set from `LIBTORCH`.
+- Windows x64: the linked native bridge libraries and the selected LibTorch 2.7.0 DLL set from `LIBTORCH`; tagged GitHub releases use the CPU distribution.
 
 No upstream Qwen inference executables are packaged. Model weights are never bundled.
 
@@ -169,7 +175,7 @@ npm run test
 npm run build:desktop
 ```
 
-Apple Silicon release builds are verified locally by launching the packaged bridge probe and checking its Mach-O dependencies. Windows code, profiles, and packaging logic are covered by compilation/source tests; a real Windows CUDA and CPU smoke test remains required before claiming native Windows runtime validation for a release.
+The tagged-release workflow builds on native Apple Silicon macOS 26 and Windows x64 runners. It verifies signatures, notarization, portable Mach-O dependencies, deployment targets, and packaged bridge probes before publishing. Real Windows CPU generation and a clean-VM install remain required before removing the experimental label; CUDA generation applies to separately built CUDA packages and is not claimed by the GitHub installer.
 
 ## Troubleshooting
 

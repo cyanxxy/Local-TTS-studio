@@ -7,6 +7,7 @@ interface NavigatorLike {
 }
 
 const ALL_LOCAL_MODELS: readonly ModelType[] = ["kokoro", "supertonic"];
+const ELECTRON_BROWSER_MODELS: readonly ModelType[] = ["kokoro"];
 
 export interface LocalBrowserSupport {
   isSupported: boolean;
@@ -46,7 +47,7 @@ export function getLocalBrowserSupport(
       isSupported: true,
       isIOS: false,
       message: null,
-      supportedModels: ALL_LOCAL_MODELS,
+      supportedModels: ELECTRON_BROWSER_MODELS,
       unsupportedModelMessages: {},
     };
   }

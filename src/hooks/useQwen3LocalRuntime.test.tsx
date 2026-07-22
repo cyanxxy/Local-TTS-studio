@@ -407,6 +407,46 @@ describe("useQwen3LocalRuntime long-text batching", () => {
     expect(result.current.error).toContain("at most 6,000 characters");
   });
 
+  it("requires a non-empty VoiceDesign description before generating", async () => {
+    let settings = {
+      ...runtimeSettings(),
+      profile: {
+        ...runtimeSettings().profile,
+        repo: "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit",
+        mode: "voiceDesign",
+        label: "Qwen3 VoiceDesign",
+      },
+      instruct: "   ",
+    };
+    vi.mocked(useQwen3Runtime).mockImplementation(() => settings as never);
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        cancel: vi.fn().mockResolvedValue({ cancelled: true }),
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn(() => () => undefined),
+      },
+    } as never;
+    const { player } = audioPlayer();
+    const { result, rerender } = renderHook(() => useQwen3LocalRuntime({
+      enabled: true,
+      text: "A sentence long enough to synthesize.",
+      player,
+      setShowPlayer: vi.fn(),
+    }));
+
+    await waitFor(() => expect(result.current.error).toBe("Describe the VoiceDesign voice before generating."));
+    expect(result.current.canGenerate).toBe(false);
+
+    settings = { ...settings, instruct: "A calm documentary narrator." };
+    rerender();
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+  });
+
   it("clears generated playback when an audible Qwen setting changes", () => {
     let settings = runtimeSettings();
     vi.mocked(useQwen3Runtime).mockImplementation(() => settings as never);

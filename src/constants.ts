@@ -4,6 +4,13 @@ export const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 export const KOKORO_MODEL_REVISION = "1939ad2a8e416c0acfeecc08a694d14ef25f2231";
 export const SUPERTONIC_MODEL_ID = "onnx-community/Supertonic-TTS-2-ONNX";
 export const SUPERTONIC_MODEL_REVISION = "68d4d9420d0e0e51d14656e1ec5c9b091490b49e";
+export const SUPERTONIC3_MODEL_ID = "Supertone/supertonic-3";
+export const SUPERTONIC3_MODEL_REVISION = "3cadd1ee6394adea1bd021217a0e650ede09a323";
+export const SUPERTONIC3_VOICES = ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"] as const;
+export const SUPERTONIC3_LANGUAGES = [
+  "en", "ko", "ja", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi", "hr", "hu",
+  "id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi",
+] as const;
 
 export const MODELS = {
   kokoro: {

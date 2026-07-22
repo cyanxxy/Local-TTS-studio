@@ -1,0 +1,232 @@
+name: Release desktop installers
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Verify tag and package version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must use vMAJOR.MINOR.PATCH." >&2
+            exit 1
+          fi
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ "v$package_version" != "$GITHUB_REF_NAME" ]]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $package_version." >&2
+            exit 1
+          fi
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run test:js
+      - run: npm run build:web
+
+  create-release:
+    name: Create draft release
+    needs: verify
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Create draft if needed
+        shell: bash
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" \
+              --verify-tag \
+              --draft \
+              --generate-notes \
+              --title "Open TTS $GITHUB_REF_NAME" \
+              --notes "Desktop downloads include a notarized Apple Silicon macOS build and an experimental signed Windows x64 CPU build. Model weights download on first use and are not bundled."
+          fi
+
+  build-macos:
+    name: Build macOS arm64
+    needs: create-release
+    runs-on: macos-26
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/open-tts-rust-target
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+      CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+      APPLE_API_KEY_BASE64: ${{ secrets.MACOS_API_KEY_BASE64 }}
+      APPLE_API_KEY_ID: ${{ secrets.MACOS_API_KEY_ID }}
+      APPLE_API_ISSUER: ${{ secrets.MACOS_API_ISSUER }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install native build tools
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          brew install cmake libomp openssl@3 pkg-config automake autoconf libtool
+      - name: Require macOS signing and notarization secrets
+        shell: bash
+        run: |
+          missing=()
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_API_KEY_BASE64 APPLE_API_KEY_ID APPLE_API_ISSUER; do
+            if [[ -z "${!name}" ]]; then missing+=("$name"); fi
+          done
+          if (( ${#missing[@]} )); then
+            echo "Missing required macOS release secrets: ${missing[*]}" >&2
+            exit 1
+          fi
+      - run: npm ci
+      - name: Build, sign, and notarize
+        shell: bash
+        run: |
+          api_key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$api_key_path"
+          chmod 600 "$api_key_path"
+          export APPLE_API_KEY="$api_key_path"
+          export OPENSSL_DIR="$(brew --prefix openssl@3)"
+          export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          npm run build:electron
+          npm run test:rust -- --release
+          rm -rf "$CARGO_TARGET_DIR"
+          npx electron-builder --mac --arm64 --config.forceCodeSigning=true
+      - name: Verify signed package and native bridge
+        shell: bash
+        run: |
+          app_path="release/mac-arm64/Open TTS.app"
+          bridge_path="$app_path/Contents/Resources/dist-rust/open-tts-local-bridge"
+          test -d "$app_path"
+          test -x "$bridge_path"
+          codesign --verify --deep --strict --verbose=2 "$app_path"
+          spctl --assess --type execute --verbose=4 "$app_path"
+          xcrun stapler validate "$app_path"
+          "$bridge_path" --action probe --model qwen3 --cache-dir "$RUNNER_TEMP/open-tts-probe"
+          if find "$app_path/Contents/Resources/dist-rust" -type f -print0 | xargs -0 file | grep -q 'Mach-O'; then
+            while IFS= read -r -d '' candidate; do
+              if file "$candidate" | grep -q 'Mach-O'; then
+                if otool -L "$candidate" | grep -E '/opt/homebrew|/usr/local'; then
+                  echo "Non-portable library reference in $candidate" >&2
+                  exit 1
+                fi
+                min_os="$(vtool -show-build "$candidate" 2>/dev/null | awk '/minos/{print $2; exit}')"
+                if [[ -n "$min_os" ]]; then
+                  min_major="${min_os%%.*}"
+                  min_rest="${min_os#*.}"
+                  min_minor="${min_rest%%.*}"
+                  if (( min_major > 26 || (min_major == 26 && min_minor > 0) )); then
+                    echo "$candidate requires macOS $min_os, newer than the supported 26.0 minimum." >&2
+                    exit 1
+                  fi
+                fi
+              fi
+            done < <(find "$app_path/Contents/Resources/dist-rust" -type f -print0)
+          fi
+      - name: Upload macOS release assets
+        shell: bash
+        run: gh release upload "$GITHUB_REF_NAME" release/Open-TTS-*.dmg release/Open-TTS-*.zip --clobber
+
+  build-windows:
+    name: Build Windows x64 CPU
+    needs: create-release
+    runs-on: windows-2025
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}\open-tts-rust-target
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --no-self-update
+          rustup default stable-x86_64-pc-windows-msvc
+      - name: Require Windows signing secrets
+        shell: pwsh
+        run: |
+          $missing = @("CSC_LINK", "CSC_KEY_PASSWORD") | Where-Object {
+            [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_))
+          }
+          if ($missing.Count -gt 0) {
+            throw "Missing required Windows release secrets: $($missing -join ', ')"
+          }
+      - name: Download pinned CPU LibTorch
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "libtorch-2.7.0-cpu.zip"
+          Invoke-WebRequest -Uri "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.7.0%2Bcpu.zip" -OutFile $archive
+          $expectedSha256 = "2267cd447052bc839df147afc03865b5569336f9a45c43841142844e2011a561"
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "LibTorch SHA-256 mismatch. Expected $expectedSha256, received $actualSha256."
+          }
+          Expand-Archive -Path $archive -DestinationPath $env:RUNNER_TEMP
+          Remove-Item $archive
+          "LIBTORCH=$env:RUNNER_TEMP\libtorch" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$env:RUNNER_TEMP\libtorch\lib" | Out-File -FilePath $env:GITHUB_PATH -Append
+      - run: npm ci
+      - name: Build and sign installer
+        shell: pwsh
+        run: |
+          npm run build:electron
+          npm run test:rust -- --release
+          Remove-Item -Recurse -Force $env:CARGO_TARGET_DIR
+          npx electron-builder --win --x64 --config.forceCodeSigning=true
+      - name: Verify signed package and native bridge
+        shell: pwsh
+        run: |
+          $unpacked = Join-Path $PWD "release\win-unpacked"
+          $bridge = Join-Path $unpacked "resources\dist-rust\open-tts-local-bridge.exe"
+          $downloader = Join-Path $unpacked "resources\dist-rust\open-tts-hf-xet-downloader.exe"
+          $installer = Get-ChildItem "release\Open-TTS-*.exe" -File | Select-Object -First 1
+          $signedFiles = @($installer.FullName, (Join-Path $unpacked "Open TTS.exe"), $bridge, $downloader)
+          foreach ($path in $signedFiles) {
+            if (-not (Test-Path $path)) { throw "Missing packaged executable: $path" }
+            $signature = Get-AuthenticodeSignature $path
+            if ($signature.Status -ne "Valid") {
+              throw "Invalid Authenticode signature for $path`: $($signature.Status)"
+            }
+          }
+          Remove-Item Env:LIBTORCH -ErrorAction SilentlyContinue
+          $env:Path = "$env:SystemRoot\System32;$env:SystemRoot"
+          & $bridge --action probe --model qwen3 --cache-dir "$env:RUNNER_TEMP\open-tts-probe"
+          if ($LASTEXITCODE -ne 0) { throw "Packaged Windows bridge probe failed." }
+      - name: Upload Windows release asset
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "release\Open-TTS-*.exe" -File | Select-Object -First 1
+          if (-not $installer) { throw "Windows installer was not created." }
+          gh release upload $env:GITHUB_REF_NAME $installer.FullName --clobber
+
+  publish-release:
+    name: Publish release
+    needs:
+      - build-macos
+      - build-windows
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Publish completed desktop release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest

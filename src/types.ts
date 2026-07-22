@@ -29,6 +29,7 @@ export interface AudioExportOptions {
 export interface GenerationTuningSettings {
   speed: number;
   quality: number;
+  language?: string;
   pauseOverridesSec?: Partial<Record<ChunkPauseKind, number>>;
   sentenceSpeedVariance?: number;
   pronunciationRules?: PronunciationRule[];
@@ -43,6 +44,7 @@ export type WorkerInMessage =
       generationId?: string;
       text: string;
       voice: string;
+      language?: string;
       speed: number;
       quality: number;
       finalPauseSec?: number;

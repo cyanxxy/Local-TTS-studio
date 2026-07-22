@@ -49,4 +49,17 @@ describe("DownloadProgress", () => {
     const bar = container.querySelector(".progress-animated");
     expect(bar).toHaveStyle({ width: "0%" });
   });
+
+  it("shows Electron-only Supertonic 3 preparation", () => {
+    render(
+      <DownloadProgress
+        kokoroState={idleState}
+        supertonicState={idleState}
+        supertonic3State={{ ...idleState, loading: true, downloadProgress: 25 }}
+      />,
+    );
+
+    expect(screen.getByText("Supertonic 3")).toBeInTheDocument();
+    expect(screen.getByText("25%")).toBeInTheDocument();
+  });
 });

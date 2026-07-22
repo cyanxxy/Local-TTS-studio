@@ -23,18 +23,23 @@ const MAX_REFERENCE_TEXT_LENGTH = 2000;
 
 const ALLOWED_NEUTTS_MODELS = new Set([
   "neuphonic/neutts-nano-q4-gguf",
-  "neuphonic/neutts-nano-q8-gguf",
+  "neuphonic/neutts-air-q4-gguf",
+  "neuphonic/neutts-air-q8-gguf",
   "neuphonic/neutts-nano-german-q4-gguf",
-  "neuphonic/neutts-nano-german-q8-gguf",
   "neuphonic/neutts-nano-french-q4-gguf",
-  "neuphonic/neutts-nano-french-q8-gguf",
   "neuphonic/neutts-nano-spanish-q4-gguf",
-  "neuphonic/neutts-nano-spanish-q8-gguf",
+]);
+
+const LEGACY_NEUTTS_MODEL_REPLACEMENTS = new Map([
+  ["neuphonic/neutts-nano-q8-gguf", "neuphonic/neutts-nano-q4-gguf"],
+  ["neuphonic/neutts-nano-german-q8-gguf", "neuphonic/neutts-nano-german-q4-gguf"],
+  ["neuphonic/neutts-nano-french-q8-gguf", "neuphonic/neutts-nano-french-q4-gguf"],
+  ["neuphonic/neutts-nano-spanish-q8-gguf", "neuphonic/neutts-nano-spanish-q4-gguf"],
 ]);
 
 const ALLOWED_QWEN3_SPEAKERS = new Set<string>(QWEN3_SPEAKERS);
 const ALLOWED_QWEN3_LANGUAGES = new Set<string>(QWEN3_LANGUAGES);
-const ALLOWED_QWEN3_MODES = new Set<Qwen3Mode>(["customVoice", "voiceClone"]);
+const ALLOWED_QWEN3_MODES = new Set<Qwen3Mode>(["customVoice", "voiceClone", "voiceDesign"]);
 const QWEN3_GENERATE_FIELDS = new Set([
   "text",
   "mode",
@@ -321,6 +326,12 @@ export function sanitizeNeuttsPayload(payload: unknown): Record<string, unknown>
 
   const modelRepo = parseOptionalString(payload.modelRepo, "modelRepo", { maxLength: 128 });
   if (modelRepo && !ALLOWED_NEUTTS_MODELS.has(modelRepo)) {
+    const replacement = LEGACY_NEUTTS_MODEL_REPLACEMENTS.get(modelRepo);
+    if (replacement) {
+      throw new Error(
+        `Legacy NeuTTS Nano Q8 model \`${modelRepo}\` is no longer supported. Select \`${replacement}\` instead.`,
+      );
+    }
     throw new Error("Unsupported NeuTTS model repository.");
   }
 
@@ -404,8 +415,16 @@ export function sanitizeQwen3Payload(
     if (!hasReferenceWav && !referenceCacheKey) {
       throw new Error("Qwen3-TTS voice cloning requires a reference WAV or `referenceCacheKey`.");
     }
-  } else if (referenceText || referenceAudioBase64 || referenceCacheKey) {
-    throw new Error("Qwen3-TTS CustomVoice does not accept voice-clone reference fields.");
+  } else {
+    if (referenceText || referenceAudioBase64 || referenceCacheKey) {
+      throw new Error("This Qwen3-TTS mode does not accept voice-clone reference fields.");
+    }
+    if (mode === "voiceDesign" && speaker) {
+      throw new Error("Qwen3-TTS VoiceDesign does not accept a predefined speaker.");
+    }
+    if (mode === "voiceDesign" && !instruct) {
+      throw new Error("Qwen3-TTS VoiceDesign requires a non-empty `instruct` voice description.");
+    }
   }
 
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });

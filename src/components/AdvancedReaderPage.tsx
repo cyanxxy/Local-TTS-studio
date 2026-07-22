@@ -8,17 +8,23 @@ import {
   useState,
   type ReactNode,
   type RefObject,
+  type CSSProperties,
 } from "react";
 import { createPortal } from "react-dom";
 import {
   BookOpen,
+  Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   FileUp,
   Library,
   Link2,
   Loader2,
   Plus,
+  Pencil,
   SlidersHorizontal,
+  Type,
 } from "lucide-react";
 import {
   MIN_TEXT_LENGTH,
@@ -34,17 +40,26 @@ import { chunkTextForModelDetailed } from "../lib/chunking";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import {
   estimateWordRanges,
+  type ReaderChapter,
   type ReaderDocumentRecord,
+  type ReaderSection,
 } from "../lib/readerDocument";
+import {
+  DEFAULT_READER_VIEW_PREFERENCES,
+  readerColumnWidthRem,
+  type ReaderViewPreferences,
+} from "../lib/readerPreferences";
 import { AudioPlayer, type AudioPlayerPrimaryAction } from "./AudioPlayer";
 import { ModelToggle } from "./ModelToggle";
-import { ReaderLibrarySidebar } from "./ReaderLibrarySidebar";
+import { ReaderLibrarySidebar, type ReaderSidebarTab } from "./ReaderLibrarySidebar";
 import { VoiceSelector } from "./VoiceSelector";
 
 interface AdvancedReaderPageProps {
   fullScreen?: boolean;
   text: string;
   onTextChange: (text: string) => void;
+  onEditStart?: () => void;
+  onEditEnd?: () => void;
   /** Desktop-only document import (PDF/DOCX/images via LiteParse); absent on web builds. */
   onImportDocument?: () => void;
   isImportingDocument?: boolean;
@@ -52,6 +67,14 @@ interface AdvancedReaderPageProps {
   onImportUrl?: (url: string) => Promise<void> | void;
   documents?: ReaderDocumentRecord[];
   activeDocument?: ReaderDocumentRecord | null;
+  activeChapter?: ReaderChapter | null;
+  activeSection?: ReaderSection | null;
+  previousSection?: ReaderSection | null;
+  nextSection?: ReaderSection | null;
+  totalSectionCount?: number;
+  onNavigateToOffset?: (offset: number, positionSec?: number) => void;
+  viewPreferences?: ReaderViewPreferences;
+  onViewPreferencesChange?: (patch: Partial<ReaderViewPreferences>) => void;
   libraryLoading?: boolean;
   libraryError?: string | null;
   libraryPersistent?: boolean;
@@ -69,11 +92,12 @@ interface AdvancedReaderPageProps {
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
-  desktopQwenMode?: "customVoice" | "voiceClone";
+  desktopQwenMode?: "customVoice" | "voiceClone" | "voiceDesign";
   desktopVoiceLabel?: string;
   desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
   supertonicState: ModelState;
+  visibleModels?: readonly ModelType[];
   unavailableModels?: Partial<Record<ModelType, string>>;
   kokoroVoices: string[];
   voice: string;
@@ -119,6 +143,7 @@ interface ReaderDesktopModelOption {
 
 interface OverlayPart {
   text: string;
+  start: number;
   sectionIndex: number;
   isActive: boolean;
   isWordActive: boolean;
@@ -127,6 +152,33 @@ interface OverlayPart {
 interface SectionBoundary {
   start: number;
   end: number;
+}
+
+interface TextBlock {
+  start: number;
+  end: number;
+  blankLineBefore: boolean;
+}
+
+/**
+ * Splits section text into paragraph blocks, one per non-empty line. Newline
+ * separators live between blocks and are never rendered as glyphs; every block
+ * records its character offset so DOM positions map back to text offsets.
+ */
+function splitTextBlocks(text: string): TextBlock[] {
+  const blocks: TextBlock[] = [];
+  const lineMatcher = /[^\n]+/g;
+  let previousEnd = 0;
+  let match: RegExpExecArray | null;
+  while ((match = lineMatcher.exec(text)) !== null) {
+    blocks.push({
+      start: match.index,
+      end: match.index + match[0].length,
+      blankLineBefore: text.slice(previousEnd, match.index).split("\n").length > 2,
+    });
+    previousEnd = match.index + match[0].length;
+  }
+  return blocks;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -167,16 +219,18 @@ function formatVoiceName(id: string): string {
  */
 function buildOverlayParts(
   text: string,
+  blocks: TextBlock[],
   boundaries: SectionBoundary[],
   activeRange: { start: number; end: number } | null,
   activeWordRange: { start: number; end: number } | null,
 ): OverlayPart[] {
   if (!text) return [];
-  if (boundaries.length === 0 && !activeRange && !activeWordRange) {
-    return [{ text, sectionIndex: -1, isActive: false, isWordActive: false }];
-  }
 
   const offsets = new Set<number>([0, text.length]);
+  for (const block of blocks) {
+    offsets.add(block.start);
+    offsets.add(block.end);
+  }
   for (const boundary of boundaries) {
     offsets.add(clamp(boundary.start, 0, text.length));
     offsets.add(clamp(boundary.end, 0, text.length));
@@ -211,6 +265,7 @@ function buildOverlayParts(
 
     parts.push({
       text: text.slice(partStart, partEnd),
+      start: partStart,
       sectionIndex,
       isActive,
       isWordActive,
@@ -223,7 +278,7 @@ function buildOverlayParts(
 /* Shared metrics for the overlay and the transparent textarea beneath it.
    Both must be glyph-for-glyph identical, so they always use this one string. */
 const DOCUMENT_TEXT_CLASSES =
-  "whitespace-pre-wrap break-words font-reading text-reader sm:text-reader-lg";
+  "whitespace-pre-wrap break-words font-reading";
 
 /* Horizontal padding comes from .reader-doc-pad, which centers a readable
    text column inside the full-bleed panel at any window size. */
@@ -238,14 +293,27 @@ interface ViewportPopoverProps {
   popoverRef: RefObject<HTMLDivElement | null>;
   maxWidth: number;
   className: string;
+  ariaLabel: string;
+  onClose: () => void;
   children: ReactNode;
 }
+
+const POPOVER_FOCUSABLE_SELECTOR = [
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "textarea:not([disabled])",
+  "select:not([disabled])",
+  "[href]",
+  "[tabindex]:not([tabindex='-1'])",
+].join(",");
 
 function ViewportPopover({
   anchorRef,
   popoverRef,
   maxWidth,
   className,
+  ariaLabel,
+  onClose,
   children,
 }: ViewportPopoverProps) {
   const [position, setPosition] = useState<{
@@ -254,6 +322,10 @@ function ViewportPopover({
     width: number;
     maxHeight: number;
   } | null>(null);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
 
   useLayoutEffect(() => {
     const updatePosition = () => {
@@ -299,11 +371,55 @@ function ViewportPopover({
     };
   }, [anchorRef, maxWidth]);
 
+  const ready = position !== null;
+  useEffect(() => {
+    if (!ready) return;
+    const anchor = anchorRef.current;
+    const frame = window.requestAnimationFrame(() => {
+      const focusable = popoverRef.current?.querySelector<HTMLElement>(POPOVER_FOCUSABLE_SELECTOR);
+      (focusable ?? popoverRef.current)?.focus();
+    });
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !popoverRef.current) return;
+      const focusable = [...popoverRef.current.querySelectorAll<HTMLElement>(POPOVER_FOCUSABLE_SELECTOR)]
+        .filter((element) => !element.hasAttribute("disabled"));
+      if (focusable.length === 0) {
+        event.preventDefault();
+        popoverRef.current.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable.at(-1)!;
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.removeEventListener("keydown", handleKeyDown);
+      if (anchor?.isConnected) anchor.focus();
+    };
+  }, [anchorRef, popoverRef, ready]);
+
   if (!position) return null;
 
   return createPortal(
     <div
       ref={popoverRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={ariaLabel}
+      tabIndex={-1}
       className={`fixed z-[120] overflow-y-auto ${className}`}
       style={position}
     >
@@ -317,12 +433,22 @@ export function AdvancedReaderPage({
   fullScreen = false,
   text,
   onTextChange,
+  onEditStart,
+  onEditEnd,
   onImportDocument,
   isImportingDocument = false,
   onImportFile,
   onImportUrl,
   documents = [],
   activeDocument = null,
+  activeChapter = null,
+  activeSection = null,
+  previousSection = null,
+  nextSection = null,
+  totalSectionCount = 0,
+  onNavigateToOffset,
+  viewPreferences = DEFAULT_READER_VIEW_PREFERENCES,
+  onViewPreferencesChange,
   libraryLoading = false,
   libraryError = null,
   libraryPersistent = true,
@@ -343,6 +469,7 @@ export function AdvancedReaderPage({
   desktopModelSettings,
   kokoroState,
   supertonicState,
+  visibleModels,
   unavailableModels,
   kokoroVoices,
   voice,
@@ -393,37 +520,160 @@ export function AdvancedReaderPage({
   const activeVoiceLabel = selectedDesktopModel
     ? desktopVoiceLabel ?? selectedDesktopModel.label
     : formatVoiceName(voice);
-  const overlayRef = useRef<HTMLDivElement>(null);
+  const documentScrollerRef = useRef<HTMLDivElement>(null);
+  const readerTextRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const readingTextId = useId();
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [appearanceOpen, setAppearanceOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editDraft, setEditDraft] = useState(text);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryTab, setLibraryTab] = useState<ReaderSidebarTab>("library");
   const [urlImportOpen, setUrlImportOpen] = useState(false);
   const [urlInput, setUrlInput] = useState("");
   const [urlImportError, setUrlImportError] = useState<string | null>(null);
   const [urlImportBusy, setUrlImportBusy] = useState(false);
   const [navigationTextOffset, setNavigationTextOffset] = useState<number | null>(null);
+  const [selectedPassage, setSelectedPassage] = useState<{ quote: string; textOffset: number } | null>(null);
   const settingsRef = useRef<HTMLDivElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsPopoverRef = useRef<HTMLDivElement>(null);
+  const appearanceButtonRef = useRef<HTMLButtonElement>(null);
+  const appearancePopoverRef = useRef<HTMLDivElement>(null);
   const urlButtonRef = useRef<HTMLButtonElement>(null);
   const urlPopoverRef = useRef<HTMLDivElement>(null);
   const settingsOpenRef = useRef(settingsOpen);
+  const appearanceOpenRef = useRef(appearanceOpen);
   const urlImportOpenRef = useRef(urlImportOpen);
+  const editingRef = useRef(editing);
+  const editDraftRef = useRef(editDraft);
+  const onEditEndRef = useRef(onEditEnd);
+  const onTextChangeRef = useRef(onTextChange);
+  const previousDocumentIdRef = useRef(activeDocument?.id);
+  const editCommitTimerRef = useRef<number | null>(null);
+  // Cross-section jumps land after the new section's text renders; this holds
+  // the document-absolute offset to scroll to once that happens.
+  const pendingScrollOffsetRef = useRef<number | null>(null);
+  const [followPaused, setFollowPaused] = useState(false);
+  const followPausedRef = useRef(false);
+
+  const cancelEditCommit = useCallback(() => {
+    if (editCommitTimerRef.current !== null) {
+      window.clearTimeout(editCommitTimerRef.current);
+      editCommitTimerRef.current = null;
+    }
+  }, []);
 
   useEffect(() => {
     settingsOpenRef.current = settingsOpen;
   }, [settingsOpen]);
 
   useEffect(() => {
+    appearanceOpenRef.current = appearanceOpen;
+  }, [appearanceOpen]);
+
+  useEffect(() => {
     urlImportOpenRef.current = urlImportOpen;
   }, [urlImportOpen]);
 
   useEffect(() => {
+    editingRef.current = editing;
+    editDraftRef.current = editDraft;
+    onEditEndRef.current = onEditEnd;
+    onTextChangeRef.current = onTextChange;
+  }, [editDraft, editing, onEditEnd, onTextChange]);
+
+  useEffect(() => {
+    if (previousDocumentIdRef.current !== activeDocument?.id) {
+      // A pending debounced commit belongs to the previous document; letting it
+      // fire now would write stale text into the newly opened one.
+      cancelEditCommit();
+      if (editingRef.current) onEditEndRef.current?.();
+    }
+    previousDocumentIdRef.current = activeDocument?.id;
     setNavigationTextOffset(null);
-  }, [activeDocument?.id, text]);
+    setSelectedPassage(null);
+    setEditing(false);
+  }, [activeDocument?.id, cancelEditCommit]);
+
+  useEffect(() => () => {
+    if (editCommitTimerRef.current !== null) {
+      window.clearTimeout(editCommitTimerRef.current);
+      editCommitTimerRef.current = null;
+      if (editingRef.current) onTextChangeRef.current(editDraftRef.current);
+    }
+    if (editingRef.current) onEditEndRef.current?.();
+  }, []);
+
+  useEffect(() => {
+    if (editing) return;
+    setNavigationTextOffset(null);
+    setSelectedPassage(null);
+    setEditDraft(text);
+  }, [activeSection?.id, editing, text]);
+
+  useEffect(() => {
+    followPausedRef.current = false;
+    setFollowPaused(false);
+  }, [activeDocument?.id, activeSection?.id]);
+
+  /** Scroll the reading pane so the given local text offset sits in the upper third. */
+  const scrollToLocalOffset = useCallback((localOffset: number) => {
+    const scroller = documentScrollerRef.current;
+    const root = readerTextRef.current;
+    if (!scroller || !root) return;
+    const paragraphs = [...root.querySelectorAll<HTMLElement>("[data-block-start]")];
+    if (paragraphs.length === 0) return;
+    let paragraph = paragraphs[0];
+    for (const element of paragraphs) {
+      if (Number(element.dataset.blockStart) > localOffset) break;
+      paragraph = element;
+    }
+
+    let remaining = Math.max(0, localOffset - Number(paragraph.dataset.blockStart));
+    const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
+    let node = walker.nextNode() as Text | null;
+    while (node && remaining > node.length) {
+      remaining -= node.length;
+      node = walker.nextNode() as Text | null;
+    }
+    const range = document.createRange();
+    if (node) {
+      range.setStart(node, Math.min(node.length, remaining));
+      range.collapse(true);
+    } else {
+      range.selectNodeContents(paragraph);
+      range.collapse(true);
+    }
+    const rangeRect = typeof range.getBoundingClientRect === "function"
+      ? range.getBoundingClientRect()
+      : null;
+    const anchorRect = rangeRect && (rangeRect.height > 0 || rangeRect.top !== 0)
+      ? rangeRect
+      : paragraph.getBoundingClientRect();
+    const lead = Math.max(32, scroller.clientHeight * 0.28);
+    programmaticScrollRef.current = true;
+    scroller.scrollTop = Math.max(
+      0,
+      scroller.scrollTop + anchorRect.top - scroller.getBoundingClientRect().top - lead,
+    );
+  }, []);
+
+  useLayoutEffect(() => {
+    if (editing) return;
+    const pending = pendingScrollOffsetRef.current;
+    pendingScrollOffsetRef.current = null;
+    if (pending !== null && activeSection && pending >= activeSection.start) {
+      scrollToLocalOffset(pending - activeSection.start);
+      return;
+    }
+    if (documentScrollerRef.current) documentScrollerRef.current.scrollTop = 0;
+    if (textareaRef.current) textareaRef.current.scrollTop = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only on document/section change
+  }, [activeDocument?.id, activeSection?.id, editing]);
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -434,6 +684,13 @@ export function AdvancedReaderPage({
         && !settingsPopoverRef.current?.contains(target)
       ) {
         setSettingsOpen(false);
+      }
+      if (
+        appearanceOpenRef.current
+        && !appearanceButtonRef.current?.contains(target)
+        && !appearancePopoverRef.current?.contains(target)
+      ) {
+        setAppearanceOpen(false);
       }
       if (
         urlImportOpenRef.current
@@ -452,7 +709,11 @@ export function AdvancedReaderPage({
       ? desktopQwenMode === "voiceClone"
         ? buildQwen3RequestSections(text)
         : buildQwen3TextUnits(text)
-      : chunkTextForModelDetailed(text, activeModel, { runtime: { backend: runtimeBackend, quality } }),
+      : chunkTextForModelDetailed(
+          text,
+          selectedDesktopModel?.key === "supertonic3" ? "supertonic" : activeModel,
+          { runtime: { backend: runtimeBackend, quality } },
+        ),
     [activeModel, desktopQwenMode, quality, runtimeBackend, selectedDesktopModel?.key, text],
   );
 
@@ -518,60 +779,105 @@ export function AdvancedReaderPage({
     }))
   ), [previewChunks]);
 
+  const textBlocks = useMemo(() => splitTextBlocks(text), [text]);
+
   const overlayParts = useMemo(
-    () => buildOverlayParts(text, sectionBoundaries, activeRange, activeWordRange),
-    [text, sectionBoundaries, activeRange, activeWordRange],
+    () => buildOverlayParts(text, textBlocks, sectionBoundaries, activeRange, activeWordRange),
+    [text, textBlocks, sectionBoundaries, activeRange, activeWordRange],
   );
+
+  const paragraphs = useMemo(() => {
+    const groups = textBlocks.map((block) => ({ block, parts: [] as OverlayPart[] }));
+    let blockIndex = 0;
+    for (const part of overlayParts) {
+      while (blockIndex < textBlocks.length && part.start >= textBlocks[blockIndex].end) {
+        blockIndex += 1;
+      }
+      if (blockIndex >= textBlocks.length) break;
+      // Parts that fall between blocks are newline separators; they carry no glyphs.
+      if (part.start >= textBlocks[blockIndex].start) groups[blockIndex].parts.push(part);
+    }
+    return groups;
+  }, [overlayParts, textBlocks]);
 
   const hasGeneratedSegments = segments.length > 0;
   const meaningfulLength = getMeaningfulTextLength(text);
   const charsRemaining = MIN_TEXT_LENGTH - meaningfulLength;
   const hasAudio = totalDuration > 0;
-  const focusMode = isPlaying && activeRange !== null;
-  const currentTextOffset = activeWordRange?.start
+  const focusMode = viewPreferences.focusMode && isPlaying && activeRange !== null;
+  const sectionStart = activeSection?.start ?? 0;
+  const persistedLocalOffset = clamp(
+    (activeDocument?.progress.textOffset ?? sectionStart) - sectionStart,
+    0,
+    text.length,
+  );
+  const currentLocalTextOffset = activeWordRange?.start
     ?? activeRange?.start
-    ?? navigationTextOffset
-    ?? activeDocument?.progress.textOffset
-    ?? 0;
-  const readingProgress = activeDocument?.progress.percent
-    ?? (text.length > 0 ? (currentTextOffset / text.length) * 100 : 0);
-  const currentChapter = activeDocument?.chapters.find(
+    ?? (navigationTextOffset === null ? null : navigationTextOffset - sectionStart)
+    ?? persistedLocalOffset;
+  const currentTextOffset = sectionStart + clamp(currentLocalTextOffset, 0, text.length);
+  const readingProgress = activeDocument && activeDocument.text.length > 0
+    ? (currentTextOffset / activeDocument.text.length) * 100
+    : text.length > 0 ? (currentLocalTextOffset / text.length) * 100 : 0;
+  const currentChapter = activeChapter ?? activeDocument?.chapters.find(
     (chapter) => currentTextOffset >= chapter.start && currentTextOffset < chapter.end,
   ) ?? activeDocument?.chapters.at(-1) ?? null;
+  const remainingSeconds = Math.max(0, totalDuration - currentTime);
+  const remainingLabel = totalDuration > 0
+    ? remainingSeconds < 60
+      ? `${Math.ceil(remainingSeconds)} sec left`
+      : `${Math.ceil(remainingSeconds / 60)} min left`
+    : null;
 
-  // Auto-follow backs off after the user scrolls manually, so reading ahead
-  // or reviewing earlier text is never yanked back to the spoken sentence.
+  // Auto-follow hands control back the moment the user scrolls during playback,
+  // and stays paused until they resume it deliberately (pill, jump, or replay).
   const programmaticScrollRef = useRef(false);
-  const lastUserScrollAtRef = useRef(0);
-  const USER_SCROLL_GRACE_MS = 4000;
 
-  const syncOverlayScroll = (target: HTMLTextAreaElement) => {
+  const handleDocumentScroll = () => {
     if (programmaticScrollRef.current) {
       programmaticScrollRef.current = false;
-    } else {
-      lastUserScrollAtRef.current = Date.now();
+      return;
     }
-    if (!overlayRef.current) return;
-    overlayRef.current.scrollTop = target.scrollTop;
-    overlayRef.current.scrollLeft = target.scrollLeft;
+    if (isPlaying && hasAudio && !followPausedRef.current) {
+      followPausedRef.current = true;
+      setFollowPaused(true);
+    }
   };
 
-  useEffect(() => {
-    if (!isPlaying) return;
-    if (Date.now() - lastUserScrollAtRef.current < USER_SCROLL_GRACE_MS) return;
-    if (!overlayRef.current || !textareaRef.current) return;
-    const marker = overlayRef.current.querySelector<HTMLElement>(".reader-word-highlight-active")
-      ?? overlayRef.current.querySelector<HTMLElement>(".reader-chunk-highlight-active");
+  const scrollMarkerIntoView = useCallback(() => {
+    const scroller = documentScrollerRef.current;
+    if (!scroller) return;
+    const marker = scroller.querySelector<HTMLElement>(".reader-word-highlight-active")
+      ?? scroller.querySelector<HTMLElement>(".reader-chunk-highlight-active");
     if (!marker) return;
 
     // Keep the spoken sentence in the upper third of the page, book-style.
-    const lead = Math.max(32, overlayRef.current.clientHeight * 0.28);
-    const nextTop = Math.max(0, marker.offsetTop - lead);
-    if (Math.abs(textareaRef.current.scrollTop - nextTop) < 1) return;
+    const lead = Math.max(32, scroller.clientHeight * 0.28);
+    const nextTop = Math.max(
+      0,
+      scroller.scrollTop + marker.getBoundingClientRect().top - scroller.getBoundingClientRect().top - lead,
+    );
+    if (Math.abs(scroller.scrollTop - nextTop) < 1) return;
     programmaticScrollRef.current = true;
-    overlayRef.current.scrollTop = nextTop;
-    textareaRef.current.scrollTop = nextTop;
-  }, [activeRange, isPlaying]);
+    scroller.scrollTop = nextTop;
+  }, []);
+
+  const resumeFollowing = useCallback(() => {
+    followPausedRef.current = false;
+    setFollowPaused(false);
+    scrollMarkerIntoView();
+  }, [scrollMarkerIntoView]);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    followPausedRef.current = false;
+    setFollowPaused(false);
+  }, [isPlaying]);
+
+  useEffect(() => {
+    if (!isPlaying || followPaused) return;
+    scrollMarkerIntoView();
+  }, [activeRange, followPaused, isPlaying, scrollMarkerIntoView]);
 
   /* ── Player dock actions ──────────────────────────────────── */
   const showRetry = !modelReady && !!modelError;
@@ -625,6 +931,14 @@ export function AdvancedReaderPage({
   const activeSegmentNumber = activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null;
   const canRetakeCurrentSegment = hasGeneratedSegments && canRetakeSegments && activeSegmentIndex >= 0 && !isRetaking;
 
+  const finishEditing = useCallback(() => {
+    if (!editing) return;
+    cancelEditCommit();
+    onTextChange(editDraft);
+    onEditEnd?.();
+    setEditing(false);
+  }, [cancelEditCommit, editDraft, editing, onEditEnd, onTextChange]);
+
   const handlePreviousSegment = useCallback(() => {
     if (activeSegmentIndex > 0) {
       onJumpToSegment(segments[activeSegmentIndex - 1].id);
@@ -644,26 +958,118 @@ export function AdvancedReaderPage({
   }, [activeSegmentIndex, onRetakeSegment, segments]);
 
   const handleJumpToOffset = useCallback((offset: number, positionSec?: number) => {
-    const targetOffset = clamp(offset, 0, text.length);
+    finishEditing();
+    followPausedRef.current = false;
+    setFollowPaused(false);
+    const documentLength = activeDocument?.text.length ?? sectionStart + text.length;
+    const targetOffset = clamp(offset, 0, documentLength);
     setNavigationTextOffset(targetOffset);
+    onNavigateToOffset?.(targetOffset, positionSec);
+
+    const sectionEnd = activeSection?.end ?? sectionStart + text.length;
+    const isDocumentEnd = sectionEnd === documentLength && targetOffset === documentLength;
+    const isCurrentSection = targetOffset >= sectionStart
+      && (targetOffset < sectionEnd || isDocumentEnd);
+    if (!isCurrentSection) {
+      pendingScrollOffsetRef.current = targetOffset;
+      return;
+    }
+    const localOffset = clamp(targetOffset - sectionStart, 0, text.length);
     if (typeof positionSec === "number" && totalDuration > 0) {
       onSeek(clamp(positionSec / totalDuration, 0, 1));
     } else {
-      const targetSegment = findSegmentForTextOffset(segments, targetOffset);
+      const targetSegment = findSegmentForTextOffset(segments, localOffset);
       if (targetSegment) onJumpToSegment(targetSegment.id);
     }
 
-    const textarea = textareaRef.current;
-    if (textarea) {
-      textarea.focus();
-      textarea.setSelectionRange(targetOffset, targetOffset);
-      const ratio = text.length > 0 ? targetOffset / text.length : 0;
-      const nextTop = Math.max(0, ratio * (textarea.scrollHeight - textarea.clientHeight));
-      programmaticScrollRef.current = true;
-      textarea.scrollTop = nextTop;
-      if (overlayRef.current) overlayRef.current.scrollTop = nextTop;
+    scrollToLocalOffset(localOffset);
+  }, [
+    activeDocument?.text.length,
+    activeSection?.end,
+    finishEditing,
+    onJumpToSegment,
+    onNavigateToOffset,
+    onSeek,
+    scrollToLocalOffset,
+    sectionStart,
+    segments,
+    text.length,
+    totalDuration,
+  ]);
+
+  /**
+   * Maps the current DOM selection back to a local text offset. Paragraph
+   * elements carry their block's character offset, so the prefix length inside
+   * the containing paragraph plus that offset is exact even though newline
+   * glyphs are never rendered.
+   */
+  const getArticleSelectionOffset = useCallback((): {
+    local: number;
+    collapsed: boolean;
+    quote: string;
+  } | null => {
+    const root = readerTextRef.current;
+    const selection = window.getSelection();
+    if (!root || !selection || selection.rangeCount === 0) return null;
+    const selectedRange = selection.getRangeAt(0);
+    if (!root.contains(selectedRange.startContainer) || !root.contains(selectedRange.endContainer)) return null;
+    const startElement = selectedRange.startContainer instanceof Element
+      ? selectedRange.startContainer
+      : selectedRange.startContainer.parentElement;
+    const paragraph = startElement?.closest<HTMLElement>("[data-block-start]");
+    if (!paragraph || !root.contains(paragraph)) return null;
+
+    const prefix = document.createRange();
+    prefix.selectNodeContents(paragraph);
+    prefix.setEnd(selectedRange.startContainer, selectedRange.startOffset);
+    const local = clamp(
+      Number(paragraph.dataset.blockStart) + prefix.toString().length,
+      0,
+      text.length,
+    );
+    return { local, collapsed: selection.isCollapsed, quote: selection.toString() };
+  }, [text.length]);
+
+  const handleReaderTextMouseUp = useCallback(() => {
+    const info = getArticleSelectionOffset();
+    if (!info) return;
+    if (!info.collapsed) {
+      const quote = info.quote.trim().replace(/\s+/g, " ").slice(0, 500);
+      if (quote) setSelectedPassage({ quote, textOffset: sectionStart + info.local });
+      return;
     }
-  }, [onJumpToSegment, onSeek, segments, text.length, totalDuration]);
+    // A plain click only dismisses the note pill — seeking is double-click.
+    setSelectedPassage(null);
+  }, [getArticleSelectionOffset, sectionStart]);
+
+  const handleReaderTextDoubleClick = useCallback(() => {
+    const info = getArticleSelectionOffset();
+    if (!info) return;
+    window.getSelection()?.removeAllRanges();
+    setSelectedPassage(null);
+    handleJumpToOffset(sectionStart + info.local);
+  }, [getArticleSelectionOffset, handleJumpToOffset, sectionStart]);
+
+  // Arrow keys page through reading sections whenever focus isn't in a form
+  // control or dialog — the book-reader equivalent of turning pages.
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (editingRef.current) return;
+      const target = event.target;
+      if (
+        target instanceof HTMLElement
+        && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")
+      ) return;
+      const section = event.key === "ArrowRight" ? nextSection : previousSection;
+      if (!section) return;
+      event.preventDefault();
+      handleJumpToOffset(section.start);
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [handleJumpToOffset, nextSection, previousSection]);
 
   const handleFilePick = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -688,11 +1094,6 @@ export function AdvancedReaderPage({
     }
   }, [onImportUrl, urlImportBusy, urlInput]);
 
-  const handleDeleteDocument = useCallback((id: string) => {
-    const document = documents.find((entry) => entry.id === id);
-    if (!document || !onDeleteDocument) return;
-    if (window.confirm(`Delete “${document.title}” and its cached audio?`)) onDeleteDocument(id);
-  }, [documents, onDeleteDocument]);
 
   return (
     <div className={`relative flex w-full flex-col gap-3 sm:gap-4 ${fullScreen ? "min-h-[calc(100vh-9.5rem)]" : "mt-6"}`}>
@@ -708,7 +1109,7 @@ export function AdvancedReaderPage({
         onClose={() => setLibraryOpen(false)}
         onOpenDocument={(id) => onOpenDocument?.(id)}
         onNewDocument={() => onNewDocument?.()}
-        onDeleteDocument={handleDeleteDocument}
+        onDeleteDocument={(id) => onDeleteDocument?.(id)}
         onUpdateMetadata={(patch) => onUpdateDocumentMetadata?.(patch)}
         onJumpToOffset={handleJumpToOffset}
         onAddBookmark={(input) => onAddBookmark?.(input)}
@@ -716,6 +1117,9 @@ export function AdvancedReaderPage({
         onAddNote={(input) => onAddNote?.(input)}
         onUpdateNote={(id, value) => onUpdateNote?.(id, value)}
         onRemoveNote={(id) => onRemoveNote?.(id)}
+        selectedPassage={selectedPassage}
+        tab={libraryTab}
+        onTabChange={setLibraryTab}
       />
 
       <input
@@ -742,7 +1146,8 @@ export function AdvancedReaderPage({
             </h2>
             <p className="mt-0.5 truncate font-mono text-xs tabular-nums text-text-muted">
               {activeDocument?.author ? `${activeDocument.author} · ` : ""}
-              {Math.round(readingProgress)}% · {activeDocument?.chapters.length ?? previewChunks.length} chapter{(activeDocument?.chapters.length ?? previewChunks.length) !== 1 ? "s" : ""}
+              {Math.round(readingProgress)}% · {activeDocument?.chapters.length ?? 0} chapter{(activeDocument?.chapters.length ?? 0) !== 1 ? "s" : ""}
+              {activeSection && totalSectionCount > 1 ? ` · section ${activeSection.order + 1}/${totalSectionCount}` : ""}
               {statusLabel ? ` · ${statusLabel}` : ""}
             </p>
           </div>
@@ -758,6 +1163,125 @@ export function AdvancedReaderPage({
           <Library size={14} className="text-text-muted" />
           <span className="hidden font-medium lg:inline">Library</span>
           <span className="rounded-full bg-accent-light px-1.5 font-mono text-2xs text-accent">{documents.length}</span>
+        </button>
+
+        <div className="relative">
+          <button
+            ref={appearanceButtonRef}
+            type="button"
+            onClick={() => setAppearanceOpen((open) => !open)}
+            aria-label="Reading appearance"
+            aria-expanded={appearanceOpen}
+            title="Reading appearance"
+            className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl border border-white/50 bg-white/40 text-text-muted shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-accent active:translate-y-0 active:scale-[0.98]"
+          >
+            <Type size={16} />
+          </button>
+          {appearanceOpen && (
+            <ViewportPopover
+              anchorRef={appearanceButtonRef}
+              popoverRef={appearancePopoverRef}
+              maxWidth={360}
+              className="glass-pop rounded-2xl p-4"
+              ariaLabel="Reading appearance"
+              onClose={() => setAppearanceOpen(false)}
+            >
+              <div className="space-y-4">
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <label htmlFor={`${readingTextId}-font-size`} className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+                      Text size
+                    </label>
+                    <span className="font-mono text-xs text-text-secondary">{viewPreferences.fontSize}px</span>
+                  </div>
+                  <input
+                    id={`${readingTextId}-font-size`}
+                    type="range"
+                    min={15}
+                    max={26}
+                    step={1}
+                    value={viewPreferences.fontSize}
+                    onChange={(event) => onViewPreferencesChange?.({ fontSize: Number(event.target.value) })}
+                  />
+                </div>
+                <div>
+                  <div className="mb-2 flex items-center justify-between">
+                    <label htmlFor={`${readingTextId}-line-height`} className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+                      Line spacing
+                    </label>
+                    <span className="font-mono text-xs text-text-secondary">{viewPreferences.lineHeight.toFixed(2)}</span>
+                  </div>
+                  <input
+                    id={`${readingTextId}-line-height`}
+                    type="range"
+                    min={1.4}
+                    max={2.2}
+                    step={0.05}
+                    value={viewPreferences.lineHeight}
+                    onChange={(event) => onViewPreferencesChange?.({ lineHeight: Number(event.target.value) })}
+                  />
+                </div>
+                <fieldset>
+                  <legend className="mb-2 text-xs font-semibold uppercase tracking-widest text-text-muted">Column width</legend>
+                  <div className="grid grid-cols-3 gap-1 rounded-xl bg-white/30 p-1">
+                    {(["narrow", "comfortable", "wide"] as const).map((width) => (
+                      <button
+                        key={width}
+                        type="button"
+                        aria-pressed={viewPreferences.columnWidth === width}
+                        onClick={() => onViewPreferencesChange?.({ columnWidth: width })}
+                        className={`rounded-lg px-2 py-2 text-xs font-medium capitalize transition-colors ${
+                          viewPreferences.columnWidth === width
+                            ? "bg-panel text-accent shadow-glass-sm"
+                            : "text-text-muted hover:text-text-primary"
+                        }`}
+                      >
+                        {width === "comfortable" ? "Standard" : width}
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+                <label className="flex items-center justify-between gap-3 text-sm text-text-secondary">
+                  Focus spoken text
+                  <input
+                    type="checkbox"
+                    checked={viewPreferences.focusMode}
+                    onChange={(event) => onViewPreferencesChange?.({ focusMode: event.target.checked })}
+                  />
+                </label>
+                <label className="flex items-center justify-between gap-3 text-sm text-text-secondary">
+                  Continue automatically
+                  <input
+                    type="checkbox"
+                    checked={viewPreferences.autoAdvance}
+                    onChange={(event) => onViewPreferencesChange?.({ autoAdvance: event.target.checked })}
+                  />
+                </label>
+              </div>
+            </ViewportPopover>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={() => {
+            if (editing) {
+              finishEditing();
+            } else {
+              setEditDraft(text);
+              onEditStart?.();
+              setEditing(true);
+            }
+          }}
+          aria-label={editing ? "Finish editing section" : "Edit current section"}
+          title={editing ? "Finish editing" : "Edit current section"}
+          className={`flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl border shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px active:translate-y-0 active:scale-[0.98] ${
+            editing
+              ? "border-accent/30 bg-accent-light text-accent"
+              : "border-white/50 bg-white/40 text-text-muted hover:bg-white/60 hover:text-accent"
+          }`}
+        >
+          {editing ? <Check size={16} /> : <Pencil size={15} />}
         </button>
 
         {onNewDocument && (
@@ -812,6 +1336,8 @@ export function AdvancedReaderPage({
                 popoverRef={urlPopoverRef}
                 maxWidth={400}
                 className="glass-pop rounded-2xl p-4"
+                ariaLabel="Import from URL"
+                onClose={() => setUrlImportOpen(false)}
               >
                 <label className="block text-xs font-semibold uppercase tracking-widest text-text-muted">
                   Article URL
@@ -876,6 +1402,8 @@ export function AdvancedReaderPage({
               popoverRef={settingsPopoverRef}
               maxWidth={448}
               className="glass-pop animate-scale-in origin-top-right rounded-2xl p-4"
+              ariaLabel="Voice settings"
+              onClose={() => setSettingsOpen(false)}
             >
               <div className="flex flex-col gap-4">
                 <ModelToggle
@@ -884,6 +1412,7 @@ export function AdvancedReaderPage({
                   desktopModelOptions={desktopModelOptions}
                   kokoroState={kokoroState}
                   supertonicState={supertonicState}
+                  visibleModels={visibleModels}
                   unavailableModels={unavailableModels}
                 />
 
@@ -936,7 +1465,7 @@ export function AdvancedReaderPage({
       {selectedDesktopModel && modelError && (
         <div className="flex flex-col gap-3 rounded-2xl border border-danger/20 bg-danger/[0.06] px-4 py-3 sm:flex-row sm:items-center sm:justify-between" role="status">
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-text-primary">Qwen needs setup in Reader</p>
+            <p className="text-sm font-semibold text-text-primary">{activeModelLabel} needs setup in Reader</p>
             <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-text-secondary">{modelError}</p>
           </div>
           <button
@@ -951,7 +1480,17 @@ export function AdvancedReaderPage({
 
       {(libraryError || currentChapter) && (
         <div className="flex flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
-          <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1">
+            <button
+              type="button"
+              disabled={!previousSection}
+              onClick={() => previousSection && handleJumpToOffset(previousSection.start)}
+              aria-label="Previous reading section"
+              title="Previous section (←)"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-white/45 hover:text-accent disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              <ChevronLeft size={15} />
+            </button>
             {libraryError ? (
               <p className="text-xs text-danger" role="status">{libraryError}</p>
             ) : currentChapter ? (
@@ -961,10 +1500,23 @@ export function AdvancedReaderPage({
                 className="block w-full max-w-full truncate text-left text-xs font-medium text-text-muted transition-colors hover:text-accent"
               >
                 Chapter {currentChapter.order + 1} of {activeDocument?.chapters.length}: {currentChapter.title}
+                {activeSection && activeSection.chapterSectionCount > 1
+                  ? ` · Part ${activeSection.chapterSectionIndex + 1} of ${activeSection.chapterSectionCount}`
+                  : ""}
               </button>
             ) : null}
+            <button
+              type="button"
+              disabled={!nextSection}
+              onClick={() => nextSection && handleJumpToOffset(nextSection.start)}
+              aria-label="Next reading section"
+              title="Next section (→)"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-white/45 hover:text-accent disabled:cursor-not-allowed disabled:opacity-35"
+            >
+              <ChevronRight size={15} />
+            </button>
           </div>
-          <div className="flex min-w-32 items-center gap-2 sm:w-56">
+          <div className="flex min-w-32 items-center gap-2 sm:w-64">
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
               <div
                 className="h-full rounded-full bg-accent transition-[transform] duration-300 origin-left"
@@ -974,65 +1526,135 @@ export function AdvancedReaderPage({
             <span className="w-9 text-right font-mono text-2xs text-text-muted tabular-nums">
               {Math.round(readingProgress)}%
             </span>
+            {remainingLabel && (
+              <span className="hidden whitespace-nowrap font-mono text-2xs text-text-muted tabular-nums md:inline">
+                {remainingLabel}
+              </span>
+            )}
           </div>
         </div>
       )}
 
       {/* ── Document ────────────────────────────────────────── */}
-      <section className={`glass-panel relative overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}>
-        <label htmlFor={readingTextId} className="sr-only">
-          Reading Text
-        </label>
+      <section
+        className={`glass-panel relative overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}
+        style={{
+          "--reader-column-width": `${readerColumnWidthRem(viewPreferences.columnWidth)}rem`,
+        } as CSSProperties}
+      >
         <div className={`relative ${fullScreen ? "h-full min-h-[55vh]" : "min-h-72"}`}>
-          <div
-            ref={overlayRef}
-            aria-hidden
-            className={`pointer-events-none absolute inset-0 z-20 select-none overflow-auto text-text-primary ${DOCUMENT_TEXT_CLASSES} ${documentPadding(fullScreen)} ${focusMode ? "reader-focus" : ""}`}
-          >
-            {overlayParts.map((part, index) => {
-              const activeClass = part.isActive
-                ? "reader-chunk-highlight reader-chunk-highlight-active"
-                : "";
-              const wordClass = part.isWordActive ? "reader-word-highlight-active" : "";
-              const tintClass = part.sectionIndex >= 0
-                ? part.sectionIndex % 2 === 0
-                  ? "reader-section-even"
-                  : "reader-section-odd"
-                : "";
-              const className = `${tintClass} ${activeClass} ${wordClass}`.trim();
+          {editing ? (
+            <textarea
+              id={readingTextId}
+              ref={textareaRef}
+              aria-label="Reading Text"
+              value={editDraft}
+              onChange={(event) => {
+                const value = event.target.value;
+                setEditDraft(value);
+                // Re-sectioning the document on every keystroke is expensive;
+                // debounce the upstream commit and flush on blur/finish.
+                cancelEditCommit();
+                editCommitTimerRef.current = window.setTimeout(() => {
+                  editCommitTimerRef.current = null;
+                  onTextChange(value);
+                }, 400);
+              }}
+              onBlur={() => {
+                cancelEditCommit();
+                onTextChange(editDraft);
+              }}
+              onScroll={handleDocumentScroll}
+              onDoubleClick={(event) => {
+                if (!hasGeneratedSegments) return;
+                const targetSegment = findSegmentForTextOffset(segments, event.currentTarget.selectionStart);
+                if (targetSegment) onJumpToSegment(targetSegment.id);
+              }}
+              placeholder="Type or paste text for this reading section…"
+              className={`absolute inset-0 h-full w-full resize-none overflow-auto bg-transparent text-text-primary caret-text-primary placeholder:font-sans placeholder:text-text-muted focus:outline-none ${DOCUMENT_TEXT_CLASSES} ${documentPadding(fullScreen)}`}
+              style={{ fontSize: viewPreferences.fontSize, lineHeight: viewPreferences.lineHeight }}
+            />
+          ) : (
+            <div
+              id={readingTextId}
+              ref={documentScrollerRef}
+              role="document"
+              aria-label="Reading Text"
+              tabIndex={0}
+              onScroll={handleDocumentScroll}
+              className={`absolute inset-0 overflow-auto text-text-primary outline-none ${documentPadding(fullScreen)} ${focusMode ? "reader-focus" : ""}`}
+              style={{ fontSize: viewPreferences.fontSize, lineHeight: viewPreferences.lineHeight }}
+            >
+              {currentChapter && (
+                <header className="mb-7 border-b border-border/50 pb-5">
+                  <p className="font-mono text-2xs uppercase tracking-widest text-text-muted">
+                    Chapter {currentChapter.order + 1} of {activeDocument?.chapters.length ?? 1}
+                    {activeSection && activeSection.chapterSectionCount > 1
+                      ? ` · Part ${activeSection.chapterSectionIndex + 1} of ${activeSection.chapterSectionCount}`
+                      : ""}
+                  </p>
+                  <h3 className="mt-2 font-display text-[1.45em] leading-tight font-semibold text-text-primary">
+                    {currentChapter.title}
+                  </h3>
+                </header>
+              )}
+              <article
+                ref={readerTextRef}
+                onMouseUp={handleReaderTextMouseUp}
+                onDoubleClick={handleReaderTextDoubleClick}
+                title="Double-click to listen from here"
+                className={`${DOCUMENT_TEXT_CLASSES} reader-article`}
+              >
+                {paragraphs.map(({ block, parts }) => (
+                  <p
+                    key={`block-${block.start}`}
+                    data-block-start={block.start}
+                    className={block.blankLineBefore ? "reader-paragraph-spaced" : undefined}
+                  >
+                    {parts.map((part) => {
+                      const activeClass = part.isActive
+                        ? "reader-chunk-highlight reader-chunk-highlight-active"
+                        : "";
+                      const wordClass = part.isWordActive ? "reader-word-highlight-active" : "";
+                      const className = `${activeClass} ${wordClass}`.trim();
 
-              return (
-                <span
-                  key={`part-${index}`}
-                  className={className || undefined}
-                  data-reader-active-word={part.isWordActive ? "true" : undefined}
+                      return (
+                        <span
+                          key={`part-${part.start}`}
+                          className={className || undefined}
+                          data-section-index={part.sectionIndex >= 0 ? part.sectionIndex : undefined}
+                          data-reader-active-word={part.isWordActive ? "true" : undefined}
+                        >
+                          {part.text}
+                        </span>
+                      );
+                    })}
+                  </p>
+                ))}
+              </article>
+              {selectedPassage && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLibraryTab("notes");
+                    setLibraryOpen(true);
+                  }}
+                  className="sticky bottom-28 left-1/2 mt-8 -translate-x-1/2 rounded-full border border-accent/25 bg-panel/90 px-4 py-2 text-xs font-semibold text-accent shadow-glass-md backdrop-blur-xl"
                 >
-                  {part.text}
-                </span>
-              );
-            })}
-            {/* Mirror a trailing blank line so the textarea's final newline keeps overlay height in sync. */}
-            {text.endsWith("\n") && <span>{"\n"}</span>}
-          </div>
-
-          <textarea
-            id={readingTextId}
-            ref={textareaRef}
-            value={text}
-            onChange={(event) => onTextChange(event.target.value)}
-            onScroll={(event) => syncOverlayScroll(event.currentTarget)}
-            onMouseUp={(event) => {
-              if (!hasGeneratedSegments) return;
-              const ta = event.currentTarget;
-              if (ta.selectionStart !== ta.selectionEnd) return;
-              const pos = ta.selectionStart;
-              const targetSegment = findSegmentForTextOffset(segments, pos);
-              if (targetSegment) onJumpToSegment(targetSegment.id);
-            }}
-            placeholder="Type or paste long-form text to read aloud…"
-            className={`absolute inset-0 z-10 h-full w-full resize-none bg-transparent text-transparent caret-text-primary placeholder:font-sans placeholder:text-text-muted focus:outline-none ${DOCUMENT_TEXT_CLASSES} ${documentPadding(fullScreen)}`}
-            style={{ WebkitTextFillColor: "transparent" }}
-          />
+                  Add note to selection
+                </button>
+              )}
+            </div>
+          )}
+          {followPaused && isPlaying && !editing && (
+            <button
+              type="button"
+              onClick={resumeFollowing}
+              className="absolute bottom-5 left-1/2 z-10 -translate-x-1/2 rounded-full border border-accent/25 bg-panel/90 px-4 py-2 text-xs font-semibold text-accent shadow-glass-md backdrop-blur-xl transition-transform active:scale-[0.98]"
+            >
+              Resume auto-follow
+            </button>
+          )}
         </div>
       </section>
 

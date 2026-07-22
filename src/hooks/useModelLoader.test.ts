@@ -139,4 +139,20 @@ describe("useModelLoader", () => {
 
     expect(MockWorker.instances).toHaveLength(1);
   });
+
+  it("does not create the legacy Supertonic worker for Electron's Kokoro-only browser set", async () => {
+    const { result } = renderHook(() => useModelLoader("kokoro", {
+      supportedModels: ["kokoro"],
+    }));
+
+    await waitFor(() => expect(MockWorker.instances).toHaveLength(1));
+
+    expect(result.current.kokoroWorker.current).not.toBeNull();
+    expect(result.current.supertonicWorker.current).toBeNull();
+    expect(MockWorker.instances[0].postedMessages).toContainEqual({
+      type: "LOAD",
+      preferredVoice: undefined,
+      debugProfiling: false,
+    });
+  });
 });

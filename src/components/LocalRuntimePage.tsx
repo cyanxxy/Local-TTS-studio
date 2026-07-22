@@ -25,6 +25,7 @@ import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
 import {
   NEUTTS_OPTIONS,
   qwen3UsesVoiceClone,
+  qwen3UsesVoiceDesign,
 } from "./localRuntime/modelOptions";
 import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
@@ -167,6 +168,7 @@ export function LocalRuntimePage({
 
   const electronAvailable = !!window.electron?.localTts;
   const qwen3VoiceClone = qwen3UsesVoiceClone(qwen3.profile.repo);
+  const qwen3VoiceDesign = qwen3UsesVoiceDesign(qwen3.profile.repo);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -483,17 +485,24 @@ export function LocalRuntimePage({
         && qwen3.referenceText.trim().length > 0
         && !!qwen3.referenceAudioBase64;
     }
+    if (model === "qwen3" && qwen3VoiceDesign) {
+      return qwen3.modelPath.trim().length > 0
+        && qwen3.readiness !== "missing"
+        && qwen3.instruct.trim().length > 0;
+    }
     if (model === "qwen3") {
       return qwen3.modelPath.trim().length > 0 && qwen3.readiness !== "missing";
     }
     return true;
   }, [
     model,
+    qwen3.instruct,
     qwen3.modelPath,
     qwen3.readiness,
     qwen3.referenceAudioBase64,
     qwen3.referenceText,
     qwen3VoiceClone,
+    qwen3VoiceDesign,
     referenceCodesBase64,
     referenceWavBase64,
     referenceText,
@@ -693,7 +702,7 @@ export function LocalRuntimePage({
           payload.referenceAudioBase64 = qwen3.referenceAudioBase64;
           payload.referenceText = qwen3.referenceText.trim();
         } else {
-          payload.speaker = qwen3.speaker;
+          if (!qwen3VoiceDesign) payload.speaker = qwen3.speaker;
           payload.instruct = qwen3.instruct.trim() || undefined;
         }
         payload.language = qwen3.language;
@@ -756,6 +765,7 @@ export function LocalRuntimePage({
     neuttsModel,
     qwen3,
     qwen3VoiceClone,
+    qwen3VoiceDesign,
     referenceCodesBase64,
     referenceWavBase64,
     referenceText,

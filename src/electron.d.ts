@@ -46,7 +46,7 @@ export interface LocalTtsCacheInfo {
 export interface LocalTtsQwen3ProfileSetup {
   repo: string;
   revision: string;
-  mode: "customVoice" | "voiceClone";
+  mode: "customVoice" | "voiceClone" | "voiceDesign";
   parameters: "0.6B" | "1.7B";
   provider: "mlx" | "libtorch";
   platforms: readonly ("darwin" | "win32")[];
@@ -140,7 +140,7 @@ interface LocalTtsBridge {
   }) => Promise<LocalTtsGenerateResult>;
   warm?: (request: {
     model: LocalTtsModel;
-    mode?: "customVoice" | "voiceClone";
+    mode?: "customVoice" | "voiceClone" | "voiceDesign";
     modelPath?: string;
     modelRepo?: string;
   }) => Promise<LocalTtsWarmResult>;

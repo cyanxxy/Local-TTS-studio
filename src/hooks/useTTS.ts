@@ -236,6 +236,7 @@ export function useTTS({
         generationId,
         text,
         voice,
+        language: settings.language,
         speed: settings.speed,
         quality: settings.quality,
         pauseOverridesSec: settings.pauseOverridesSec,

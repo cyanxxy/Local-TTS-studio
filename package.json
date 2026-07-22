@@ -1,7 +1,15 @@
 {
   "name": "offline-voice-studio",
   "private": true,
-  "version": "1.6.0",
+  "version": "1.7.0",
+  "description": "A local-first text-to-speech studio for the web and desktop.",
+  "author": "cyanxxy",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/cyanxxy/Local-TTS-studio#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cyanxxy/Local-TTS-studio.git"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.12.0"
@@ -19,6 +27,8 @@
     "build:desktop": "npm run build:web && npm run build:electron:main",
     "build:electron": "npm run build:desktop",
     "dist": "npm run build:electron && electron-builder",
+    "dist:mac": "npm run build:electron && electron-builder --mac --arm64",
+    "dist:win": "npm run build:electron && electron-builder --win --x64",
     "preview": "vite preview",
     "lint": "eslint .",
     "test": "npm run test:js && npm run test:rust",
@@ -41,6 +51,7 @@
     "fflate": "^0.8.3",
     "kokoro-js": "1.2.1",
     "lucide-react": "^1.7.0",
+    "onnxruntime-web": "1.26.0-dev.20260416-b7804b056c",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "tailwindcss": "^4.1.17"
@@ -75,7 +86,44 @@
     "appId": "com.opentts.desktop",
     "productName": "Open TTS",
     "mac": {
-      "identity": null
+      "artifactName": "Open-TTS-${version}-macOS-${arch}.${ext}",
+      "category": "public.app-category.productivity",
+      "minimumSystemVersion": "26.0",
+      "hardenedRuntime": true,
+      "notarize": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "win": {
+      "artifactName": "Open-TTS-${version}-Windows-${arch}-CPU.${ext}",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true
     },
     "electronFuses": {
       "runAsNode": false,

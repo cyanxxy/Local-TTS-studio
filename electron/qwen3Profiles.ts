@@ -28,7 +28,7 @@ export type Qwen3Language = typeof QWEN3_LANGUAGES[number];
 export type Qwen3Speaker = typeof QWEN3_SPEAKERS[number];
 export type Qwen3Platform = "darwin" | "win32";
 export type Qwen3Provider = "mlx" | "libtorch";
-export type Qwen3Mode = "customVoice" | "voiceClone";
+export type Qwen3Mode = "customVoice" | "voiceClone" | "voiceDesign";
 
 export interface Qwen3Profile {
   readonly repo: string;
@@ -97,6 +97,17 @@ export const QWEN3_PROFILES = [
     requiredFiles: REQUIRED_MODEL_FILES,
   },
   {
+    repo: "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit",
+    revision: "ffc6545dc9cb086950aa46c6cd3db490e6ece3e1",
+    mode: "voiceDesign",
+    parameters: "1.7B",
+    provider: "mlx",
+    platforms: ["darwin"],
+    weightFormat: "mlx-6bit",
+    label: "VoiceDesign · 1.7B · MLX 6-bit",
+    requiredFiles: REQUIRED_MODEL_FILES,
+  },
+  {
     repo: "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
     revision: "85e237c12c027371202489a0ec509ded67b5e4b5",
     mode: "customVoice",
@@ -138,6 +149,17 @@ export const QWEN3_PROFILES = [
     platforms: ["win32"],
     weightFormat: "safetensors",
     label: "Voice clone · 1.7B · CUDA/CPU",
+    requiredFiles: REQUIRED_MODEL_FILES,
+  },
+  {
+    repo: "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign",
+    revision: "5ecdb67327fd37bb2e042aab12ff7391903235d3",
+    mode: "voiceDesign",
+    parameters: "1.7B",
+    provider: "libtorch",
+    platforms: ["win32"],
+    weightFormat: "safetensors",
+    label: "VoiceDesign · 1.7B · CUDA/CPU",
     requiredFiles: REQUIRED_MODEL_FILES,
   },
 ] as const satisfies readonly Qwen3Profile[];

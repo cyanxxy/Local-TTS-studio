@@ -40,7 +40,7 @@ describe("browserSupport", () => {
     ).toBe(true);
   });
 
-  it("keeps Electron runtimes enabled", () => {
+  it("removes legacy Supertonic 2 from Electron browser models", () => {
     expect(
       getLocalBrowserSupport(
         {
@@ -54,9 +54,16 @@ describe("browserSupport", () => {
       isSupported: true,
       isIOS: false,
       message: null,
-      supportedModels: ["kokoro", "supertonic"],
+      supportedModels: ["kokoro"],
       unsupportedModelMessages: {},
     });
+  });
+
+  it("falls back persisted Electron Supertonic 2 selections to Kokoro", () => {
+    const support = getLocalBrowserSupport(undefined, true);
+
+    expect(isModelSupportedInBrowser("supertonic", support)).toBe(false);
+    expect(getDefaultSupportedModel(support)).toBe("kokoro");
   });
 
   it("reports Kokoro as unavailable on iOS", () => {

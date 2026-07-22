@@ -12,8 +12,10 @@ import { LocalRuntimePage } from "./LocalRuntimePage";
 
 const CUSTOM_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const BASE_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
+const VOICE_DESIGN_REPO = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit";
 const CUSTOM_PATH = "/cache/qwen3/mlx/custom";
 const BASE_PATH = "/cache/qwen3/mlx/base";
+const VOICE_DESIGN_PATH = "/cache/qwen3/mlx/voice-design";
 
 const audio = vi.hoisted(() => ({
   beginStream: vi.fn(),
@@ -69,6 +71,19 @@ const setup: LocalTtsQwen3Setup = {
       label: "Voice clone · 0.6B · MLX 6-bit",
       requiredFiles: ["config.json", "model.safetensors"],
       modelDir: BASE_PATH,
+      readiness: "verified",
+    },
+    {
+      repo: VOICE_DESIGN_REPO,
+      revision: "ffc6545dc9cb086950aa46c6cd3db490e6ece3e1",
+      mode: "voiceDesign",
+      parameters: "1.7B",
+      provider: "mlx",
+      platforms: ["darwin"],
+      weightFormat: "mlx-6bit",
+      label: "VoiceDesign · 1.7B · MLX 6-bit",
+      requiredFiles: ["config.json", "model.safetensors"],
+      modelDir: VOICE_DESIGN_PATH,
       readiness: "verified",
     },
   ],
@@ -326,6 +341,34 @@ describe("LocalRuntimePage", () => {
     for (const removed of ["baseModelPath", "deviceMap", "dtype", "attnImplementation", "topP"]) {
       expect(generate.mock.calls[0][0].payload).not.toHaveProperty(removed);
     }
+  });
+
+  it("requires a VoiceDesign description before generation", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    fireEvent.change(screen.getByLabelText("Model size and voice mode"), {
+      target: { value: VOICE_DESIGN_REPO },
+    });
+    await waitFor(() => expect(screen.getByLabelText("Model size and voice mode")).toHaveValue(VOICE_DESIGN_REPO));
+
+    const generateButton = screen.getByRole("button", { name: /^generate$/i });
+    expect(generateButton).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Voice description"), { target: { value: "   " } });
+    expect(generateButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText("Voice description"), {
+      target: { value: "A calm, mature documentary narrator." },
+    });
+    await waitFor(() => expect(generateButton).toBeEnabled());
+    fireEvent.click(generateButton);
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(generate.mock.calls[0][0].payload).toEqual(expect.objectContaining({
+      mode: "voiceDesign",
+      modelRepo: VOICE_DESIGN_REPO,
+      modelPath: VOICE_DESIGN_PATH,
+      instruct: "A calm, mature documentary narrator.",
+    }));
+    expect(generate.mock.calls[0][0].payload).not.toHaveProperty("speaker");
   });
 
   it("generates Base voice cloning with exact transcript and WAV only", async () => {

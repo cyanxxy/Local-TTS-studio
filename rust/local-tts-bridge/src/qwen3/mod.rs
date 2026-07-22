@@ -22,7 +22,7 @@ pub(super) use model_files::ExpectedModelType;
 ))]
 pub(super) use runtime::{
     AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneReference,
-    VoiceCloneRequest, resolved_runtime_target,
+    VoiceCloneRequest, VoiceDesignRequest, resolved_runtime_target,
 };
 
 #[cfg(test)]

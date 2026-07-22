@@ -1,0 +1,218 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index 7dca060..d724092 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -56,7 +56,7 @@ default = ["tch-backend"]
+ # Use libtorch/PyTorch as the computation backend (default)
+ tch-backend = ["dep:tch"]
+ # Use Apple MLX as the computation backend (macOS Apple Silicon only).
+-# Requires the mlx-c git submodule: `git submodule update --init --recursive`
++# Requires the bundled mlx-c source tree documented in OPEN_TTS_VENDOR.md.
+ mlx = []
+ 
+ [build-dependencies]
+diff --git a/build.rs b/build.rs
+index f6ba158..94e40cd 100644
+--- a/build.rs
++++ b/build.rs
+@@ -1,7 +1,7 @@
+ // Build script for qwen3-tts-rs.
+ //
+ // When the `mlx` feature is enabled (macOS only), this script:
+-// 1. Builds the mlx-c library from the git submodule via CMake
++// 1. Builds the bundled mlx-c source tree via CMake
+ // 2. Emits linker directives for mlx-c, MLX, Metal, and system frameworks
+ 
+ fn main() {
+@@ -24,14 +24,15 @@ fn build_mlx() {
+         );
+     }
+ 
+-    let mlx_c_dir = std::path::PathBuf::from("mlx-c");
++    let mlx_c_dir = std::path::PathBuf::from(
++        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not provide CARGO_MANIFEST_DIR"),
++    )
++    .join("mlx-c");
+     if !mlx_c_dir.join("CMakeLists.txt").exists() {
+         panic!(
+-            "mlx-c submodule not found. Please run:\n\
+-             \n\
+-             git submodule update --init --recursive\n\
+-             \n\
+-             to clone the mlx-c dependency."
++            "Bundled mlx-c sources are missing from {}. Restore the vendored tree using \
++             rust/vendor/qwen3-tts-rs/OPEN_TTS_VENDOR.md.",
++            mlx_c_dir.display()
+         );
+     }
+ 
+diff --git a/src/inference.rs b/src/inference.rs
+index e908a86..7028c70 100644
+--- a/src/inference.rs
++++ b/src/inference.rs
+@@ -667,6 +667,70 @@ impl TalkerModel {
+         input_embeddings
+     }
+ 
++    /// Build the dual-stream prompt used by VoiceDesign models.
++    ///
++    /// VoiceDesign is conditioned by instruction text and intentionally omits
++    /// the predefined-speaker codec token used by CustomVoice.
++    #[allow(clippy::too_many_arguments)]
++    pub fn build_voice_design_input_embeddings(
++        &self,
++        text_token_ids: &[i64],
++        language_id: Option<i64>,
++        tts_pad_id: i64,
++        tts_bos_id: i64,
++        tts_eos_id: i64,
++        codec_think_id: i64,
++        codec_nothink_id: i64,
++        codec_think_bos_id: i64,
++        codec_think_eos_id: i64,
++        codec_pad_id: i64,
++        codec_bos_id: i64,
++    ) -> Tensor {
++        let role_embed = self.embed_text(&text_token_ids[..3]);
++        let special_text = self.embed_text(&[tts_pad_id, tts_bos_id, tts_eos_id]);
++        let tts_pad_embed = special_text.narrow(1, 0, 1);
++        let tts_bos_embed = special_text.narrow(1, 1, 1);
++        let tts_eos_embed = special_text.narrow(1, 2, 1);
++
++        let mut codec_prefill = match language_id {
++            Some(language_id) => vec![
++                codec_think_id,
++                codec_think_bos_id,
++                language_id,
++                codec_think_eos_id,
++            ],
++            None => vec![codec_nothink_id, codec_think_bos_id, codec_think_eos_id],
++        };
++        codec_prefill.extend_from_slice(&[codec_pad_id, codec_bos_id]);
++        let codec_prefix = self.embed_codec(&codec_prefill);
++        let prefix_without_bos_len = codec_prefix.size()[1] - 1;
++        let pad_count = prefix_without_bos_len - 1;
++        let text_for_codec = Tensor::cat(
++            &[
++                tts_pad_embed.expand(&[1, pad_count, self.hidden_size], false),
++                tts_bos_embed.shallow_clone(),
++            ],
++            1,
++        );
++        let phase2 = &text_for_codec + &codec_prefix.narrow(1, 0, prefix_without_bos_len);
++
++        let text_end = text_token_ids.len().saturating_sub(5);
++        let text_content_ids = &text_token_ids[3..text_end];
++        let text_content_embed = if text_content_ids.is_empty() {
++            Tensor::zeros(&[1, 0, self.hidden_size], DType::Float32, self.device)
++        } else {
++            self.embed_text(text_content_ids)
++        };
++        let text_with_eos = Tensor::cat(&[text_content_embed, tts_eos_embed], 1);
++        let codec_pad_repeated = self
++            .embed_codec(&[codec_pad_id])
++            .expand(&[1, text_with_eos.size()[1], self.hidden_size], false);
++        let phase3 = &text_with_eos + &codec_pad_repeated;
++        let phase4 = &tts_pad_embed + &codec_prefix.narrow(1, prefix_without_bos_len, 1);
++
++        Tensor::cat(&[role_embed, phase2, phase3, phase4], 1)
++    }
++
+     /// Build dual-stream input embeddings using a speaker embedding (x-vector)
+     /// instead of a speaker ID. Used for voice cloning with the Base model.
+     #[allow(clippy::too_many_arguments)]
+@@ -1790,7 +1854,8 @@ impl TTSInference {
+             .copied()
+             .unwrap_or(0) as i64;
+ 
+-        // Get language ID
++        // VoiceDesign supports Auto language (no language token); CustomVoice
++        // keeps the historical fallback for compatibility.
+         let language_id = self
+             .config
+             .talker_config
+@@ -1798,19 +1863,28 @@ impl TTSInference {
+             .as_ref()
+             .and_then(|map| map.get(&language.to_lowercase()))
+             .copied()
+-            .unwrap_or(0) as i64;
++            .map(|value| value as i64);
++        let voice_design = self.config.tts_model_type.as_deref() == Some("voice_design");
+ 
+-        println!(
+-            "Speaker: {} (id={}), Language: {} (id={})",
+-            speaker, speaker_id, language, language_id
+-        );
+-        if !instruct.is_empty() {
+-            println!("Instruction: \"{}\"", instruct);
++        // Preserve upstream CLI diagnostics for CustomVoice, but keep the
++        // resident VoiceDesign bridge from writing request details to stdout.
++        if !voice_design {
++            println!(
++                "Speaker: {} (id={}), Language: {} (id={})",
++                speaker,
++                speaker_id,
++                language,
++                language_id.map_or_else(|| "auto".to_string(), |value| value.to_string())
++            );
++            if !instruct.is_empty() {
++                println!("Instruction: \"{}\"", instruct);
++            }
+         }
+ 
+         // Get special token IDs
+         let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
+         let codec_think_id = self.config.talker_config.codec_think_id as i64;
++        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
+         let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
+         let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
+         let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
+@@ -1878,19 +1952,35 @@ impl TTSInference {
+ 
+         // Build dual-stream input embeddings for main text
+         println!("Building input embeddings...");
+-        let main_embeddings = self.talker.build_input_embeddings(
+-            &main_token_ids,
+-            speaker_id,
+-            language_id,
+-            tts_pad_id,
+-            tts_bos_id,
+-            tts_eos_id,
+-            codec_think_id,
+-            codec_think_bos_id,
+-            codec_think_eos_id,
+-            codec_pad_id,
+-            codec_bos_id,
+-        );
++        let main_embeddings = if voice_design {
++            self.talker.build_voice_design_input_embeddings(
++                &main_token_ids,
++                language_id,
++                tts_pad_id,
++                tts_bos_id,
++                tts_eos_id,
++                codec_think_id,
++                codec_nothink_id,
++                codec_think_bos_id,
++                codec_think_eos_id,
++                codec_pad_id,
++                codec_bos_id,
++            )
++        } else {
++            self.talker.build_input_embeddings(
++                &main_token_ids,
++                speaker_id,
++                language_id.unwrap_or(0),
++                tts_pad_id,
++                tts_bos_id,
++                tts_eos_id,
++                codec_think_id,
++                codec_think_bos_id,
++                codec_think_eos_id,
++                codec_pad_id,
++                codec_bos_id,
++            )
++        };
+ 
+         // Concatenate instruction prefix (if any) with main embeddings
+         let input_embeddings = if let Some(inst_emb) = instruct_embeddings {

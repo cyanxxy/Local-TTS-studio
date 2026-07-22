@@ -120,3 +120,35 @@ export async function ensureRevisionScopedCacheEntries(
     headers: { "content-type": "text/plain; charset=utf-8" },
   }));
 }
+
+export type PinnedAssetIntegrity = {
+  byteLength: number;
+} & (
+  | { sha256: string; gitBlobSha1?: never }
+  | { sha256?: never; gitBlobSha1: string }
+);
+
+function hex(bytes: ArrayBuffer): string {
+  return Array.from(new Uint8Array(bytes), (value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+/** Verify immutable model bytes before they enter a persistent browser cache. */
+export async function verifyPinnedAssetIntegrity(
+  buffer: ArrayBuffer,
+  expected: PinnedAssetIntegrity,
+): Promise<boolean> {
+  if (buffer.byteLength !== expected.byteLength || !globalThis.crypto?.subtle) return false;
+  if (expected.sha256) {
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+    return hex(digest) === expected.sha256;
+  }
+  if (expected.gitBlobSha1) {
+    const header = new TextEncoder().encode(`blob ${buffer.byteLength}\0`);
+    const gitBlob = new Uint8Array(header.byteLength + buffer.byteLength);
+    gitBlob.set(header);
+    gitBlob.set(new Uint8Array(buffer), header.byteLength);
+    const digest = await globalThis.crypto.subtle.digest("SHA-1", gitBlob);
+    return hex(digest) === expected.gitBlobSha1;
+  }
+  return false;
+}

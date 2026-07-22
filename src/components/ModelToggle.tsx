@@ -6,6 +6,7 @@ interface ModelToggleProps {
   onModelChange: (model: ModelType) => void;
   kokoroState: ModelState;
   supertonicState: ModelState;
+  visibleModels?: readonly ModelType[];
   unavailableModels?: Partial<Record<ModelType, string>>;
   desktopModelOptions?: ModelToggleDesktopOption[];
 }
@@ -46,13 +47,15 @@ export function ModelToggle({
   onModelChange,
   kokoroState,
   supertonicState,
+  visibleModels = ["kokoro", "supertonic"],
   unavailableModels,
   desktopModelOptions = [],
 }: ModelToggleProps) {
-  const models: { key: ModelType; label: string; state: ModelState }[] = [
+  const allModels: { key: ModelType; label: string; state: ModelState }[] = [
     { key: "kokoro",     label: MODELS.kokoro.label,     state: kokoroState },
     { key: "supertonic", label: MODELS.supertonic.label, state: supertonicState },
   ];
+  const models = allModels.filter(({ key }) => visibleModels.includes(key));
   const hasSelectedDesktopModel = desktopModelOptions.some((option) => option.selected);
 
   return (

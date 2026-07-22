@@ -11,11 +11,28 @@ export interface ReaderChapter {
   level: number;
 }
 
+/**
+ * A bounded playback/rendering window inside a real book chapter. Reader
+ * sections are derived, not persisted: chapter metadata remains the canonical
+ * table of contents while unusually large chapters stay cheap to render and
+ * synthesize.
+ */
+export interface ReaderSection {
+  id: string;
+  chapterId: string;
+  order: number;
+  chapterSectionIndex: number;
+  chapterSectionCount: number;
+  start: number;
+  end: number;
+}
+
 export interface ReaderProgress {
   positionSec: number;
   totalDurationSec: number;
   textOffset: number;
   chapterId: string | null;
+  sectionId: string | null;
   percent: number;
   updatedAt: number;
 }
@@ -25,6 +42,7 @@ export interface ReaderBookmark {
   label: string;
   textOffset: number;
   chapterId: string | null;
+  sectionId: string | null;
   positionSec: number;
   createdAt: number;
 }
@@ -35,6 +53,7 @@ export interface ReaderNote {
   quote: string;
   textOffset: number;
   chapterId: string | null;
+  sectionId: string | null;
   createdAt: number;
   updatedAt: number;
 }
@@ -85,14 +104,22 @@ export interface CachedReaderAudioChunk {
 }
 
 export interface CachedReaderAudio {
+  cacheKey: string;
   documentId: string;
+  chapterId: string;
+  sectionId: string;
   signature: string;
   chunks: CachedReaderAudioChunk[];
+  byteLength: number;
   currentTime: number;
   playbackRate: number;
   totalDuration: number;
   updatedAt: number;
 }
+
+export const READER_SECTION_TARGET_CHARS = 8_000;
+export const READER_SECTION_MIN_CHARS = 4_000;
+export const READER_SECTION_MAX_CHARS = 12_000;
 
 export interface EstimatedWordRange {
   word: string;
@@ -108,12 +135,20 @@ function createId(prefix: string): string {
   return `${prefix}-${randomId}`;
 }
 
-function normalizeText(text: string): string {
+export function normalizeReaderText(text: string): string {
   return text
     .replace(/\r\n?/g, "\n")
     .replace(/[\t ]+\n/g, "\n")
     .replace(/\n{4,}/g, "\n\n\n")
     .trim();
+}
+
+/** Normalize only newly edited section content without touching its outer book. */
+export function normalizeReaderTextFragment(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\t ]+\n/g, "\n")
+    .replace(/\n{4,}/g, "\n\n\n");
 }
 
 function cleanTitle(value: string): string {
@@ -125,7 +160,7 @@ function cleanTitle(value: string): string {
 }
 
 export function deriveDocumentTitle(text: string, fallback = "Untitled document"): string {
-  const firstMeaningfulLine = normalizeText(text)
+  const firstMeaningfulLine = normalizeReaderText(text)
     .split("\n")
     .map((line) => cleanTitle(line))
     .find((line) => line.length >= 2 && line.length <= 160);
@@ -212,38 +247,35 @@ export function normalizeReaderChapters(
   chapters: readonly Omit<ReaderChapter, "order" | "id">[] | readonly ReaderChapter[],
   documentTitle: string,
 ): ReaderChapter[] {
-  const normalizedText = normalizeText(text);
   const valid = chapters
     .map((chapter) => ({
       ...chapter,
-      start: Math.max(0, Math.min(normalizedText.length, Math.floor(chapter.start))),
-      end: Math.max(0, Math.min(normalizedText.length, Math.floor(chapter.end))),
+      start: Math.max(0, Math.min(text.length, Math.floor(chapter.start))),
+      end: Math.max(0, Math.min(text.length, Math.floor(chapter.end))),
     }))
     .filter((chapter) => chapter.end > chapter.start)
     .sort((a, b) => a.start - b.start)
     .filter((chapter, index, sorted) => index === 0 || chapter.start > sorted[index - 1].start);
 
-  if (valid.length === 0) return structureTextChapters(normalizedText, documentTitle);
+  if (valid.length === 0) return structureTextChapters(text, documentTitle);
 
   return valid.map((chapter, order) => ({
     id: "id" in chapter && chapter.id ? chapter.id : uniqueChapterId(chapter.title, order),
     title: cleanTitle(chapter.title) || `Chapter ${order + 1}`,
     order,
     start: order === 0 ? 0 : chapter.start,
-    end: valid[order + 1]?.start ?? normalizedText.length,
+    end: valid[order + 1]?.start ?? text.length,
     level: Math.max(1, Math.min(6, Math.floor(chapter.level || 1))),
   }));
 }
 
-/** Preserve imported chapter metadata while moving boundaries around a localized text edit. */
-export function rebaseReaderChapters(
-  previousText: string,
-  nextText: string,
-  chapters: readonly ReaderChapter[],
-  documentTitle: string,
-): ReaderChapter[] {
-  if (chapters.length === 0) return structureTextChapters(nextText, documentTitle);
+interface ReaderTextChangeRange {
+  prefixLength: number;
+  previousChangeEnd: number;
+  nextChangeEnd: number;
+}
 
+function getReaderTextChangeRange(previousText: string, nextText: string): ReaderTextChangeRange {
   let prefixLength = 0;
   const sharedLimit = Math.min(previousText.length, nextText.length);
   while (prefixLength < sharedLimit && previousText[prefixLength] === nextText[prefixLength]) {
@@ -258,7 +290,124 @@ export function rebaseReaderChapters(
     suffixLength += 1;
   }
 
-  const previousChangeEnd = previousText.length - suffixLength;
+  return {
+    prefixLength,
+    previousChangeEnd: previousText.length - suffixLength,
+    nextChangeEnd: nextText.length - suffixLength,
+  };
+}
+
+/** Keep whole-book annotations anchored as text before them grows or shrinks. */
+export function rebaseReaderTextOffset(previousText: string, nextText: string, offset: number): number {
+  const { prefixLength, previousChangeEnd, nextChangeEnd } = getReaderTextChangeRange(previousText, nextText);
+  const safeOffset = Math.max(0, Math.min(previousText.length, offset));
+  if (safeOffset < prefixLength) return safeOffset;
+  if (safeOffset >= previousChangeEnd) return safeOffset + nextText.length - previousText.length;
+  return prefixLength + Math.min(safeOffset - prefixLength, nextChangeEnd - prefixLength);
+}
+
+function nearestReaderSectionBoundary(text: string, start: number, end: number): number {
+  if (end - start <= READER_SECTION_MAX_CHARS) return end;
+
+  const minimum = Math.min(end, start + READER_SECTION_MIN_CHARS);
+  const preferred = Math.min(end, start + READER_SECTION_TARGET_CHARS);
+  const maximum = Math.min(end, start + READER_SECTION_MAX_CHARS);
+  const window = text.slice(minimum, maximum);
+  const candidates: number[] = [];
+
+  for (const match of window.matchAll(/\n{2,}/g)) {
+    candidates.push(minimum + (match.index ?? 0) + match[0].length);
+  }
+  for (const match of window.matchAll(/[.!?]["'’”)]*\s+/g)) {
+    candidates.push(minimum + (match.index ?? 0) + match[0].length);
+  }
+
+  if (candidates.length > 0) {
+    return candidates.reduce((best, candidate) => (
+      Math.abs(candidate - preferred) < Math.abs(best - preferred) ? candidate : best
+    ));
+  }
+
+  const whitespace = text.slice(minimum, maximum).lastIndexOf(" ");
+  return whitespace >= 0 ? minimum + whitespace + 1 : maximum;
+}
+
+/** Build deterministic, paragraph-aligned working sections for a book. */
+export function buildReaderSections(
+  text: string,
+  chapters: readonly ReaderChapter[],
+): ReaderSection[] {
+  if (!text) return [];
+  const sourceChapters = chapters.length > 0
+    ? chapters
+    : [{ id: "chapter-1", title: "Document", order: 0, start: 0, end: text.length, level: 1 }];
+  const sections: ReaderSection[] = [];
+
+  for (const chapter of sourceChapters) {
+    const chapterStart = Math.max(0, Math.min(text.length, chapter.start));
+    const chapterEnd = Math.max(chapterStart, Math.min(text.length, chapter.end));
+    if (chapterEnd <= chapterStart) continue;
+
+    const boundaries = [chapterStart];
+    let cursor = chapterStart;
+    while (cursor < chapterEnd) {
+      const next = nearestReaderSectionBoundary(text, cursor, chapterEnd);
+      const safeNext = Math.max(cursor + 1, Math.min(chapterEnd, next));
+      boundaries.push(safeNext);
+      cursor = safeNext;
+    }
+
+    const chapterSectionCount = boundaries.length - 1;
+    for (let index = 0; index < chapterSectionCount; index += 1) {
+      sections.push({
+        id: `${chapter.id}:section-${index + 1}`,
+        chapterId: chapter.id,
+        order: sections.length,
+        chapterSectionIndex: index,
+        chapterSectionCount,
+        start: boundaries[index],
+        end: boundaries[index + 1],
+      });
+    }
+  }
+
+  return sections;
+}
+
+export function readerSectionAtOffset(
+  sections: readonly ReaderSection[],
+  offset: number,
+): ReaderSection | null {
+  if (sections.length === 0) return null;
+  const clampedOffset = Math.max(0, offset);
+  return sections.find((section) => clampedOffset >= section.start && clampedOffset < section.end)
+    ?? [...sections].reverse().find((section) => clampedOffset >= section.start)
+    ?? sections[0];
+}
+
+export function getReaderSectionText(text: string, section: ReaderSection | null): string {
+  if (!section) return text;
+  return text.slice(section.start, section.end);
+}
+
+export function createReaderAudioCacheKey(documentId: string, sectionId: string): string {
+  return JSON.stringify([documentId, sectionId]);
+}
+
+export function getCachedReaderAudioByteLength(chunks: readonly CachedReaderAudioChunk[]): number {
+  return chunks.reduce((total, chunk) => total + chunk.audio.byteLength, 0);
+}
+
+/** Preserve imported chapter metadata while moving boundaries around a localized text edit. */
+export function rebaseReaderChapters(
+  previousText: string,
+  nextText: string,
+  chapters: readonly ReaderChapter[],
+  documentTitle: string,
+): ReaderChapter[] {
+  if (chapters.length === 0) return structureTextChapters(nextText, documentTitle);
+
+  const { prefixLength, previousChangeEnd } = getReaderTextChangeRange(previousText, nextText);
   const delta = nextText.length - previousText.length;
   const insertionOnly = previousChangeEnd === prefixLength;
   const moveBoundary = (offset: number): number => {
@@ -280,11 +429,12 @@ export function rebaseReaderChapters(
 
 export function createReaderDocument(input: ReaderDocumentInput): ReaderDocumentRecord {
   const now = input.now ?? Date.now();
-  const text = normalizeText(input.text);
+  const text = normalizeReaderText(input.text);
   const title = cleanTitle(input.title || "") || deriveDocumentTitle(text);
   const chapters = input.chapters
     ? normalizeReaderChapters(text, input.chapters, title)
     : structureTextChapters(text, title);
+  const sections = buildReaderSections(text, chapters);
 
   return {
     id: input.id ?? createId("document"),
@@ -302,6 +452,7 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
       totalDurationSec: 0,
       textOffset: 0,
       chapterId: chapters[0]?.id ?? null,
+      sectionId: sections[0]?.id ?? null,
       percent: 0,
       updatedAt: now,
     },
@@ -310,6 +461,40 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
     createdAt: now,
     updatedAt: now,
     lastOpenedAt: now,
+  };
+}
+
+/** Add fields introduced by newer Reader versions without rewriting book text. */
+export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): ReaderDocumentRecord {
+  const chapters = normalizeReaderChapters(document.text, document.chapters ?? [], document.title);
+  const sections = buildReaderSections(document.text, chapters);
+  const progressOffset = Math.max(0, Math.min(document.text.length, document.progress?.textOffset ?? 0));
+  const progressChapter = chapterAtOffset(chapters, progressOffset);
+  const progressSection = sections.find((section) => section.id === document.progress?.sectionId)
+    ?? readerSectionAtOffset(sections, progressOffset);
+
+  return {
+    ...document,
+    chapters,
+    progress: {
+      positionSec: Math.max(0, document.progress?.positionSec ?? 0),
+      totalDurationSec: Math.max(0, document.progress?.totalDurationSec ?? 0),
+      textOffset: progressOffset,
+      chapterId: progressChapter?.id ?? null,
+      sectionId: progressSection?.id ?? null,
+      percent: calculateReaderProgress(document.text.length, progressOffset, 0, 0),
+      updatedAt: document.progress?.updatedAt ?? document.updatedAt,
+    },
+    bookmarks: (document.bookmarks ?? []).map((bookmark) => ({
+      ...bookmark,
+      chapterId: chapterAtOffset(chapters, bookmark.textOffset)?.id ?? null,
+      sectionId: readerSectionAtOffset(sections, bookmark.textOffset)?.id ?? null,
+    })),
+    notes: (document.notes ?? []).map((note) => ({
+      ...note,
+      chapterId: chapterAtOffset(chapters, note.textOffset)?.id ?? null,
+      sectionId: readerSectionAtOffset(sections, note.textOffset)?.id ?? null,
+    })),
   };
 }
 
@@ -330,9 +515,10 @@ export function calculateReaderProgress(
   positionSec: number,
   totalDurationSec: number,
 ): number {
-  if (totalDurationSec > 0) {
-    return Math.max(0, Math.min(100, (positionSec / totalDurationSec) * 100));
-  }
+  // Audio duration is section-local and therefore cannot define whole-book
+  // progress. Keep these parameters for callers migrating from the v1 API.
+  void positionSec;
+  void totalDurationSec;
   if (textLength > 0) {
     return Math.max(0, Math.min(100, (textOffset / textLength) * 100));
   }
@@ -409,5 +595,5 @@ export function buildAudioSignature(parts: {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
-  return (hash >>> 0).toString(36);
+  return `${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
 }

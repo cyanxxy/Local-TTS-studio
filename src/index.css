@@ -577,28 +577,20 @@ input[type="range"]::-moz-range-thumb {
   50%       { background-color: color-mix(in srgb, #5AC5F5 22%, transparent); }
 }
 
-/* ── Reader section tints ─────────────────────────────────── */
-.reader-section-even {
-  background-color: transparent;
+/* ── Reader paragraphs ────────────────────────────────────
+   Section text renders as real paragraph blocks; newline glyphs are never
+   rendered, so spacing comes from margins. A block preceded by a blank line
+   in the source gets book-style paragraph separation. */
+.reader-article p {
+  margin: 0;
 }
 
-.reader-section-odd {
-  background-color: color-mix(in srgb, var(--color-accent) 4%, transparent);
-  border-radius: 4px;
+.reader-article p + p {
+  margin-top: 0.35em;
 }
 
-.reader-section-odd.reader-chunk-highlight-active,
-.reader-section-even.reader-chunk-highlight-active {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, #5AC5F5 30%, transparent) 0%,
-    color-mix(in srgb, var(--color-accent) 20%, transparent) 100%
-  );
-}
-
-.reader-section-odd.reader-word-highlight-active,
-.reader-section-even.reader-word-highlight-active {
-  background: color-mix(in srgb, var(--color-accent) 34%, #ffffff 22%);
+.reader-article p.reader-paragraph-spaced {
+  margin-top: 1.1em;
 }
 
 /* ── Reader document column ───────────────────────────────────
@@ -606,7 +598,7 @@ input[type="range"]::-moz-range-thumb {
    column inside it at any window width. Applied to both the
    overlay and the textarea so their metrics stay identical. */
 .reader-doc-pad {
-  padding-inline: max(1.25rem, calc((100% - 44rem) / 2));
+  padding-inline: max(1.25rem, calc((100% - var(--reader-column-width, 44rem)) / 2));
 }
 
 /* ── Reader focus mode — while audio plays, the page recedes and the
@@ -617,9 +609,6 @@ input[type="range"]::-moz-range-thumb {
 }
 .reader-focus span.reader-chunk-highlight-active {
   color: var(--color-text-primary);
-}
-.reader-focus .reader-section-odd:not(.reader-chunk-highlight-active) {
-  background-color: transparent;
 }
 
 /* ── Respect reduced-motion ───────────────────────────────── */

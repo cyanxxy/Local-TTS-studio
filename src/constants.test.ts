@@ -9,6 +9,10 @@ import {
   QUALITY_DEFAULT,
   MIN_TEXT_LENGTH,
   MAX_CHUNK_LENGTH,
+  SUPERTONIC3_LANGUAGES,
+  SUPERTONIC3_MODEL_ID,
+  SUPERTONIC3_MODEL_REVISION,
+  SUPERTONIC3_VOICES,
 } from "./constants";
 import type { ModelType } from "./types";
 
@@ -28,6 +32,13 @@ describe("constants", () => {
       "Female", "Female 2", "Female 3", "Female 4", "Female 5",
       "Male", "Male 2", "Male 3", "Male 4", "Male 5",
     ]);
+  });
+
+  it("pins the Electron-only Supertonic 3 model and its published presets", () => {
+    expect(SUPERTONIC3_MODEL_ID).toBe("Supertone/supertonic-3");
+    expect(SUPERTONIC3_MODEL_REVISION).toMatch(/^[a-f0-9]{40}$/);
+    expect(SUPERTONIC3_VOICES).toHaveLength(10);
+    expect(SUPERTONIC3_LANGUAGES).toHaveLength(31);
   });
 
   it("speed range is valid", () => {

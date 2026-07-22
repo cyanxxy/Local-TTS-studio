@@ -9,6 +9,7 @@ use serde::Deserialize;
 pub enum ExpectedModelType {
     CustomVoice,
     Base,
+    VoiceDesign,
 }
 
 impl ExpectedModelType {
@@ -16,6 +17,7 @@ impl ExpectedModelType {
         match self {
             Self::CustomVoice => "custom_voice",
             Self::Base => "base",
+            Self::VoiceDesign => "voice_design",
         }
     }
 }
@@ -126,6 +128,13 @@ mod tests {
         let info = validate_model_dir(dir.path(), ExpectedModelType::CustomVoice).unwrap();
         assert!(info.languages.contains("english"));
         assert!(info.speakers.contains("ryan"));
+    }
+
+    #[test]
+    fn accepts_voice_design_without_predefined_speakers() {
+        let dir = complete_model("voice_design");
+        let info = validate_model_dir(dir.path(), ExpectedModelType::VoiceDesign).unwrap();
+        assert_eq!(info.model_type, "voice_design");
     }
 
     #[test]

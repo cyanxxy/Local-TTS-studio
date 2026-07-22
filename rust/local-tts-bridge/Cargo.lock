@@ -2772,7 +2772,6 @@ dependencies = [
 [[package]]
 name = "qwen3-tts-rs"
 version = "0.2.2"
-source = "git+https://github.com/badlogic/qwen3_tts_rs.git?rev=288a716ce38a91c826dd67968c75d1dd4b0f07bc#288a716ce38a91c826dd67968c75d1dd4b0f07bc"
 dependencies = [
  "anyhow",
  "async-stream",

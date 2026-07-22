@@ -39,6 +39,21 @@ describe("ModelToggle", () => {
     expect(screen.getByText("Supertonic")).toBeInTheDocument();
   });
 
+  it("omits legacy Supertonic when Electron exposes only Kokoro", () => {
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={() => {}}
+        kokoroState={readyState}
+        supertonicState={readyState}
+        visibleModels={["kokoro"]}
+      />,
+    );
+
+    expect(screen.getByText("Kokoro")).toBeInTheDocument();
+    expect(screen.queryByText("Supertonic")).not.toBeInTheDocument();
+  });
+
   it("calls onModelChange when clicking inactive model", () => {
     const onModelChange = vi.fn();
     render(

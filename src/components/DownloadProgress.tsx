@@ -4,6 +4,7 @@ import { MODELS } from "../constants";
 interface DownloadProgressProps {
   kokoroState: ModelState;
   supertonicState: ModelState;
+  supertonic3State?: ModelState;
 }
 
 function ProgressBar({ state, name }: { state: ModelState; name: string }) {
@@ -32,10 +33,12 @@ function ProgressBar({ state, name }: { state: ModelState; name: string }) {
   );
 }
 
-export function DownloadProgress({ kokoroState, supertonicState }: DownloadProgressProps) {
+export function DownloadProgress({ kokoroState, supertonicState, supertonic3State }: DownloadProgressProps) {
   const showKokoro = kokoroState.loading || (!!kokoroState.error && !kokoroState.ready);
   const showSupertonic = supertonicState.loading || (!!supertonicState.error && !supertonicState.ready);
-  if (!showKokoro && !showSupertonic) return null;
+  const showSupertonic3 = !!supertonic3State
+    && (supertonic3State.loading || (!!supertonic3State.error && !supertonic3State.ready));
+  if (!showKokoro && !showSupertonic && !showSupertonic3) return null;
 
   return (
     <div className="px-5 py-4 rounded-[22px] glass-panel flex flex-col gap-4 animate-fade-up">
@@ -50,6 +53,9 @@ export function DownloadProgress({ kokoroState, supertonicState }: DownloadProgr
       )}
       {showSupertonic && (
         <ProgressBar name={MODELS.supertonic.label} state={supertonicState} />
+      )}
+      {showSupertonic3 && supertonic3State && (
+        <ProgressBar name="Supertonic 3" state={supertonic3State} />
       )}
     </div>
   );

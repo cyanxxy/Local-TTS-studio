@@ -18,7 +18,7 @@ Browser-native neural speech synthesis through WebGPU, plus optional Electron de
 [![Electron 42](https://img.shields.io/badge/Electron-42-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
 [![Rust](https://img.shields.io/badge/Rust-local%20bridge-B7410E?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-[Screenshots](#screenshots) · [Capabilities](#capabilities) · [Models](#models) · [Settings](#app-settings) · [Shortcuts](#keyboard-shortcuts) · [Quick Start](#quick-start) · [Docs](#documentation)
+[Downloads](#desktop-downloads) · [Screenshots](#screenshots) · [Capabilities](#capabilities) · [Models](#models) · [Settings](#app-settings) · [Shortcuts](#keyboard-shortcuts) · [Quick Start](#quick-start) · [Docs](#documentation)
 
 </div>
 
@@ -29,7 +29,7 @@ Browser-native neural speech synthesis through WebGPU, plus optional Electron de
 Open TTS is two applications built from a single codebase:
 
 - **Web** — a browser-native Studio and Reader at `/studio` and `/reader`, with every inference step running client-side in Web Workers.
-- **Desktop** — an Electron shell that serves the same Studio and Reader under `/desktop/*`, adds Qwen3-TTS as an in-place Studio/Reader model option, and exposes optional local-runtime setup pages through a Rust bridge.
+- **Desktop** — an Electron shell that serves the same Studio and Reader under `/desktop/*`, adds Supertonic 3 and Qwen3-TTS as in-place Studio/Reader model options, and exposes optional local-runtime setup pages through a Rust bridge.
 - **Shared core** — model loading, generation, playback, export, and routing live in shared React/TypeScript modules used by both shells.
 
 Browser models prefer WebGPU, fall back to WASM where supported, and cache their weights after first load for repeat use. Electron local runtimes run through `open-tts-local-bridge`, a compiled Rust binary that Electron probes and keeps warm behind a per-launch loopback capability token. This is local IPC protection—not user, account, or cloud authentication. Synthesis runs locally; first-run model/runtime downloads still contact upstream hosts for asset retrieval, and cached browser assets remain subject to browser storage policy.
@@ -81,7 +81,7 @@ Open Settings from the slider button in the top-right corner, or press <kbd>⌘<
 | **Interface** | Small, default, or large UI scaling; Inter, system, or Outfit app font. |
 | **Reading** | Literata, Inter, Outfit, or Georgia for long-form Reader documents. |
 | **Accessibility** | Reduce transparency and reduce motion independently. |
-| **Optional models** | Show or hide NeuTTS Nano and Qwen3-TTS setup pages in desktop navigation. Hiding Qwen does not remove it from Studio or Reader. |
+| **Optional models** | Show or hide NeuTTS Nano/Air and Qwen3-TTS setup pages in desktop navigation. Hiding Qwen does not remove it from Studio or Reader. |
 
 Preferences persist locally and apply across Studio, Reader, and desktop runtime pages.
 
@@ -98,6 +98,7 @@ Shortcuts work while Open TTS is the active application. Space remains normal te
 | Stop generation | <kbd>⌘</kbd> <kbd>.</kbd> | <kbd>Ctrl</kbd> <kbd>.</kbd> |
 | Play or pause | <kbd>Space</kbd> | <kbd>Space</kbd> |
 | Skip backward / forward 10 seconds | <kbd>⌥</kbd> <kbd>←</kbd> / <kbd>→</kbd> | <kbd>Alt</kbd> <kbd>←</kbd> / <kbd>→</kbd> |
+| Previous / next Reader section | <kbd>←</kbd> / <kbd>→</kbd> | <kbd>←</kbd> / <kbd>→</kbd> |
 
 ---
 
@@ -106,9 +107,10 @@ Shortcuts work while Open TTS is the active application. Space remains normal te
 | Model / runtime | Source | Routes | Web | Desktop | Notes |
 |---|---|---|:---:|:---:|---|
 | **Kokoro-82M** | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 24 kHz browser model, 28 named voices; model and voice assets are pinned to revision `1939ad2a8e416c0acfeecc08a694d14ef25f2231` |
-| **Supertonic TTS** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 44.1 kHz browser model, 10 voices |
-| **NeuTTS Nano** | Neuphonic GGUF variants via Rust `neutts` | `/desktop/neutts` | No | Yes | Rust-only local runtime; accepts a reference WAV or pre-encoded `.npy` codes plus its matching transcript |
-| **Qwen3-TTS Native** | Pinned `qwen3-tts-rs` inside the Rust bridge: MLX on Apple Silicon, LibTorch CUDA/CPU on Windows x64 | `/desktop/studio`, `/desktop/reader`, `/desktop/qwen3` | No | Yes | One resident inference process; CustomVoice and Base voice cloning share revision-pinned downloads and one renderer settings state. Windows remains experimental pending native release validation |
+| **Supertonic TTS 2** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` | Yes | No | Legacy 44.1 kHz web/iOS model; replaced by Supertonic 3 in Electron |
+| **Supertonic 3** | Revision-pinned `Supertone/supertonic-3` ONNX assets | `/desktop/studio`, `/desktop/reader` | No | Yes | Electron-only renderer worker; 99M parameters, 10 voices, 31 languages, expression tags, WebGPU/WASM |
+| **NeuTTS Nano / Air** | Neuphonic GGUF variants via Rust `neutts` | `/desktop/neutts` | No | Yes | Nano Q4 for English, German, French, and Spanish, plus higher-quality Air 0.7B Q4/Q8 for English; accepts a reference WAV or pre-encoded `.npy` codes plus its matching transcript |
+| **Qwen3-TTS Native** | Pinned `qwen3-tts-rs` inside the Rust bridge: MLX on Apple Silicon and LibTorch on Windows x64 | `/desktop/studio`, `/desktop/reader`, `/desktop/qwen3` | No | Yes | One resident inference process; CustomVoice, Base voice cloning, and VoiceDesign 1.7B share revision-pinned downloads and one renderer settings state. The GitHub Windows installer is CPU-only and remains experimental; custom CUDA builds are supported but not distributed there |
 
 > The deployed web app exposes browser Studio and Reader only. Desktop routes live under `/desktop/*` and are opened by Electron.
 
@@ -121,17 +123,17 @@ Kokoro's 28 voice IDs are `af_heart`, `af_alloy`, `af_aoede`, `af_bella`, `af_je
 | Capability | Details |
 |---|---|
 | **Local & private** | Built-in synthesis paths run on-device — no hosted inference server, account, API key, or usage cap. First-run model/runtime downloads contact upstream hosts for asset retrieval. |
-| **Two browser models** | Kokoro-82M and Supertonic, accelerated by WebGPU with an automatic WASM fallback. |
-| **Studio & Reader** | A focused synthesis workspace plus a long-form reading mode with a document library, sentence-aware chunking, progress, bookmarks, and notes. |
+| **Web models** | Web browsers expose Kokoro-82M and Supertonic 2 with WebGPU/WASM; Electron replaces Supertonic 2 with Supertonic 3. |
+| **Studio & Reader** | A focused synthesis workspace plus a long-book Reader with a searchable table of contents, full-text search, paragraph-block rendering, bounded section rendering/generation, stable whole-book progress, arrow-key section paging, double-click-to-listen seeking, bookmarks with text previews, quoted notes, and automatic continuation (on by default). |
 | **Studio-grade export** | WAV (32-bit float, 24-bit, 16-bit PCM) and MP3, with optional loudness normalization, sample-peak limiting, and resampling. |
 | **Estimated captions** | Export estimated SRT, VTT, or JSON timings alongside the audio. |
 | **Creator presets** | One-click TikTok Voiceover, YouTube Shorts, and YouTube Long-form profiles. |
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
-| **Appearance & reading fonts** | System/light/dark themes, four accents, interface scaling, three interface fonts, and four dedicated Reader fonts. |
+| **Appearance & reading fonts** | System/light/dark themes, four accents, interface scaling, three interface fonts, four Reader fonts, and persistent Reader text size, line spacing, column width, and focus controls. |
 | **Desktop keyboard workflow** | Cross-platform navigation, generation, stop, playback, and seeking shortcuts, documented inside Settings. |
 | **Accessible motion and material** | Independent reduced-motion and reduced-transparency preferences with responsive controls and keyboard focus handling. |
 | **Offline reuse** | Model weights cache in-browser (IndexedDB + Cache API) for repeat use, subject to browser quota, persistence, and eviction behavior. |
-| **Desktop runtimes** | Electron adds Qwen3-TTS to Studio/Reader and exposes NeuTTS Nano and Qwen3 setup pages through a resident Rust WebSocket bridge. |
+| **Desktop runtimes** | Electron adds Supertonic 3 and Qwen3-TTS to Studio/Reader and exposes NeuTTS Nano/Air and Qwen3 setup pages through a resident Rust WebSocket bridge. |
 | **Shared Qwen voices** | Electron exposes one Qwen profile, speaker, language, instruction, and sampling state across Studio, Reader, and the dedicated setup page. The active speaker is visible and selectable inline. |
 | **Guided Qwen setup** | A prominent download/repair action, total progress, current-file details, actionable errors, validation, and an optional existing-folder path. |
 | **Document import** | Bring EPUB, PDF, text, Office, image, HTML, and web-article content into Reader; the desktop shell also exposes file import to Studio. Extraction is local after any source file or page has downloaded. See [Document Import](#document-import). |
@@ -154,11 +156,13 @@ The desktop app adds an **Import** button to Studio and Reader. [LiteParse](http
 
 Guard rails keep imports predictable: imported files have a 100 MB cap, extracted text has a 1.5 million character cap, and LiteParse work has an 800-page cap and five-minute deadline. EPUB extraction separately limits archive expansion and entry count. The first OCR use downloads Tesseract language data once; subsequent OCR can run offline while that data remains cached. LibreOffice, ImageMagick, and Ghostscript are optional local prerequisites for the formats noted above.
 
+Reader keeps the full imported book in its local library but works on one bounded, sentence-aligned reading section at a time. Chapters remain the visible table of contents; the smaller sections keep rendering, synthesis, seeking, and per-section audio caching responsive across long books. Book-relative progress, bookmarks, and selected-text notes survive section changes, while compatible cached audio resumes locally and can continue into the next section automatically.
+
 ---
 
 ## Rust Local Bridge
 
-The desktop-only NeuTTS Nano and Qwen3-TTS integrations run through a compiled Rust binary at `rust/local-tts-bridge`. Electron launches `open-tts-local-bridge` directly; there is no Python runtime, adapter script, interpreter discovery, child Qwen server, or managed virtual environment.
+The desktop-only NeuTTS Nano/Air and Qwen3-TTS integrations run through a compiled Rust binary at `rust/local-tts-bridge`. Electron launches `open-tts-local-bridge` directly; there is no Python runtime, adapter script, interpreter discovery, child Qwen server, or managed virtual environment.
 
 The bridge has two actions:
 
@@ -167,7 +171,7 @@ The bridge has two actions:
 
 For generation, Electron starts the bridge with `--host 127.0.0.1 --port 0` and passes a random, memory-only per-process capability in `OPEN_TTS_WS_AUTH_TOKEN`, keeping it out of the command line. Rust does not accept a token CLI flag. The capability prevents unrelated browser pages or local clients from controlling a predictable localhost service; it is regenerated for each bridge launch and is never an account credential. Rust rejects any host that resolves outside loopback, verifies the bound listener, prints `__PORT__<actual-port>` on stdout, and accepts WebSocket traffic only on `/<token>` through the maintained `tungstenite` protocol stack. Metadata travels as JSON frames, while audio streams as raw Float32 binary chunks. The renderer schedules those chunks with Web Audio and owns WAV normalization/export.
 
-Qwen inference is compiled into that same process. Each target package contains its supported tensor provider, while the bridge resolves the actual device at runtime: Apple Silicon asks MLX whether Metal is available and otherwise uses MLX CPU; Windows x64 asks LibTorch whether CUDA is available and otherwise uses LibTorch CPU. Probe, warm-up, generation results, and the UI report the resolved provider/device and whether it is accelerated. Requests expose only model, voice/language, reference data, and supported sampling controls.
+Qwen inference is compiled into that same process. Each target package contains its supported tensor provider, while the bridge resolves the actual device at runtime: Apple Silicon asks MLX whether Metal is available and otherwise uses MLX CPU; Windows builds linked to CUDA-enabled LibTorch use CUDA when available and otherwise use LibTorch CPU. The GitHub Windows installer deliberately carries the smaller CPU-only LibTorch distribution so it fits GitHub Release limits. Probe, warm-up, generation results, and the UI report the resolved provider/device and whether it is accelerated. Requests expose only model, voice/language, reference data, and supported sampling controls.
 
 The resident host loads a selected model once and reuses it across requests. CustomVoice emits completed text units immediately as raw Float32 WebSocket chunks; Base voice cloning uploads its WAV/transcript once per worker session and reuses prepared reference features by a short-lived job key. Text units are split by Unicode scalar count—not byte offsets—so dense CJK, emoji, combining marks, and long unbroken text cannot be sliced through UTF-8 boundaries.
 
@@ -177,7 +181,7 @@ Model downloads are immutable: each approved profile names an exact Hugging Face
 
 Existing installations are migrated without another multi-gigabyte download: when Open TTS finds a structurally valid pre-1.1 Qwen cache directory, it atomically adopts it into the revision-scoped layout. Studio, Reader, and the Qwen setup page then use the same model path and the same in-memory voice settings. Switching the exact speaker does not reload the model host; switching to an undownloaded model profile requires downloading or selecting that profile first.
 
-`npm run build:rust` copies two narrowly scoped executables into `dist-rust/`: the resident `open-tts-local-bridge` and `open-tts-hf-xet-downloader`. The Xet helper is short-lived and is launched only when an approved, revision-pinned Qwen safetensors download needs Hugging Face's Xet transport; it is never an inference backend. Packaging also includes provider resources and native libraries. On Apple Silicon this includes `mlx.metallib`; on Windows x64 it currently includes the LibTorch 2.7.0 distribution DLL set.
+`npm run build:rust` copies two narrowly scoped executables into `dist-rust/`: the resident `open-tts-local-bridge` and `open-tts-hf-xet-downloader`. The Xet helper is short-lived and is launched only when an approved, revision-pinned Qwen safetensors download needs Hugging Face's Xet transport; it is never an inference backend. Packaging also includes provider resources and native libraries. On Apple Silicon this includes `mlx.metallib`; on Windows x64 it includes the selected LibTorch 2.7.0 distribution DLL set. The release workflow selects the CPU distribution.
 
 ---
 
@@ -199,6 +203,17 @@ The release gate is `npm run lint`, `npm run test`, and `npm run build`. Desktop
 
 ---
 
+## Desktop Downloads
+
+Installers are attached to the [latest GitHub Release](https://github.com/cyanxxy/Local-TTS-studio/releases/latest):
+
+- **macOS 26+ on Apple Silicon:** notarized DMG, plus a ZIP build.
+- **Windows 10/11 x64:** signed NSIS installer with the CPU-only LibTorch runtime. Windows support remains experimental.
+
+Model weights are not bundled; the app downloads the selected model on first use and verifies its pinned revision. Intel Macs, Windows on Arm, and Linux are not packaged. Release maintainers can find the signing-secret and tagging procedure in [Desktop release process](./docs/releasing.md).
+
+---
+
 ## Quick Start
 
 ### Requirements
@@ -216,7 +231,7 @@ npm run dev:desktop    # Vite + Electron desktop app
 ```
 
 The web app is served at [`http://localhost:5173/studio`](http://localhost:5173/studio).
-The Electron app opens the desktop shell under `/desktop/*`; Qwen3 appears as an Electron-only model option in Studio and Reader after the Rust bridge probes successfully. Selecting Qwen exposes shared speaker and language controls inline; **Model setup** opens the guided profile download, repair, and voice-clone configuration page.
+The Electron app opens the desktop shell under `/desktop/*`. Supertonic 3 appears only in this desktop shell and downloads its pinned ONNX assets on first selection. Qwen3 appears after the Rust bridge probes successfully; selecting it exposes shared voice controls inline, while **Model setup** opens guided download, repair, voice-clone, and VoiceDesign configuration.
 
 Use the top-right Settings button to choose the theme, accent, interface size, interface font, Reader font, visual effects, and optional setup pages. The dedicated NeuTTS and Qwen navigation items are hidden by default; enable them under **Settings → Optional models** when you want to configure those runtimes. Qwen remains selectable inside Studio and Reader either way.
 
@@ -231,6 +246,8 @@ Use the top-right Settings button to choose the theme, accent, interface size, i
 | `npm run build:desktop` · `npm run build:electron` | Web build + Rust bridge + compile Electron main process |
 | `npm run build:electron:main` | Build Rust bridge and compile Electron main/preload code only |
 | `npm run dist` | Package the desktop app into `release/` |
+| `npm run dist:mac` | Package the Apple Silicon macOS DMG and ZIP |
+| `npm run dist:win` | Package the Windows x64 NSIS installer (`LIBTORCH` required) |
 | `npm run preview` | Preview the production web build locally |
 | `npm run lint` | ESLint |
 | `npm run test` | Vitest + Rust bridge unit tests |
@@ -238,7 +255,7 @@ Use the top-right Settings button to choose the theme, accent, interface size, i
 | `npm run test:rust` | Rust bridge unit tests |
 | `npm run eval:inference` | Reproducible inference-speed benchmark (see [docs](./docs/performance.md)) |
 
-Packaged desktop builds bundle the Electron shell, the Rust local bridge, and its scoped Xet download helper. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the build makes both Rust executables self-contained — their native libraries are bundled into `dist-rust/` and relinked to `@rpath` — so they run without Homebrew; distributing the app still requires a Developer ID signature and notarization. There is no adapter script, interpreter discovery, or managed virtual environment setup; see [local runtime setup](./docs/local-runtimes.md).
+Packaged desktop builds bundle the Electron shell, the Rust local bridge, and its scoped Xet download helper. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the build makes both Rust executables self-contained — their native libraries are bundled into `dist-rust/` and relinked to `@rpath` — so they run without Homebrew. Tagged releases require a Developer ID signature and notarization on macOS and Authenticode signing on Windows. There is no adapter script, interpreter discovery, or managed virtual environment setup; see [local runtime setup](./docs/local-runtimes.md).
 
 ---
 
@@ -249,7 +266,7 @@ Packaged desktop builds bundle the Electron shell, the Rust local bridge, and it
 - iPhone and iPad browsers expose Supertonic only — Kokoro is intentionally disabled on iOS pending further validation.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.
 - Electron local runtimes generate through `OPEN_TTS_WS_AUTH_TOKEN=<token> open-tts-local-bridge --action serve-ws --port 0`; Rust announces the bound loopback port, metadata travels over authenticated WebSocket JSON, and audio streams as binary Float32 chunks. Electron creates and supplies the secret automatically.
-- Qwen3 model weights are downloaded explicitly from its setup page and cached by immutable profile revision. The app reports overall/file progress, verifies the result, offers repair/re-download, and keeps manual folder selection behind an optional disclosure. CustomVoice needs no reference clip; Base voice cloning requires a WAV and its exact transcript. No extra Qwen inference executable or Python environment is required. NeuTTS accepts a WAV reference or pre-encoded `.npy` codes plus the matching transcript.
+- Qwen3 model weights are downloaded explicitly from its setup page and cached by immutable profile revision. The app reports overall/file progress, verifies the result, offers repair/re-download, and keeps manual folder selection behind an optional disclosure. CustomVoice needs no reference clip; Base voice cloning requires a WAV and its exact transcript; VoiceDesign uses a natural-language voice description. No extra Qwen inference executable or Python environment is required. NeuTTS accepts a WAV reference or pre-encoded `.npy` codes plus the matching transcript.
 - Optional-model checkboxes control only dedicated navigation/setup pages. Qwen3 remains available as an inline Studio and Reader model when its setup tab is hidden.
 - App preferences and Reader library data are local to the current browser/Electron profile.
 - `vercel.json` provides SPA rewrites plus COOP/COEP headers, which keep the WASM fallback cross-origin isolated (and multi-threaded) for the browser build.
@@ -269,7 +286,7 @@ src/
 ├─ components/   Studio, Reader, player, settings, local-runtime UI
 ├─ hooks/        Model loading, playback, generation, routing, creator state
 ├─ lib/          Audio, chunking, captions, cache, browser/runtime helpers
-├─ workers/      Kokoro + Supertonic inference workers and the audio export worker
+├─ workers/      Kokoro, Supertonic 2/3 inference workers, and the audio export worker
 └─ types.ts      Worker protocol and shared UI types
 ```
 
@@ -279,6 +296,7 @@ src/
 
 - [Architecture](./docs/architecture.md) — source map, worker protocol, and audio path
 - [Desktop local runtimes](./docs/local-runtimes.md) — Rust bridge protocol, setup, and troubleshooting
+- [Desktop release process](./docs/releasing.md) — signed macOS/Windows packaging and tagging
 - [Performance benchmarks](./docs/performance.md) — reproducible inference-speed eval
 - [Design system](./docs/design-system.md) — tokens, typography, and color
 

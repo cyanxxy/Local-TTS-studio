@@ -1,11 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   buildAudioSignature,
+  buildReaderSections,
   calculateReaderProgress,
   chapterAtOffset,
   createReaderDocument,
   estimateWordRanges,
+  normalizeReaderDocumentRecord,
+  normalizeReaderTextFragment,
   rebaseReaderChapters,
+  rebaseReaderTextOffset,
+  READER_SECTION_MAX_CHARS,
+  readerSectionAtOffset,
   structureTextChapters,
 } from "./readerDocument";
 
@@ -53,13 +59,76 @@ describe("readerDocument", () => {
     expect(words.at(-1)?.endSec).toBe(9);
   });
 
-  it("calculates audio progress first and text progress as a fallback", () => {
-    expect(calculateReaderProgress(1000, 200, 30, 120)).toBe(25);
+  it("keeps book progress stable when only one section has generated audio", () => {
+    expect(calculateReaderProgress(1000, 200, 30, 120)).toBe(20);
     expect(calculateReaderProgress(1000, 200, 0, 0)).toBe(20);
+  });
+
+  it("derives bounded reading sections without changing the real table of contents", () => {
+    const paragraphs = Array.from({ length: 120 }, (_, index) => (
+      `Paragraph ${index + 1}. ${"A long sentence for section planning. ".repeat(8)}`
+    ));
+    const text = `# One very long chapter\n\n${paragraphs.join("\n\n")}`;
+    const document = createReaderDocument({ title: "Long book", text });
+    const sections = buildReaderSections(document.text, document.chapters);
+
+    expect(document.chapters).toHaveLength(1);
+    expect(sections.length).toBeGreaterThan(1);
+    expect(sections.every((section) => section.end - section.start <= READER_SECTION_MAX_CHARS)).toBe(true);
+    expect(sections.map((section) => document.text.slice(section.start, section.end)).join(""))
+      .toBe(document.text);
+    expect(readerSectionAtOffset(sections, sections[1].start)?.id).toBe(sections[1].id);
+  });
+
+  it("migrates legacy progress and annotations onto derived sections", () => {
+    const document = createReaderDocument({
+      id: "legacy-book",
+      text: "A long legacy paragraph. ".repeat(900),
+      now: 100,
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const textOffset = sections[1].start + 25;
+    const legacy = {
+      ...document,
+      progress: {
+        positionSec: 12,
+        totalDurationSec: 40,
+        textOffset,
+        chapterId: document.chapters[0].id,
+        percent: 99,
+        updatedAt: 200,
+      },
+      bookmarks: [{
+        id: "bookmark-legacy",
+        label: "Resume here",
+        textOffset,
+        chapterId: document.chapters[0].id,
+        positionSec: 12,
+        createdAt: 200,
+      }],
+      notes: [{
+        id: "note-legacy",
+        text: "Remember this",
+        quote: "legacy paragraph",
+        textOffset,
+        chapterId: document.chapters[0].id,
+        createdAt: 200,
+        updatedAt: 200,
+      }],
+    } as unknown as typeof document;
+
+    const migrated = normalizeReaderDocumentRecord(legacy);
+
+    expect(migrated.text).toBe(document.text);
+    expect(migrated.progress.sectionId).toBe(sections[1].id);
+    expect(migrated.progress.percent).toBeCloseTo((textOffset / document.text.length) * 100);
+    expect(migrated.bookmarks[0].sectionId).toBe(sections[1].id);
+    expect(migrated.notes[0].sectionId).toBe(sections[1].id);
   });
 
   it("changes audio signatures when generation inputs change", () => {
     const base = { text: "hello", model: "kokoro", voice: "heart", quality: 5 };
+    expect(buildAudioSignature(base)).toMatch(/^5-/);
     expect(buildAudioSignature(base)).toBe(buildAudioSignature(base));
     expect(buildAudioSignature(base)).not.toBe(buildAudioSignature({ ...base, voice: "bella" }));
     expect(buildAudioSignature(base)).not.toBe(buildAudioSignature({ ...base, text: "hello!" }));
@@ -93,5 +162,19 @@ describe("readerDocument", () => {
       { id: "conclusion", title: "Conclusion", level: 2 },
     ]);
     expect(next.slice(rebased[1].start)).toContain("Conclusion body.");
+  });
+
+  it("normalizes an edited fragment without trimming its section boundaries", () => {
+    expect(normalizeReaderTextFragment(" leading  \r\n\r\n\r\n\r\ntrailing "))
+      .toBe(" leading\n\n\ntrailing ");
+  });
+
+  it("rebases absolute annotation offsets around a localized edit", () => {
+    const previous = "before EDIT after";
+    const next = "before A MUCH LONGER EDIT after";
+
+    expect(rebaseReaderTextOffset(previous, next, 2)).toBe(2);
+    expect(rebaseReaderTextOffset(previous, next, previous.indexOf("after")))
+      .toBe(next.indexOf("after"));
   });
 });
