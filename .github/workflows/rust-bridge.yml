@@ -42,7 +42,7 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
