@@ -1,0 +1,68 @@
+name: Rust bridge
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "rust/**"
+      - "scripts/*rust*"
+      - ".github/workflows/rust-bridge.yml"
+  pull_request:
+    paths:
+      - "rust/**"
+      - "scripts/*rust*"
+      - ".github/workflows/rust-bridge.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-bridge-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  format:
+    name: Check Rust formatting
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup component add rustfmt
+      # The vendored qwen3-tts-rs tree is digest-pinned to its upstream
+      # snapshot and is intentionally not held to local formatting.
+      - run: cargo fmt --manifest-path rust/local-tts-bridge/Cargo.toml --check
+
+  build-and-test:
+    name: Build and test bridge (macOS arm64)
+    runs-on: macos-26
+    timeout-minutes: 90
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "26.0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install native build tools
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          brew install cmake libomp openssl@3 pkg-config automake autoconf libtool
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust/local-tts-bridge
+          env-vars: CARGO_TARGET_DIR MACOSX_DEPLOYMENT_TARGET
+      - run: npm ci
+      - name: Build bridge and run Rust checks
+        shell: bash
+        run: |
+          OPENSSL_DIR="$(brew --prefix openssl@3)"
+          export OPENSSL_DIR
+          export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+          npm run build:rust
+          npm run test:rust -- --release
+      - name: Probe packaged bridge
+        run: ./dist-rust/open-tts-local-bridge --action probe --model qwen3 --cache-dir "$RUNNER_TEMP/open-tts-probe"

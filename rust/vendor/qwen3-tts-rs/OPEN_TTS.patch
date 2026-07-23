@@ -216,3 +216,14 @@ index e908a86..7028c70 100644
  
          // Concatenate instruction prefix (if any) with main embeddings
          let input_embeddings = if let Some(inst_emb) = instruct_embeddings {
+diff --git a/src/model.rs b/src/model.rs
+index a6cd70d..e1b722e 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -211,5 +211,5 @@ impl Qwen3TTSModel {
+         // Load generation config if available
+-        let gen_config_path = Path::new(&model_path).join("generate_config.json");
++        let gen_config_path = Path::new(&model_path).join("generation_config.json");
+         let generate_defaults = if gen_config_path.exists() {
+             GenerationConfig::from_file(&gen_config_path)?
+         } else {

@@ -201,6 +201,8 @@ Qwen performance must be measured separately for each native provider and model 
 
 The release gate is `npm run lint`, `npm run test`, and `npm run build`. Desktop packaging additionally runs the pinned native Qwen build and provider-resource checks through `npm run build:desktop` or `npm run dist`.
 
+Continuous integration runs on pushes to `main` and on pull requests: `.github/workflows/ci.yml` covers linting, the Electron type check, the Vitest suite (excluding the native-bridge integration test, which needs a Rust build), and the web build, while `.github/workflows/rust-bridge.yml` builds, tests, and probes the native bridge on macOS arm64 whenever Rust sources or the bridge build scripts change. Tag pushes are verified by the release workflow itself.
+
 ---
 
 ## Desktop Downloads

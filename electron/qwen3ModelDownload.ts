@@ -4,7 +4,7 @@ import { promises as fs } from "fs";
 import type { IncomingMessage } from "http";
 import { request as httpsRequest } from "https";
 import path from "path";
-import type { Qwen3Profile } from "./qwen3Profiles";
+import { QWEN3_OPTIONAL_MODEL_FILES, type Qwen3Profile } from "./qwen3Profiles";
 
 export const QWEN3_MODEL_MANIFEST = "open-tts-model.json";
 export const IDLE_DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -228,7 +228,18 @@ function encodedRepo(repo: string): string {
   return repo.split("/").map(encodeURIComponent).join("/");
 }
 
-async function getRequiredHubFiles(
+function toHubFile(filePath: string, sibling: HuggingFaceSibling): HubFile {
+  const lfsSize = sibling.lfs?.size;
+  const size = typeof lfsSize === "number" ? lfsSize : sibling.size;
+  const oid = sibling.lfs?.oid;
+  return {
+    path: filePath,
+    ...(typeof size === "number" && Number.isSafeInteger(size) && size >= 0 ? { sizeBytes: size } : {}),
+    ...(typeof oid === "string" && /^[a-f0-9]{64}$/i.test(oid) ? { sha256: oid.toLowerCase() } : {}),
+  };
+}
+
+async function getHubFiles(
   profile: Qwen3Profile,
   request: UrlRequest,
   signal?: AbortSignal,
@@ -240,18 +251,17 @@ async function getRequiredHubFiles(
   for (const sibling of info.siblings) {
     if (isSafeHuggingFaceFileName(sibling.rfilename)) siblings.set(sibling.rfilename, sibling);
   }
-  return profile.requiredFiles.map((requiredPath) => {
+  const files = profile.requiredFiles.map((requiredPath) => {
     const sibling = siblings.get(requiredPath);
     if (!sibling) throw new Error(`Pinned Qwen3 revision is missing required file: ${requiredPath}`);
-    const lfsSize = sibling.lfs?.size;
-    const size = typeof lfsSize === "number" ? lfsSize : sibling.size;
-    const oid = sibling.lfs?.oid;
-    return {
-      path: requiredPath,
-      ...(typeof size === "number" && Number.isSafeInteger(size) && size >= 0 ? { sizeBytes: size } : {}),
-      ...(typeof oid === "string" && /^[a-f0-9]{64}$/i.test(oid) ? { sha256: oid.toLowerCase() } : {}),
-    };
+    return toHubFile(requiredPath, sibling);
   });
+  for (const optionalPath of QWEN3_OPTIONAL_MODEL_FILES) {
+    if (profile.requiredFiles.includes(optionalPath)) continue;
+    const sibling = siblings.get(optionalPath);
+    if (sibling) files.push(toHubFile(optionalPath, sibling));
+  }
+  return files;
 }
 
 async function hashFile(filePath: string, signal?: AbortSignal): Promise<{ sizeBytes: number; sha256: string }> {
@@ -400,7 +410,12 @@ export async function isStructurallyValidQwen3ModelDir(
       if (!stat.isFile() || stat.size === 0) return false;
     }
     const config = JSON.parse(await fs.readFile(path.join(modelDir, "config.json"), "utf-8")) as { tts_model_type?: unknown };
-    return config.tts_model_type === (profile.mode === "voiceClone" ? "base" : "custom_voice");
+    const expectedModelType = {
+      customVoice: "custom_voice",
+      voiceClone: "base",
+      voiceDesign: "voice_design",
+    }[profile.mode];
+    return config.tts_model_type === expectedModelType;
   } catch {
     return false;
   }
@@ -436,6 +451,21 @@ export async function inspectQwen3ModelDir(
       }
     } catch {
       return { readiness: "structural", reason: `Could not verify ${requiredPath}.` };
+    }
+  }
+  for (const optionalPath of QWEN3_OPTIONAL_MODEL_FILES) {
+    throwIfDownloadCancelled(signal);
+    let actual: { sizeBytes: number; sha256: string };
+    try {
+      actual = await hashFile(resolveDownloadDestination(modelDir, optionalPath), signal);
+    } catch (error) {
+      throwIfDownloadCancelled(signal);
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      return { readiness: "structural", reason: `Could not verify ${optionalPath}.` };
+    }
+    const expected = byPath.get(optionalPath);
+    if (!expected || actual.sizeBytes !== expected.sizeBytes || actual.sha256 !== expected.sha256) {
+      return { readiness: "structural", reason: `${optionalPath} is present but does not match the verified manifest.` };
     }
   }
   return { readiness: "verified" };
@@ -478,7 +508,7 @@ export async function downloadQwen3Model(
 ): Promise<Qwen3ModelDownloadResult> {
   throwIfDownloadCancelled(signal);
   await fs.mkdir(modelDir, { recursive: true });
-  const hubFiles = await getRequiredHubFiles(profile, request, signal);
+  const hubFiles = await getHubFiles(profile, request, signal);
   const manifestFiles: Qwen3ModelManifestFile[] = [];
   let downloadedFiles = 0;
   let skippedFiles = 0;
@@ -553,6 +583,12 @@ export async function downloadQwen3Model(
     manifestFiles.push({ path: file.path, sizeBytes: result.sizeBytes, sha256: result.sha256 });
   }
   throwIfDownloadCancelled(signal);
+  // A leftover optional file from an older revision or a manual copy is not in
+  // the new manifest and would demote the directory during final verification.
+  for (const optionalPath of QWEN3_OPTIONAL_MODEL_FILES) {
+    if (hubFiles.some((file) => file.path === optionalPath)) continue;
+    await fs.rm(resolveDownloadDestination(modelDir, optionalPath), { force: true });
+  }
   await writeManifest(modelDir, {
     schemaVersion: 1,
     repo: profile.repo,

@@ -18,6 +18,7 @@ import {
   inspectQwen3ModelDir,
   isAllowedHuggingFaceDownloadHost,
   isSafeHuggingFaceFileName,
+  isStructurallyValidQwen3ModelDir,
   QWEN3_MODEL_MANIFEST,
   requestUrl,
   resolveDownloadDestination,
@@ -60,11 +61,11 @@ function fakeResponse(
   return response;
 }
 
-function fakeHubRequest(seen: string[] = []): UrlRequest {
+function fakeHubRequest(seen: string[] = [], files: Map<string, Buffer> = FILES): UrlRequest {
   return (url) => {
     seen.push(url);
     if (url.includes("/api/models/")) {
-      const siblings = [...FILES].map(([rfilename, body]) => ({
+      const siblings = [...files].map(([rfilename, body]) => ({
         rfilename,
         size: body.byteLength,
         lfs: { size: body.byteLength, oid: digest(body) },
@@ -73,7 +74,7 @@ function fakeHubRequest(seen: string[] = []): UrlRequest {
     }
     const marker = `/resolve/${REVISION}/`;
     const fileName = decodeURIComponent(url.split(marker)[1]);
-    const body = FILES.get(fileName);
+    const body = files.get(fileName);
     if (!body) return Promise.resolve(fakeResponse("missing", { statusCode: 404 }));
     return Promise.resolve(fakeResponse(body));
   };
@@ -158,7 +159,7 @@ describe("downloadQwen3Model", () => {
     expect(fs.existsSync(revisionDir)).toBe(false);
   });
 
-  it("downloads only required files at the exact revision and writes a verified manifest last", async () => {
+  it("downloads the pinned revision's files and writes a verified manifest last", async () => {
     const modelDir = makeTempDir();
     const seen: string[] = [];
     const progress: Qwen3ModelDownloadProgress[] = [];
@@ -218,6 +219,62 @@ describe("downloadQwen3Model", () => {
     await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
     fs.writeFileSync(path.join(modelDir, "model.safetensors"), "tampered");
     await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toMatchObject({ readiness: "structural" });
+  });
+
+  it("accepts voice_design model directories for voiceDesign profiles", async () => {
+    const modelDir = makeTempDir();
+    fs.writeFileSync(path.join(modelDir, "config.json"), '{"tts_model_type":"voice_design"}');
+    fs.writeFileSync(path.join(modelDir, "model.safetensors"), "weights");
+
+    await expect(isStructurallyValidQwen3ModelDir(modelDir, {
+      ...PROFILE,
+      mode: "voiceDesign",
+    })).resolves.toBe(true);
+  });
+
+  it("downloads generation_config.json when the pinned revision ships it", async () => {
+    const modelDir = makeTempDir();
+    const generationConfig = Buffer.from('{"top_p":0.9}');
+    const files = new Map([...FILES, ["generation_config.json", generationConfig]]);
+
+    const result = await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest([], files));
+    expect(result).toMatchObject({ downloadedFiles: 3, readiness: "verified" });
+    expect(fs.readFileSync(path.join(modelDir, "generation_config.json"))).toEqual(generationConfig);
+
+    const manifest = JSON.parse(fs.readFileSync(path.join(modelDir, QWEN3_MODEL_MANIFEST), "utf-8"));
+    expect(manifest.files).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: "generation_config.json", sha256: digest(generationConfig) }),
+    ]));
+
+    fs.writeFileSync(path.join(modelDir, "generation_config.json"), '{"top_p":1}');
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toMatchObject({ readiness: "structural" });
+  });
+
+  it("stays verified when the pinned revision has no generation_config.json", async () => {
+    const modelDir = makeTempDir();
+    const result = await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    expect(result).toMatchObject({ downloadedFiles: 2, readiness: "verified" });
+    expect(fs.existsSync(path.join(modelDir, "generation_config.json"))).toBe(false);
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
+  });
+
+  it("removes a leftover generation_config.json the pinned revision does not ship", async () => {
+    const modelDir = makeTempDir();
+    fs.writeFileSync(path.join(modelDir, "generation_config.json"), '{"stale":true}');
+
+    const result = await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    expect(result).toMatchObject({ readiness: "verified" });
+    expect(fs.existsSync(path.join(modelDir, "generation_config.json"))).toBe(false);
+  });
+
+  it("rejects a custom_voice directory for a voiceDesign profile", async () => {
+    const modelDir = makeTempDir();
+    for (const [fileName, body] of FILES) fs.writeFileSync(path.join(modelDir, fileName), body);
+
+    await expect(isStructurallyValidQwen3ModelDir(modelDir, {
+      ...PROFILE,
+      mode: "voiceDesign",
+    })).resolves.toBe(false);
   });
 
   it("rejects a wrong model type and a stale manifest", async () => {

@@ -1,7 +1,7 @@
 {
   "name": "offline-voice-studio",
   "private": true,
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "A local-first text-to-speech studio for the web and desktop.",
   "author": "cyanxxy",
   "license": "Apache-2.0",

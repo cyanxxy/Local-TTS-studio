@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+  # The vendored qwen3-tts-rs snapshot is updated manually (see
+  # rust/vendor/qwen3-tts-rs/OPEN_TTS_VENDOR.md), so only the bridge crate
+  # gets automated cargo updates.
+  - package-ecosystem: cargo
+    directory: /rust/local-tts-bridge
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

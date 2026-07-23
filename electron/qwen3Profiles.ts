@@ -51,6 +51,15 @@ const REQUIRED_MODEL_FILES = [
   "speech_tokenizer/model.safetensors",
 ] as const;
 
+// Downloaded when the pinned revision ships them, but never required: model
+// readiness and generation must not depend on these, because older revisions
+// and previously downloaded model directories may lack them. The resident
+// bridge currently applies built-in generation defaults either way; the file
+// is captured so model directories stay complete for runtimes that read it.
+export const QWEN3_OPTIONAL_MODEL_FILES = [
+  "generation_config.json",
+] as const;
+
 export const QWEN3_PROFILES = [
   {
     repo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",

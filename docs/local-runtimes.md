@@ -32,7 +32,7 @@ There is no one-shot generation action and no stdout/base64 audio fallback.
 
 In addition to CustomVoice and Base voice-clone profiles, each supported platform exposes Qwen3-TTS 1.7B VoiceDesign: MLX 6-bit revision `ffc6545dc9cb086950aa46c6cd3db490e6ece3e1` on Apple Silicon and official safetensors revision `5ecdb67327fd37bb2e042aab12ff7391903235d3` on Windows x64. VoiceDesign omits a predefined speaker token and conditions generation on the supplied natural-language voice description.
 
-`electron/qwen3Profiles.ts` is the authoritative profile table. It contains four Apple MLX profiles and four Windows x64 LibTorch profiles: CustomVoice and Base, each at 0.6B and 1.7B. Every profile fixes:
+`electron/qwen3Profiles.ts` is the authoritative profile table. It contains five Apple MLX profiles and five Windows x64 LibTorch profiles: CustomVoice and Base at 0.6B and 1.7B, plus VoiceDesign at 1.7B. Every profile fixes:
 
 - repository and immutable Hugging Face revision;
 - provider and supported platform;
@@ -49,7 +49,7 @@ CustomVoice provides nine built-in speakers and needs no reference audio. Base p
 The Electron main process owns downloads through `electron/qwen3ModelDownload.ts`.
 
 1. Resolve only the selected profile's exact revision.
-2. Select only the profile's required files.
+2. Select the profile's required files, plus optional files (currently `generation_config.json`) when the pinned revision ships them; leftover optional files the revision does not ship are removed.
 3. Write each response to a `.download` path.
 4. Validate declared length and available Hub SHA-256 metadata.
 5. Atomically promote the completed file.
@@ -59,7 +59,7 @@ The manifest records the repository, revision, paths, sizes, and digests. Setup 
 
 - `missing`: incomplete or wrong model type;
 - `structural`: required files and model type look valid, but no matching verified manifest exists;
-- `verified`: all required files match the immutable manifest.
+- `verified`: all required files match the immutable manifest, and any optional file present on disk matches it as well.
 
 This permits advanced users to choose an existing directory without misrepresenting it as a verified app download. Rust validates the directory and `tts_model_type` again before loading it.
 

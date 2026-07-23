@@ -8,8 +8,10 @@ This directory is a source snapshot, not a live Git checkout or submodule.
 
 Open TTS carries a small patch in `OPEN_TTS.patch`. It adds the low-level
 VoiceDesign prompt construction used by the resident bridge, keeps
-VoiceDesign request details off stdout, and changes MLX build guidance to match
-this bundled source tree. The upstream high-level VoiceDesign API at the pinned
+VoiceDesign request details off stdout, changes MLX build guidance to match
+this bundled source tree, and corrects the generation-config filename in
+`src/model.rs` to `generation_config.json` (upstream reads the nonexistent
+`generate_config.json`). The upstream high-level VoiceDesign API at the pinned
 revision returns placeholder silence; the rest of the low-level inference
 engine remains the native backend used by Open TTS.
 

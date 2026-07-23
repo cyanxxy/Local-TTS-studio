@@ -209,7 +209,7 @@ impl Qwen3TTSModel {
         };
 
         // Load generation config if available
-        let gen_config_path = Path::new(&model_path).join("generate_config.json");
+        let gen_config_path = Path::new(&model_path).join("generation_config.json");
         let generate_defaults = if gen_config_path.exists() {
             GenerationConfig::from_file(&gen_config_path)?
         } else {
