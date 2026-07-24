@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps, ReactNode } from "react";
 import { AdvancedReaderPage } from "./AdvancedReaderPage";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
@@ -12,6 +12,14 @@ import {
 import { DEFAULT_READER_VIEW_PREFERENCES } from "../lib/readerPreferences";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import { chunkTextForModelDetailed } from "../lib/chunking";
+import { PlaybackClock } from "../lib/playbackClock";
+
+function clockAt(seconds: number): PlaybackClock {
+  const clock = new PlaybackClock();
+  clock.set(seconds);
+  return clock;
+}
+
 
 vi.mock("./ModelToggle", () => ({
   ModelToggle: ({ desktopModelOptions = [] }: {
@@ -101,7 +109,7 @@ function renderReader(overrides: Partial<ComponentProps<typeof AdvancedReaderPag
     onStop: vi.fn(),
     stats: defaultStats,
     isPlaying: false,
-    currentTime: 0,
+    clock: clockAt(0),
     totalDuration: 0,
     segments: [],
     activeSegmentId: null,
@@ -596,7 +604,7 @@ describe("AdvancedReaderPage", () => {
     const { container } = renderReader({
       text: "Hello extraordinary world.",
       totalDuration: 3,
-      currentTime: 1.5,
+      clock: clockAt(1.5),
       isPlaying: true,
       activeSegmentId: "segment-1",
       segments: [createSegment({
@@ -609,6 +617,35 @@ describe("AdvancedReaderPage", () => {
     });
 
     expect(container.querySelector("[data-reader-active-word='true']")).toHaveTextContent("extraordinary");
+  });
+
+  it("follows the spoken word from the playback clock without a re-render", () => {
+    const clock = clockAt(0.2);
+    const { container } = renderReader({
+      text: "Hello extraordinary world.",
+      totalDuration: 3,
+      clock,
+      isPlaying: true,
+      activeSegmentId: "segment-1",
+      segments: [createSegment({
+        text: "Hello extraordinary world.",
+        startSec: 0,
+        endSec: 3,
+        textStart: 0,
+        textEnd: 26,
+      })],
+    });
+
+    const activeWord = () => container.querySelector("[data-reader-active-word='true']")?.textContent;
+    expect(activeWord()).toBe("Hello");
+
+    // No prop change and no rerender() — advancing the clock alone must move the
+    // highlight, which is what keeps the position off the render path.
+    act(() => clock.set(1.5));
+    expect(activeWord()).toBe("extraordinary");
+
+    act(() => clock.set(2.8));
+    expect(activeWord()).toBe("world.");
   });
 
   it("opens the local library, navigates the table of contents, and creates bookmarks", () => {

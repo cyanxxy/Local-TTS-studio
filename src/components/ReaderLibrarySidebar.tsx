@@ -10,6 +10,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import type { PlaybackClock } from "../lib/playbackClock";
 import type { ReaderDocumentRecord } from "../lib/readerDocument";
 
 export type ReaderSidebarTab = "library" | "contents" | "search" | "bookmarks" | "notes";
@@ -49,7 +50,7 @@ interface ReaderLibrarySidebarProps {
   documents: ReaderDocumentRecord[];
   activeDocument: ReaderDocumentRecord | null;
   currentTextOffset: number;
-  currentTime: number;
+  clock: PlaybackClock;
   loading?: boolean;
   persistent?: boolean;
   onClose: () => void;
@@ -98,7 +99,7 @@ export function ReaderLibrarySidebar({
   documents,
   activeDocument,
   currentTextOffset,
-  currentTime,
+  clock,
   loading = false,
   persistent = true,
   onClose,
@@ -466,7 +467,7 @@ export function ReaderLibrarySidebar({
               onClick={() => onAddBookmark({
                 label: currentChapter?.title || `Bookmark ${activeDocument.bookmarks.length + 1}`,
                 textOffset: currentTextOffset,
-                positionSec: currentTime,
+                positionSec: clock.getTime(),
               })}
               className="flex w-full items-center justify-center gap-2 rounded-xl border border-accent/25 bg-accent-light px-3 py-2.5 text-sm font-semibold text-accent transition-all active:scale-[0.98]"
             >

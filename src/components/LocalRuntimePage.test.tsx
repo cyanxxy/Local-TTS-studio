@@ -9,6 +9,7 @@ import type {
 import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
 import { MAX_REFERENCE_CODES_FILE_BYTES } from "../../electron/localTtsLimits";
 import { LocalRuntimePage } from "./LocalRuntimePage";
+import { PlaybackClock } from "../lib/playbackClock";
 
 const CUSTOM_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const BASE_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
@@ -32,7 +33,8 @@ vi.mock("../hooks/useAudioPlayer", () => ({
   useAudioPlayer: () => ({
     ...audio,
     activeSegmentId: null,
-    currentTime: 0,
+    clock: new PlaybackClock(),
+    getCurrentTime: () => 0,
     isPlaying: false,
     segments: [],
     totalDuration: 0,

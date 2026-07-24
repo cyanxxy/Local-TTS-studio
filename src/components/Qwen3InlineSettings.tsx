@@ -67,6 +67,9 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
               </button>
             ))}
           </div>
+          <p className="mt-1.5 text-2xs leading-4 text-text-muted">
+            Best quality comes from matching the language to the voice: Aiden or Ryan for English.
+          </p>
         </fieldset>
       )}
 

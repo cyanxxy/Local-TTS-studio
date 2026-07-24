@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { lazy, Suspense, useState, useCallback, useEffect, useMemo, useRef } from "react";
 import { Settings2 } from "lucide-react";
 import type { ChunkPauseKind, ModelType } from "../types";
 import { MIN_TEXT_LENGTH } from "../constants";
@@ -25,10 +25,7 @@ import { ControlsProvider } from "../components/ControlsContext";
 import { AudioPlayer } from "../components/AudioPlayer";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
-import { AppSettingsDialog } from "../components/AppSettingsDialog";
 import { CreatorToolsPanel } from "../components/CreatorToolsPanel";
-import { AdvancedReaderPage } from "../components/AdvancedReaderPage";
-import { LocalRuntimePage } from "../components/LocalRuntimePage";
 import { getPagePath, type AppPage } from "../lib/appRouting";
 import {
   getDefaultSupportedModel,
@@ -63,12 +60,6 @@ import {
   type ReaderDocumentRecord,
   type ReaderSection,
 } from "../lib/readerDocument";
-import {
-  fetchRemoteDocument,
-  importReaderFile,
-  parseEpubDocument,
-  parseHtmlReaderDocument,
-} from "../lib/readerImport";
 
 type LocalRuntimePageKey = Extract<AppPage, "neutts" | "qwen3">;
 type InlineDesktopModelKey = "qwen3" | "supertonic3";
@@ -79,7 +70,26 @@ interface SynthesisAppProps {
   createSupertonic3Worker?: () => Worker;
 }
 
+// Split out of the entry chunk: the Reader and the per-model local-runtime
+// pages are each a large subtree that most sessions never open, and the app
+// settings dialog is only mounted once the user asks for it. Studio — the
+// landing surface — stays in the entry chunk so it never waits on a fetch.
+const AdvancedReaderPage = lazy(() => import("../components/AdvancedReaderPage")
+  .then((module) => ({ default: module.AdvancedReaderPage })));
+const LocalRuntimePage = lazy(() => import("../components/LocalRuntimePage")
+  .then((module) => ({ default: module.LocalRuntimePage })));
+const AppSettingsDialog = lazy(() => import("../components/AppSettingsDialog")
+  .then((module) => ({ default: module.AppSettingsDialog })));
+
 const LOCAL_RUNTIME_PAGE_KEYS = ["neutts", "qwen3"] as const satisfies readonly LocalRuntimePageKey[];
+
+// Document import pulls in Readability and a zip reader — roughly a tenth of the
+// entry chunk — but is only ever reached from a user-initiated import, which is
+// already asynchronous. Load it on demand instead of at startup.
+const loadReaderImport = () => import("../lib/readerImport");
+
+/** How often the Reader samples playback position to persist reading progress. */
+const READER_PROGRESS_SAMPLE_MS = 750;
 
 const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
   name: string;
@@ -622,6 +632,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       const result = await documentsBridge.importDocument();
       if (!result.canceled) {
         if (result.epubBytes) {
+          const { parseEpubDocument } = await loadReaderImport();
           const document = parseEpubDocument(new Uint8Array(result.epubBytes), result.fileName);
           if (isReaderPage) {
             await readerLibrary.createDocument(document);
@@ -657,6 +668,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setImportError(null);
     setIsImportingDocument(true);
     try {
+      const { importReaderFile } = await loadReaderImport();
       const document = await importReaderFile(file);
       await readerLibrary.createDocument(document);
     } catch (error) {
@@ -674,6 +686,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setImportError(null);
     setIsImportingDocument(true);
     try {
+      const { fetchRemoteDocument, parseHtmlReaderDocument } = await loadReaderImport();
       const payload = documentsBridge?.importUrl
         ? await documentsBridge.importUrl(url)
         : await fetchRemoteDocument(url);
@@ -1228,13 +1241,14 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       supertonic3Runtime.resetGeneratedAudio();
     },
   };
+  // Read at call time rather than snapshotted per render: the playback position
+  // is not React state, so a render-time snapshot would go stale immediately.
+  const getCurrentTime = player.getCurrentTime;
   const readerPlaybackSnapshotRef = useRef({
-    currentTime: player.currentTime,
     playbackRate: player.playbackRate,
     totalDuration: player.totalDuration,
   });
   readerPlaybackSnapshotRef.current = {
-    currentTime: player.currentTime,
     playbackRate: player.playbackRate,
     totalDuration: player.totalDuration,
   };
@@ -1267,12 +1281,13 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       signature,
       chunks,
       byteLength: getCachedReaderAudioByteLength(chunks),
-      currentTime: playback.currentTime,
+      currentTime: getCurrentTime(),
       playbackRate: playback.playbackRate,
       totalDuration: playback.totalDuration,
       updatedAt,
     }).catch((cause) => setImportError(cause instanceof Error ? cause.message : String(cause)));
   }, [
+    getCurrentTime,
     getReaderAudioSnapshot,
     saveReaderAudio,
   ]);
@@ -1358,41 +1373,42 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     isReaderPage,
   ]);
 
-  useEffect(() => {
+  const recordReaderProgress = useCallback(() => {
     if (!isReaderPage || !activeReaderDocument || !activeReaderSection) return;
     // Switching Reader documents resets the shared player before IndexedDB
     // audio has loaded. Never persist that temporary zero state over a real
     // resume point, and do not create progress from an empty transport.
     if (readerRestorePendingRef.current || player.segments.length === 0 || player.totalDuration <= 0) return;
+    const currentTime = getCurrentTime();
     const now = Date.now();
-    const atEnd = player.totalDuration > 0 && player.currentTime >= player.totalDuration;
+    const atEnd = player.totalDuration > 0 && currentTime >= player.totalDuration;
     const isLastSection = activeReaderSectionIndex === readerSections.length - 1;
     const terminalTextOffset = isLastSection
       ? activeReaderDocument.text.length
       : Math.max(activeReaderSection.start, activeReaderSection.end - 1);
     if (atEnd && activeReaderDocument.progress.textOffset >= terminalTextOffset) return;
-    if (!atEnd && now - lastReaderProgressUpdateRef.current < 750) return;
+    if (!atEnd && now - lastReaderProgressUpdateRef.current < READER_PROGRESS_SAMPLE_MS) return;
     lastReaderProgressUpdateRef.current = now;
 
     const segment = player.segments.find((entry) => entry.id === player.activeSegmentId);
     let textOffset = activeReaderDocument.progress.textOffset;
     if (segment && typeof segment.textStart === "number" && typeof segment.textEnd === "number") {
       const duration = Math.max(0.001, segment.endSec - segment.startSec);
-      const ratio = Math.max(0, Math.min(1, (player.currentTime - segment.startSec) / duration));
+      const ratio = Math.max(0, Math.min(1, (currentTime - segment.startSec) / duration));
       const localOffset = segment.textStart + (segment.textEnd - segment.textStart) * ratio;
       textOffset = activeReaderSection.start + localOffset;
     }
     if (atEnd) textOffset = terminalTextOffset;
     else textOffset = Math.max(activeReaderSection.start, Math.min(terminalTextOffset, textOffset));
     updateReaderProgress({
-      positionSec: player.currentTime,
+      positionSec: currentTime,
       totalDurationSec: player.totalDuration,
       textOffset,
     });
   }, [
+    getCurrentTime,
     isReaderPage,
     player.activeSegmentId,
-    player.currentTime,
     player.segments,
     player.totalDuration,
     activeReaderDocument,
@@ -1401,13 +1417,21 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     readerSections.length,
     updateReaderProgress,
   ]);
+  const recordReaderProgressRef = useRef(recordReaderProgress);
+  recordReaderProgressRef.current = recordReaderProgress;
+
+  // Transport-shape changes (a new active segment, pausing, the stream ending)
+  // are React state, so they still drive a progress write directly.
+  useEffect(() => {
+    recordReaderProgress();
+  }, [recordReaderProgress, player.isPlaying]);
 
   const autoAdvancedSectionRef = useRef<string | null>(null);
   useEffect(() => {
     autoAdvancedSectionRef.current = null;
   }, [activeReaderSection?.id]);
 
-  useEffect(() => {
+  const maybeAutoAdvanceSection = useCallback(() => {
     if (
       !isReaderPage
       || !readerViewPreferences.autoAdvance
@@ -1418,23 +1442,43 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       || player.isPlaying
       || player.segments.length === 0
       || player.totalDuration <= 0
-      || player.currentTime < player.totalDuration - 0.02
+      || getCurrentTime() < player.totalDuration - 0.02
       || autoAdvancedSectionRef.current === activeReaderSection.id
     ) return;
     autoAdvancedSectionRef.current = activeReaderSection.id;
     navigateReaderToOffset(nextReaderSection.start, 0, { autoPlay: true, autoGenerate: true });
   }, [
     activeReaderSection,
+    getCurrentTime,
     isReaderPage,
     navigateReaderToOffset,
     nextReaderSection,
-    player.currentTime,
     player.isPlaying,
     player.segments.length,
     player.totalDuration,
     readerGenerationBusy,
     readerViewPreferences.autoAdvance,
   ]);
+  const maybeAutoAdvanceSectionRef = useRef(maybeAutoAdvanceSection);
+  maybeAutoAdvanceSectionRef.current = maybeAutoAdvanceSection;
+
+  useEffect(() => {
+    maybeAutoAdvanceSection();
+  }, [maybeAutoAdvanceSection]);
+
+  // The position itself is not React state, so watch it through the clock
+  // instead of a render dependency. The listener fires on the animation frame
+  // but re-renders nothing: both callbacks are guarded (a throttle, and a
+  // per-section latch) and only touch state when they actually do something.
+  // Listening rather than polling also keeps a scrub-while-paused both
+  // recording its resume point and honouring auto-advance at the end.
+  useEffect(() => {
+    if (!isReaderPage) return;
+    return player.clock.subscribe(() => {
+      recordReaderProgressRef.current();
+      maybeAutoAdvanceSectionRef.current();
+    });
+  }, [isReaderPage, player.clock]);
 
   useEffect(() => {
     if (!isReaderPage || !activeReaderDocumentId || !activeReaderSectionRef.current || player.segments.length === 0) return;
@@ -1645,7 +1689,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                   <AudioPlayer
                     embedded
                     isPlaying={player.isPlaying}
-                    currentTime={player.currentTime}
+                    clock={player.clock}
                     totalDuration={player.totalDuration}
                     segmentCount={player.segments.length}
                     activeSegmentNumber={activeSegmentNumber}
@@ -1681,6 +1725,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           ) : browserSupportPanel
         ) : isReaderPage ? (
           localInferenceSupported ? (
+            <Suspense fallback={null}>
             <AdvancedReaderPage
               fullScreen
               text={activeReaderSectionText}
@@ -1763,7 +1808,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onStop={handleReaderStop}
               stats={readerStats}
               isPlaying={player.isPlaying}
-              currentTime={player.currentTime}
+              clock={player.clock}
               totalDuration={player.totalDuration}
               playbackRate={player.playbackRate}
               onPlaybackRateChange={player.setPlaybackRate}
@@ -1779,6 +1824,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               canRetakeSegments={!isReaderUsingQwen3 && !isReaderUsingSupertonic3}
               onJumpToSegment={handleJumpToSegment}
             />
+            </Suspense>
           ) : browserSupportPanel
         ) : null}
 
@@ -1792,6 +1838,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               hidden={!isActive}
               aria-hidden={!isActive}
             >
+              <Suspense fallback={null}>
               <LocalRuntimePage
                 active={isActive}
                 model={page}
@@ -1802,6 +1849,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                 links={config.links}
                 initialText={text}
               />
+              </Suspense>
             </section>
           );
         })}
@@ -1840,14 +1888,18 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
         )}
 
       </div>
-      <AppSettingsDialog
-        open={appSettingsOpen}
-        desktopModelsAvailable={enableDesktopRuntimes && isElectronRuntime}
-        preferences={preferences}
-        onChange={updatePreferences}
-        onReset={resetPreferences}
-        onClose={closeAppSettings}
-      />
+      {appSettingsOpen && (
+        <Suspense fallback={null}>
+          <AppSettingsDialog
+            open={appSettingsOpen}
+            desktopModelsAvailable={enableDesktopRuntimes && isElectronRuntime}
+            preferences={preferences}
+            onChange={updatePreferences}
+            onReset={resetPreferences}
+            onClose={closeAppSettings}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

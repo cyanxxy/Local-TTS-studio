@@ -64,6 +64,7 @@ describe("Qwen3RuntimeProvider", () => {
       </Qwen3RuntimeProvider>,
     );
     await waitFor(() => expect(screen.getByLabelText("studio")).toHaveTextContent("/models/custom"));
+    expect(screen.getByLabelText("studio")).toHaveTextContent("Aiden|English");
     fireEvent.click(screen.getByLabelText("settings").querySelectorAll("button")[0]);
     fireEvent.click(screen.getByLabelText("settings").querySelectorAll("button")[1]);
     expect(screen.getByLabelText("studio")).toHaveTextContent("Ryan|Italian");

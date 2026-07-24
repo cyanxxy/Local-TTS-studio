@@ -18,6 +18,23 @@ import {
 } from "../lib/readerDocument";
 
 const mock = vi.hoisted(() => {
+  // Minimal stand-in for PlaybackClock. It cannot be the real class: vi.hoisted
+  // runs before module imports are evaluated.
+  const clockListeners = new Set<() => void>();
+  let clockPosition = 0;
+  const playerClock = {
+    subscribe: (listener: () => void) => {
+      clockListeners.add(listener);
+      return () => clockListeners.delete(listener);
+    },
+    getTime: () => clockPosition,
+    set: (next: number) => {
+      if (next === clockPosition) return;
+      clockPosition = next;
+      for (const listener of [...clockListeners]) listener();
+    },
+  };
+
   const readyState: ModelState = {
     ready: true,
     loading: false,
@@ -27,6 +44,7 @@ const mock = vi.hoisted(() => {
   };
 
   return {
+    playerClock,
     readyState,
     routing: {
       activePage: "studio",
@@ -77,7 +95,8 @@ const mock = vi.hoisted(() => {
     player: {
       isPlaying: false,
       error: null as string | null,
-      currentTime: 0,
+      clock: playerClock,
+      getCurrentTime: () => playerClock.getTime(),
       totalDuration: 4,
       playbackRate: 1,
       segments: [{ id: "seg-1", text: "Segment", startSec: 0, endSec: 4, index: 1, total: 1 }] as AudioSegment[],
@@ -516,11 +535,13 @@ function resetMockState() {
     loadModel: vi.fn(),
     reloadModel: vi.fn(),
   };
+  mock.playerClock.set(0);
   mock.player = {
     ...mock.player,
     isPlaying: false,
     error: null,
-    currentTime: 0,
+    clock: mock.playerClock,
+    getCurrentTime: () => mock.playerClock.getTime(),
     totalDuration: 4,
     playbackRate: 1,
     segments: [{ id: "seg-1", text: "Segment", startSec: 0, endSec: 4, index: 1, total: 1 }],
@@ -713,7 +734,7 @@ describe("SynthesisApp", () => {
     await waitFor(() => expect(mock.persistCreatorState).toHaveBeenCalled());
   });
 
-  it("keeps the Studio script separate while entering and editing Reader", () => {
+  it("keeps the Studio script separate while entering and editing Reader", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     const readerDocument = createReaderDocument({
       id: "separate-reader",
@@ -733,7 +754,7 @@ describe("SynthesisApp", () => {
       isStudioPage: false,
     };
     view.rerender(<WebApp />);
-    expect(screen.getByTestId("reader-text-value")).toHaveTextContent(readerDocument.text);
+    expect(await screen.findByTestId("reader-text-value")).toHaveTextContent(readerDocument.text);
     fireEvent.click(screen.getByRole("button", { name: "reader-text" }));
     expect(mock.readerLibrary.updateActiveText).toHaveBeenCalledWith(
       "Reader text with enough length.",
@@ -750,7 +771,7 @@ describe("SynthesisApp", () => {
     expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("A new Studio-only script.");
   });
 
-  it("splices an edit into its frozen section even when chapter and section ids churn", () => {
+  it("splices an edit into its frozen section even when chapter and section ids churn", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "reader",
@@ -801,7 +822,7 @@ describe("SynthesisApp", () => {
     mock.readerLibrary.activeDocument = document;
 
     const view = render(<WebApp />);
-    fireEvent.click(screen.getByRole("button", { name: "reader-edit-start" }));
+    fireEvent.click(await screen.findByRole("button", { name: "reader-edit-start" }));
 
     const churnedDocument: ReaderDocumentRecord = {
       ...document,
@@ -899,17 +920,17 @@ describe("SynthesisApp", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-supertonic3" }));
+    fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-supertonic3" }));
 
     expect(screen.getByRole("button", { name: "reader-desktop-supertonic3-selected" })).toBeInTheDocument();
     await waitFor(() => expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false }));
   });
 
-  it("supports macOS and Windows keyboard shortcuts without hijacking text entry", () => {
+  it("supports macOS and Windows keyboard shortcuts without hijacking text entry", async () => {
     const { rerender } = render(<WebApp />);
 
     fireEvent.keyDown(document, { key: ",", metaKey: true });
-    expect(screen.getByRole("dialog", { name: "Appearance" })).toBeInTheDocument();
+    expect(await screen.findByRole("dialog", { name: "Appearance" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Close settings" }));
 
     fireEvent.keyDown(document, { key: "2", ctrlKey: true });
@@ -942,7 +963,7 @@ describe("SynthesisApp", () => {
     render(<WebApp />);
 
     fireEvent.click(screen.getByRole("button", { name: "Open app settings" }));
-    fireEvent.click(screen.getByRole("button", { name: "App font Outfit" }));
+    fireEvent.click(await screen.findByRole("button", { name: "App font Outfit" }));
     fireEvent.click(screen.getByRole("button", { name: "Reading font Georgia" }));
 
     expect(document.documentElement.dataset.interfaceFont).toBe("outfit");
@@ -955,7 +976,7 @@ describe("SynthesisApp", () => {
     });
   });
 
-  it("orchestrates reader controls and segment jumps", () => {
+  it("orchestrates reader controls and segment jumps", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "reader",
@@ -970,7 +991,7 @@ describe("SynthesisApp", () => {
 
     render(<WebApp />);
 
-    fireEvent.click(screen.getByRole("button", { name: "reader-text" }));
+    fireEvent.click(await screen.findByRole("button", { name: "reader-text" }));
     fireEvent.click(screen.getByRole("button", { name: "reader-model" }));
     fireEvent.click(screen.getByRole("button", { name: "reader-voice" }));
     fireEvent.click(screen.getByRole("button", { name: "reader-quality" }));
@@ -1026,7 +1047,7 @@ describe("SynthesisApp", () => {
     render(<WebApp />);
 
     const sectionText = getReaderSectionText(document.text, section);
-    expect(screen.getByTestId("reader-text-value").textContent).toBe(sectionText);
+    expect((await screen.findByTestId("reader-text-value")).textContent).toBe(sectionText);
     expect(screen.getByTestId("reader-section-id")).toHaveTextContent(section.id);
     await waitFor(() => {
       const options = vi.mocked(useGenerationControl).mock.calls.at(-1)?.[0];
@@ -1065,7 +1086,7 @@ describe("SynthesisApp", () => {
     };
     mock.readerLibrary.documents = [activeDocument];
     mock.readerLibrary.activeDocument = activeDocument;
-    mock.player.currentTime = 1;
+    mock.playerClock.set(1);
     mock.player.totalDuration = 4;
     mock.player.activeSegmentId = "section-segment";
     mock.player.segments = [{
@@ -1082,7 +1103,7 @@ describe("SynthesisApp", () => {
     const view = render(<WebApp />);
     await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, section.id));
     mock.readerLibrary.updateProgress.mockClear();
-    mock.player.currentTime = 2;
+    mock.playerClock.set(2);
     view.rerender(<WebApp />);
 
     await waitFor(() => expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith({
@@ -1113,7 +1134,7 @@ describe("SynthesisApp", () => {
     mock.readerLibrary.documents = [document];
     mock.readerLibrary.activeDocument = document;
     const cachedAudio = new Float32Array([0.2, -0.2]).buffer;
-    mock.player.currentTime = 3;
+    mock.playerClock.set(3);
     mock.player.totalDuration = 4;
     mock.player.activeSegmentId = "ending-segment";
     mock.player.segments = [{
@@ -1138,7 +1159,7 @@ describe("SynthesisApp", () => {
     await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
     mock.readerLibrary.updateProgress.mockClear();
     mock.readerLibrary.saveAudio.mockClear();
-    mock.player.currentTime = 4;
+    mock.playerClock.set(4);
     view.rerender(<WebApp />);
 
     await waitFor(() => expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith(
@@ -1277,7 +1298,7 @@ describe("SynthesisApp", () => {
 
     const view = render(<WebApp />);
     await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
-    fireEvent.click(screen.getByRole("button", { name: "reader-next-section" }));
+    fireEvent.click(await screen.findByRole("button", { name: "reader-next-section" }));
 
     const revisitedDocument: ReaderDocumentRecord = {
       ...document,
@@ -1386,7 +1407,7 @@ describe("SynthesisApp", () => {
     expect(mock.readerLibrary.updateProgress).not.toHaveBeenCalled();
   });
 
-  it("hides optional navigation pages without removing inline Qwen from Studio", () => {
+  it("hides optional navigation pages without removing inline Qwen from Studio", async () => {
     Object.defineProperty(window, "electron", {
       value: {
         isElectron: true,
@@ -1417,7 +1438,7 @@ describe("SynthesisApp", () => {
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Open app settings" }));
-    fireEvent.click(screen.getAllByRole("button", { name: "Optional models" })[0]);
+    fireEvent.click((await screen.findAllByRole("button", { name: "Optional models" }))[0]);
     fireEvent.click(screen.getByRole("checkbox", { name: /Show NeuTTS Nano/i }));
     fireEvent.click(screen.getByRole("checkbox", { name: /Show Qwen3-TTS/i }));
 
@@ -1472,9 +1493,9 @@ describe("SynthesisApp", () => {
     render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.queryByRole("link", { name: "Qwen3-TTS" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-qwen3" }));
+    fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "reader-desktop-qwen3-selected" })).toBeInTheDocument();
-    expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Vivian");
+    expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Aiden");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
     await waitFor(() => expect(mock.localTts.probe).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Aiden" }));
@@ -1525,7 +1546,7 @@ describe("SynthesisApp", () => {
     })));
   });
 
-  it("exposes local EPUB/file and URL import on web builds", () => {
+  it("exposes local EPUB/file and URL import on web builds", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "reader",
@@ -1540,7 +1561,7 @@ describe("SynthesisApp", () => {
 
     render(<WebApp />);
 
-    expect(screen.getByRole("button", { name: "reader-file-import" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "reader-file-import" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "reader-url-import" })).toBeInTheDocument();
   });
 
@@ -1575,7 +1596,7 @@ describe("SynthesisApp", () => {
 
     render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "reader-import" }));
+    fireEvent.click(await screen.findByRole("button", { name: "reader-import" }));
     expect(importDocument).toHaveBeenCalled();
     await waitFor(() => {
       expect(mock.readerLibrary.createDocument).toHaveBeenCalledWith(expect.objectContaining({
@@ -1657,7 +1678,7 @@ describe("SynthesisApp", () => {
 
     render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
-    fireEvent.click(screen.getByRole("button", { name: "reader-import" }));
+    fireEvent.click(await screen.findByRole("button", { name: "reader-import" }));
     await waitFor(() => {
       expect(screen.getByText('No readable text found in "scan.pdf".')).toBeInTheDocument();
     });
@@ -1716,7 +1737,7 @@ describe("SynthesisApp", () => {
     });
   });
 
-  it("renders local runtime routes", () => {
+  it("renders local runtime routes", async () => {
     showOptionalDesktopModels();
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
@@ -1732,7 +1753,7 @@ describe("SynthesisApp", () => {
     };
 
     const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
-    expect(screen.getByText("NeuTTS Nano / Air (Neuphonic)")).toBeInTheDocument();
+    expect(await screen.findByText("NeuTTS Nano / Air (Neuphonic)")).toBeInTheDocument();
 
     mock.routing = {
       ...mock.routing,
@@ -1740,10 +1761,10 @@ describe("SynthesisApp", () => {
     };
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
-    expect(screen.getByText("Qwen3-TTS 12Hz Native")).toBeInTheDocument();
+    expect(await screen.findByText("Qwen3-TTS 12Hz Native")).toBeInTheDocument();
   });
 
-  it("preserves local runtime tab DOM state when switching tabs", () => {
+  it("preserves local runtime tab DOM state when switching tabs", async () => {
     showOptionalDesktopModels();
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
@@ -1763,7 +1784,7 @@ describe("SynthesisApp", () => {
     };
 
     const { rerender } = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
-    const neuttsState = screen.getByTestId("local-draft-neutts") as HTMLInputElement;
+    const neuttsState = await screen.findByTestId("local-draft-neutts") as HTMLInputElement;
     fireEvent.change(neuttsState, { target: { value: "voice reference kept" } });
     expect(screen.queryByTestId("local-draft-qwen3")).not.toBeInTheDocument();
 
@@ -1775,7 +1796,7 @@ describe("SynthesisApp", () => {
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
-    const qwen3State = screen.getByTestId("local-draft-qwen3") as HTMLInputElement;
+    const qwen3State = await screen.findByTestId("local-draft-qwen3") as HTMLInputElement;
     fireEvent.change(qwen3State, { target: { value: "qwen3 settings kept" } });
 
     fireEvent.click(screen.getByRole("link", { name: "Studio" }));

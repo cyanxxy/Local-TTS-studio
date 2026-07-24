@@ -4,6 +4,7 @@ import type { GenerationTuningSettings, WorkerInMessage, WorkerOutMessage } from
 import { useGenerationControl } from "./useGenerationControl";
 import type { AudioSegment, UseAudioPlayerReturn } from "./useAudioPlayer";
 import type { UseTTSReturn } from "./useTTS";
+import { PlaybackClock } from "../lib/playbackClock";
 
 class MockWorker {
   public postedMessages: WorkerInMessage[] = [];
@@ -35,7 +36,8 @@ function createPlayerMock(overrides: Partial<UseAudioPlayerReturn> = {}): UseAud
   return {
     isPlaying: false,
     error: null,
-    currentTime: 0,
+    clock: new PlaybackClock(),
+    getCurrentTime: () => 0,
     totalDuration: 0,
     playbackRate: 1,
     segments: [],

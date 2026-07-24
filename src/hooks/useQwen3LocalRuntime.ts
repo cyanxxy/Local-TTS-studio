@@ -33,6 +33,15 @@ interface ReceivedAudioChunk {
   textUnitTotal?: number;
 }
 
+interface PendingAudioDelivery {
+  requestId: string;
+  generationVersion: number;
+  expectedChunkCount: number;
+  timeoutId: number;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
 interface UseQwen3LocalRuntimeReturn {
   modelState: ModelState;
   canGenerate: boolean;
@@ -49,6 +58,10 @@ interface UseQwen3LocalRuntimeReturn {
 
 const LOCAL_MODEL = "qwen3";
 const QWEN_SECTION_JOIN_PAUSE_SEC = 0.2;
+// The native result and streamed audio use separate Electron IPC messages.
+// An invoke result can become observable before the final event has crossed
+// into the renderer, especially when that event carries a large PCM buffer.
+const AUDIO_DELIVERY_GRACE_MS = 5_000;
 
 function requestId(kind: "probe" | "generate" | "job"): string {
   return `${LOCAL_MODEL}-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
@@ -123,6 +136,7 @@ export function useQwen3LocalRuntime({
   const activeRequestUnitCountRef = useRef(1);
   const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const cancelProgressFlushRef = useRef<(() => void) | null>(null);
+  const pendingAudioDeliveryRef = useRef<PendingAudioDelivery | null>(null);
   const warmedKeyRef = useRef<string | null>(null);
   const warmingKeyRef = useRef<string | null>(null);
   const activeTextUnitsRef = useRef<TextChunk[]>([]);
@@ -136,10 +150,61 @@ export function useQwen3LocalRuntime({
   const stopAll = player.stopAll;
   const truncateAudioChunks = player.truncateAudioChunks;
 
+  const settlePendingAudioDelivery = useCallback((error?: Error) => {
+    const pending = pendingAudioDeliveryRef.current;
+    if (!pending) return;
+    pendingAudioDeliveryRef.current = null;
+    window.clearTimeout(pending.timeoutId);
+    if (error) pending.reject(error);
+    else pending.resolve();
+  }, []);
+
+  const cancelPendingAudioDelivery = useCallback(() => {
+    // Cancellation/version checks after the await decide whether the job should
+    // continue. Resolving here simply prevents an obsolete request from waiting
+    // for an event that the native bridge will no longer send.
+    settlePendingAudioDelivery();
+  }, [settlePendingAudioDelivery]);
+
+  const waitForAudioDelivery = useCallback((
+    activeRequestId: string,
+    generationVersion: number,
+    expectedChunkCount: number,
+  ): Promise<void> => {
+    if (chunksRef.current.filter(Boolean).length === expectedChunkCount) {
+      return Promise.resolve();
+    }
+
+    cancelPendingAudioDelivery();
+    return new Promise<void>((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        const pending = pendingAudioDeliveryRef.current;
+        if (
+          pending?.requestId !== activeRequestId
+          || pending.generationVersion !== generationVersion
+        ) return;
+        settlePendingAudioDelivery(
+          new Error("Generation returned incomplete streamed audio."),
+        );
+      }, AUDIO_DELIVERY_GRACE_MS);
+      pendingAudioDeliveryRef.current = {
+        requestId: activeRequestId,
+        generationVersion,
+        expectedChunkCount,
+        timeoutId,
+        resolve,
+        reject,
+      };
+    });
+  }, [cancelPendingAudioDelivery, settlePendingAudioDelivery]);
+
   useEffect(() => {
     mountedRef.current = true;
-    return () => { mountedRef.current = false; };
-  }, []);
+    return () => {
+      mountedRef.current = false;
+      cancelPendingAudioDelivery();
+    };
+  }, [cancelPendingAudioDelivery]);
 
   const clearGeneratedResult = useCallback(() => {
     chunksRef.current = [];
@@ -163,6 +228,7 @@ export function useQwen3LocalRuntime({
 
   const resetGeneratedAudio = useCallback(() => {
     generationVersionRef.current += 1;
+    cancelPendingAudioDelivery();
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
@@ -171,13 +237,14 @@ export function useQwen3LocalRuntime({
     setError(null);
     setGenerateBusy(false);
     setGenerationProgress(0);
-  }, [cancelActiveGeneration, clearGeneratedResult, setShowPlayer]);
+  }, [cancelActiveGeneration, cancelPendingAudioDelivery, clearGeneratedResult, setShowPlayer]);
 
   // Generated audio and errors belong to the exact synthesis configuration
   // that produced them. Clear the shared player when any audible Qwen setting
   // changes so old speech is never presented as the newly selected voice.
   useEffect(() => {
     generationVersionRef.current += 1;
+    cancelPendingAudioDelivery();
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
@@ -203,6 +270,7 @@ export function useQwen3LocalRuntime({
     settings.speaker,
     settings.temperature,
     settings.topK,
+    cancelPendingAudioDelivery,
   ]);
 
   const runProbe = useCallback(async () => {
@@ -241,6 +309,7 @@ export function useQwen3LocalRuntime({
     }
     runtimeVersionRef.current += 1;
     generationVersionRef.current += 1;
+    cancelPendingAudioDelivery();
     cancelProgressFlushRef.current?.();
     pendingProgressRef.current = null;
     cancelActiveGeneration();
@@ -251,7 +320,7 @@ export function useQwen3LocalRuntime({
     setGenerateBusy(false);
     setGenerationProgress(0);
     setProgress(null);
-  }, [cancelActiveGeneration, enabled, retryLoad]);
+  }, [cancelActiveGeneration, cancelPendingAudioDelivery, enabled, retryLoad]);
 
   useEffect(() => {
     if (!electronAvailable || generateBusy || !bridge?.warm) return;
@@ -335,8 +404,18 @@ export function useQwen3LocalRuntime({
           if (mountedRef.current) setError(message(nextError));
         });
       }
+
+      const pending = pendingAudioDeliveryRef.current;
+      if (
+        pending
+        && pending.requestId === event.requestId
+        && pending.generationVersion === generationVersionRef.current
+        && chunksRef.current.filter(Boolean).length === pending.expectedChunkCount
+      ) {
+        settlePendingAudioDelivery();
+      }
     });
-  }, [bridge, electronAvailable, scheduleChunk, text]);
+  }, [bridge, electronAvailable, scheduleChunk, settlePendingAudioDelivery, text]);
 
   useEffect(() => () => {
     cancelProgressFlushRef.current?.();
@@ -384,9 +463,12 @@ export function useQwen3LocalRuntime({
       charsPerSec: processingTime > 0 ? text.trim().length / processingTime : 0,
       rtf: result && result.durationSec > 0 ? result.elapsedSec / result.durationSec : 0,
       totalDuration: player.totalDuration || result?.durationSec || 0,
-      currentDuration: player.currentTime,
+      // Sampled rather than tracked: the live position ticks every frame and no
+      // consumer renders this field, so depending on it would rebuild the stats
+      // object (and re-render every consumer) 60 times a second for nothing.
+      currentDuration: player.getCurrentTime(),
     };
-  }, [player.currentTime, player.totalDuration, result, text]);
+  }, [player, result, text]);
 
   const handleGenerate = useCallback(() => {
     if (!canGenerate || !bridge) return;
@@ -514,9 +596,12 @@ export function useQwen3LocalRuntime({
             || generationVersionRef.current !== version
             || activeRequestRef.current !== id
           ) return;
-          if (chunksRef.current.filter(Boolean).length !== generated.audioChunkCount) {
-            throw new Error("Generation returned incomplete streamed audio.");
-          }
+          await waitForAudioDelivery(id, version, generated.audioChunkCount);
+          if (
+            !mountedRef.current
+            || generationVersionRef.current !== version
+            || activeRequestRef.current !== id
+          ) return;
           combinedResult = mergeGenerateResults(combinedResult, generated);
           activeSectionCompleted = true;
 
@@ -598,10 +683,12 @@ export function useQwen3LocalRuntime({
     settings,
     text,
     truncateAudioChunks,
+    waitForAudioDelivery,
   ]);
 
   const handleStop = useCallback(() => {
     generationVersionRef.current += 1;
+    cancelPendingAudioDelivery();
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
@@ -609,7 +696,7 @@ export function useQwen3LocalRuntime({
     clearGeneratedResult();
     setGenerateBusy(false);
     setError(null);
-  }, [cancelActiveGeneration, clearGeneratedResult, endStream]);
+  }, [cancelActiveGeneration, cancelPendingAudioDelivery, clearGeneratedResult, endStream]);
 
   return {
     modelState,

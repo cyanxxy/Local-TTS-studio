@@ -30,6 +30,14 @@ export type Qwen3Platform = "darwin" | "win32";
 export type Qwen3Provider = "mlx" | "libtorch";
 export type Qwen3Mode = "customVoice" | "voiceClone" | "voiceDesign";
 
+// Open TTS ships with English UI and English starter text. Qwen's model card
+// recommends matching preset voices to their native language. Aiden is
+// English-native and, on the bundled 0.6B MLX profile, produces a more natural
+// Reader pace than Ryan. The first model speaker (Vivian) is Chinese-native and
+// can sound unnatural on English passages.
+export const QWEN3_DEFAULT_SPEAKER: Qwen3Speaker = "Aiden";
+export const QWEN3_DEFAULT_LANGUAGE: Qwen3Language = "English";
+
 export interface Qwen3Profile {
   readonly repo: string;
   readonly revision: string;

@@ -59,7 +59,17 @@ export const MAX_CHUNK_LENGTH = 1000;
 export const KOKORO_WEBGPU_MAX_INFERENCE_CHARS = 520;
 export const KOKORO_WASM_MAX_INFERENCE_CHARS = 280;
 export const SUPERTONIC_INTER_CHUNK_SILENCE_SEC = 0.5;
-export const AUDIO_PLAYER_MAX_BUFFER_SECONDS = 15 * 60;
+
+// How far ahead of the playhead the player materialises AudioBuffers and starts
+// AudioBufferSourceNodes. Every scheduled chunk costs a decoded copy of its PCM
+// (~96 KB per second at 24 kHz mono float32) plus a live source node, so this is
+// a memory ceiling, not just a latency knob: a book-length section scheduled an
+// hour ahead would hold hundreds of megabytes. 30 s is far more than enough to
+// ride out a slow generation step or a busy main thread.
+export const AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS = 30;
+// Decoded buffers this far behind the playhead are released. They are rebuilt
+// lazily from the retained Float32 PCM if the listener seeks back.
+export const AUDIO_PLAYER_RETAIN_BEHIND_SECONDS = 10;
 
 
 export const PAUSE_MIN = 0;

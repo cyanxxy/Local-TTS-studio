@@ -13,6 +13,7 @@ import {
   Square,
 } from "lucide-react";
 import type { GenerationStats } from "../types";
+import { usePlaybackSelector, usePlaybackTime, type PlaybackClock } from "../lib/playbackClock";
 
 type AudioPlayerVariant = "panel" | "dock";
 type PrimaryActionIcon = "generate" | "retry" | "loading";
@@ -33,7 +34,7 @@ interface AudioPlayerProps {
   embedded?: boolean;
   variant?: AudioPlayerVariant;
   isPlaying: boolean;
-  currentTime: number;
+  clock: PlaybackClock;
   totalDuration: number;
   segmentCount: number;
   activeSegmentNumber: number | null;
@@ -78,6 +79,144 @@ function formatTime(secs: number): string {
   const m = Math.floor(totalTenths / 600);
   const s = ((totalTenths % 600) / 10).toFixed(1);
   return `${m}:${s.padStart(4, "0")}`;
+}
+
+/**
+ * The playback position advances every animation frame. Only these two leaves
+ * subscribe to it, so the rest of the player — transport buttons, stats chips,
+ * status labels — re-renders when its own props change rather than 60 times a
+ * second.
+ */
+function selectElapsedTenths(timeSec: number): number {
+  return Math.round(Math.max(0, Number.isFinite(timeSec) ? timeSec : 0) * 10);
+}
+
+function selectHasPosition(timeSec: number): boolean {
+  return timeSec > 0;
+}
+
+/** Tenth-of-a-second readout, so it settles at 10 Hz instead of the frame rate. */
+function ElapsedTime({ clock, className }: { clock: PlaybackClock; className: string }) {
+  const tenths = usePlaybackSelector(clock, selectElapsedTenths);
+  return <span className={className}>{formatTime(tenths / 10)}</span>;
+}
+
+interface SeekBarProps {
+  clock: PlaybackClock;
+  totalDuration: number;
+  hasAudio: boolean;
+  compact: boolean;
+  isDock: boolean;
+  onSeek: (percentage: number) => void;
+}
+
+function SeekBar({ clock, totalDuration, hasAudio, compact, isDock, onSeek }: SeekBarProps) {
+  // The scrubber is the one element that genuinely wants frame-rate updates.
+  const currentTime = usePlaybackTime(clock);
+  const barRef = useRef<HTMLDivElement>(null);
+  const isDragging = useRef(false);
+  const onSeekRef = useRef(onSeek);
+
+  useEffect(() => {
+    onSeekRef.current = onSeek;
+  }, [onSeek]);
+
+  const progress = totalDuration > 0 ? Math.min(100, (currentTime / totalDuration) * 100) : 0;
+
+  const getSeekPct = useCallback((clientX: number): number => {
+    if (!barRef.current) return 0;
+    const rect = barRef.current.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  }, []);
+
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!hasAudio) return;
+      e.preventDefault();
+      e.currentTarget.setPointerCapture(e.pointerId);
+      isDragging.current = true;
+      onSeekRef.current(getSeekPct(e.clientX));
+    },
+    [getSeekPct, hasAudio],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      const dur = totalDuration;
+      if (!hasAudio || dur === 0) return;
+      const cur = clock.getTime();
+      const step = 5 / dur;
+      if (e.key === "ArrowRight" || e.key === "ArrowUp") {
+        e.preventDefault();
+        onSeekRef.current(Math.min(1, cur / dur + step));
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
+        e.preventDefault();
+        onSeekRef.current(Math.max(0, cur / dur - step));
+      } else if (e.key === "Home") {
+        e.preventDefault();
+        onSeekRef.current(0);
+      } else if (e.key === "End") {
+        e.preventDefault();
+        onSeekRef.current(1);
+      }
+    },
+    [clock, hasAudio, totalDuration],
+  );
+
+  const handlePointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!isDragging.current) return;
+      onSeekRef.current(getSeekPct(e.clientX));
+    },
+    [getSeekPct],
+  );
+
+  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+    isDragging.current = false;
+  }, []);
+
+  const handlePointerCancel = useCallback(() => {
+    isDragging.current = false;
+  }, []);
+
+  return (
+    <div
+      ref={barRef}
+      className={`${isDock ? "h-8" : "order-last h-8 basis-full sm:order-none sm:basis-auto"} group relative min-w-0 flex-1 select-none rounded-full ${
+        hasAudio ? "cursor-pointer" : ""
+      }`}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handlePointerCancel}
+      onKeyDown={handleKeyDown}
+      role="slider"
+      tabIndex={hasAudio ? 0 : -1}
+      aria-label="Seek"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.round(progress)}
+      aria-valuetext={`${formatTime(currentTime)} of ${formatTime(totalDuration)}`}
+    >
+      <div className={`absolute left-0 right-0 top-1/2 -translate-y-1/2 ${compact ? "h-1" : "h-1.5"} rounded-full ${hasAudio ? "bg-border-strong" : "bg-border"}`} />
+      <div
+        className={`absolute left-0 top-1/2 ${compact ? "h-1" : "h-1.5"} -translate-y-1/2 rounded-full bg-accent`}
+        style={{ width: `${progress}%` }}
+      />
+      <div
+        className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-accent opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+        style={{
+          left: `calc(${progress}% - 6px)`,
+          boxShadow: "var(--shadow-accent-lg)",
+        }}
+      />
+    </div>
+  );
 }
 
 function hasGenerationStats(stats: GenerationStats): boolean {
@@ -129,7 +268,7 @@ export function AudioPlayer({
   embedded = false,
   variant = "panel",
   isPlaying,
-  currentTime,
+  clock,
   totalDuration,
   segmentCount,
   activeSegmentNumber,
@@ -157,90 +296,14 @@ export function AudioPlayer({
   onDownload,
   onStop,
 }: AudioPlayerProps) {
-  const barRef = useRef<HTMLDivElement>(null);
-  const isDragging = useRef(false);
-  const onSeekRef = useRef(onSeek);
-  const currentTimeRef = useRef(currentTime);
-  const totalDurationRef = useRef(totalDuration);
-
-  useEffect(() => {
-    onSeekRef.current = onSeek;
-  }, [onSeek]);
-  useEffect(() => {
-    currentTimeRef.current = currentTime;
-  }, [currentTime]);
-  useEffect(() => {
-    totalDurationRef.current = totalDuration;
-  }, [totalDuration]);
-
   const isDock = variant === "dock";
-  const progress = totalDuration > 0 ? Math.min(100, (currentTime / totalDuration) * 100) : 0;
   const hasAudio = totalDuration > 0;
   const canTogglePlayback = hasAudio && (!isGenerating || allowPlaybackDuringGeneration);
-  const canStop = Boolean(onStop) && (isGenerating || hasAudio || isPlaying || currentTime > 0);
+  const hasPosition = usePlaybackSelector(clock, selectHasPosition);
+  const canStop = Boolean(onStop) && (isGenerating || hasAudio || isPlaying || hasPosition);
   const statsVisible = hasGenerationStats(stats);
   const sectionText = sectionLabel(segmentCount, activeSegmentNumber, sectionPreviewCount);
   const effectivePrimaryAction = hasAudio ? undefined : primaryAction;
-
-  const getSeekPct = useCallback((clientX: number): number => {
-    if (!barRef.current) return 0;
-    const rect = barRef.current.getBoundingClientRect();
-    if (rect.width <= 0) return 0;
-    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-  }, []);
-
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!hasAudio) return;
-      e.preventDefault();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      isDragging.current = true;
-      onSeekRef.current(getSeekPct(e.clientX));
-    },
-    [getSeekPct, hasAudio],
-  );
-
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      const dur = totalDurationRef.current;
-      if (!hasAudio || dur === 0) return;
-      const cur = currentTimeRef.current;
-      const step = 5 / dur;
-      if (e.key === "ArrowRight" || e.key === "ArrowUp") {
-        e.preventDefault();
-        onSeekRef.current(Math.min(1, cur / dur + step));
-      } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
-        e.preventDefault();
-        onSeekRef.current(Math.max(0, cur / dur - step));
-      } else if (e.key === "Home") {
-        e.preventDefault();
-        onSeekRef.current(0);
-      } else if (e.key === "End") {
-        e.preventDefault();
-        onSeekRef.current(1);
-      }
-    },
-    [hasAudio],
-  );
-
-  const handlePointerMove = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (!isDragging.current) return;
-      onSeekRef.current(getSeekPct(e.clientX));
-    },
-    [getSeekPct],
-  );
-
-  const handlePointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-      e.currentTarget.releasePointerCapture(e.pointerId);
-    }
-    isDragging.current = false;
-  }, []);
-
-  const handlePointerCancel = useCallback(() => {
-    isDragging.current = false;
-  }, []);
 
   const transportButton = (enabled: boolean) =>
     `flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full border transition-all duration-200 ${
@@ -283,38 +346,14 @@ export function AudioPlayer({
   };
 
   const seekControl = (
-    <div
-      ref={barRef}
-      className={`${isDock ? "h-8" : "order-last h-8 basis-full sm:order-none sm:basis-auto"} group relative min-w-0 flex-1 select-none rounded-full ${
-        hasAudio ? "cursor-pointer" : ""
-      }`}
-      onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
-      onPointerUp={handlePointerUp}
-      onPointerCancel={handlePointerCancel}
-      onLostPointerCapture={handlePointerCancel}
-      onKeyDown={handleKeyDown}
-      role="slider"
-      tabIndex={hasAudio ? 0 : -1}
-      aria-label="Seek"
-      aria-valuemin={0}
-      aria-valuemax={100}
-      aria-valuenow={Math.round(progress)}
-      aria-valuetext={`${formatTime(currentTime)} of ${formatTime(totalDuration)}`}
-    >
-      <div className={`absolute left-0 right-0 top-1/2 -translate-y-1/2 ${compact ? "h-1" : "h-1.5"} rounded-full ${hasAudio ? "bg-border-strong" : "bg-border"}`} />
-      <div
-        className={`absolute left-0 top-1/2 ${compact ? "h-1" : "h-1.5"} -translate-y-1/2 rounded-full bg-accent`}
-        style={{ width: `${progress}%` }}
-      />
-      <div
-        className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-accent opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
-        style={{
-          left: `calc(${progress}% - 6px)`,
-          boxShadow: "var(--shadow-accent-lg)",
-        }}
-      />
-    </div>
+    <SeekBar
+      clock={clock}
+      totalDuration={totalDuration}
+      hasAudio={hasAudio}
+      compact={compact}
+      isDock={isDock}
+      onSeek={onSeek}
+    />
   );
 
   const statsPanel = statsVisible && !isDock && (
@@ -415,9 +454,10 @@ export function AudioPlayer({
       {statsChips}
       <div className="glass-pop rounded-[26px] px-4 pt-3 pb-2.5 sm:px-5">
         <div className="flex items-center gap-3">
-          <span className="w-11 shrink-0 text-right font-mono text-xs text-text-muted tabular-nums">
-            {formatTime(currentTime)}
-          </span>
+          <ElapsedTime
+            clock={clock}
+            className="w-11 shrink-0 text-right font-mono text-xs text-text-muted tabular-nums"
+          />
           {seekControl}
           <span className="w-11 shrink-0 font-mono text-xs text-text-muted tabular-nums">
             {formatTime(totalDuration)}
@@ -585,9 +625,10 @@ export function AudioPlayer({
         </div>
 
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 sm:flex-nowrap sm:gap-4">
-          <span className={`font-mono text-xs text-text-muted ${compact ? "w-11" : "w-12"} shrink-0 text-right tabular-nums`}>
-            {formatTime(currentTime)}
-          </span>
+          <ElapsedTime
+            clock={clock}
+            className={`font-mono text-xs text-text-muted ${compact ? "w-11" : "w-12"} shrink-0 text-right tabular-nums`}
+          />
           {seekControl}
           <span className={`font-mono text-xs text-text-muted ${compact ? "w-11" : "w-12"} shrink-0 tabular-nums`}>
             {formatTime(totalDuration)}

@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useId,
@@ -49,6 +50,7 @@ import {
   readerColumnWidthRem,
   type ReaderViewPreferences,
 } from "../lib/readerPreferences";
+import { usePlaybackSelector, type PlaybackClock } from "../lib/playbackClock";
 import { AudioPlayer, type AudioPlayerPrimaryAction } from "./AudioPlayer";
 import { ModelToggle } from "./ModelToggle";
 import { ReaderLibrarySidebar, type ReaderSidebarTab } from "./ReaderLibrarySidebar";
@@ -115,7 +117,7 @@ interface AdvancedReaderPageProps {
   onStop: () => void;
   stats: GenerationStats;
   isPlaying: boolean;
-  currentTime: number;
+  clock: PlaybackClock;
   totalDuration: number;
   playbackRate?: number;
   onPlaybackRateChange?: (rate: number) => void;
@@ -146,7 +148,6 @@ interface OverlayPart {
   start: number;
   sectionIndex: number;
   isActive: boolean;
-  isWordActive: boolean;
 }
 
 interface SectionBoundary {
@@ -216,13 +217,16 @@ function formatVoiceName(id: string): string {
  * the active range. Spans carry only background styling (tint + highlight), never
  * inline content, so the overlay stays glyph-for-glyph identical to the textarea
  * beneath it — keeping the caret, highlights, and scrolling in sync.
+ *
+ * Deliberately independent of the spoken word: the word moves several times a
+ * second and splitting on it here would rebuild every span in the section each
+ * time. The word highlight is applied per paragraph at render time instead.
  */
 function buildOverlayParts(
   text: string,
   blocks: TextBlock[],
   boundaries: SectionBoundary[],
   activeRange: { start: number; end: number } | null,
-  activeWordRange: { start: number; end: number } | null,
 ): OverlayPart[] {
   if (!text) return [];
 
@@ -239,28 +243,29 @@ function buildOverlayParts(
     offsets.add(clamp(activeRange.start, 0, text.length));
     offsets.add(clamp(activeRange.end, 0, text.length));
   }
-  if (activeWordRange) {
-    offsets.add(clamp(activeWordRange.start, 0, text.length));
-    offsets.add(clamp(activeWordRange.end, 0, text.length));
-  }
 
   const sorted = [...offsets].sort((a, b) => a - b);
   const parts: OverlayPart[] = [];
 
+  // Boundaries and split offsets are both ascending, so the section lookup walks
+  // forward once across the whole section instead of scanning every boundary for
+  // every span (which was quadratic on a chapter with many chunks).
+  let boundaryCursor = 0;
   for (let i = 0; i < sorted.length - 1; i++) {
     const partStart = sorted[i];
     const partEnd = sorted[i + 1];
     if (partEnd <= partStart) continue;
 
-    const sectionIndex = boundaries.findIndex(
-      (boundary) => partStart >= boundary.start && partStart < boundary.end,
-    );
+    while (boundaryCursor < boundaries.length && boundaries[boundaryCursor].end <= partStart) {
+      boundaryCursor += 1;
+    }
+    const boundary = boundaries[boundaryCursor];
+    const sectionIndex = boundary && partStart >= boundary.start && partStart < boundary.end
+      ? boundaryCursor
+      : -1;
 
     const isActive = activeRange
       ? partStart >= activeRange.start && partEnd <= activeRange.end
-      : false;
-    const isWordActive = activeWordRange
-      ? partStart >= activeWordRange.start && partEnd <= activeWordRange.end
       : false;
 
     parts.push({
@@ -268,11 +273,123 @@ function buildOverlayParts(
       start: partStart,
       sectionIndex,
       isActive,
-      isWordActive,
     });
   }
 
   return parts;
+}
+
+interface ReaderParagraphProps {
+  block: TextBlock;
+  parts: OverlayPart[];
+  /** Absolute offsets of the spoken word, or -1 when it is not in this block. */
+  wordStart: number;
+  wordEnd: number;
+}
+
+function overlayPartClassName(isActive: boolean): string | undefined {
+  return isActive ? "reader-chunk-highlight reader-chunk-highlight-active" : undefined;
+}
+
+/**
+ * One paragraph of the reading pane. Memoised on its own parts plus the word
+ * offsets, so a word advancing re-renders only the paragraph containing it —
+ * the rest of a chapter's spans stay untouched between sections.
+ */
+const ReaderParagraph = memo(function ReaderParagraph({
+  block,
+  parts,
+  wordStart,
+  wordEnd,
+}: ReaderParagraphProps) {
+  return (
+    <p
+      data-block-start={block.start}
+      className={block.blankLineBefore ? "reader-paragraph-spaced" : undefined}
+    >
+      {parts.map((part) => {
+        const className = overlayPartClassName(part.isActive);
+        const partEnd = part.start + part.text.length;
+        const overlaps = wordStart >= 0 && wordStart < partEnd && wordEnd > part.start;
+
+        if (!overlaps) {
+          return (
+            <span
+              key={`part-${part.start}`}
+              className={className}
+              data-section-index={part.sectionIndex >= 0 ? part.sectionIndex : undefined}
+            >
+              {part.text}
+            </span>
+          );
+        }
+
+        // Split around the spoken word rather than re-deriving every span in the
+        // section from scratch. `scrollMarkerIntoView` looks for the
+        // reader-word-highlight-active element, so it must stay in the DOM.
+        const sectionIndex = part.sectionIndex >= 0 ? part.sectionIndex : undefined;
+        const localStart = Math.max(0, wordStart - part.start);
+        const localEnd = Math.min(part.text.length, wordEnd - part.start);
+        const before = part.text.slice(0, localStart);
+        const word = part.text.slice(localStart, localEnd);
+        const after = part.text.slice(localEnd);
+        const wordClassName = className
+          ? `${className} reader-word-highlight-active`
+          : "reader-word-highlight-active";
+
+        return [
+          before && (
+            <span key={`part-${part.start}`} className={className} data-section-index={sectionIndex}>
+              {before}
+            </span>
+          ),
+          word && (
+            <span
+              key={`word-${part.start + localStart}`}
+              className={wordClassName}
+              data-section-index={sectionIndex}
+              data-reader-active-word="true"
+            >
+              {word}
+            </span>
+          ),
+          after && (
+            <span key={`tail-${part.start + localEnd}`} className={className} data-section-index={sectionIndex}>
+              {after}
+            </span>
+          ),
+        ];
+      })}
+    </p>
+  );
+});
+
+/**
+ * Time remaining. Subscribes to the playback clock on its own so the whole
+ * reader does not re-render for a label that changes once a second.
+ */
+function RemainingTime({
+  clock,
+  totalDuration,
+  className,
+}: {
+  clock: PlaybackClock;
+  totalDuration: number;
+  className: string;
+}) {
+  const selectRemaining = useCallback(
+    (timeSec: number) => Math.max(0, Math.ceil(totalDuration - timeSec)),
+    [totalDuration],
+  );
+  const remainingSeconds = usePlaybackSelector(clock, selectRemaining);
+  if (totalDuration <= 0) return null;
+  return (
+    <span className={className}>
+      {remainingSeconds < 60
+        ? `${remainingSeconds} sec left`
+        : `${Math.ceil(remainingSeconds / 60)} min left`}
+    </span>
+  );
 }
 
 /* Shared metrics for the overlay and the transparent textarea beneath it.
@@ -487,7 +604,7 @@ export function AdvancedReaderPage({
   onStop,
   stats,
   isPlaying,
-  currentTime,
+  clock,
   totalDuration,
   playbackRate = 1,
   onPlaybackRateChange,
@@ -761,12 +878,20 @@ export function AdvancedReaderPage({
     );
   }, [activeSegment]);
 
+  // Selecting an *index* rather than the position itself is what keeps this page
+  // off the animation-frame path: the value only changes when the spoken word
+  // changes, a few times a second, so everything below re-renders at that rate.
+  const selectActiveWordIndex = useCallback(
+    (timeSec: number) => estimatedWords.findIndex(
+      (word) => timeSec >= word.startSec && timeSec < word.endSec,
+    ),
+    [estimatedWords],
+  );
+  const activeWordIndex = usePlaybackSelector(clock, selectActiveWordIndex);
   const activeWordRange = useMemo(() => {
-    const activeWord = estimatedWords.find(
-      (word) => currentTime >= word.startSec && currentTime < word.endSec,
-    );
+    const activeWord = activeWordIndex >= 0 ? estimatedWords[activeWordIndex] : undefined;
     return activeWord ? { start: activeWord.start, end: activeWord.end } : null;
-  }, [currentTime, estimatedWords]);
+  }, [activeWordIndex, estimatedWords]);
 
   // Visual sections must remain stable while audio streams in. Generated
   // segments are a partial, time-based view and may also be transport-split;
@@ -782,8 +907,8 @@ export function AdvancedReaderPage({
   const textBlocks = useMemo(() => splitTextBlocks(text), [text]);
 
   const overlayParts = useMemo(
-    () => buildOverlayParts(text, textBlocks, sectionBoundaries, activeRange, activeWordRange),
-    [text, textBlocks, sectionBoundaries, activeRange, activeWordRange],
+    () => buildOverlayParts(text, textBlocks, sectionBoundaries, activeRange),
+    [text, textBlocks, sectionBoundaries, activeRange],
   );
 
   const paragraphs = useMemo(() => {
@@ -822,12 +947,7 @@ export function AdvancedReaderPage({
   const currentChapter = activeChapter ?? activeDocument?.chapters.find(
     (chapter) => currentTextOffset >= chapter.start && currentTextOffset < chapter.end,
   ) ?? activeDocument?.chapters.at(-1) ?? null;
-  const remainingSeconds = Math.max(0, totalDuration - currentTime);
-  const remainingLabel = totalDuration > 0
-    ? remainingSeconds < 60
-      ? `${Math.ceil(remainingSeconds)} sec left`
-      : `${Math.ceil(remainingSeconds / 60)} min left`
-    : null;
+
 
   // Auto-follow hands control back the moment the user scrolls during playback,
   // and stays paused until they resume it deliberately (pill, jump, or replay).
@@ -1103,7 +1223,7 @@ export function AdvancedReaderPage({
         documents={documents}
         activeDocument={activeDocument}
         currentTextOffset={currentTextOffset}
-        currentTime={currentTime}
+        clock={clock}
         loading={libraryLoading}
         persistent={libraryPersistent}
         onClose={() => setLibraryOpen(false)}
@@ -1526,11 +1646,11 @@ export function AdvancedReaderPage({
             <span className="w-9 text-right font-mono text-2xs text-text-muted tabular-nums">
               {Math.round(readingProgress)}%
             </span>
-            {remainingLabel && (
-              <span className="hidden whitespace-nowrap font-mono text-2xs text-text-muted tabular-nums md:inline">
-                {remainingLabel}
-              </span>
-            )}
+            <RemainingTime
+              clock={clock}
+              totalDuration={totalDuration}
+              className="hidden whitespace-nowrap font-mono text-2xs text-text-muted tabular-nums md:inline"
+            />
           </div>
         </div>
       )}
@@ -1605,32 +1725,22 @@ export function AdvancedReaderPage({
                 title="Double-click to listen from here"
                 className={`${DOCUMENT_TEXT_CLASSES} reader-article`}
               >
-                {paragraphs.map(({ block, parts }) => (
-                  <p
-                    key={`block-${block.start}`}
-                    data-block-start={block.start}
-                    className={block.blankLineBefore ? "reader-paragraph-spaced" : undefined}
-                  >
-                    {parts.map((part) => {
-                      const activeClass = part.isActive
-                        ? "reader-chunk-highlight reader-chunk-highlight-active"
-                        : "";
-                      const wordClass = part.isWordActive ? "reader-word-highlight-active" : "";
-                      const className = `${activeClass} ${wordClass}`.trim();
-
-                      return (
-                        <span
-                          key={`part-${part.start}`}
-                          className={className || undefined}
-                          data-section-index={part.sectionIndex >= 0 ? part.sectionIndex : undefined}
-                          data-reader-active-word={part.isWordActive ? "true" : undefined}
-                        >
-                          {part.text}
-                        </span>
-                      );
-                    })}
-                  </p>
-                ))}
+                {paragraphs.map(({ block, parts }) => {
+                  // Hand the word offsets only to the paragraph that contains
+                  // them; every other paragraph keeps its memoised output.
+                  const holdsActiveWord = activeWordRange !== null
+                    && activeWordRange.start < block.end
+                    && activeWordRange.end > block.start;
+                  return (
+                    <ReaderParagraph
+                      key={`block-${block.start}`}
+                      block={block}
+                      parts={parts}
+                      wordStart={holdsActiveWord ? activeWordRange.start : -1}
+                      wordEnd={holdsActiveWord ? activeWordRange.end : -1}
+                    />
+                  );
+                })}
               </article>
               {selectedPassage && (
                 <button
@@ -1670,7 +1780,7 @@ export function AdvancedReaderPage({
           variant="dock"
           embedded
           isPlaying={isPlaying}
-          currentTime={currentTime}
+          clock={clock}
           totalDuration={totalDuration}
           segmentCount={segments.length}
           activeSegmentNumber={activeSegmentNumber}

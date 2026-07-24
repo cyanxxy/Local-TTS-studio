@@ -2,6 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { AudioPlayer } from "./AudioPlayer";
 import type { GenerationStats } from "../types";
+import { PlaybackClock } from "../lib/playbackClock";
+
+function clockAt(seconds: number): PlaybackClock {
+  const clock = new PlaybackClock();
+  clock.set(seconds);
+  return clock;
+}
+
 
 const defaultStats: GenerationStats = {
   firstLatency: null,
@@ -16,7 +24,7 @@ function renderPlayer(overrides: Partial<React.ComponentProps<typeof AudioPlayer
   return render(
     <AudioPlayer
       isPlaying={false}
-      currentTime={0}
+      clock={clockAt(0)}
       totalDuration={0}
       segmentCount={0}
       activeSegmentNumber={null}
@@ -56,7 +64,7 @@ describe("AudioPlayer", () => {
       isPlaying: true,
       isGenerating: true,
       allowPlaybackDuringGeneration: true,
-      currentTime: 2,
+      clock: clockAt(2),
       totalDuration: 10,
       segmentCount: 3,
       activeSegmentNumber: 2,
@@ -131,7 +139,7 @@ describe("AudioPlayer", () => {
       compact: true,
       embedded: true,
       isPlaying: true,
-      currentTime: 65.2,
+      clock: clockAt(65.2),
       totalDuration: 125.6,
       segmentCount: 4,
       activeSegmentNumber: 2,
@@ -186,7 +194,7 @@ describe("AudioPlayer", () => {
   it("handles pointer and keyboard seeking", () => {
     const onSeek = vi.fn();
     renderPlayer({
-      currentTime: 50,
+      clock: clockAt(50),
       totalDuration: 100,
       segmentCount: 2,
       onSeek,
@@ -246,7 +254,7 @@ describe("AudioPlayer", () => {
 
   it("caps visual progress and shows inactive section counts", () => {
     renderPlayer({
-      currentTime: 200,
+      clock: clockAt(200),
       totalDuration: 100,
       segmentCount: 3,
       activeSegmentNumber: null,
@@ -258,7 +266,7 @@ describe("AudioPlayer", () => {
 
   it("carries rounded seconds into the next minute", () => {
     renderPlayer({
-      currentTime: 59.96,
+      clock: clockAt(59.96),
       totalDuration: 120,
       segmentCount: 1,
     });
