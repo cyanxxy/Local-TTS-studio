@@ -330,7 +330,10 @@ describe("download stream integrity", () => {
     Object.assign(stalled, { statusCode: 200, headers: {} });
     const promise = downloadHuggingFaceFile(url, destination, () => {}, () => Promise.resolve(stalled));
     promise.catch(() => undefined);
-    for (let index = 0; index < 20; index += 1) await new Promise((resolve) => setImmediate(resolve));
+    for (let index = 0; index < 100 && stalled.listenerCount("data") === 0; index += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    expect(stalled.listenerCount("data")).toBeGreaterThan(0);
     await vi.advanceTimersByTimeAsync(IDLE_DOWNLOAD_TIMEOUT_MS + 1);
     await expect(promise).rejects.toThrow(/stalled/);
   });
