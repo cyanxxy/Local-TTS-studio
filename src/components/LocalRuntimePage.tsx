@@ -885,9 +885,11 @@ export function LocalRuntimePage({
       charsPerSec: processingTime > 0 ? text.trim().length / processingTime : 0,
       rtf: result && result.durationSec > 0 ? result.elapsedSec / result.durationSec : 0,
       totalDuration: duration,
-      currentDuration: audioPlayer.currentTime,
+      // See the note in useQwen3LocalRuntime: sampled, not tracked, so the stats
+      // object does not churn on every animation frame.
+      currentDuration: audioPlayer.getCurrentTime(),
     };
-  }, [audioPlayer.currentTime, audioPlayer.totalDuration, result, text]);
+  }, [audioPlayer, result, text]);
   const handleDownloadAudio = useCallback(() => {
     const url = audioUrlRef.current;
     if (url) {
@@ -1057,7 +1059,7 @@ export function LocalRuntimePage({
             <AudioPlayer
               embedded
               isPlaying={audioPlayer.isPlaying}
-              currentTime={audioPlayer.currentTime}
+              clock={audioPlayer.clock}
               totalDuration={audioPlayer.totalDuration}
               segmentCount={audioPlayer.segments.length}
               activeSegmentNumber={activeSegmentNumber}

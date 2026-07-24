@@ -296,6 +296,11 @@ function createMainWindow() {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
+      // The playback clock, chunk scheduler, end-of-stream detection and Reader
+      // auto-advance all run off requestAnimationFrame. Chromium throttles rAF
+      // and timers hard once the window is hidden or occluded, which is exactly
+      // what a listener does with a text-to-speech reader — so opt out.
+      backgroundThrottling: false,
     },
   });
 
@@ -798,9 +803,11 @@ async function runRustBridge(
         activeBridgeProcesses.set(requestId, child);
       }
 
-      let stdout = "";
+      // Collected as fragments and joined once at close. Repeated `+=` on a
+      // multi-megabyte string reallocates the whole buffer on every data event.
+      const stdoutParts: string[] = [];
+      const stderrParts: string[] = [];
       let stdoutLineBuffer = "";
-      let stderr = "";
       let stdoutBytes = 0;
       let stderrBytes = 0;
       let settled = false;
@@ -840,7 +847,7 @@ async function runRustBridge(
           return;
         }
         const text = chunk.toString("utf-8");
-        stdout += text;
+        stdoutParts.push(text);
         stdoutLineBuffer += text;
 
         const lines = stdoutLineBuffer.split(/\r?\n/);
@@ -871,7 +878,7 @@ async function runRustBridge(
           rejectForOutputLimit("stderr", RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES);
           return;
         }
-        stderr += chunk.toString("utf-8");
+        stderrParts.push(chunk.toString("utf-8"));
       });
 
       child.on("error", (err) => {
@@ -886,6 +893,7 @@ async function runRustBridge(
         settled = true;
         cleanup();
 
+        const stderr = stderrParts.join("");
         if (code !== 0) {
           if (stderr.trim()) {
             console.error(`[local-tts:${action}] Rust local bridge stderr\n${stderr}`);
@@ -895,7 +903,7 @@ async function runRustBridge(
         }
 
         try {
-          resolve(parseBridgeResult(stdout, stderr, action));
+          resolve(parseBridgeResult(stdoutParts.join(""), stderr, action));
         } catch (err) {
           reject(err);
         }
@@ -916,34 +924,83 @@ async function runRustBridge(
   }
 }
 
+// A HuggingFace model cache holds tens of thousands of files. Recursing with an
+// unbounded Promise.all would issue that many concurrent stat() calls, pinning
+// the main process and risking descriptor exhaustion, so walk it with a fixed
+// pool of workers over an explicit directory queue instead.
+const CACHE_SIZE_SCAN_CONCURRENCY = 32;
+
+type CacheScanTask =
+  | { kind: "dir"; path: string }
+  | { kind: "file"; path: string };
+
 async function getDirectorySizeBytes(dirPath: string): Promise<number> {
   let total = 0;
+  const pending: CacheScanTask[] = [{ kind: "dir", path: dirPath }];
+  // Workers that found the queue momentarily empty while other workers were
+  // still discovering entries. They are released whenever a task completes, so
+  // the pool does not collapse to a single worker on the initial one-item queue.
+  let idleWaiters: Array<() => void> = [];
+  let activeTasks = 0;
+
+  const releaseIdleWaiters = () => {
+    const waiters = idleWaiters;
+    idleWaiters = [];
+    for (const wake of waiters) wake();
+  };
+
   // The cache tree is mutated concurrently (clear-cache, in-flight downloads,
   // the Rust bridge's HF cache), so a file or subdir can vanish between the
   // readdir snapshot and the per-entry stat/recurse. Treat such ENOENT races as
   // a 0-byte contribution to keep the size query best-effort instead of failing
   // the whole IPC call; surface any other error normally.
-  let entries: import("fs").Dirent[];
-  try {
-    entries = await fs.readdir(dirPath, { withFileTypes: true });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
-    throw err;
-  }
-
-  await Promise.all(entries.map(async (entry) => {
-    const fullPath = path.join(dirPath, entry.name);
+  const runTask = async (task: CacheScanTask): Promise<void> => {
     try {
-      if (entry.isDirectory()) {
-        total += await getDirectorySizeBytes(fullPath);
-      } else if (entry.isFile()) {
-        const stats = await fs.stat(fullPath);
+      if (task.kind === "file") {
+        const stats = await fs.stat(task.path);
         total += stats.size;
+        return;
+      }
+
+      const entries = await fs.readdir(task.path, { withFileTypes: true });
+      for (const entry of entries) {
+        const fullPath = path.join(task.path, entry.name);
+        if (entry.isDirectory()) pending.push({ kind: "dir", path: fullPath });
+        else if (entry.isFile()) pending.push({ kind: "file", path: fullPath });
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
-  }));
+  };
+
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const next = pending.pop();
+      if (next === undefined) {
+        // No queued work. If nothing is in flight either, the walk is complete
+        // and no new tasks can appear; otherwise wait for an in-flight task.
+        if (activeTasks === 0) {
+          releaseIdleWaiters();
+          return;
+        }
+        await new Promise<void>((resolve) => idleWaiters.push(resolve));
+        continue;
+      }
+
+      activeTasks += 1;
+      try {
+        await runTask(next);
+      } finally {
+        activeTasks -= 1;
+        // Also runs when runTask throws, so a failure never strands the pool.
+        releaseIdleWaiters();
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from({ length: CACHE_SIZE_SCAN_CONCURRENCY }, () => worker()),
+  );
 
   return total;
 }
@@ -1164,6 +1221,10 @@ app.whenReady().then(() => {
         return;
       }
       const end = Math.min(transfer.bytes.byteLength, offset + EPUB_TRANSFER_CHUNK_BYTES);
+      // `slice` (not `subarray`) is deliberate: structured clone of a typed
+      // array serialises its whole backing ArrayBuffer, so a view would copy the
+      // entire EPUB on every chunk. MessagePortMain only accepts MessagePortMain
+      // in its transfer list, so the clone copy itself cannot be avoided.
       port.postMessage({ offset, chunk: transfer.bytes.slice(offset, end) });
       offset = end;
       setImmediate(sendNextChunk);

@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AUDIO_PLAYER_MAX_BUFFER_SECONDS } from "../constants";
+import { AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS } from "../constants";
 import * as audioExportClientModule from "../lib/audioExportClient";
 import * as exportAudioModule from "../lib/exportAudio";
 import { useAudioPlayer } from "./useAudioPlayer";
@@ -48,6 +48,7 @@ class MockAudioContext {
   public currentTime = 0;
   public state: "running" | "suspended" | "closed" = "suspended";
   public readonly destination = {};
+  public readonly createdBuffers: MockAudioBuffer[] = [];
   public readonly createdSources: MockAudioBufferSourceNode[] = [];
   public readonly resume = vi.fn(async () => {
     if (MockAudioContext.resumeError) {
@@ -68,7 +69,9 @@ class MockAudioContext {
   }
 
   createBuffer(_channels: number, length: number, sampleRate: number): MockAudioBuffer {
-    return new MockAudioBuffer(length, sampleRate);
+    const buffer = new MockAudioBuffer(length, sampleRate);
+    this.createdBuffers.push(buffer);
+    return buffer;
   }
 
   createBufferSource(): MockAudioBufferSourceNode {
@@ -200,7 +203,7 @@ describe("useAudioPlayer", () => {
     });
 
     expect(result.current.totalDuration).toBe(1);
-    expect(result.current.currentTime).toBe(0.5);
+    expect(result.current.getCurrentTime()).toBe(0.5);
     expect(result.current.playbackRate).toBe(1.5);
     expect(result.current.segments[0]).toMatchObject({
       text: "Cached chapter",
@@ -228,7 +231,7 @@ describe("useAudioPlayer", () => {
     });
 
     expect(result.current.isPlaying).toBe(false);
-    expect(result.current.currentTime).toBeCloseTo(0.25, 6);
+    expect(result.current.getCurrentTime()).toBeCloseTo(0.25, 6);
   });
 
   it("limits queued sources to the playback buffer window", async () => {
@@ -241,8 +244,111 @@ describe("useAudioPlayer", () => {
     });
 
     const ctx = MockAudioContext.instances[0];
-    const expectedMaxSources = Math.ceil(AUDIO_PLAYER_MAX_BUFFER_SECONDS / 100);
+    const expectedMaxSources = Math.ceil(AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS / 100);
     expect(ctx.createdSources.length).toBeLessThanOrEqual(expectedMaxSources);
+  });
+
+  it("prunes rebuilt buffers again after seeking behind the low-water mark", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useAudioPlayer());
+
+      await act(async () => {
+        for (let index = 0; index < 40; index += 1) {
+          await result.current.scheduleChunk(makeChunk(`Section ${index + 1}`, 10, 1));
+        }
+      });
+
+      const ctx = MockAudioContext.instances[0];
+      await act(async () => {
+        result.current.seekTo(200);
+        await Promise.resolve();
+      });
+      expect(result.current.getCurrentTime()).toBeCloseTo(200, 6);
+
+      // Rebuild the first window, then move far enough for its first chunk to
+      // fall behind the retain window. Drive the background-safe scheduler
+      // directly so canceled animation-frame callbacks cannot affect the test.
+      await act(async () => {
+        result.current.seekTo(0);
+        await Promise.resolve();
+      });
+      ctx.currentTime = 25;
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+
+      const buffersAfterAdvance = ctx.createdBuffers.length;
+      await act(async () => {
+        result.current.seekTo(0);
+        await Promise.resolve();
+      });
+
+      // Chunk zero was pruned after the backward seek and therefore had to be
+      // decoded again. Without lowering decodedLowIndexRef, this is unchanged.
+      expect(ctx.createdBuffers).toHaveLength(buffersAfterAdvance + 1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resynchronizes a delayed timer without overlapping missed chunks", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useAudioPlayer());
+
+      await act(async () => {
+        for (let index = 0; index < 40; index += 1) {
+          await result.current.scheduleChunk(makeChunk(`Section ${index + 1}`, 10, 1));
+        }
+      });
+      expect(result.current.isPlaying).toBe(true);
+
+      const ctx = MockAudioContext.instances[0];
+      const scheduledAtStart = ctx.createdSources.length;
+
+      // Simulate a hidden tab: the AudioContext keeps running but no animation
+      // frame ever fires, so only the interval can top the schedule up.
+      animationFrameCallbacks = [];
+      act(() => {
+        ctx.currentTime += 60;
+        vi.advanceTimersByTime(60_000);
+      });
+
+      const resumedSources = ctx.createdSources.slice(scheduledAtStart);
+      expect(resumedSources.length).toBeGreaterThan(0);
+      expect(resumedSources[0]?.startedWith?.[1]).toBeGreaterThan(0);
+      for (const source of resumedSources) {
+        expect(source.startedWith?.[0]).toBeGreaterThanOrEqual(ctx.currentTime);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("publishes the playback position to clock subscribers", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    const seen: number[] = [];
+    const unsubscribe = result.current.clock.subscribe(() => {
+      seen.push(result.current.clock.getTime());
+    });
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Section 1", 4, 1));
+    });
+    act(() => {
+      result.current.seekTo(2);
+    });
+
+    expect(seen).toContain(2);
+    expect(result.current.clock.getTime()).toBe(result.current.getCurrentTime());
+
+    unsubscribe();
+    const countAfterUnsubscribe = seen.length;
+    act(() => {
+      result.current.seekTo(1);
+    });
+    expect(seen.length).toBe(countAfterUnsubscribe);
   });
 
   it("excludes trailing synthetic silence from exported captions", async () => {
@@ -286,26 +392,26 @@ describe("useAudioPlayer", () => {
       result.current.seek(0.5);
       await Promise.resolve();
     });
-    expect(result.current.currentTime).toBeCloseTo(1, 6);
+    expect(result.current.getCurrentTime()).toBeCloseTo(1, 6);
     expect(result.current.activeSegmentId).toBe("segment-2");
 
     await act(async () => {
       result.current.skip(-0.5);
       await Promise.resolve();
     });
-    expect(result.current.currentTime).toBeCloseTo(0.5, 6);
+    expect(result.current.getCurrentTime()).toBeCloseTo(0.5, 6);
 
     await act(async () => {
       result.current.jumpToSegment("missing");
       await Promise.resolve();
     });
-    expect(result.current.currentTime).toBeCloseTo(0.5, 6);
+    expect(result.current.getCurrentTime()).toBeCloseTo(0.5, 6);
 
     await act(async () => {
       result.current.jumpToSegment("segment-2");
       await Promise.resolve();
     });
-    expect(result.current.currentTime).toBeCloseTo(1, 6);
+    expect(result.current.getCurrentTime()).toBeCloseTo(1, 6);
 
     act(() => {
       result.current.setPlaybackRate(3);
@@ -333,7 +439,7 @@ describe("useAudioPlayer", () => {
       result.current.stopAll();
     });
     expect(result.current.isPlaying).toBe(false);
-    expect(result.current.currentTime).toBe(0);
+    expect(result.current.getCurrentTime()).toBe(0);
     expect(result.current.activeSegmentId).toBeNull();
 
     act(() => {
@@ -428,7 +534,7 @@ describe("useAudioPlayer", () => {
     });
 
     expect(result.current.isPlaying).toBe(false);
-    expect(result.current.currentTime).toBe(0);
+    expect(result.current.getCurrentTime()).toBe(0);
     expect(ctx.createdSources[0]?.stopped).toBe(true);
   });
 
@@ -471,7 +577,7 @@ describe("useAudioPlayer", () => {
     });
 
     expect(result.current.totalDuration).toBe(2);
-    expect(result.current.currentTime).toBeCloseTo(1.5, 6);
+    expect(result.current.getCurrentTime()).toBeCloseTo(1.5, 6);
     expect(result.current.segments).toEqual([
       expect.objectContaining({ id: "segment-1", text: "First retake", startSec: 0, endSec: 1 }),
       expect.objectContaining({ id: "segment-2", text: "Second section", startSec: 1, endSec: 2 }),
@@ -491,7 +597,7 @@ describe("useAudioPlayer", () => {
     });
 
     expect(result.current.isPlaying).toBe(true);
-    expect(result.current.currentTime).toBe(0);
+    expect(result.current.getCurrentTime()).toBe(0);
   });
 
   it("keeps playback open at the generated buffer edge until streaming completes", async () => {
@@ -512,7 +618,7 @@ describe("useAudioPlayer", () => {
 
     flushNextAnimationFrame();
 
-    expect(result.current.currentTime).toBe(1);
+    expect(result.current.getCurrentTime()).toBe(1);
     expect(result.current.isPlaying).toBe(true);
 
     ctx.createdSources[0]?.onended?.();
@@ -531,7 +637,7 @@ describe("useAudioPlayer", () => {
     ctx.currentTime = 2.4;
     flushNextAnimationFrame();
 
-    expect(result.current.currentTime).toBe(2);
+    expect(result.current.getCurrentTime()).toBe(2);
     expect(result.current.isPlaying).toBe(false);
   });
 });

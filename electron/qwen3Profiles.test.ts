@@ -2,6 +2,8 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  QWEN3_DEFAULT_LANGUAGE,
+  QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
   QWEN3_PROFILES,
   QWEN3_SPEAKERS,
@@ -41,6 +43,8 @@ describe("Qwen3 profiles", () => {
   });
 
   it("exposes the complete official language and speaker choices", () => {
+    expect(QWEN3_DEFAULT_SPEAKER).toBe("Aiden");
+    expect(QWEN3_DEFAULT_LANGUAGE).toBe("English");
     expect(QWEN3_LANGUAGES).toEqual([
       "Auto",
       "Chinese",

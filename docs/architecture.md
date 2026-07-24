@@ -30,6 +30,13 @@ src/
 `-- types.ts     Worker protocol and shared UI types
 ```
 
+Studio is the landing surface and ships in the entry chunk. The Reader page, the
+per-model local-runtime pages, the app settings dialog, and document import
+(Readability + zip) are loaded on demand via `React.lazy` / dynamic `import()`,
+so opening the app does not parse code for surfaces the session never reaches.
+Tests that assert into one of those subtrees must await its mount
+(`findBy*`/`waitFor`) rather than querying synchronously after `render`.
+
 ## Worker Protocol
 
 The browser inference path is a strict message contract between the main thread and Web Workers. The canonical TypeScript definitions live in `src/types.ts`.
@@ -48,6 +55,8 @@ This contract applies to Studio, Reader, and Electron local-runtime playback. Br
 - Playback uses the Web Audio API: `AudioContext` + `AudioBufferSourceNode`.
 - Audio chunks are `Float32Array`.
 - Streaming chunk handling keeps playback/export refs immediate, while `useTTS` stats/progress and `useAudioPlayer` segment/timeline UI state are coalesced to the next UI frame to avoid per-chunk React render pressure.
+- The playback position is **not** React state. It advances every animation frame, so `useAudioPlayer` publishes it through a `PlaybackClock` external store (`src/lib/playbackClock.ts`); components subscribe with `usePlaybackTime` at a leaf that needs frame-rate updates, or with `usePlaybackSelector` to re-render only when a derived value (an active word index, a whole-second readout) changes. Effects and callbacks read it imperatively via `getCurrentTime()`. Adding `currentTime` back to a render path re-renders the whole app 60 times a second.
+- The player materialises `AudioBuffer`s and source nodes only `AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS` ahead of the playhead and releases decoded buffers `AUDIO_PLAYER_RETAIN_BEHIND_SECONDS` behind it, rebuilding them from the retained Float32 PCM on a seek. Because the horizon is short, the schedule is topped up both from the animation-frame loop and from a one-second timer, so playback does not run dry in a hidden browser tab where frames stop. The Electron window additionally sets `backgroundThrottling: false`.
 - Export supports `wav-f32`, `wav-pcm24`, `wav-pcm16`, and `mp3`.
 - Sample rate comes from model output unless the user selects an export resample target.
 

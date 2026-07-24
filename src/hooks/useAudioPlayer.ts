@@ -1,7 +1,11 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import type { AudioExportOptions, CaptionExportFormat } from "../types";
 import type { CachedReaderAudioChunk } from "../lib/readerDocument";
-import { AUDIO_PLAYER_MAX_BUFFER_SECONDS } from "../constants";
+import {
+  AUDIO_PLAYER_RETAIN_BEHIND_SECONDS,
+  AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS,
+} from "../constants";
+import { PlaybackClock } from "../lib/playbackClock";
 import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
 import { downloadAudioChunks } from "../lib/audioExportClient";
 import { downloadBlob } from "../lib/exportAudio";
@@ -21,7 +25,14 @@ export type { AudioChunkData, AudioSegment } from "../lib/audioTimeline";
 export interface UseAudioPlayerReturn {
   isPlaying: boolean;
   error: string | null;
-  currentTime: number;
+  /**
+   * Playback position. It ticks once per animation frame, so it is published
+   * through an external store rather than React state — subscribe with
+   * `usePlaybackTime` / `usePlaybackSelector` at the leaf that needs it, or read
+   * `getCurrentTime()` imperatively from callbacks and effects.
+   */
+  clock: PlaybackClock;
+  getCurrentTime: () => number;
   totalDuration: number;
   playbackRate: number;
   segments: AudioSegment[];
@@ -51,6 +62,8 @@ export interface UseAudioPlayerReturn {
 
 const MIN_PLAYBACK_RATE = 0.75;
 const MAX_PLAYBACK_RATE = 2.0;
+/** Background-safe cadence for extending the playback schedule. */
+const SCHEDULE_TOPUP_INTERVAL_MS = 1000;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -64,11 +77,13 @@ function clamp(value: number, min: number, max: number): number {
 export function useAudioPlayer(): UseAudioPlayerReturn {
   const [isPlaying, setIsPlaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [currentTime, setCurrentTime] = useState(0);
   const [totalDuration, setTotalDuration] = useState(0);
   const [playbackRate, setPlaybackRateState] = useState(1);
   const [segments, setSegments] = useState<AudioSegment[]>([]);
   const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
+
+  // Created once and never replaced; the setter is intentionally unused.
+  const [clock] = useState(() => new PlaybackClock());
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const nextPlayTimeRef = useRef(0);
@@ -88,6 +103,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const autoPlayOnChunkRef = useRef(true);
   const streamCompleteRef = useRef(true);
   const playbackOperationRef = useRef(0);
+  // Lowest chunk index that may still hold a decoded AudioBuffer. Pruning walks
+  // forward from here instead of rescanning every chunk on every frame.
+  const decodedLowIndexRef = useRef(0);
+  const lastActiveSegmentIdRef = useRef<string | null>(null);
   const timelineUiFlushCancelRef = useRef<CancelScheduledUiFlush | null>(null);
   const timelineSegmentsDirtyRef = useRef(false);
   const timelineDurationDirtyRef = useRef(false);
@@ -142,10 +161,18 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const activeSegmentCursorRef = useRef(0);
 
+  // Called on every frame, so it must not push an unchanged value into state —
+  // React would still re-render this hook's consumers once per tick.
+  const commitActiveSegmentId = useCallback((segmentId: string | null) => {
+    if (lastActiveSegmentIdRef.current === segmentId) return;
+    lastActiveSegmentIdRef.current = segmentId;
+    setActiveSegmentId(segmentId);
+  }, []);
+
   const updateActiveSegment = useCallback((timeSec: number) => {
     const chunks = allChunksRef.current;
     if (chunks.length === 0) {
-      setActiveSegmentId(null);
+      commitActiveSegmentId(null);
       return;
     }
 
@@ -164,16 +191,18 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     activeSegmentCursorRef.current = cursor;
     const chunk = chunks[cursor];
-    setActiveSegmentId(timeSec >= chunk.startSec && timeSec < chunk.endSec ? chunk.segmentId : null);
-  }, []);
+    commitActiveSegmentId(
+      timeSec >= chunk.startSec && timeSec < chunk.endSec ? chunk.segmentId : null,
+    );
+  }, [commitActiveSegmentId]);
 
   const syncCurrentTime = useCallback((nextTime: number) => {
     const clamped = clamp(nextTime, 0, totalDurationRef.current);
     currentTimeRef.current = clamped;
-    setCurrentTime(clamped);
+    clock.set(clamped);
     updateActiveSegment(clamped);
     return clamped;
-  }, [updateActiveSegment]);
+  }, [clock, updateActiveSegment]);
 
   const syncTotalDuration = useCallback((nextDuration: number, options: { deferUi?: boolean } = {}) => {
     const clamped = Math.max(0, nextDuration);
@@ -228,42 +257,58 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     return chunk.audioBuffer;
   }, [copyToChannel]);
 
-  const pruneBufferedAudio = useCallback(() => {
-    let retainedDuration = 0;
+  // Releases decoded buffers that the playhead has moved past. Chunks are time
+  // ordered and buffers are only ever created ahead of `decodedLowIndexRef`, so
+  // this costs one step per chunk actually released rather than a full rescan.
+  // A released buffer is rebuilt on demand by `ensureAudioBuffer` if the
+  // listener seeks back into it; the underlying Float32 PCM is never dropped.
+  const pruneBufferedAudio = useCallback((referenceTimeSec: number) => {
+    const chunks = allChunksRef.current;
+    const releaseBefore = referenceTimeSec - AUDIO_PLAYER_RETAIN_BEHIND_SECONDS;
 
-    for (let index = allChunksRef.current.length - 1; index >= 0; index -= 1) {
-      const chunk = allChunksRef.current[index];
-      if (!chunk.audioBuffer) continue;
-
-      const duration = chunk.endSec - chunk.startSec;
-      if (retainedDuration === 0 || retainedDuration + duration <= AUDIO_PLAYER_MAX_BUFFER_SECONDS) {
-        retainedDuration += duration;
-        continue;
-      }
-
-      chunk.audioBuffer = undefined;
+    let index = Math.max(0, Math.min(decodedLowIndexRef.current, chunks.length));
+    while (index < chunks.length && chunks[index].endSec < releaseBefore) {
+      chunks[index].audioBuffer = undefined;
+      index += 1;
     }
+    decodedLowIndexRef.current = index;
   }, []);
 
+  /** First chunk whose audio extends past `timeSec`, or `length` if none does. */
   const findChunkIndexAtTime = useCallback((timeSec: number): number => {
     const chunks = allChunksRef.current;
-    for (let index = 0; index < chunks.length; index += 1) {
-      if (chunks[index].endSec > timeSec) {
-        return index;
-      }
+    let low = 0;
+    let high = chunks.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (chunks[mid].endSec > timeSec) high = mid;
+      else low = mid + 1;
     }
-    return chunks.length;
+    return low;
   }, []);
 
   const scheduleBufferedChunks = useCallback((ctx: AudioContext, seekTimeSec?: number) => {
     if (allChunksRef.current.length === 0) return;
 
     const liveTime = isPlayingRef.current ? getLiveTimelineTime() : currentTimeRef.current;
-    const horizonSec = liveTime + AUDIO_PLAYER_MAX_BUFFER_SECONDS;
+    const horizonSec = liveTime + AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS;
     const playbackRate = playbackRateRef.current;
     let nextPlay = nextPlayTimeRef.current;
     let cursor = scheduleCursorRef.current;
     let firstChunkSeekTime = seekTimeSec;
+
+    // A hidden tab or blocked main thread can delay both scheduling loops past
+    // the materialised horizon. Web Audio starts a source whose `when` is in the
+    // past immediately, so retaining the stale cursor would make every missed
+    // chunk overlap. Re-anchor at the live timeline position and start only the
+    // chunk that contains it, with the elapsed portion skipped.
+    if (nextPlay > 0 && nextPlay <= ctx.currentTime) {
+      nextPlay = ctx.currentTime;
+      cursor = findChunkIndexAtTime(liveTime);
+      firstChunkSeekTime = liveTime;
+      timelineAnchorRef.current = liveTime;
+      contextAnchorRef.current = ctx.currentTime;
+    }
 
     while (cursor < allChunksRef.current.length) {
       const chunk = allChunksRef.current[cursor];
@@ -294,8 +339,16 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     nextPlayTimeRef.current = nextPlay;
     scheduleCursorRef.current = cursor;
-    pruneBufferedAudio();
-  }, [ensureAudioBuffer, getLiveTimelineTime, pruneBufferedAudio, registerSource]);
+    // Safe to run on every frame: the walk resumes from the low-water mark, so
+    // it does no work at all unless the playhead has actually left a chunk.
+    pruneBufferedAudio(liveTime);
+  }, [
+    ensureAudioBuffer,
+    findChunkIndexAtTime,
+    getLiveTimelineTime,
+    pruneBufferedAudio,
+    registerSource,
+  ]);
 
   const replayFromOffset = useCallback(async (seekTimeSec: number, shouldPlay: boolean) => {
     const ctx = getContext();
@@ -306,6 +359,13 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     stopAllNodes();
     nextPlayTimeRef.current = 0;
     scheduleCursorRef.current = findChunkIndexAtTime(clampedSeek);
+    // Seeking behind the decoded low-water mark rebuilds earlier buffers. Move
+    // the pruning cursor back as well so those buffers are released again after
+    // the playhead passes them.
+    decodedLowIndexRef.current = Math.min(
+      decodedLowIndexRef.current,
+      scheduleCursorRef.current,
+    );
     timelineAnchorRef.current = clampedSeek;
     contextAnchorRef.current = ctx.currentTime;
 
@@ -390,6 +450,22 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }
     return () => cancelAnimationFrame(animFrameRef.current);
   }, [isPlaying, getLiveTimelineTime, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
+
+  // A second, timer-driven top-up of the schedule. The animation-frame loop
+  // above is the primary one, but it stops entirely in a hidden browser tab —
+  // and the schedule only runs AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS ahead, so
+  // relying on it alone would let audio run dry shortly after the listener
+  // switches tabs. Timers are throttled in the background but never below about
+  // a second, which leaves the whole horizon as slack. `getLiveTimelineTime`
+  // reads from the AudioContext, so the position stays accurate either way.
+  useEffect(() => {
+    if (!isPlaying) return;
+    const timer = window.setInterval(() => {
+      const ctx = audioContextRef.current;
+      if (ctx && isPlayingRef.current) scheduleBufferedChunks(ctx);
+    }, SCHEDULE_TOPUP_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [isPlaying, scheduleBufferedChunks]);
 
   const scheduleChunk = useCallback(async (chunk: AudioChunkData) => {
     const ctx = getContext();
@@ -656,7 +732,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       autoPlayOnChunkRef.current = false;
       void replayFromOffset(playbackSnapshot, false);
     }
-    pruneBufferedAudio();
+    // The chunk array was spliced, so the low-water mark no longer refers to
+    // the chunk it was measured against.
+    decodedLowIndexRef.current = 0;
+    pruneBufferedAudio(playbackSnapshot);
   }, [pruneBufferedAudio, rebuildSegmentState, replayFromOffset, syncCurrentTime, syncTotalDuration]);
 
   const getAudioCacheSnapshot = useCallback((): CachedReaderAudioChunk[] => (
@@ -691,7 +770,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     syncCurrentTime(nextTime);
     autoPlayOnChunkRef.current = wasPlaying && nextTime < nextDuration;
     void replayFromOffset(nextTime, autoPlayOnChunkRef.current);
-    pruneBufferedAudio();
+    decodedLowIndexRef.current = 0;
+    pruneBufferedAudio(nextTime);
   }, [
     getLiveTimelineTime,
     pruneBufferedAudio,
@@ -756,10 +836,11 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     setError(null);
     setTotalDuration(duration);
     setSegments(buildAudioSegments(allChunksRef.current));
-    setCurrentTime(restoredTime);
+    clock.set(restoredTime);
     updateActiveSegment(restoredTime);
-    pruneBufferedAudio();
-  }, [cancelTimelineStateFlush, findChunkIndexAtTime, pruneBufferedAudio, stopAllNodes, updateActiveSegment]);
+    decodedLowIndexRef.current = 0;
+    pruneBufferedAudio(restoredTime);
+  }, [cancelTimelineStateFlush, clock, findChunkIndexAtTime, pruneBufferedAudio, stopAllNodes, updateActiveSegment]);
 
   const beginStream = useCallback(() => {
     streamCompleteRef.current = false;
@@ -790,6 +871,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     allChunksRef.current = [];
     nextPlayTimeRef.current = 0;
     scheduleCursorRef.current = 0;
+    decodedLowIndexRef.current = 0;
     timelineAnchorRef.current = 0;
     contextAnchorRef.current = 0;
     interruptedRef.current = false;
@@ -798,14 +880,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     setError(null);
 
     setSegments([]);
-    setActiveSegmentId(null);
+    commitActiveSegmentId(null);
 
     setIsPlaying(false);
     isPlayingRef.current = false;
 
     syncCurrentTime(0);
     syncTotalDuration(0);
-  }, [cancelTimelineStateFlush, stopAllNodes, syncCurrentTime, syncTotalDuration]);
+  }, [cancelTimelineStateFlush, commitActiveSegmentId, stopAllNodes, syncCurrentTime, syncTotalDuration]);
 
   const stopAll = useCallback(() => {
     playbackOperationRef.current += 1;
@@ -821,8 +903,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     setIsPlaying(false);
     isPlayingRef.current = false;
     syncCurrentTime(0);
-    setActiveSegmentId(null);
-  }, [stopAllNodes, syncCurrentTime]);
+    commitActiveSegmentId(null);
+  }, [commitActiveSegmentId, stopAllNodes, syncCurrentTime]);
+
+  const getCurrentTime = useCallback(() => currentTimeRef.current, []);
 
   useEffect(() => {
     return () => {
@@ -839,7 +923,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   return {
     isPlaying,
     error,
-    currentTime,
+    clock,
+    getCurrentTime,
     totalDuration,
     playbackRate,
     segments,

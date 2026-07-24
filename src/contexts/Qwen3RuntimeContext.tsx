@@ -17,6 +17,8 @@ import {
   getDefaultQwen3Profile,
   getQwen3Profile,
   getQwen3Profiles,
+  QWEN3_DEFAULT_LANGUAGE,
+  QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
   QWEN3_SPEAKERS,
   type Qwen3Profile,
@@ -89,8 +91,8 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<Qwen3Profile>(initialProfile);
   const [modelPath, setModelPathState] = useState("");
   const [readiness, setReadiness] = useState<Qwen3RuntimeSettings["readiness"]>("missing");
-  const [speaker, setSpeakerState] = useState<string>(QWEN3_SPEAKERS[0]);
-  const [language, setLanguageState] = useState<string>(QWEN3_LANGUAGES[0]);
+  const [speaker, setSpeakerState] = useState<string>(QWEN3_DEFAULT_SPEAKER);
+  const [language, setLanguageState] = useState<string>(QWEN3_DEFAULT_LANGUAGE);
   const [instruct, setInstruct] = useState("");
   const [temperature, setTemperatureState] = useState(0.9);
   const [topK, setTopKState] = useState(50);
