@@ -42,7 +42,7 @@ In addition to CustomVoice and Base voice-clone profiles, each supported platfor
 
 The default is the platform's 0.6B CustomVoice profile: 6-bit MLX on Apple Silicon and standard safetensors with LibTorch on Windows x64. The 1.7B profiles remain explicit quality choices.
 
-CustomVoice provides nine built-in speakers and needs no reference audio. Base performs voice cloning and requires a WAV plus the exact reference transcript. Both accept Auto plus Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.
+CustomVoice provides nine built-in speakers and needs no reference audio. Aiden with explicit English language conditioning is the default; the picker shows each speaker's native language, prioritizes the two English-native voices, and lets users select any other speaker without reloading the model. Base performs voice cloning and requires a WAV plus the exact reference transcript. Both accept Auto plus Chinese, English, Japanese, Korean, German, French, Russian, Portuguese, Spanish, and Italian.
 
 ## Model downloads and validation
 
@@ -78,7 +78,7 @@ Generation payloads are strict and reject unknown fields. Supported fields are:
   "instruct": "Speak warmly",
   "temperature": 0.9,
   "topK": 50,
-  "maxNewTokens": 1536
+  "maxNewTokens": 8192
 }
 ```
 

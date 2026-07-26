@@ -26,6 +26,17 @@ export const QWEN3_SPEAKERS = [
 
 export type Qwen3Language = typeof QWEN3_LANGUAGES[number];
 export type Qwen3Speaker = typeof QWEN3_SPEAKERS[number];
+export const QWEN3_SPEAKER_NATIVE_LANGUAGES = {
+  Vivian: "Chinese",
+  Serena: "Chinese",
+  Uncle_Fu: "Chinese",
+  Dylan: "Chinese",
+  Eric: "Chinese",
+  Ryan: "English",
+  Aiden: "English",
+  Ono_Anna: "Japanese",
+  Sohee: "Korean",
+} as const satisfies Record<Qwen3Speaker, Qwen3Language>;
 export type Qwen3Platform = "darwin" | "win32";
 export type Qwen3Provider = "mlx" | "libtorch";
 export type Qwen3Mode = "customVoice" | "voiceClone" | "voiceDesign";

@@ -187,6 +187,15 @@ describe("localTtsIpc request sanitizers", () => {
     const baseRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
     const voiceDesignRepo = "mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit";
     expect(sanitizeGeneratePayload("qwen3", {
+      text: "Use the English defaults.",
+      mode: "customVoice",
+      modelRepo: customRepo,
+      modelPath: "/models/qwen3-customvoice",
+    }, "darwin", "arm64")).toMatchObject({
+      speaker: "Aiden",
+      language: "English",
+    });
+    expect(sanitizeGeneratePayload("qwen3", {
       text: "  Hello from Qwen. ",
       mode: "customVoice",
       modelRepo: customRepo,

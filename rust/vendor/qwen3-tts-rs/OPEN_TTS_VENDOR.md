@@ -11,9 +11,12 @@ VoiceDesign prompt construction used by the resident bridge, keeps
 VoiceDesign request details off stdout, changes MLX build guidance to match
 this bundled source tree, and corrects the generation-config filename in
 `src/model.rs` to `generation_config.json` (upstream reads the nonexistent
-`generate_config.json`). The upstream high-level VoiceDesign API at the pinned
-revision returns placeholder silence; the rest of the low-level inference
-engine remains the native backend used by Open TTS.
+`generate_config.json`). It also aligns CLI/worker defaults with the model's
+8,192-token generation configuration and rejects budget exhaustion without an
+end-of-speech token instead of returning truncated audio as a successful
+completion. The upstream high-level VoiceDesign API at the pinned revision
+returns placeholder silence; the rest of the low-level inference engine
+remains the native backend used by Open TTS.
 
 ## Re-vendor checklist
 

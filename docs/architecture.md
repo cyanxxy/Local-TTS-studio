@@ -66,8 +66,11 @@ Reader keeps the complete normalized document and its real chapter table of cont
 
 - Progress, bookmarks, notes, and chapter navigation use absolute whole-book text offsets. Audio segment offsets and playback time remain local to the active section; `SynthesisApp` translates between the two boundaries.
 - Section IDs are derived from stable chapter IDs and their in-chapter order. They are not a second table of contents.
-- Generated PCM is cached independently by `[documentId, sectionId]`. A signature of section text plus model, voice, quality, and tuning invalidates only incompatible audio. IndexedDB uses small metadata records for LRU pruning and is bounded to 96 sections or 512 MiB; the faster session-memory LRU is separately bounded to 12 sections or 192 MiB.
-- IndexedDB version 3 keeps the document, settings, and section-audio stores, but deletes the obsolete document-level `audio` store during upgrade; legacy audio is discarded rather than migrated. Records loaded from older profiles are normalized in memory to add section IDs while preserving book text and annotations.
+- Generated PCM is cached independently by `[documentId, sectionId]`. A signature of section text plus model, voice, quality, and tuning invalidates only incompatible audio. Persistent storage uses small metadata records for LRU pruning and is bounded to 96 sections or 512 MiB; the faster session-memory LRU is separately bounded to 12 sections or 192 MiB.
+- The web build uses IndexedDB version 3 for document, settings, and section-audio stores. Electron uses the public-domain SQLite engine bundled with its Node.js runtime, owns the connection in a dedicated worker, and streams PCM to that worker in bounded chunks. It stores the same Reader contract under the local app-data directory. See [Local persistence](./storage.md).
+- IndexedDB upgrades delete the obsolete document-level `audio` store rather than migrating it. Records loaded from older profiles are normalized in memory to add section IDs while preserving book text and annotations.
+- The first desktop read imports documents a pre-SQLite release left in the renderer's IndexedDB, ahead of the "empty library, seed a starter document" path, so an upgrade never presents an empty library. Cached audio is not carried over; the IndexedDB copy is left intact.
+- Quitting the desktop app asks each renderer to flush its debounced Reader writes and waits for them before closing the worker; window and tab teardown flush the same way on both targets.
 - At a section boundary, Reader flushes the completed cache before restoring a compatible next section or generating it. Automatic continuation is a persisted Reader preference, enabled by default, and can be disabled.
 
 ## Model-Specific Notes

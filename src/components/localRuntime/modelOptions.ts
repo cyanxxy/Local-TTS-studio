@@ -1,7 +1,9 @@
 import {
   getDefaultQwen3Profile,
   getQwen3Profiles,
+  QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
+  QWEN3_SPEAKER_NATIVE_LANGUAGES,
   QWEN3_SPEAKERS,
 } from "../../../electron/qwen3Profiles";
 
@@ -19,9 +21,18 @@ export const NEUTTS_OPTIONS: LocalRuntimeOption[] = [
   { value: "neuphonic/neutts-nano-spanish-q4-gguf", label: "Spanish · neutts-nano · Q4 GGUF" },
 ];
 
-export const QWEN3_SPEAKER_OPTIONS: LocalRuntimeOption[] = QWEN3_SPEAKERS.map((speaker) => ({
+const QWEN3_SPEAKER_OPTION_ORDER = [
+  QWEN3_DEFAULT_SPEAKER,
+  ...QWEN3_SPEAKERS.filter((speaker) => (
+    speaker !== QWEN3_DEFAULT_SPEAKER
+    && QWEN3_SPEAKER_NATIVE_LANGUAGES[speaker] === "English"
+  )),
+  ...QWEN3_SPEAKERS.filter((speaker) => QWEN3_SPEAKER_NATIVE_LANGUAGES[speaker] !== "English"),
+];
+
+export const QWEN3_SPEAKER_OPTIONS: LocalRuntimeOption[] = QWEN3_SPEAKER_OPTION_ORDER.map((speaker) => ({
   value: speaker,
-  label: speaker.replace("_", " "),
+  label: `${speaker.replace(/_/g, " ")} · ${QWEN3_SPEAKER_NATIVE_LANGUAGES[speaker]}`,
 }));
 
 export const QWEN3_LANGUAGE_OPTIONS: LocalRuntimeOption[] = QWEN3_LANGUAGES.map((language) => ({

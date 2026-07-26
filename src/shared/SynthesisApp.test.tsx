@@ -1496,6 +1496,7 @@ describe("SynthesisApp", () => {
     fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "reader-desktop-qwen3-selected" })).toBeInTheDocument();
     expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Aiden");
+    expect(screen.getByLabelText("Qwen language")).toHaveValue("English");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
     await waitFor(() => expect(mock.localTts.probe).toHaveBeenCalledTimes(1));
     fireEvent.click(screen.getByRole("button", { name: "Aiden" }));

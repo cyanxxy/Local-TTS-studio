@@ -17,6 +17,8 @@ pub const LANGUAGES: &[&str] = &[
 pub const SPEAKERS: &[&str] = &[
     "Vivian", "Serena", "Uncle_Fu", "Dylan", "Eric", "Ryan", "Aiden", "Ono_Anna", "Sohee",
 ];
+pub const DEFAULT_CUSTOM_VOICE_SPEAKER: &str = "Aiden";
+pub const DEFAULT_CUSTOM_VOICE_LANGUAGE: &str = "English";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenerationControls {
@@ -37,7 +39,7 @@ impl GenerationControls {
 
 impl Default for GenerationControls {
     fn default() -> Self {
-        Self::new(0.9, 50, 1_536)
+        Self::new(0.9, 50, 8_192)
     }
 }
 
@@ -72,6 +74,11 @@ mod tests {
     }
 
     #[test]
+    fn generation_controls_default_to_the_model_generation_budget() {
+        assert_eq!(GenerationControls::default().max_new_tokens, 8_192);
+    }
+
+    #[test]
     fn all_languages_plus_auto_are_normalized() {
         for language in [
             "Auto",
@@ -96,6 +103,11 @@ mod tests {
 
     #[test]
     fn speakers_validate_as_display_names_and_resolve_lowercase_ids() {
+        assert!(SPEAKERS.contains(&DEFAULT_CUSTOM_VOICE_SPEAKER));
+        assert_eq!(
+            normalize_language(DEFAULT_CUSTOM_VOICE_LANGUAGE).unwrap(),
+            "english"
+        );
         assert_eq!(normalize_speaker("Uncle_Fu").unwrap(), "uncle_fu");
         assert_eq!(normalize_speaker("Ono_Anna").unwrap(), "ono_anna");
         assert!(normalize_speaker("unknown").is_err());

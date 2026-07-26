@@ -22,6 +22,15 @@ use std::time::{Duration, Instant};
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::Tokenizer;
 
+fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
+    if max_codes > 0 && generated_frames >= max_codes as usize {
+        return Err(Qwen3TTSError::Generation(format!(
+            "Qwen3 reached the {max_codes}-token generation limit before producing end-of-speech. Increase max tokens or split the text into smaller sections."
+        )));
+    }
+    Ok(())
+}
+
 fn round_f32_to_bf16_value(value: f32) -> f32 {
     let bits = value.to_bits();
     let rounding_bias = 0x7fff + ((bits >> 16) & 1);
@@ -1767,6 +1776,7 @@ impl TTSInference {
             codec_eos_id,
             &tts_pad_embed,
         );
+        ensure_generation_reached_eos(codes.len(), max_codes)?;
         println!("Generated {} code frames", codes.len());
 
         // Convert codes to audio using vocoder
@@ -2005,6 +2015,7 @@ impl TTSInference {
             codec_eos_id,
             &tts_pad_embed,
         );
+        ensure_generation_reached_eos(codes.len(), max_codes)?;
         println!("Generated {} code frames", codes.len());
 
         // Decode with vocoder
@@ -2862,6 +2873,9 @@ impl TTSInference {
                 should_continue
             },
         );
+        if should_continue {
+            ensure_generation_reached_eos(generated, max_codes)?;
+        }
         println!("Generated {} streamed code frames", generated);
         Ok(())
     }
@@ -2869,8 +2883,12 @@ impl TTSInference {
 
 #[cfg(test)]
 mod tests {
+    use super::ensure_generation_reached_eos;
+
     #[test]
-    fn test_inference_placeholder() {
-        assert!(true);
+    fn generation_budget_exhaustion_is_not_reported_as_completion() {
+        let error = ensure_generation_reached_eos(64, 64).unwrap_err();
+        assert!(error.to_string().contains("before producing end-of-speech"));
+        assert!(ensure_generation_reached_eos(63, 64).is_ok());
     }
 }
