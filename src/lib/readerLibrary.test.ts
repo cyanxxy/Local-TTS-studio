@@ -62,6 +62,18 @@ async function putRawDocument(record: unknown): Promise<void> {
   database.close();
 }
 
+async function putRawCachedAudio(record: unknown): Promise<void> {
+  const database = await openReaderLibrary();
+  await new Promise<void>((resolve, reject) => {
+    const transaction = database.transaction("chapter-audio", "readwrite");
+    transaction.objectStore("chapter-audio").put(record);
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error ?? new Error("Failed to write raw cached audio."));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Raw cached audio write was aborted."));
+  });
+  database.close();
+}
+
 async function openBlockingVersionTwoDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open("open-tts-reader-library", 2);
@@ -86,6 +98,7 @@ async function openBlockingVersionTwoDatabase(): Promise<IDBDatabase> {
 
 describe("readerLibrary", () => {
   beforeEach(async () => {
+    delete window.electron;
     vi.stubGlobal("indexedDB", new IDBFactory());
     vi.stubGlobal("IDBKeyRange", IDBKeyRange);
     await clearReaderLibraryForTests();
@@ -241,6 +254,24 @@ describe("readerLibrary", () => {
 
     expect((await listReaderDocuments()).map((document) => document.id)).toEqual(["healthy"]);
     expect(await getReaderDocument("corrupt")).toBeNull();
+  });
+
+  it("skips a corrupt persisted audio entry instead of playing it back", async () => {
+    await putRawCachedAudio({
+      cacheKey: createReaderAudioCacheKey("corrupt-audio", "section-1"),
+      documentId: "corrupt-audio",
+      chapterId: "chapter-1",
+      sectionId: "section-1",
+      signature: "signature",
+      chunks: [{ audio: "not-a-buffer", samplingRate: 24_000, text: "section", index: 0, total: 1 }],
+      byteLength: 4,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      updatedAt: 500,
+    });
+
+    expect(await getCachedReaderAudio("corrupt-audio", "section-1")).toBeNull();
   });
 
   it("rejects a blocked upgrade instead of leaving Reader loading forever", async () => {

@@ -55,6 +55,7 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
               <button
                 key={option.value}
                 type="button"
+                aria-label={option.value}
                 aria-pressed={qwen.speaker === option.value}
                 onClick={() => qwen.setSpeaker(option.value)}
                 className={`min-w-0 rounded-lg border px-2 py-2 text-xs font-semibold transition-colors ${

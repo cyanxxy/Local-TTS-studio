@@ -1,7 +1,7 @@
 {
   "name": "offline-voice-studio",
   "private": true,
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "A local-first text-to-speech studio for the web and desktop.",
   "author": "cyanxxy",
   "license": "Apache-2.0",
@@ -31,6 +31,7 @@
     "dist:win": "npm run build:electron && electron-builder --win --x64",
     "preview": "vite preview",
     "lint": "eslint .",
+    "typecheck": "tsc -b --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "test": "npm run test:js && npm run test:rust",
     "test:js": "vitest run",
     "test:rust": "node scripts/test-rust-bridge.mjs",

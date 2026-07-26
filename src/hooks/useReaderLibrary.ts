@@ -26,6 +26,7 @@ import {
   getActiveReaderDocumentId,
   getCachedReaderAudio,
   isReaderLibrarySupported,
+  isReaderLibraryShutdownError,
   listReaderDocuments,
   MAX_READER_AUDIO_MEMORY_CACHE_BYTES,
   MAX_READER_AUDIO_MEMORY_CACHE_ENTRIES,
@@ -105,13 +106,21 @@ interface InitializedReaderLibrary {
   activeDocumentId: string | null;
 }
 
+function nextReaderDocumentUpdatedAt(document: ReaderDocumentRecord): number {
+  return Math.max(
+    Date.now(),
+    document.updatedAt + 1,
+    document.progress.updatedAt + 1,
+  );
+}
+
 function structurePendingTextDocument(document: ReaderDocumentRecord): ReaderDocumentRecord {
   return normalizeReaderDocumentRecord({
     ...document,
     chapters: document.sourceType === "epub" || document.sourceType === "url"
       ? document.chapters
       : structureTextChapters(document.text, document.title),
-    updatedAt: Date.now(),
+    updatedAt: nextReaderDocumentUpdatedAt(document),
   });
 }
 
@@ -159,6 +168,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
   const progressSaveTimersRef = useRef(new Map<string, number>());
   const documentSaveTimersRef = useRef(new Map<string, number>());
   const memoryAudioRef = useRef(new Map<string, CachedReaderAudio>());
+  const inFlightSavesRef = useRef(new Set<Promise<void>>());
   const sectionsRef = useRef(new Map<string, {
     text: string;
     chapters: ReaderDocumentRecord["chapters"];
@@ -180,10 +190,26 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     activeDocumentIdRef.current = activeDocumentId;
   }, [activeDocumentId]);
 
+  const reportError = useCallback((cause: unknown) => {
+    if (isReaderLibraryShutdownError(cause)) return;
+    setError(errorMessage(cause));
+  }, []);
+
+  // A flush has to be able to tell the desktop shell when the writes it issued
+  // have actually landed, so every fire-and-forget save stays observable until
+  // it settles.
+  const trackSave = useCallback((save: Promise<void>): Promise<void> => {
+    const tracked = save.catch(reportError).finally(() => {
+      inFlightSavesRef.current.delete(tracked);
+    });
+    inFlightSavesRef.current.add(tracked);
+    return tracked;
+  }, [reportError]);
+
   const persistDocument = useCallback((document: ReaderDocumentRecord) => {
     if (!persistent) return;
-    void saveReaderDocument(document).catch((cause) => setError(errorMessage(cause)));
-  }, [persistent]);
+    void trackSave(saveReaderDocument(document));
+  }, [persistent, trackSave]);
 
   const replaceDocument = useCallback((document: ReaderDocumentRecord, persist = true) => {
     const nextDocuments = sortDocuments([
@@ -236,7 +262,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
           documentsRef.current = [seed];
           activeDocumentIdRef.current = seed.id;
           setActiveDocumentIdState(seed.id);
-          setError(errorMessage(cause));
+          reportError(cause);
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -246,9 +272,16 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     return () => {
       cancelled = true;
     };
-  }, [persistent, seedText]);
+  }, [persistent, reportError, seedText]);
 
-  useEffect(() => () => {
+  /**
+   * Writes out everything still waiting behind a debounce timer and resolves
+   * once those writes have settled. Teardown never lets the timers fire, so
+   * this runs on unmount, on `pagehide`, and when the desktop shell asks for a
+   * flush before it closes the Reader worker. Draining the timers first makes
+   * a second call a no-op, so overlapping teardown paths cannot double-write.
+   */
+  const flushPendingWrites = useCallback((): Promise<void> => {
     const pendingTextIds = new Set([
       ...pendingTextStructureIdsRef.current,
       ...textSaveTimersRef.current.keys(),
@@ -266,14 +299,41 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     progressSaveTimersRef.current.clear();
     documentSaveTimersRef.current.clear();
 
-    if (!persistent) return;
+    if (!persistent) return Promise.resolve();
     for (const id of pendingIds) {
       const latest = documentsRef.current.find((document) => document.id === id);
       if (!latest) continue;
       const flushed = pendingTextIds.has(id) ? structurePendingTextDocument(latest) : latest;
-      void saveReaderDocument(flushed);
+      void trackSave(saveReaderDocument(flushed));
     }
-  }, [persistent]);
+    // Autosaves started before the flush are just as unsaved as the debounced
+    // ones, so wait on the whole in-flight set rather than only what this call
+    // issued.
+    return Promise.allSettled([...inFlightSavesRef.current]).then(() => undefined);
+  }, [persistent, trackSave]);
+
+  useEffect(() => {
+    // React unmount is not part of closing a window or a browser tab, so the
+    // flush has to hang off the page teardown event as well. Fire-and-forget:
+    // the requests are dispatched before the page goes away, and on desktop
+    // main completes them without the renderer.
+    const flushOnPageHide = () => {
+      void flushPendingWrites();
+    };
+    window.addEventListener("pagehide", flushOnPageHide);
+    return () => {
+      window.removeEventListener("pagehide", flushOnPageHide);
+      void flushPendingWrites();
+    };
+  }, [flushPendingWrites]);
+
+  useEffect(() => {
+    // Quitting the desktop app blocks the window teardown, so `pagehide` never
+    // runs; main asks for the flush instead and waits for this promise.
+    const bridge = typeof window !== "undefined" ? window.electron?.readerLibrary : undefined;
+    if (!bridge?.subscribeFlushRequests) return;
+    return bridge.subscribeFlushRequests(() => flushPendingWrites());
+  }, [flushPendingWrites]);
 
   const activeDocument = useMemo(
     () => documents.find((document) => document.id === activeDocumentId) ?? null,
@@ -355,7 +415,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     const current = documentsRef.current.find((document) => document.id === id);
     const nextText = preserveText ? text : normalizeReaderText(text);
     if (!current || current.text === nextText) return;
-    const now = Date.now();
+    const now = nextReaderDocumentUpdatedAt(current);
     const rebaseOffset = (offset: number) => rebaseReaderTextOffset(current.text, nextText, offset);
     const next = {
       ...current,
@@ -401,7 +461,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
   const updateActiveMetadata = useCallback((patch: Pick<Partial<ReaderDocumentRecord>, "title" | "author" | "description" | "language">) => {
     const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
     if (!current) return;
-    replaceDocument({ ...current, ...patch, updatedAt: Date.now() }, false);
+    replaceDocument({ ...current, ...patch, updatedAt: nextReaderDocumentUpdatedAt(current) }, false);
     scheduleDocumentPersist(current.id);
   }, [replaceDocument, scheduleDocumentPersist]);
 
@@ -413,6 +473,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     const textOffset = Math.max(0, Math.min(current.text.length, update.textOffset));
     const chapter = chapterAtOffset(current.chapters, textOffset);
     const section = readerSectionAtOffset(sectionsForDocument(current), textOffset);
+    const updatedAt = nextReaderDocumentUpdatedAt(current);
     const next = {
       ...current,
       progress: {
@@ -427,7 +488,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
           update.positionSec,
           update.totalDurationSec,
         ),
-        updatedAt: Date.now(),
+        updatedAt,
       },
     };
     replaceDocument(next, false);
@@ -453,7 +514,11 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
       sectionId: section?.id ?? null,
       positionSec: input.positionSec,
     });
-    replaceDocument({ ...current, bookmarks: [...current.bookmarks, bookmark], updatedAt: Date.now() });
+    replaceDocument({
+      ...current,
+      bookmarks: [...current.bookmarks, bookmark],
+      updatedAt: nextReaderDocumentUpdatedAt(current),
+    });
   }, [replaceDocument, sectionsForDocument]);
 
   const removeBookmark = useCallback((bookmarkId: string) => {
@@ -462,7 +527,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     replaceDocument({
       ...current,
       bookmarks: current.bookmarks.filter((bookmark) => bookmark.id !== bookmarkId),
-      updatedAt: Date.now(),
+      updatedAt: nextReaderDocumentUpdatedAt(current),
     });
   }, [replaceDocument]);
 
@@ -478,16 +543,21 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
       chapterId: chapter?.id ?? null,
       sectionId: section?.id ?? null,
     });
-    replaceDocument({ ...current, notes: [...current.notes, note], updatedAt: Date.now() });
+    replaceDocument({
+      ...current,
+      notes: [...current.notes, note],
+      updatedAt: nextReaderDocumentUpdatedAt(current),
+    });
   }, [replaceDocument, sectionsForDocument]);
 
   const updateNote = useCallback((noteId: string, text: string) => {
     const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
     if (!current) return;
+    const updatedAt = nextReaderDocumentUpdatedAt(current);
     const notes: ReaderNote[] = current.notes.map((note) => note.id === noteId
-      ? { ...note, text, updatedAt: Date.now() }
+      ? { ...note, text, updatedAt }
       : note);
-    replaceDocument({ ...current, notes, updatedAt: Date.now() }, false);
+    replaceDocument({ ...current, notes, updatedAt }, false);
     scheduleDocumentPersist(current.id);
   }, [replaceDocument, scheduleDocumentPersist]);
 
@@ -497,7 +567,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     replaceDocument({
       ...current,
       notes: current.notes.filter((note) => note.id !== noteId),
-      updatedAt: Date.now(),
+      updatedAt: nextReaderDocumentUpdatedAt(current),
     });
   }, [replaceDocument]);
 

@@ -122,6 +122,22 @@ interface DocumentsBridge {
   importUrl: (url: string) => Promise<DocumentUrlImportResult>;
 }
 
+interface ReaderLibraryBridge {
+  listDocuments: () => Promise<unknown[]>;
+  getDocument: (id: string) => Promise<unknown | null>;
+  saveDocument: (document: unknown) => Promise<void>;
+  deleteDocument: (id: string) => Promise<void>;
+  getActiveDocumentId: () => Promise<string | null>;
+  setActiveDocumentId: (id: string) => Promise<void>;
+  saveAudio: (audio: unknown) => Promise<void>;
+  getAudio: (documentId: string, sectionId: string) => Promise<unknown | null>;
+  deleteAudio: (documentId: string, sectionId?: string) => Promise<void>;
+  // Quitting asks every window to write out its debounced Reader edits and
+  // holds the shutdown until the listener's promise settles. Optional so test
+  // fixtures and older preloads can omit it.
+  subscribeFlushRequests?: (listener: () => Promise<void> | void) => () => void;
+}
+
 interface LocalTtsBridge {
   probe: (request: {
     model: LocalTtsModel;
@@ -170,6 +186,7 @@ declare global {
       isElectron: boolean;
       platform?: string;
       arch?: string;
+      readerLibrary?: ReaderLibraryBridge;
       documents?: DocumentsBridge;
       localTts?: LocalTtsBridge;
     };

@@ -34,7 +34,7 @@ function Consumer({ name }: { name: string }) {
   const state = useQwen3Runtime();
   return (
     <section aria-label={name}>
-      <output>{`${state.profile.repo}|${state.speaker}|${state.language}|${state.modelPath}`}</output>
+      <output>{`${state.profile.repo}|${state.speaker}|${state.language}|${state.maxNewTokens}|${state.modelPath}`}</output>
       <button onClick={() => state.setSpeaker("Ryan")}>Ryan</button>
       <button onClick={() => state.setLanguage("Italian")}>Italian</button>
       <button onClick={() => state.setProfileRepo(BASE_REPO)}>Base</button>
@@ -64,7 +64,7 @@ describe("Qwen3RuntimeProvider", () => {
       </Qwen3RuntimeProvider>,
     );
     await waitFor(() => expect(screen.getByLabelText("studio")).toHaveTextContent("/models/custom"));
-    expect(screen.getByLabelText("studio")).toHaveTextContent("Aiden|English");
+    expect(screen.getByLabelText("studio")).toHaveTextContent("Aiden|English|8192");
     fireEvent.click(screen.getByLabelText("settings").querySelectorAll("button")[0]);
     fireEvent.click(screen.getByLabelText("settings").querySelectorAll("button")[1]);
     expect(screen.getByLabelText("studio")).toHaveTextContent("Ryan|Italian");

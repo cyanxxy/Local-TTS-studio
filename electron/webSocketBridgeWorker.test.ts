@@ -455,7 +455,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
     const { pool } = makePool();
     const originalSend = WebSocket.prototype.send;
     let intercepted = false;
-    const sendSpy = vi.spyOn(WebSocket.prototype, "send").mockImplementation(function (data) {
+    const sendSpy = vi.spyOn(WebSocket.prototype, "send").mockImplementation(function (this: WebSocket, data) {
       if (!intercepted && typeof data === "string" && data.includes('"requestId":"r-cancel-gap"')) {
         intercepted = true;
         expect(pool.cancel("r-cancel-gap")).toBe(true);

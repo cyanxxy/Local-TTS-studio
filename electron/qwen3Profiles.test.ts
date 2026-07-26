@@ -6,6 +6,7 @@ import {
   QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
   QWEN3_PROFILES,
+  QWEN3_SPEAKER_NATIVE_LANGUAGES,
   QWEN3_SPEAKERS,
   getDefaultQwen3Profile,
   getQwen3Profiles,
@@ -45,6 +46,8 @@ describe("Qwen3 profiles", () => {
   it("exposes the complete official language and speaker choices", () => {
     expect(QWEN3_DEFAULT_SPEAKER).toBe("Aiden");
     expect(QWEN3_DEFAULT_LANGUAGE).toBe("English");
+    expect(QWEN3_SPEAKERS).toContain(QWEN3_DEFAULT_SPEAKER);
+    expect(QWEN3_SPEAKER_NATIVE_LANGUAGES[QWEN3_DEFAULT_SPEAKER]).toBe(QWEN3_DEFAULT_LANGUAGE);
     expect(QWEN3_LANGUAGES).toEqual([
       "Auto",
       "Chinese",
@@ -69,5 +72,6 @@ describe("Qwen3 profiles", () => {
       "Ono_Anna",
       "Sohee",
     ]);
+    expect(Object.keys(QWEN3_SPEAKER_NATIVE_LANGUAGES)).toEqual(QWEN3_SPEAKERS);
   });
 });

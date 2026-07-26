@@ -3,6 +3,8 @@ import type { GenerationContinuation } from "./generateRateLimiter";
 import {
   getQwen3Profile,
   qwen3ProfileSupportsRuntime,
+  QWEN3_DEFAULT_LANGUAGE,
+  QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
   QWEN3_SPEAKERS,
   type Qwen3Mode,
@@ -430,6 +432,8 @@ export function sanitizeQwen3Payload(
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
   const topK = parseOptionalInteger(payload.topK, "topK", { min: 0, max: 1000 });
   const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 8192 });
+  const resolvedSpeaker = mode === "customVoice" ? speaker ?? QWEN3_DEFAULT_SPEAKER : speaker;
+  const resolvedLanguage = mode === "customVoice" ? language ?? QWEN3_DEFAULT_LANGUAGE : language;
 
   return {
     text,
@@ -439,8 +443,8 @@ export function sanitizeQwen3Payload(
     ...(referenceText ? { referenceText } : {}),
     ...(referenceAudioBase64 ? { referenceAudioBase64 } : {}),
     ...(referenceCacheKey ? { referenceCacheKey } : {}),
-    speaker,
-    language,
+    speaker: resolvedSpeaker,
+    language: resolvedLanguage,
     instruct,
     temperature,
     topK,

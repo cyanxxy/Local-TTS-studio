@@ -51,17 +51,28 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      - uses: actions/checkout@v6
       - name: Create draft if needed
         shell: bash
         run: |
           if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$GITHUB_REF_NAME" \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --draft \
-              --generate-notes \
-              --title "Open TTS $GITHUB_REF_NAME" \
-              --notes "Desktop downloads include unsigned DMG and ZIP builds for Apple Silicon Macs running macOS 26 or newer. These artifacts are not notarized, so macOS may require Control-clicking the app and choosing Open on first launch. Model weights download on first use and are not bundled. Windows packages are not included in this release."
+            notes_file="docs/releases/$GITHUB_REF_NAME.md"
+            if [[ -f "$notes_file" ]]; then
+              gh release create "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY" \
+                --verify-tag \
+                --draft \
+                --title "Open TTS $GITHUB_REF_NAME" \
+                --notes-file "$notes_file"
+            else
+              gh release create "$GITHUB_REF_NAME" \
+                --repo "$GITHUB_REPOSITORY" \
+                --verify-tag \
+                --draft \
+                --generate-notes \
+                --title "Open TTS $GITHUB_REF_NAME" \
+                --notes "Desktop downloads include unsigned DMG and ZIP builds for Apple Silicon Macs running macOS 26 or newer. These artifacts are not notarized, so macOS may require Control-clicking the app and choosing Open on first launch. Model weights download on first use and are not bundled. Windows packages are not included in this release."
+            fi
           fi
 
   build-macos:

@@ -12,38 +12,11 @@ import {
 } from "lucide-react";
 import type { PlaybackClock } from "../lib/playbackClock";
 import type { ReaderDocumentRecord } from "../lib/readerDocument";
+import { findDocumentMatches } from "../lib/readerSearch";
 
 export type ReaderSidebarTab = "library" | "contents" | "search" | "bookmarks" | "notes";
 
-interface SearchResult {
-  offset: number;
-  before: string;
-  match: string;
-  after: string;
-}
-
 const SEARCH_RESULT_LIMIT = 50;
-
-function findDocumentMatches(text: string, query: string): SearchResult[] {
-  const needle = query.trim().toLocaleLowerCase();
-  if (needle.length < 2) return [];
-  const haystack = text.toLocaleLowerCase();
-  const results: SearchResult[] = [];
-  let cursor = 0;
-  while (results.length < SEARCH_RESULT_LIMIT) {
-    const at = haystack.indexOf(needle, cursor);
-    if (at === -1) break;
-    const end = at + needle.length;
-    results.push({
-      offset: at,
-      before: text.slice(Math.max(0, at - 40), at).replace(/\s+/g, " ").trimStart(),
-      match: text.slice(at, end),
-      after: text.slice(end, end + 60).replace(/\s+/g, " ").trimEnd(),
-    });
-    cursor = end;
-  }
-  return results;
-}
 
 interface ReaderLibrarySidebarProps {
   open: boolean;
@@ -85,15 +58,6 @@ function formatRelativeTime(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
-const FOCUSABLE_SELECTOR = [
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "textarea:not([disabled])",
-  "select:not([disabled])",
-  "[href]",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
-
 export function ReaderLibrarySidebar({
   open,
   documents,
@@ -122,6 +86,8 @@ export function ReaderLibrarySidebar({
   const [searchDrafts, setSearchDrafts] = useState<Record<string, string>>({});
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const sidebarRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const restoreFocusRef = useRef<HTMLElement | null>(null);
   const onCloseRef = useRef(onClose);
   useEffect(() => {
@@ -147,7 +113,9 @@ export function ReaderLibrarySidebar({
     setSearchDrafts((drafts) => ({ ...drafts, [activeDocumentId]: value }));
   };
   const searchResults = useMemo(
-    () => activeDocument ? findDocumentMatches(activeDocument.text, searchQuery) : [],
+    () => activeDocument
+      ? findDocumentMatches(activeDocument.text, searchQuery, SEARCH_RESULT_LIMIT)
+      : [],
     [activeDocument, searchQuery],
   );
 
@@ -156,41 +124,30 @@ export function ReaderLibrarySidebar({
     restoreFocusRef.current = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;
-    const frame = window.requestAnimationFrame(() => {
-      const focusable = sidebarRef.current?.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
-      (focusable ?? sidebarRef.current)?.focus();
-    });
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();
         onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || !sidebarRef.current) return;
-      const focusable = [...sidebarRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
-        .filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        sidebarRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable.at(-1)!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
       }
     };
     document.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.cancelAnimationFrame(frame);
       document.removeEventListener("keydown", handleKeyDown);
       if (restoreFocusRef.current?.isConnected) restoreFocusRef.current.focus();
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (tab === "search") {
+        searchInputRef.current?.focus();
+      } else if (!sidebarRef.current?.contains(document.activeElement)) {
+        closeButtonRef.current?.focus();
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [open, tab]);
 
   if (!open) return null;
 
@@ -198,7 +155,6 @@ export function ReaderLibrarySidebar({
     <aside
       ref={sidebarRef}
       role="dialog"
-      aria-modal="true"
       aria-label="Reader library"
       tabIndex={-1}
       className="glass-pop fixed inset-y-3 left-3 z-50 flex w-[min(23rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-[26px] shadow-glass-lg md:absolute md:inset-y-0 md:left-0 md:w-[22rem] md:rounded-[28px]"
@@ -211,6 +167,7 @@ export function ReaderLibrarySidebar({
           </p>
         </div>
         <button
+          ref={closeButtonRef}
           type="button"
           onClick={onClose}
           aria-label="Close Reader library"
@@ -220,7 +177,7 @@ export function ReaderLibrarySidebar({
         </button>
       </div>
 
-      <div className="grid grid-cols-4 gap-1 border-b border-black/5 p-2">
+      <div className="grid grid-cols-5 gap-1 border-b border-black/5 p-2">
         {TABS.map((item) => {
           const Icon = item.icon;
           return (
@@ -408,11 +365,11 @@ export function ReaderLibrarySidebar({
               <Search size={13} aria-hidden />
               <span className="sr-only">Search this document</span>
               <input
+                ref={searchInputRef}
                 type="search"
                 value={searchQuery}
                 onChange={(event) => setSearchQuery(event.target.value)}
                 placeholder="Search this document"
-                autoFocus
                 className="min-w-0 flex-1 bg-transparent text-sm text-text-primary outline-none placeholder:text-text-muted"
               />
             </label>

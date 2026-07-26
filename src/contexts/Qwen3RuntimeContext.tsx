@@ -24,7 +24,7 @@ import {
   type Qwen3Profile,
 } from "../../electron/qwen3Profiles";
 
-export const QWEN3_DEFAULT_MAX_NEW_TOKENS = 1_536;
+export const QWEN3_DEFAULT_MAX_NEW_TOKENS = 8_192;
 
 export interface Qwen3RuntimeSettings {
   profile: Qwen3Profile;

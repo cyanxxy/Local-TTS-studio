@@ -60,7 +60,7 @@ struct Args {
     top_k: i64,
 
     /// Maximum generated codec frames.
-    #[arg(long, alias = "max-new-tokens", default_value_t = 1536)]
+    #[arg(long, alias = "max-new-tokens", default_value_t = 8192)]
     max_tokens: i64,
 
     /// Output sample rate.

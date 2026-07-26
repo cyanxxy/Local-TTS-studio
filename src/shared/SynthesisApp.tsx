@@ -60,6 +60,7 @@ import {
   type ReaderDocumentRecord,
   type ReaderSection,
 } from "../lib/readerDocument";
+import { isReaderLibraryShutdownError } from "../lib/readerLibrary";
 
 type LocalRuntimePageKey = Extract<AppPage, "neutts" | "qwen3">;
 type InlineDesktopModelKey = "qwen3" | "supertonic3";
@@ -208,6 +209,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     () => (enableDesktopRuntimes && isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
   );
   const readerLibrary = useReaderLibrary(initialState.text);
+  // Quitting holds the window open while the Reader worker drains, so a cache
+  // write that loses that race is expected and must not surface as an error.
+  const reportReaderError = useCallback((cause: unknown) => {
+    if (isReaderLibraryShutdownError(cause)) return;
+    setImportError(cause instanceof Error ? cause.message : String(cause));
+  }, []);
   const {
     preferences: readerViewPreferences,
     updatePreferences: updateReaderViewPreferences,
@@ -1285,10 +1292,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       playbackRate: playback.playbackRate,
       totalDuration: playback.totalDuration,
       updatedAt,
-    }).catch((cause) => setImportError(cause instanceof Error ? cause.message : String(cause)));
+    }).catch(reportReaderError);
   }, [
     getCurrentTime,
     getReaderAudioSnapshot,
+    reportReaderError,
     saveReaderAudio,
   ]);
   flushReaderAudioRef.current = persistActiveReaderAudio;
@@ -1361,7 +1369,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       }
     };
     void restore().catch((cause) => {
-      if (!cancelled) setImportError(cause instanceof Error ? cause.message : String(cause));
+      if (!cancelled) reportReaderError(cause);
     });
     return () => {
       cancelled = true;
@@ -1371,6 +1379,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     activeReaderDocumentId,
     activeReaderSection?.id,
     isReaderPage,
+    reportReaderError,
   ]);
 
   const recordReaderProgress = useCallback(() => {

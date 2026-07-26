@@ -9,6 +9,7 @@ import {
   session,
   shell,
   type IpcMainInvokeEvent,
+  type MessagePortMain,
   type WebContents,
 } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
@@ -53,6 +54,8 @@ import {
   isSafeExternalUrl,
   shouldGrantPermission,
 } from "./security";
+import { ReaderLibraryWorkerClient } from "./readerLibraryWorkerClient";
+import { getDirectorySizeBytes } from "./directorySize";
 import {
   BRIDGE_PROGRESS_PREFIX,
   assertLocalModel,
@@ -106,6 +109,11 @@ const RUST_BRIDGE_GENERATE_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000;
 const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES = 16 * 1024 * 1024;
 const RUST_CANCEL_KILL_AFTER_MS = 2_000;
+// Renderers debounce Reader writes for up to a second, so the quit has to hold
+// long enough for a flush round trip. The outer quit race
+// (RUST_CANCEL_KILL_AFTER_MS + 500) still caps the total, so a renderer that
+// never answers cannot stretch the shutdown past that budget.
+const READER_LIBRARY_FLUSH_TIMEOUT_MS = 1_500;
 const GENERATE_RATE_WINDOW_MS = 500;
 // Generation reuses a resident WebSocket worker (load once, serve many). The
 // worker is killed after this much idle time to release model memory; the next
@@ -147,6 +155,90 @@ const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
 let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
 const qwen3DownloadAbortController = new AbortController();
 const activeQwenModelDownloads = new Set<Promise<unknown>>();
+let readerLibraryWorker: ReaderLibraryWorkerClient | null = null;
+// Tracked apart from `bridgeShuttingDown`: the quit asks every renderer to
+// flush its debounced Reader writes first, so `reader-library:*` has to keep
+// working after the local runtime has already been told to stop.
+let readerLibraryShuttingDown = false;
+const pendingReaderLibraryFlushes = new Map<string, () => void>();
+
+function getReaderLibraryWorker(): ReaderLibraryWorkerClient {
+  if (readerLibraryShuttingDown) throw new Error("Reader library is shutting down.");
+  if (readerLibraryWorker) return readerLibraryWorker;
+  const worker = new ReaderLibraryWorkerClient(
+    path.join(__dirname, "readerLibraryWorker.js"),
+    path.join(app.getPath("userData"), "reader-library.sqlite3"),
+    () => {
+      if (readerLibraryWorker === worker) readerLibraryWorker = null;
+    },
+  );
+  readerLibraryWorker = worker;
+  return worker;
+}
+
+function requestField(request: unknown, field: string): unknown {
+  if (!isRecord(request) || !(field in request)) {
+    throw new TypeError(`Reader library request is missing ${field}.`);
+  }
+  return request[field];
+}
+
+// Electron has already transferred the port into main by the time a stream
+// handler runs, so every failure path has to answer on it and close it;
+// otherwise the renderer waits out the full audio stream timeout.
+function rejectStreamPort(port: MessagePortMain, message: string): void {
+  port.postMessage({ type: "result", ok: false, error: message });
+  port.close();
+}
+
+/**
+ * Asks every open window to write out the Reader edits it is still holding
+ * behind a debounce timer. `before-quit` blocks the quit, so those timers would
+ * otherwise never fire and the edits would be lost without a trace.
+ *
+ * Resolves once every window has acknowledged or the timeout expires — a
+ * renderer that is wedged or already gone must not strand the shutdown.
+ */
+function requestReaderLibraryFlush(): Promise<void> {
+  const windows = BrowserWindow.getAllWindows();
+  if (windows.length === 0) {
+    // No renderer left to ask, but one that just closed may have posted its
+    // `pagehide` writes already; give the IPC queue a turn before the worker
+    // closes underneath them.
+    return new Promise<void>((resolve) => { setImmediate(resolve); });
+  }
+
+  const acknowledgements = windows.map((window) => new Promise<void>((resolve) => {
+    if (window.webContents.isDestroyed()) {
+      resolve();
+      return;
+    }
+    const token = randomUUID();
+    pendingReaderLibraryFlushes.set(token, resolve);
+    try {
+      window.webContents.send("reader-library:flush", { token });
+    } catch {
+      // A window can be destroyed between the check and the send.
+      pendingReaderLibraryFlushes.delete(token);
+      resolve();
+    }
+  }));
+  return Promise.race([
+    Promise.all(acknowledgements).then(() => undefined),
+    new Promise<void>((resolve) => { setTimeout(resolve, READER_LIBRARY_FLUSH_TIMEOUT_MS); }),
+  ]).then(() => {
+    pendingReaderLibraryFlushes.clear();
+  });
+}
+
+// Latches the shutdown flag together with the close so no request can slip
+// between the two and reach a worker that is already draining.
+function closeReaderLibraryWorker(): Promise<void> {
+  readerLibraryShuttingDown = true;
+  const worker = readerLibraryWorker;
+  readerLibraryWorker = null;
+  return worker?.close() ?? Promise.resolve();
+}
 
 // Best-effort Qwen model warm-up. At most one
 // warm-up runs per model; a generate request that arrives while one is in
@@ -924,87 +1016,6 @@ async function runRustBridge(
   }
 }
 
-// A HuggingFace model cache holds tens of thousands of files. Recursing with an
-// unbounded Promise.all would issue that many concurrent stat() calls, pinning
-// the main process and risking descriptor exhaustion, so walk it with a fixed
-// pool of workers over an explicit directory queue instead.
-const CACHE_SIZE_SCAN_CONCURRENCY = 32;
-
-type CacheScanTask =
-  | { kind: "dir"; path: string }
-  | { kind: "file"; path: string };
-
-async function getDirectorySizeBytes(dirPath: string): Promise<number> {
-  let total = 0;
-  const pending: CacheScanTask[] = [{ kind: "dir", path: dirPath }];
-  // Workers that found the queue momentarily empty while other workers were
-  // still discovering entries. They are released whenever a task completes, so
-  // the pool does not collapse to a single worker on the initial one-item queue.
-  let idleWaiters: Array<() => void> = [];
-  let activeTasks = 0;
-
-  const releaseIdleWaiters = () => {
-    const waiters = idleWaiters;
-    idleWaiters = [];
-    for (const wake of waiters) wake();
-  };
-
-  // The cache tree is mutated concurrently (clear-cache, in-flight downloads,
-  // the Rust bridge's HF cache), so a file or subdir can vanish between the
-  // readdir snapshot and the per-entry stat/recurse. Treat such ENOENT races as
-  // a 0-byte contribution to keep the size query best-effort instead of failing
-  // the whole IPC call; surface any other error normally.
-  const runTask = async (task: CacheScanTask): Promise<void> => {
-    try {
-      if (task.kind === "file") {
-        const stats = await fs.stat(task.path);
-        total += stats.size;
-        return;
-      }
-
-      const entries = await fs.readdir(task.path, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(task.path, entry.name);
-        if (entry.isDirectory()) pending.push({ kind: "dir", path: fullPath });
-        else if (entry.isFile()) pending.push({ kind: "file", path: fullPath });
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    }
-  };
-
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const next = pending.pop();
-      if (next === undefined) {
-        // No queued work. If nothing is in flight either, the walk is complete
-        // and no new tasks can appear; otherwise wait for an in-flight task.
-        if (activeTasks === 0) {
-          releaseIdleWaiters();
-          return;
-        }
-        await new Promise<void>((resolve) => idleWaiters.push(resolve));
-        continue;
-      }
-
-      activeTasks += 1;
-      try {
-        await runTask(next);
-      } finally {
-        activeTasks -= 1;
-        // Also runs when runTask throws, so a failure never strands the pool.
-        releaseIdleWaiters();
-      }
-    }
-  };
-
-  await Promise.all(
-    Array.from({ length: CACHE_SIZE_SCAN_CONCURRENCY }, () => worker()),
-  );
-
-  return total;
-}
-
 async function handleCacheInfo(request: unknown): Promise<LocalCacheInfo> {
   const { model } = sanitizeCacheRequest(request);
   const cachePath = getCacheDir(model);
@@ -1134,6 +1145,107 @@ app.whenReady().then(() => {
   registerPermissionHandlers();
   createMainWindow();
 
+  ipcMain.handle("reader-library:list-documents", (event) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return getReaderLibraryWorker().request("listDocuments");
+  });
+
+  ipcMain.handle("reader-library:get-document", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return getReaderLibraryWorker().request("getDocument", [requestField(request, "id")]);
+  });
+
+  ipcMain.handle("reader-library:save-document", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return getReaderLibraryWorker().request("saveDocument", [requestField(request, "document")]);
+  });
+
+  ipcMain.handle("reader-library:delete-document", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return getReaderLibraryWorker().request("deleteDocument", [requestField(request, "id")]);
+  });
+
+  ipcMain.handle("reader-library:get-active-document-id", (event) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return getReaderLibraryWorker().request("getActiveDocumentId");
+  });
+
+  ipcMain.handle("reader-library:set-active-document-id", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    return getReaderLibraryWorker().request("setActiveDocumentId", [requestField(request, "id")]);
+  });
+
+  ipcMain.on("reader-library:save-audio-stream", (event, request: unknown) => {
+    const port = event.ports[0];
+    if (!port) return;
+    try {
+      assertTrustedIpcSender(event, { allowDevServer: isDev });
+    } catch {
+      // This throws only for an untrusted sender, so close the port without
+      // telling that sender anything about why it was rejected.
+      port.close();
+      return;
+    }
+    if (readerLibraryShuttingDown) {
+      rejectStreamPort(port, "Reader library is shutting down.");
+      return;
+    }
+    if (!isRecord(request)) {
+      rejectStreamPort(port, "Invalid Reader audio stream request.");
+      return;
+    }
+    try {
+      getReaderLibraryWorker().saveAudio(port, request.metadata, request.chunkCount);
+    } catch (err) {
+      rejectStreamPort(port, err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  ipcMain.on("reader-library:get-audio-stream", (event, request: unknown) => {
+    const port = event.ports[0];
+    if (!port) return;
+    try {
+      assertTrustedIpcSender(event, { allowDevServer: isDev });
+    } catch {
+      // This throws only for an untrusted sender, so close the port without
+      // telling that sender anything about why it was rejected.
+      port.close();
+      return;
+    }
+    if (readerLibraryShuttingDown) {
+      rejectStreamPort(port, "Reader library is shutting down.");
+      return;
+    }
+    if (!isRecord(request)) {
+      rejectStreamPort(port, "Invalid Reader audio lookup request.");
+      return;
+    }
+    try {
+      getReaderLibraryWorker().getAudio(port, request.documentId, request.sectionId);
+    } catch (err) {
+      rejectStreamPort(port, err instanceof Error ? err.message : String(err));
+    }
+  });
+
+  ipcMain.on("reader-library:flush-complete", (event, request: unknown) => {
+    try {
+      assertTrustedIpcSender(event, { allowDevServer: isDev });
+    } catch {
+      return;
+    }
+    if (!isRecord(request) || typeof request.token !== "string") return;
+    const acknowledge = pendingReaderLibraryFlushes.get(request.token);
+    if (!acknowledge) return;
+    pendingReaderLibraryFlushes.delete(request.token);
+    acknowledge();
+  });
+
+  ipcMain.handle("reader-library:delete-audio", (event, request: unknown) => {
+    assertTrustedIpcSender(event, { allowDevServer: isDev });
+    if (!isRecord(request)) throw new TypeError("Invalid Reader library audio deletion request.");
+    return getReaderLibraryWorker().request("deleteAudio", [request.documentId, request.sectionId]);
+  });
+
   ipcMain.handle("local-tts:probe", async (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
     const probe = await runRustBridge("probe", request, event);
@@ -1244,6 +1356,16 @@ app.whenReady().then(() => {
 app.on("before-quit", (event) => {
   if (bridgeShuttingDown) return;
   bridgeShuttingDown = true;
+  // The renderers are still alive here and the quit below holds them open, so
+  // collect their debounced Reader edits before the worker stops accepting
+  // work; closing it first is what silently dropped the last edit.
+  let readerLibraryShutdown: Promise<void> | null = null;
+  if (readerLibraryWorker || BrowserWindow.getAllWindows().length > 0) {
+    readerLibraryShutdown = requestReaderLibraryFlush()
+      .then(closeReaderLibraryWorker, closeReaderLibraryWorker);
+  } else {
+    readerLibraryShuttingDown = true;
+  }
   qwen3DownloadAbortController.abort();
   for (const requestId of activeBridgeRequestOwners.keys()) {
     cancelledBridgeRequests.add(requestId);
@@ -1259,7 +1381,12 @@ app.on("before-quit", (event) => {
   // children (SIGTERM + SIGKILL escalation) have a bounded window to run;
   // otherwise the unref'd kill timers die with the process and a
   // SIGTERM-ignoring child survives.
-  if (!webSocketBridgeWorkers && probeChildren.length === 0 && modelDownloads.length === 0) return;
+  if (
+    !webSocketBridgeWorkers
+    && probeChildren.length === 0
+    && modelDownloads.length === 0
+    && !readerLibraryShutdown
+  ) return;
   event.preventDefault();
   const probeExits = probeChildren.map((child) =>
     child.exitCode !== null || child.signalCode !== null
@@ -1272,6 +1399,7 @@ app.on("before-quit", (event) => {
   void Promise.race([
     Promise.all([
       webSocketBridgeWorkers?.shutdownAll() ?? Promise.resolve(),
+      readerLibraryShutdown ?? Promise.resolve(),
       ...probeExits,
       Promise.allSettled(modelDownloads).then(() => undefined),
     ]),

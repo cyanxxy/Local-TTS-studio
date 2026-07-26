@@ -25,8 +25,9 @@ use tungstenite::{Message, WebSocket};
     all(target_os = "windows", target_arch = "x86_64")
 ))]
 use qwen3::{
-    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneReference,
-    VoiceCloneRequest, VoiceDesignRequest, resolved_runtime_target,
+    AudioSink, CustomVoiceRequest, DEFAULT_CUSTOM_VOICE_LANGUAGE, DEFAULT_CUSTOM_VOICE_SPEAKER,
+    GenerationSummary, Qwen3Runtime, VoiceCloneReference, VoiceCloneRequest, VoiceDesignRequest,
+    resolved_runtime_target,
 };
 use qwen3::{ExpectedModelType, GenerationControls};
 use reference_audio::decode_bounded_mono_wav;
@@ -588,7 +589,7 @@ impl RuntimeState {
         let controls = GenerationControls::new(
             payload.temperature.unwrap_or(0.9),
             payload.top_k.unwrap_or(50),
-            payload.max_new_tokens.unwrap_or(1_536),
+            payload.max_new_tokens.unwrap_or(8_192),
         );
         let started = Instant::now();
         let inference_started = Instant::now();
@@ -603,8 +604,14 @@ impl RuntimeState {
                 Path::new(&payload.model_path),
                 &CustomVoiceRequest {
                     text: &payload.text,
-                    speaker: payload.speaker.as_deref().unwrap_or("Ryan"),
-                    language: payload.language.as_deref().unwrap_or("English"),
+                    speaker: payload
+                        .speaker
+                        .as_deref()
+                        .unwrap_or(DEFAULT_CUSTOM_VOICE_SPEAKER),
+                    language: payload
+                        .language
+                        .as_deref()
+                        .unwrap_or(DEFAULT_CUSTOM_VOICE_LANGUAGE),
                     instruct: payload.instruct.as_deref().unwrap_or(""),
                     controls,
                 },

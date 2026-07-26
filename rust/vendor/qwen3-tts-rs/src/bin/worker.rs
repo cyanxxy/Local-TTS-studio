@@ -25,7 +25,7 @@ use std::time::Instant;
 
 const DEFAULT_MODEL_PATH: &str = "/tmp/qwen3-tts.cpp/models/Qwen3-TTS-12Hz-0.6B-Base";
 const DEFAULT_REF_TEXT: &str = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes.";
-const DEFAULT_MAX_NEW_TOKENS: i64 = 1536;
+const DEFAULT_MAX_NEW_TOKENS: i64 = 8192;
 const DEFAULT_BLOCKSIZE: usize = 512;
 const FRAME_HEADER_BYTES: usize = 9;
 const STDOUT_FILENO: i32 = 1;
