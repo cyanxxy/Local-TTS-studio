@@ -555,6 +555,12 @@ input[type="range"]::-moz-range-thumb {
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, #ffffff 55%, transparent),
     0 1px 8px color-mix(in srgb, var(--color-accent) 14%, transparent);
+}
+
+/* The breathing only reads as "this is being spoken now", so it is applied
+   from the reader only while audio is actually playing — a paused page with a
+   pulsing highlight looks like it is still going. */
+.reader-chunk-highlight-pulsing {
   animation: reader-highlight-pulse 3.2s ease-in-out infinite;
 }
 
@@ -607,7 +613,10 @@ input[type="range"]::-moz-range-thumb {
   color: color-mix(in srgb, var(--color-text-primary) 42%, transparent);
   transition: color 0.45s ease;
 }
-.reader-focus span.reader-chunk-highlight-active {
+.reader-focus span.reader-chunk-highlight-active,
+/* The word marker can outlive its chunk span, and `.reader-focus span` outranks
+   the bare class, so it needs its own qualified rule to stay legible. */
+.reader-focus span.reader-word-highlight-active {
   color: var(--color-text-primary);
 }
 

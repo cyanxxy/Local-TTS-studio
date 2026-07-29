@@ -146,13 +146,7 @@ interface ReaderDesktopModelOption {
 interface OverlayPart {
   text: string;
   start: number;
-  sectionIndex: number;
   isActive: boolean;
-}
-
-interface SectionBoundary {
-  start: number;
-  end: number;
 }
 
 interface TextBlock {
@@ -213,10 +207,14 @@ function formatVoiceName(id: string): string {
 }
 
 /**
- * Splits the source text into contiguous spans aligned to section boundaries and
+ * Splits the source text into contiguous spans aligned to paragraph blocks and
  * the active range. Spans carry only background styling (tint + highlight), never
  * inline content, so the overlay stays glyph-for-glyph identical to the textarea
  * beneath it — keeping the caret, highlights, and scrolling in sync.
+ *
+ * Only the spoken range gets its own span: chunk boundaries are invisible to the
+ * reader, so splitting on them would cost dozens to hundreds of identical spans
+ * per section for no pixel difference.
  *
  * Deliberately independent of the spoken word: the word moves several times a
  * second and splitting on it here would rebuild every span in the section each
@@ -225,7 +223,6 @@ function formatVoiceName(id: string): string {
 function buildOverlayParts(
   text: string,
   blocks: TextBlock[],
-  boundaries: SectionBoundary[],
   activeRange: { start: number; end: number } | null,
 ): OverlayPart[] {
   if (!text) return [];
@@ -235,10 +232,6 @@ function buildOverlayParts(
     offsets.add(block.start);
     offsets.add(block.end);
   }
-  for (const boundary of boundaries) {
-    offsets.add(clamp(boundary.start, 0, text.length));
-    offsets.add(clamp(boundary.end, 0, text.length));
-  }
   if (activeRange) {
     offsets.add(clamp(activeRange.start, 0, text.length));
     offsets.add(clamp(activeRange.end, 0, text.length));
@@ -247,22 +240,10 @@ function buildOverlayParts(
   const sorted = [...offsets].sort((a, b) => a - b);
   const parts: OverlayPart[] = [];
 
-  // Boundaries and split offsets are both ascending, so the section lookup walks
-  // forward once across the whole section instead of scanning every boundary for
-  // every span (which was quadratic on a chapter with many chunks).
-  let boundaryCursor = 0;
   for (let i = 0; i < sorted.length - 1; i++) {
     const partStart = sorted[i];
     const partEnd = sorted[i + 1];
     if (partEnd <= partStart) continue;
-
-    while (boundaryCursor < boundaries.length && boundaries[boundaryCursor].end <= partStart) {
-      boundaryCursor += 1;
-    }
-    const boundary = boundaries[boundaryCursor];
-    const sectionIndex = boundary && partStart >= boundary.start && partStart < boundary.end
-      ? boundaryCursor
-      : -1;
 
     const isActive = activeRange
       ? partStart >= activeRange.start && partEnd <= activeRange.end
@@ -271,7 +252,6 @@ function buildOverlayParts(
     parts.push({
       text: text.slice(partStart, partEnd),
       start: partStart,
-      sectionIndex,
       isActive,
     });
   }
@@ -285,10 +265,14 @@ interface ReaderParagraphProps {
   /** Absolute offsets of the spoken word, or -1 when it is not in this block. */
   wordStart: number;
   wordEnd: number;
+  /** Gates the highlight's breathing animation so it rests when audio does. */
+  isPlaying: boolean;
 }
 
-function overlayPartClassName(isActive: boolean): string | undefined {
-  return isActive ? "reader-chunk-highlight reader-chunk-highlight-active" : undefined;
+function overlayPartClassName(isActive: boolean, isPlaying: boolean): string | undefined {
+  if (!isActive) return undefined;
+  const base = "reader-chunk-highlight reader-chunk-highlight-active";
+  return isPlaying ? `${base} reader-chunk-highlight-pulsing` : base;
 }
 
 /**
@@ -301,6 +285,7 @@ const ReaderParagraph = memo(function ReaderParagraph({
   parts,
   wordStart,
   wordEnd,
+  isPlaying,
 }: ReaderParagraphProps) {
   return (
     <p
@@ -308,17 +293,13 @@ const ReaderParagraph = memo(function ReaderParagraph({
       className={block.blankLineBefore ? "reader-paragraph-spaced" : undefined}
     >
       {parts.map((part) => {
-        const className = overlayPartClassName(part.isActive);
+        const className = overlayPartClassName(part.isActive, isPlaying);
         const partEnd = part.start + part.text.length;
         const overlaps = wordStart >= 0 && wordStart < partEnd && wordEnd > part.start;
 
         if (!overlaps) {
           return (
-            <span
-              key={`part-${part.start}`}
-              className={className}
-              data-section-index={part.sectionIndex >= 0 ? part.sectionIndex : undefined}
-            >
+            <span key={`part-${part.start}`} className={className}>
               {part.text}
             </span>
           );
@@ -327,7 +308,6 @@ const ReaderParagraph = memo(function ReaderParagraph({
         // Split around the spoken word rather than re-deriving every span in the
         // section from scratch. `scrollMarkerIntoView` looks for the
         // reader-word-highlight-active element, so it must stay in the DOM.
-        const sectionIndex = part.sectionIndex >= 0 ? part.sectionIndex : undefined;
         const localStart = Math.max(0, wordStart - part.start);
         const localEnd = Math.min(part.text.length, wordEnd - part.start);
         const before = part.text.slice(0, localStart);
@@ -339,7 +319,7 @@ const ReaderParagraph = memo(function ReaderParagraph({
 
         return [
           before && (
-            <span key={`part-${part.start}`} className={className} data-section-index={sectionIndex}>
+            <span key={`part-${part.start}`} className={className}>
               {before}
             </span>
           ),
@@ -347,14 +327,13 @@ const ReaderParagraph = memo(function ReaderParagraph({
             <span
               key={`word-${part.start + localStart}`}
               className={wordClassName}
-              data-section-index={sectionIndex}
               data-reader-active-word="true"
             >
               {word}
             </span>
           ),
           after && (
-            <span key={`tail-${part.start + localEnd}`} className={className} data-section-index={sectionIndex}>
+            <span key={`tail-${part.start + localEnd}`} className={className}>
               {after}
             </span>
           ),
@@ -444,6 +423,8 @@ function ViewportPopover({
     onCloseRef.current = onClose;
   }, [onClose]);
 
+  const ready = position !== null;
+
   useLayoutEffect(() => {
     const updatePosition = () => {
       const anchor = anchorRef.current;
@@ -472,7 +453,18 @@ function ViewportPopover({
         ? Math.max(viewportTop + gutter, rect.top - gap - maxHeight)
         : rect.bottom + gap;
 
-      setPosition({ top, left, width, maxHeight });
+      // The capture-phase scroll listener fires for every reader auto-follow
+      // step, several times a second; handing back the same object keeps an open
+      // popover from re-rendering when nothing about its geometry moved.
+      setPosition((previous) => (
+        previous
+        && previous.top === top
+        && previous.left === left
+        && previous.width === width
+        && previous.maxHeight === maxHeight
+          ? previous
+          : { top, left, width, maxHeight }
+      ));
     };
 
     updatePosition();
@@ -480,15 +472,28 @@ function ViewportPopover({
     window.addEventListener("scroll", updatePosition, true);
     window.visualViewport?.addEventListener("resize", updatePosition);
     window.visualViewport?.addEventListener("scroll", updatePosition);
+
+    // Content can change height after the geometry is computed — the settings
+    // popover on a model switch, the URL popover when an import error appears —
+    // and the open-above decision has to be redone when it does.
+    const observer = typeof ResizeObserver !== "undefined"
+      ? new ResizeObserver(updatePosition)
+      : null;
+    if (observer) {
+      if (popoverRef.current) observer.observe(popoverRef.current);
+      if (anchorRef.current) observer.observe(anchorRef.current);
+    }
+
     return () => {
       window.removeEventListener("resize", updatePosition);
       window.removeEventListener("scroll", updatePosition, true);
       window.visualViewport?.removeEventListener("resize", updatePosition);
       window.visualViewport?.removeEventListener("scroll", updatePosition);
+      observer?.disconnect();
     };
-  }, [anchorRef, maxWidth]);
+    // `ready` re-runs this once the popover element exists, so it can be observed.
+  }, [anchorRef, maxWidth, popoverRef, ready]);
 
-  const ready = position !== null;
   useEffect(() => {
     if (!ready) return;
     const anchor = anchorRef.current;
@@ -772,15 +777,21 @@ export function AdvancedReaderPage({
       ? rangeRect
       : paragraph.getBoundingClientRect();
     const lead = Math.max(32, scroller.clientHeight * 0.28);
-    programmaticScrollRef.current = true;
-    scroller.scrollTop = Math.max(
+    const nextTop = Math.max(
       0,
       scroller.scrollTop + anchorRect.top - scroller.getBoundingClientRect().top - lead,
     );
+    // No move means no `scroll` event, which would leave the flag armed for the
+    // next genuine user scroll — swallowing it and never pausing auto-follow.
+    if (Math.abs(scroller.scrollTop - nextTop) < 1) return;
+    programmaticScrollRef.current = true;
+    scroller.scrollTop = nextTop;
   }, []);
 
   useLayoutEffect(() => {
     if (editing) return;
+    // A flag armed just before this section change has no scroll event coming.
+    programmaticScrollRef.current = false;
     const pending = pendingScrollOffsetRef.current;
     pendingScrollOffsetRef.current = null;
     if (pending !== null && activeSection && pending >= activeSection.start) {
@@ -893,22 +904,11 @@ export function AdvancedReaderPage({
     return activeWord ? { start: activeWord.start, end: activeWord.end } : null;
   }, [activeWordIndex, estimatedWords]);
 
-  // Visual sections must remain stable while audio streams in. Generated
-  // segments are a partial, time-based view and may also be transport-split;
-  // using them as document boundaries makes future sections disappear or
-  // flicker. Click-to-seek resolves against `segments` separately below.
-  const sectionBoundaries = useMemo((): SectionBoundary[] => (
-    previewChunks.map((chunk) => ({
-      start: chunk.start,
-      end: chunk.end,
-    }))
-  ), [previewChunks]);
-
   const textBlocks = useMemo(() => splitTextBlocks(text), [text]);
 
   const overlayParts = useMemo(
-    () => buildOverlayParts(text, textBlocks, sectionBoundaries, activeRange),
-    [text, textBlocks, sectionBoundaries, activeRange],
+    () => buildOverlayParts(text, textBlocks, activeRange),
+    [text, textBlocks, activeRange],
   );
 
   const paragraphs = useMemo(() => {
@@ -1051,6 +1051,12 @@ export function AdvancedReaderPage({
   const activeSegmentNumber = activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null;
   const canRetakeCurrentSegment = hasGeneratedSegments && canRetakeSegments && activeSegmentIndex >= 0 && !isRetaking;
 
+  const startEditing = useCallback(() => {
+    setEditDraft(text);
+    onEditStart?.();
+    setEditing(true);
+  }, [onEditStart, text]);
+
   const finishEditing = useCallback(() => {
     if (!editing) return;
     cancelEditCommit();
@@ -1090,7 +1096,10 @@ export function AdvancedReaderPage({
     const isDocumentEnd = sectionEnd === documentLength && targetOffset === documentLength;
     const isCurrentSection = targetOffset >= sectionStart
       && (targetOffset < sectionEnd || isDocumentEnd);
-    if (!isCurrentSection) {
+    // Parking the offset only pays off if the section is actually going to
+    // change; without a navigation handler nothing consumes it and it would
+    // hijack the next unrelated section change instead.
+    if (!isCurrentSection && onNavigateToOffset) {
       pendingScrollOffsetRef.current = targetOffset;
       return;
     }
@@ -1150,7 +1159,11 @@ export function AdvancedReaderPage({
     return { local, collapsed: selection.isCollapsed, quote: selection.toString() };
   }, [text.length]);
 
-  const handleReaderTextMouseUp = useCallback(() => {
+  const handleReaderTextMouseUp = useCallback((event: React.MouseEvent) => {
+    // The second mouseup of a double-click lands after the browser has selected
+    // the word under the cursor, which would flash the note pill for a frame
+    // before `dblclick` seeks and clears it. Only a deliberate drag opens it.
+    if (event.detail > 1) return;
     const info = getArticleSelectionOffset();
     if (!info) return;
     if (!info.collapsed) {
@@ -1170,18 +1183,26 @@ export function AdvancedReaderPage({
     handleJumpToOffset(sectionStart + info.local);
   }, [getArticleSelectionOffset, handleJumpToOffset, sectionStart]);
 
-  // Arrow keys page through reading sections whenever focus isn't in a form
-  // control or dialog — the book-reader equivalent of turning pages.
+  // Arrow keys page through reading sections while the reader itself has focus —
+  // the book-reader equivalent of turning pages.
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      // Each page turn flushes, saves, and re-sections upstream, so a held key
+      // must not fire one per repeat.
+      if (event.repeat) return;
       if (editingRef.current) return;
       const target = event.target;
       if (
         target instanceof HTMLElement
         && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")
       ) return;
+      // Toolbar buttons keep focus after use; paging from there is surprising.
+      // Only the unfocused page and the reading pane itself turn pages.
+      const inReader = target === document.body
+        || (target instanceof Node && !!documentScrollerRef.current?.contains(target));
+      if (!inReader) return;
       const section = event.key === "ArrowRight" ? nextSection : previousSection;
       if (!section) return;
       event.preventDefault();
@@ -1385,13 +1406,8 @@ export function AdvancedReaderPage({
         <button
           type="button"
           onClick={() => {
-            if (editing) {
-              finishEditing();
-            } else {
-              setEditDraft(text);
-              onEditStart?.();
-              setEditing(true);
-            }
+            if (editing) finishEditing();
+            else startEditing();
           }}
           aria-label={editing ? "Finish editing section" : "Edit current section"}
           title={editing ? "Finish editing" : "Edit current section"}
@@ -1738,10 +1754,23 @@ export function AdvancedReaderPage({
                       parts={parts}
                       wordStart={holdsActiveWord ? activeWordRange.start : -1}
                       wordEnd={holdsActiveWord ? activeWordRange.end : -1}
+                      isPlaying={isPlaying}
                     />
                   );
                 })}
               </article>
+              {paragraphs.length === 0 && (
+                <div className="rounded-2xl border border-dashed border-border p-5 text-center font-sans text-sm text-text-muted">
+                  <p>This section is empty.</p>
+                  <button
+                    type="button"
+                    onClick={startEditing}
+                    className="mt-3 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm font-medium text-text-primary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:bg-white/60 hover:text-accent active:scale-[0.98]"
+                  >
+                    Add text
+                  </button>
+                </div>
+              )}
               {selectedPassage && (
                 <button
                   type="button"

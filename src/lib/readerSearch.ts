@@ -12,14 +12,16 @@ interface FoldedText {
 }
 
 function foldText(text: string): FoldedText {
-  let value = "";
+  // Repeated `+=` on a book-sized string forces the engine to keep flattening
+  // rope concatenations, so the folded chunks are collected and joined once.
+  const chunks: string[] = [];
   const sourceStarts: number[] = [];
   const sourceEnds: number[] = [];
   let sourceOffset = 0;
 
   for (const character of text) {
     const foldedCharacter = character.normalize("NFD").toLowerCase();
-    value += foldedCharacter;
+    chunks.push(foldedCharacter);
     for (let index = 0; index < foldedCharacter.length; index += 1) {
       sourceStarts.push(sourceOffset);
       sourceEnds.push(sourceOffset + character.length);
@@ -27,7 +29,23 @@ function foldText(text: string): FoldedText {
     sourceOffset += character.length;
   }
 
-  return { value, sourceStarts, sourceEnds };
+  return { value: chunks.join(""), sourceStarts, sourceEnds };
+}
+
+/**
+ * Folding a 500KB book walks every code point and fills two offset maps, which
+ * is far too expensive to repeat per keystroke. Documents are immutable strings
+ * in practice, so a size-1 cache keyed on string identity turns every search
+ * after the first into a plain `indexOf` over the already folded haystack.
+ */
+let foldedDocumentSource: string | null = null;
+let foldedDocument: FoldedText | null = null;
+
+function foldDocument(text: string): FoldedText {
+  if (foldedDocumentSource === text && foldedDocument) return foldedDocument;
+  foldedDocument = foldText(text);
+  foldedDocumentSource = text;
+  return foldedDocument;
 }
 
 export function findDocumentMatches(
@@ -38,7 +56,7 @@ export function findDocumentMatches(
   const trimmedQuery = query.trim();
   if ([...trimmedQuery].length < 2) return [];
   const needle = foldText(trimmedQuery).value;
-  const haystack = foldText(text);
+  const haystack = foldDocument(text);
   const results: ReaderSearchResult[] = [];
   let cursor = 0;
 
