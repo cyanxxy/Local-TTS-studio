@@ -2,6 +2,46 @@
 
 All notable changes to Open TTS are documented here.
 
+## [1.7.4] - 2026-07-29
+
+### Fixed
+
+- Fixed auto-follow silently staying engaged after a manual scroll. A jump that
+  landed on an unchanged scroll position left the programmatic-scroll flag armed,
+  so the next real user scroll was swallowed and the resume pill never appeared.
+- Fixed a parked cross-section scroll offset hijacking a later, unrelated section
+  change when the Reader was rendered without a navigation handler.
+- Fixed the note pill flashing for a frame on every double-click-to-listen.
+- Fixed the reading pane rendering an empty panel with no guidance when a section
+  has no text; it now offers an inline way into editing.
+- Fixed reading-appearance and voice popovers keeping stale geometry when their
+  contents changed height after opening.
+- Fixed arrow-key page turns firing from toolbar buttons and repeating while an
+  arrow key is held, each repeat forcing a full flush, save, and restore cycle.
+- Fixed the spoken-word highlight losing contrast in focus mode, and the spoken
+  sentence continuing to pulse while playback is paused.
+- Fixed the Reader library drawer behaving as a non-modal dialog: it now traps
+  Tab, marks itself modal, and closes on click-away behind a scrim layered above
+  the player dock.
+- Fixed the Contents, Search, Bookmarks, and Notes tabs rendering a blank panel
+  when no document is open.
+- Fixed a stale delete confirmation persisting across drawer closes and tab
+  changes, and bookmarks in one chapter all sharing an identical label.
+
+### Changed
+
+- Reader library drawer tabs are now a real tablist with `aria-selected`, roving
+  focus, and arrow, Home, and End navigation.
+- Document search now debounces input and folds the document text once per
+  document instead of on every keystroke and every playback progress sample, and
+  document title and author edits are debounced instead of writing per keystroke.
+- Reader library rows re-render individually rather than as a whole list on each
+  playback progress sample, and relative "opened" times refresh while the drawer
+  is open.
+- Removed the chunk-boundary span splitting from the reading pane. The attribute
+  it produced was read by nothing at runtime and cost dozens to hundreds of
+  identical spans per section.
+
 ## [1.7.3] - 2026-07-26
 
 ### Added

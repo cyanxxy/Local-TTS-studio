@@ -223,7 +223,7 @@ describe("AdvancedReaderPage", () => {
       activeDocument: first,
     });
     fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
     const draft = screen.getByPlaceholderText("Capture a thought about this passage…");
     fireEvent.change(draft, { target: { value: "A thought for book one" } });
 
@@ -253,7 +253,7 @@ describe("AdvancedReaderPage", () => {
     const onUpdateNote = vi.fn();
     renderReader({ text: document.text, documents: [document], activeDocument: document, onUpdateNote });
     fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Notes" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Notes" }));
     const note = screen.getByRole("textbox", { name: "Edit note" });
 
     fireEvent.change(note, { target: { value: "great " } });
@@ -569,11 +569,11 @@ describe("AdvancedReaderPage", () => {
       }],
     });
 
-    const sectionText = [...container.querySelectorAll("[data-section-index]")]
+    const sectionText = [...container.querySelectorAll("[data-block-start]")]
       .map((element) => element.textContent ?? "")
       .join("");
     expect(units.length).toBeGreaterThan(1);
-    expect(sectionText).toBe(text.trim());
+    expect(sectionText).toBe(text);
   });
 
   it("seeks by generated audio ranges without coupling them to preview boundaries", () => {
@@ -688,11 +688,11 @@ describe("AdvancedReaderPage", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Contents" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Contents" }));
     fireEvent.click(screen.getByRole("button", { name: /Ending/ }));
     expect(onJumpToSegment).toHaveBeenCalledWith("segment-2");
 
-    fireEvent.click(screen.getByRole("button", { name: "Bookmarks" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Bookmarks" }));
     fireEvent.click(screen.getByRole("button", { name: "Bookmark this position" }));
     expect(onAddBookmark).toHaveBeenCalledWith(expect.objectContaining({ positionSec: 0 }));
   });
@@ -710,7 +710,7 @@ describe("AdvancedReaderPage", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
-    fireEvent.click(screen.getByRole("button", { name: "Contents" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Contents" }));
     fireEvent.click(screen.getByRole("button", { name: /Ending/ }));
 
     expect(screen.getByRole("button", { name: "Chapter 2 of 2: Ending" })).toBeInTheDocument();
