@@ -73,7 +73,6 @@ interface AdvancedReaderPageProps {
   activeSection?: ReaderSection | null;
   previousSection?: ReaderSection | null;
   nextSection?: ReaderSection | null;
-  totalSectionCount?: number;
   onNavigateToOffset?: (offset: number, positionSec?: number) => void;
   viewPreferences?: ReaderViewPreferences;
   onViewPreferencesChange?: (patch: Partial<ReaderViewPreferences>) => void;
@@ -95,6 +94,8 @@ interface AdvancedReaderPageProps {
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
   desktopQwenMode?: "customVoice" | "voiceClone" | "voiceDesign";
+  /** False while a streaming model is still extending semantic segment durations. */
+  estimatedWordTrackingStable?: boolean;
   desktopVoiceLabel?: string;
   desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
@@ -567,7 +568,6 @@ export function AdvancedReaderPage({
   activeSection = null,
   previousSection = null,
   nextSection = null,
-  totalSectionCount = 0,
   onNavigateToOffset,
   viewPreferences = DEFAULT_READER_VIEW_PREFERENCES,
   onViewPreferencesChange,
@@ -587,6 +587,7 @@ export function AdvancedReaderPage({
   onModelChange,
   desktopModelOptions = [],
   desktopQwenMode = "customVoice",
+  estimatedWordTrackingStable = true,
   desktopVoiceLabel,
   desktopModelSettings,
   kokoroState,
@@ -876,7 +877,11 @@ export function AdvancedReaderPage({
   }, [activeSegment, activeSegmentIndex, previewChunks]);
 
   const estimatedWords = useMemo(() => {
-    if (!activeSegment || typeof activeSegment.textStart !== "number") return [];
+    if (
+      !estimatedWordTrackingStable
+      || !activeSegment
+      || typeof activeSegment.textStart !== "number"
+    ) return [];
     const speechEnd = Math.max(
       activeSegment.startSec,
       activeSegment.endSec - Math.max(0, activeSegment.pauseAfterSec ?? 0),
@@ -887,7 +892,7 @@ export function AdvancedReaderPage({
       activeSegment.startSec,
       speechEnd,
     );
-  }, [activeSegment]);
+  }, [activeSegment, estimatedWordTrackingStable]);
 
   // Selecting an *index* rather than the position itself is what keeps this page
   // off the animation-frame path: the value only changes when the spoken word
@@ -948,6 +953,34 @@ export function AdvancedReaderPage({
     (chapter) => currentTextOffset >= chapter.start && currentTextOffset < chapter.end,
   ) ?? activeDocument?.chapters.at(-1) ?? null;
 
+  /* ── Chapter rail labels ──────────────────────────────────── */
+  // Sections are a synthesis-sized window inside a chapter, so the same pair of
+  // arrows turns a page within a long chapter and crosses into the next one.
+  // Saying which it is beats a bare "next section" the reader has to decode.
+  const partCount = activeSection?.chapterSectionCount ?? 1;
+  const partIndex = activeSection?.chapterSectionIndex ?? 0;
+  const isChapterStart = partIndex === 0;
+  const chapterStepLabel = (section: ReaderSection | null, forward: boolean) => {
+    const direction = forward ? "Next" : "Previous";
+    if (!section) return `${direction} page`;
+    if (section.chapterId === currentChapter?.id) {
+      return `${direction} part of this chapter`;
+    }
+    const chapter = activeDocument?.chapters.find((entry) => entry.id === section.chapterId);
+    return chapter ? `${direction} chapter: ${chapter.title}` : `${direction} chapter`;
+  };
+  const previousStepLabel = chapterStepLabel(previousSection, false);
+  const nextStepLabel = chapterStepLabel(nextSection, true);
+  // The ordinal is noise on screen for a 135-entry EPUB, but it is real
+  // orientation for anyone hearing the label instead of seeing the rail.
+  const contentsLabel = currentChapter
+    ? `Contents · Chapter ${currentChapter.order + 1} of ${activeDocument?.chapters.length ?? 1}: ${currentChapter.title}`
+      + (partCount > 1 ? `, part ${partIndex + 1} of ${partCount}` : "")
+    : "Contents";
+  const openContents = useCallback(() => {
+    setLibraryTab("contents");
+    setLibraryOpen(true);
+  }, []);
 
   // Auto-follow hands control back the moment the user scrolls during playback,
   // and stays paused until they resume it deliberately (pill, jump, or replay).
@@ -997,7 +1030,7 @@ export function AdvancedReaderPage({
   useEffect(() => {
     if (!isPlaying || followPaused) return;
     scrollMarkerIntoView();
-  }, [activeRange, followPaused, isPlaying, scrollMarkerIntoView]);
+  }, [activeRange, activeWordIndex, followPaused, isPlaying, scrollMarkerIntoView]);
 
   /* ── Player dock actions ──────────────────────────────────── */
   const showRetry = !modelReady && !!modelError;
@@ -1285,11 +1318,11 @@ export function AdvancedReaderPage({
             <h2 className="truncate font-display text-lg leading-none font-semibold text-text-primary">
               {activeDocument?.title || "Reader"}
             </h2>
+            {/* Position lives in the chapter rail below; the header only
+                identifies the book so long titles keep their room. */}
             <p className="mt-0.5 truncate font-mono text-xs tabular-nums text-text-muted">
-              {activeDocument?.author ? `${activeDocument.author} · ` : ""}
-              {Math.round(readingProgress)}% · {activeDocument?.chapters.length ?? 0} chapter{(activeDocument?.chapters.length ?? 0) !== 1 ? "s" : ""}
-              {activeSection && totalSectionCount > 1 ? ` · section ${activeSection.order + 1}/${totalSectionCount}` : ""}
-              {statusLabel ? ` · ${statusLabel}` : ""}
+              {[activeDocument?.author, statusLabel].filter(Boolean).join(" · ")
+                || (activeDocument ? "Reading" : "No book open")}
             </p>
           </div>
         </div>
@@ -1614,71 +1647,108 @@ export function AdvancedReaderPage({
         </div>
       )}
 
-      {(libraryError || currentChapter) && (
-        <div className="flex flex-col gap-2 px-1 sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex min-w-0 items-center gap-1">
-            <button
-              type="button"
-              disabled={!previousSection}
-              onClick={() => previousSection && handleJumpToOffset(previousSection.start)}
-              aria-label="Previous reading section"
-              title="Previous section (←)"
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-white/45 hover:text-accent disabled:cursor-not-allowed disabled:opacity-35"
-            >
-              <ChevronLeft size={15} />
-            </button>
-            {libraryError ? (
-              <p className="text-xs text-danger" role="status">{libraryError}</p>
-            ) : currentChapter ? (
-              <button
-                type="button"
-                onClick={() => setLibraryOpen(true)}
-                className="block w-full max-w-full truncate text-left text-xs font-medium text-text-muted transition-colors hover:text-accent"
-              >
-                Chapter {currentChapter.order + 1} of {activeDocument?.chapters.length}: {currentChapter.title}
-                {activeSection && activeSection.chapterSectionCount > 1
-                  ? ` · Part ${activeSection.chapterSectionIndex + 1} of ${activeSection.chapterSectionCount}`
-                  : ""}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              disabled={!nextSection}
-              onClick={() => nextSection && handleJumpToOffset(nextSection.start)}
-              aria-label="Next reading section"
-              title="Next section (→)"
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-white/45 hover:text-accent disabled:cursor-not-allowed disabled:opacity-35"
-            >
-              <ChevronRight size={15} />
-            </button>
-          </div>
-          <div className="flex min-w-32 items-center gap-2 sm:w-64">
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-border">
-              <div
-                className="h-full rounded-full bg-accent transition-[transform] duration-300 origin-left"
-                style={{ transform: `scaleX(${clamp(readingProgress / 100, 0, 1)})` }}
-              />
-            </div>
-            <span className="w-9 text-right font-mono text-2xs text-text-muted tabular-nums">
-              {Math.round(readingProgress)}%
-            </span>
-            <RemainingTime
-              clock={clock}
-              totalDuration={totalDuration}
-              className="hidden whitespace-nowrap font-mono text-2xs text-text-muted tabular-nums md:inline"
-            />
-          </div>
-        </div>
+      {libraryError && (
+        <p className="px-1 text-xs text-danger" role="status">{libraryError}</p>
       )}
 
       {/* ── Document ────────────────────────────────────────── */}
       <section
-        className={`glass-panel relative overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}
+        className={`glass-panel relative flex flex-col overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}
         style={{
           "--reader-column-width": `${readerColumnWidthRem(viewPreferences.columnWidth)}rem`,
         } as CSSProperties}
       >
-        <div className={`relative ${fullScreen ? "h-full min-h-[55vh]" : "min-h-72"}`}>
+        {/* Running head: where you are, one tap to the contents, and the two
+            page turns — the only chapter chrome the reader needs. */}
+        {currentChapter && (
+          <nav
+            aria-label="Chapter navigation"
+            className="flex shrink-0 items-center gap-2 border-b border-border/40 px-2.5 py-2 sm:gap-3 sm:px-3"
+          >
+            {/* Both page turns sit together on the left, the way a reader's
+                thumb expects them, instead of straddling the title. */}
+            <div className="flex shrink-0 items-center rounded-xl border border-white/50 bg-white/35 p-0.5 shadow-glass-sm">
+              <button
+                type="button"
+                disabled={!previousSection}
+                onClick={() => previousSection && handleJumpToOffset(previousSection.start)}
+                aria-label={previousStepLabel}
+                title={`${previousStepLabel} (←)`}
+                className="flex h-7 w-7 items-center justify-center rounded-[10px] text-text-muted transition-colors hover:bg-white/70 hover:text-accent disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                <ChevronLeft size={15} />
+              </button>
+              <span className="h-4 w-px bg-border/70" aria-hidden />
+              <button
+                type="button"
+                disabled={!nextSection}
+                onClick={() => nextSection && handleJumpToOffset(nextSection.start)}
+                aria-label={nextStepLabel}
+                title={`${nextStepLabel} (→)`}
+                className="flex h-7 w-7 items-center justify-center rounded-[10px] text-text-muted transition-colors hover:bg-white/70 hover:text-accent disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
+              >
+                <ChevronRight size={15} />
+              </button>
+            </div>
+
+            {/* Hugging its own text keeps the hover and focus ring on the
+                title instead of stretching a highlight across the whole rail. */}
+            <button
+              type="button"
+              onClick={openContents}
+              aria-label={contentsLabel}
+              aria-haspopup="dialog"
+              title="Open contents"
+              className="group -ml-1 mr-auto flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-white/45"
+            >
+              <span className="truncate text-sm font-medium text-text-secondary transition-colors group-hover:text-accent">
+                {currentChapter.title}
+              </span>
+              {partCount > 1 && (
+                <span className="flex shrink-0 items-center gap-1" aria-hidden>
+                  {partCount <= 6 ? (
+                    Array.from({ length: partCount }, (_, index) => (
+                      <span
+                        key={index}
+                        className={`h-1.5 w-1.5 rounded-full transition-colors ${
+                          index === partIndex ? "bg-accent" : "bg-border"
+                        }`}
+                      />
+                    ))
+                  ) : (
+                    <span className="font-mono text-2xs text-text-muted tabular-nums">
+                      {partIndex + 1}/{partCount}
+                    </span>
+                  )}
+                </span>
+              )}
+              <ChevronDown
+                size={13}
+                className="shrink-0 text-text-muted transition-colors group-hover:text-accent"
+              />
+            </button>
+
+            <div className="flex shrink-0 items-center gap-2">
+              <div className="hidden h-1 w-20 overflow-hidden rounded-full bg-border/80 sm:block md:w-28">
+                <div
+                  className="h-full rounded-full bg-accent transition-[transform] duration-300 origin-left"
+                  style={{ transform: `scaleX(${clamp(readingProgress / 100, 0, 1)})` }}
+                />
+              </div>
+              {/* Fixed width so the rail does not twitch as the number grows. */}
+              <span className="w-9 shrink-0 text-right font-mono text-2xs text-text-muted tabular-nums">
+                {Math.round(readingProgress)}%
+              </span>
+              <RemainingTime
+                clock={clock}
+                totalDuration={totalDuration}
+                className="hidden whitespace-nowrap font-mono text-2xs text-text-muted tabular-nums md:inline"
+              />
+            </div>
+          </nav>
+        )}
+
+        <div className={`relative ${fullScreen ? "min-h-[55vh] flex-1" : "min-h-72"}`}>
           {editing ? (
             <textarea
               id={readingTextId}
@@ -1721,19 +1791,20 @@ export function AdvancedReaderPage({
               className={`absolute inset-0 overflow-auto text-text-primary outline-none ${documentPadding(fullScreen)} ${focusMode ? "reader-focus" : ""}`}
               style={{ fontSize: viewPreferences.fontSize, lineHeight: viewPreferences.lineHeight }}
             >
-              {currentChapter && (
+              {/* A chapter opens like a printed chapter opens; the parts after
+                  it pick up mid-flow with a quiet continuation marker instead
+                  of restating the title at full size. */}
+              {currentChapter && (isChapterStart ? (
                 <header className="mb-7 border-b border-border/50 pb-5">
-                  <p className="font-mono text-2xs uppercase tracking-widest text-text-muted">
-                    Chapter {currentChapter.order + 1} of {activeDocument?.chapters.length ?? 1}
-                    {activeSection && activeSection.chapterSectionCount > 1
-                      ? ` · Part ${activeSection.chapterSectionIndex + 1} of ${activeSection.chapterSectionCount}`
-                      : ""}
-                  </p>
-                  <h3 className="mt-2 font-display text-[1.45em] leading-tight font-semibold text-text-primary">
+                  <h3 className="font-display text-[1.45em] leading-tight font-semibold text-text-primary">
                     {currentChapter.title}
                   </h3>
                 </header>
-              )}
+              ) : (
+                <p className="mb-6 truncate font-mono text-2xs uppercase tracking-widest text-text-muted">
+                  {currentChapter.title} · continued
+                </p>
+              ))}
               <article
                 ref={readerTextRef}
                 onMouseUp={handleReaderTextMouseUp}

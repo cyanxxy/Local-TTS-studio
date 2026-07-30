@@ -83,6 +83,7 @@ async function loadWorkerModule({
 
   const postedMessages: WorkerOutMessage[] = [];
   const workerGlobal = {
+    close: vi.fn(),
     postMessage: vi.fn((message: WorkerOutMessage) => {
       postedMessages.push(message);
     }),
@@ -233,7 +234,7 @@ describe("supertonic.worker", () => {
     const pipelineCalls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
     const generationInstance = createPipelineInstance([createRawAudio(), deferred.promise], pipelineCalls);
 
-    const { dispatch, postedMessages } = await loadWorkerModule({
+    const { dispatch, postedMessages, workerGlobal } = await loadWorkerModule({
       chunkTexts: ["Only sentence."],
       pipelineInstances: [generationInstance],
     });
@@ -251,6 +252,8 @@ describe("supertonic.worker", () => {
       quality: 5,
     });
     dispatch({ type: "CANCEL" });
+    expect(postedMessages).toContainEqual({ type: "CANCELLED" });
+    expect(workerGlobal.close).toHaveBeenCalledOnce();
 
     deferred.resolve(createRawAudio());
     await flushPromises();

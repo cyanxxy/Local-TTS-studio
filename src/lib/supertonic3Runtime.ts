@@ -23,6 +23,12 @@ export interface Supertonic3Style {
   dp: ort.Tensor;
 }
 
+export type Supertonic3ModelName =
+  | "duration_predictor"
+  | "text_encoder"
+  | "vector_estimator"
+  | "vocoder";
+
 function disposeTensor(tensor: ort.Tensor | null | undefined): void {
   try {
     tensor?.dispose();
@@ -242,10 +248,10 @@ export class Supertonic3Runtime {
   }
 }
 
-export async function createSupertonic3Runtime(
+async function createSupertonic3RuntimeFromSource(
   config: Supertonic3Config,
   indexer: number[],
-  models: Record<"duration_predictor" | "text_encoder" | "vector_estimator" | "vocoder", ArrayBuffer>,
+  loadModel: (name: Supertonic3ModelName) => ArrayBuffer | Promise<ArrayBuffer>,
   executionProvider: "webgpu" | "wasm",
 ): Promise<Supertonic3Runtime> {
   const options: ort.InferenceSession.SessionOptions = {
@@ -254,13 +260,13 @@ export async function createSupertonic3Runtime(
   };
   const sessions: ort.InferenceSession[] = [];
   try {
-    const durationPredictor = await ort.InferenceSession.create(models.duration_predictor, options);
+    const durationPredictor = await ort.InferenceSession.create(await loadModel("duration_predictor"), options);
     sessions.push(durationPredictor);
-    const textEncoder = await ort.InferenceSession.create(models.text_encoder, options);
+    const textEncoder = await ort.InferenceSession.create(await loadModel("text_encoder"), options);
     sessions.push(textEncoder);
-    const vectorEstimator = await ort.InferenceSession.create(models.vector_estimator, options);
+    const vectorEstimator = await ort.InferenceSession.create(await loadModel("vector_estimator"), options);
     sessions.push(vectorEstimator);
-    const vocoder = await ort.InferenceSession.create(models.vocoder, options);
+    const vocoder = await ort.InferenceSession.create(await loadModel("vocoder"), options);
     sessions.push(vocoder);
     return new Supertonic3Runtime(
       config,
@@ -274,6 +280,29 @@ export async function createSupertonic3Runtime(
     await releaseSessions(sessions);
     throw error;
   }
+}
+
+export async function createSupertonic3Runtime(
+  config: Supertonic3Config,
+  indexer: number[],
+  models: Record<Supertonic3ModelName, ArrayBuffer>,
+  executionProvider: "webgpu" | "wasm",
+): Promise<Supertonic3Runtime> {
+  return createSupertonic3RuntimeFromSource(
+    config,
+    indexer,
+    (name) => models[name],
+    executionProvider,
+  );
+}
+
+export async function createSupertonic3RuntimeStreaming(
+  config: Supertonic3Config,
+  indexer: number[],
+  loadModel: (name: Supertonic3ModelName) => Promise<ArrayBuffer>,
+  executionProvider: "webgpu" | "wasm",
+): Promise<Supertonic3Runtime> {
+  return createSupertonic3RuntimeFromSource(config, indexer, loadModel, executionProvider);
 }
 
 export type { Supertonic3Config, VoiceStyleJson };

@@ -83,6 +83,14 @@ function rememberReaderAudio(
     byteLength: getCachedReaderAudioByteLength(audio.chunks),
   };
   cache.delete(cacheKey);
+
+  // An entry larger than the whole memory budget cannot be made compliant by
+  // evicting neighbours. Persist it to disk when available, but do not pin a
+  // chapter-sized PCM payload in renderer memory.
+  if (normalized.byteLength > MAX_READER_AUDIO_MEMORY_CACHE_BYTES) {
+    return normalized;
+  }
+
   cache.set(cacheKey, normalized);
 
   const entries = [...cache.entries()];

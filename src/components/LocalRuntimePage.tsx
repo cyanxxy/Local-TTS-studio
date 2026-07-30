@@ -428,16 +428,16 @@ export function LocalRuntimePage({
         sampleCount: event.sampleCount,
         silenceAfterSamples: event.silenceAfterSamples,
       };
-      const contiguousChunks = streamedAudioChunksRef.current
-        .slice(0, event.index + 1)
-        .filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
-      if (contiguousChunks.length !== event.index + 1) return;
 
       const sampleRate = streamedAudioSampleRateRef.current ?? event.sampleRate;
       const displayTotal = event.total > 0 ? event.total : event.index + 1;
-      while (scheduledAudioChunkCountRef.current < contiguousChunks.length) {
+      // Advance a cursor through newly contiguous chunks instead of slicing and
+      // filtering the complete stream for every transport frame. The previous
+      // implementation made long generations quadratic in chunk count.
+      while (scheduledAudioChunkCountRef.current < streamedAudioChunksRef.current.length) {
         const chunkIndex = scheduledAudioChunkCountRef.current;
-        const chunk = contiguousChunks[chunkIndex];
+        const chunk = streamedAudioChunksRef.current[chunkIndex];
+        if (!chunk) break;
         scheduledAudioChunkCountRef.current += 1;
         void scheduleAudioChunk({
           audio: buildPlaybackSamples(chunk),
@@ -452,8 +452,9 @@ export function LocalRuntimePage({
         });
       }
 
-      if (event.total > 0 && event.index + 1 === event.total) {
-        setNewAudioUrl(float32ChunksToWavUrl(contiguousChunks, event.sampleRate));
+      if (event.total > 0 && scheduledAudioChunkCountRef.current === event.total) {
+        const completeChunks = streamedAudioChunksRef.current.slice(0, event.total);
+        setNewAudioUrl(float32ChunksToWavUrl(completeChunks, event.sampleRate));
       }
       setStatus({
         tone: "info",

@@ -507,6 +507,16 @@ input[type="range"]::-moz-range-thumb {
     0%   { transform: scale(1);   opacity: 0.55; }
     100% { transform: scale(2.2); opacity: 0;    }
   }
+
+  /* Studio ⇄ Reader swap. Deliberately opacity-only: a transform here would
+     make the page wrapper the containing block for the Reader's fixed player
+     dock and tear it off the viewport mid-switch. The sliding tab indicator
+     carries the movement instead. */
+  --animate-page-swap: page-swap 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+  @keyframes page-swap {
+    0%   { opacity: 0; }
+    100% { opacity: 1; }
+  }
 }
 
 /* Keyframes referenced from inline `style` or non-Tailwind CSS — kept outside
@@ -545,16 +555,11 @@ input[type="range"]::-moz-range-thumb {
   padding: 0.08em 0;
 }
 
-/* Spoken-sentence highlight — soft tinted glass sweep under the words */
+/* Spoken-sentence context — a colourless paper wash. The accent belongs to the
+   word being spoken and to nothing else, so a long sentence no longer paints
+   half the page blue. */
 .reader-chunk-highlight-active {
-  background: linear-gradient(
-    180deg,
-    color-mix(in srgb, #5AC5F5 26%, transparent) 0%,
-    color-mix(in srgb, var(--color-accent) 18%, transparent) 100%
-  );
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, #ffffff 55%, transparent),
-    0 1px 8px color-mix(in srgb, var(--color-accent) 14%, transparent);
+  background: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
 }
 
 /* The breathing only reads as "this is being spoken now", so it is applied
@@ -564,23 +569,31 @@ input[type="range"]::-moz-range-thumb {
   animation: reader-highlight-pulse 3.2s ease-in-out infinite;
 }
 
-/* Estimated word-follow marker. It sits inside the broader generated-section
-   tint and is intentionally sharper, so readers can track the current word
-   while still seeing the sentence context. */
+/* Estimated word-follow marker — the one accent-coloured mark on the page.
+   The ring is drawn with a shadow spread rather than padding so the marker can
+   travel word to word without nudging the line's metrics. Panel-coloured ink
+   keeps it legible on every accent, light and dark. */
 .reader-word-highlight-active {
-  color: var(--color-text-primary);
-  background: color-mix(in srgb, var(--color-accent) 34%, #ffffff 22%);
+  color: var(--color-panel);
+  background: var(--color-accent);
   border-radius: 0.28em;
   box-shadow:
-    inset 0 -0.12em 0 color-mix(in srgb, var(--color-accent) 42%, transparent),
-    0 0 0 0.08em color-mix(in srgb, #ffffff 48%, transparent);
+    0 0 0 0.08em var(--color-accent),
+    0 1px 6px color-mix(in srgb, var(--color-accent) 32%, transparent);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
 }
 
+/* The word span carries its chunk's classes too, and an animated
+   `background-color` outranks any normal declaration — the breathing wash would
+   paint straight over the accent fill and leave the word unreadable. */
+.reader-word-highlight-active.reader-chunk-highlight-pulsing {
+  animation: none;
+}
+
 @keyframes reader-highlight-pulse {
-  0%, 100% { background-color: color-mix(in srgb, #5AC5F5 8%, transparent); }
-  50%       { background-color: color-mix(in srgb, #5AC5F5 22%, transparent); }
+  0%, 100% { background-color: color-mix(in srgb, var(--color-text-primary) 4%, transparent); }
+  50%      { background-color: color-mix(in srgb, var(--color-text-primary) 9%, transparent); }
 }
 
 /* ── Reader paragraphs ────────────────────────────────────
@@ -613,11 +626,14 @@ input[type="range"]::-moz-range-thumb {
   color: color-mix(in srgb, var(--color-text-primary) 42%, transparent);
   transition: color 0.45s ease;
 }
-.reader-focus span.reader-chunk-highlight-active,
-/* The word marker can outlive its chunk span, and `.reader-focus span` outranks
-   the bare class, so it needs its own qualified rule to stay legible. */
-.reader-focus span.reader-word-highlight-active {
+.reader-focus span.reader-chunk-highlight-active {
   color: var(--color-text-primary);
+}
+/* The word marker can outlive its chunk span, and `.reader-focus span` outranks
+   the bare class, so it needs its own qualified rule to keep its ink on the
+   accent fill instead of fading with the rest of the page. */
+.reader-focus span.reader-word-highlight-active {
+  color: var(--color-panel);
 }
 
 /* ── Respect reduced-motion ───────────────────────────────── */

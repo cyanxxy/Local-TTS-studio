@@ -2,7 +2,11 @@ import { StrictMode, type PropsWithChildren } from "react";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { clearReaderLibraryForTests, listReaderDocuments } from "../lib/readerLibrary";
+import {
+  clearReaderLibraryForTests,
+  listReaderDocuments,
+  MAX_READER_AUDIO_MEMORY_CACHE_BYTES,
+} from "../lib/readerLibrary";
 import {
   buildReaderSections,
   createReaderAudioCacheKey,
@@ -337,6 +341,38 @@ describe("useReaderLibrary", () => {
 
     expect(await result.current.loadAudio("memory-doc", "s1")).toBeNull();
     expect(await result.current.loadAudio("memory-doc", "s0")).not.toBeNull();
+  });
+
+  it("does not retain an audio entry larger than the renderer memory budget", async () => {
+    vi.stubGlobal("indexedDB", undefined);
+    const { result } = renderHook(() => useReaderLibrary("Memory-only reader."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const oversizedAudio = {
+      byteLength: MAX_READER_AUDIO_MEMORY_CACHE_BYTES + 1,
+    } as ArrayBuffer;
+    const audio: CachedReaderAudio = {
+      cacheKey: createReaderAudioCacheKey("memory-doc", "oversized"),
+      documentId: "memory-doc",
+      chapterId: "chapter-1",
+      sectionId: "oversized",
+      signature: "oversized",
+      chunks: [{
+        audio: oversizedAudio,
+        samplingRate: 24_000,
+        text: "Oversized",
+        index: 0,
+        total: 1,
+      }],
+      byteLength: oversizedAudio.byteLength,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      updatedAt: 1,
+    };
+
+    await result.current.saveAudio(audio);
+
+    expect(await result.current.loadAudio("memory-doc", "oversized")).toBeNull();
   });
 
   // Both shutdown assertions run this exact sequence, so the "stays null" case

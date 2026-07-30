@@ -1,9 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
-import { assertSafeImportUrl, importRemoteDocument } from "./urlImport";
+import {
+  assertSafeImportUrl,
+  createPinnedLookup,
+  importRemoteDocument,
+  type SafeImportTarget,
+} from "./urlImport";
 
 const publicResolver = vi.fn(async () => [{ address: "93.184.216.34", family: 4 }]);
 
 describe("urlImport", () => {
+  it("returns the address shape requested by Electron's Node lookup mode", async () => {
+    const target: SafeImportTarget = {
+      url: new URL("https://example.com/article"),
+      address: "93.184.216.34",
+      family: 4,
+    };
+    const lookup = createPinnedLookup(target);
+
+    await expect(new Promise((resolve, reject) => {
+      lookup(target.url.hostname, { all: true }, (error, addresses) => {
+        if (error) reject(error);
+        else resolve(addresses);
+      });
+    })).resolves.toEqual([{ address: target.address, family: target.family }]);
+
+    await expect(new Promise((resolve, reject) => {
+      lookup(target.url.hostname, { all: false }, (error, address, family) => {
+        if (error) reject(error);
+        else resolve({ address, family });
+      });
+    })).resolves.toEqual({ address: target.address, family: target.family });
+  });
+
   it("rejects local and credential-bearing URLs", async () => {
     await expect(assertSafeImportUrl("http://127.0.0.1/private", publicResolver)).rejects.toThrow("Local-network");
     await expect(assertSafeImportUrl("http://localhost/private", publicResolver)).rejects.toThrow("Local-network");

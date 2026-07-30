@@ -55,6 +55,7 @@ async function loadWorkerModule({
   vi.resetModules();
   const postedMessages: WorkerOutMessage[] = [];
   const workerGlobal = {
+    close: vi.fn(),
     postMessage: vi.fn((message: WorkerOutMessage) => {
       postedMessages.push(message);
     }),
@@ -260,13 +261,15 @@ describe("kokoro.worker", () => {
   it("suppresses stale output after cancellation", async () => {
     const pending = deferred<ReturnType<typeof createRawAudio>>();
     const instance = createInstance([pending.promise]);
-    const { dispatch, postedMessages } = await loadWorkerModule({ instances: [instance] });
+    const { dispatch, postedMessages, workerGlobal } = await loadWorkerModule({ instances: [instance] });
 
     dispatch({ type: "LOAD" });
     await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
 
     dispatch({ type: "GENERATE", text: "Only sentence.", voice: "af_heart", speed: 1, quality: 5 });
     dispatch({ type: "CANCEL" });
+    expect(postedMessages).toContainEqual({ type: "CANCELLED" });
+    expect(workerGlobal.close).toHaveBeenCalledOnce();
     pending.resolve(createRawAudio());
     await flushPromises();
 

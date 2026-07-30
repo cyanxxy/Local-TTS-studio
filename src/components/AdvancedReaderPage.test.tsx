@@ -301,7 +301,6 @@ describe("AdvancedReaderPage", () => {
       activeDocument: book,
       activeSection: sections[0],
       nextSection: sections[1],
-      totalSectionCount: sections.length,
       onNavigateToOffset,
     });
 
@@ -364,7 +363,6 @@ describe("AdvancedReaderPage", () => {
       activeSection: sections[0],
       previousSection: null,
       nextSection: sections[1],
-      totalSectionCount: sections.length,
       onNavigateToOffset,
       onJumpToSegment,
       segments: [createSegment({
@@ -372,7 +370,9 @@ describe("AdvancedReaderPage", () => {
       })],
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Next reading section" }));
+    // Both sections belong to the same chapter, so the rail offers a page turn
+    // inside it rather than claiming the next chapter.
+    fireEvent.click(screen.getByRole("button", { name: "Next part of this chapter" }));
 
     expect(onNavigateToOffset).toHaveBeenCalledWith(sections[1].start, undefined);
     expect(onJumpToSegment).not.toHaveBeenCalled();
@@ -576,6 +576,50 @@ describe("AdvancedReaderPage", () => {
     expect(sectionText).toBe(text);
   });
 
+  it("waits for Qwen streaming to finish before estimating word timing", () => {
+    const clock = clockAt(1.5);
+    const segment = createSegment({
+      text: "Hello extraordinary world.",
+      startSec: 0,
+      endSec: 3,
+      textStart: 0,
+      textEnd: 26,
+    });
+    const view = renderReader({
+      text: "Hello extraordinary world.",
+      totalDuration: 3,
+      clock,
+      isPlaying: true,
+      isGenerating: true,
+      activeSegmentId: "segment-1",
+      segments: [segment],
+      estimatedWordTrackingStable: false,
+    });
+
+    expect(view.container.querySelector("[data-reader-active-word='true']")).toBeNull();
+    expect(view.container.querySelector(".reader-chunk-highlight-active")).toHaveTextContent(
+      "Hello extraordinary world.",
+    );
+
+    view.rerender(
+      <AdvancedReaderPage
+        {...view.props}
+        text="Hello extraordinary world."
+        totalDuration={3}
+        clock={clock}
+        isPlaying
+        isGenerating={false}
+        activeSegmentId="segment-1"
+        segments={[segment]}
+        estimatedWordTrackingStable
+      />,
+    );
+
+    expect(view.container.querySelector("[data-reader-active-word='true']")).toHaveTextContent(
+      "extraordinary",
+    );
+  });
+
   it("seeks by generated audio ranges without coupling them to preview boundaries", () => {
     const onJumpToSegment = vi.fn();
     renderReader({
@@ -648,6 +692,64 @@ describe("AdvancedReaderPage", () => {
     expect(activeWord()).toBe("world.");
   });
 
+  it("auto-scrolls again when the playback clock advances within one sentence", () => {
+    const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get")
+      .mockReturnValue(200);
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: HTMLElement) {
+        const wordTop = this.matches(".reader-word-highlight-active")
+          ? this.textContent === "Hello"
+            ? 80
+            : this.textContent === "extraordinary"
+              ? 260
+              : 440
+          : 0;
+        return {
+          x: 0,
+          y: wordTop,
+          top: wordTop,
+          right: 0,
+          bottom: wordTop,
+          left: 0,
+          width: 0,
+          height: 0,
+          toJSON: () => ({}),
+        };
+      });
+    const clock = clockAt(0.2);
+
+    try {
+      renderReader({
+        text: "Hello extraordinary world.",
+        totalDuration: 3,
+        clock,
+        isPlaying: true,
+        activeSegmentId: "segment-1",
+        segments: [createSegment({
+          text: "Hello extraordinary world.",
+          startSec: 0,
+          endSec: 3,
+          textStart: 0,
+          textEnd: 26,
+        })],
+      });
+      const scroller = screen.getByRole("document", { name: "Reading Text" });
+      const firstWordTop = scroller.scrollTop;
+
+      // The sentence range does not change. Auto-follow must be driven by the
+      // word index published by the clock, or the accent can walk off-screen.
+      act(() => clock.set(1.5));
+      expect(scroller.scrollTop).toBeGreaterThan(firstWordTop);
+      const secondWordTop = scroller.scrollTop;
+
+      act(() => clock.set(2.8));
+      expect(scroller.scrollTop).toBeGreaterThan(secondWordTop);
+    } finally {
+      rect.mockRestore();
+      clientHeight.mockRestore();
+    }
+  });
+
   it("opens the local library, navigates the table of contents, and creates bookmarks", () => {
     const onJumpToSegment = vi.fn();
     const onAddBookmark = vi.fn();
@@ -713,7 +815,45 @@ describe("AdvancedReaderPage", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Contents" }));
     fireEvent.click(screen.getByRole("button", { name: /Ending/ }));
 
-    expect(screen.getByRole("button", { name: "Chapter 2 of 2: Ending" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Contents · Chapter 2 of 2: Ending" })).toBeInTheDocument();
+  });
+
+  it("names chapter rail page turns by where they land", () => {
+    const document = createReaderDocument({
+      id: "doc-chapter-steps",
+      title: "Two chapters",
+      text: `# Opening\n${"A paragraph with enough words for a reading section. ".repeat(700)}\n\n# Ending\nFinal text.`,
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const crossing = sections.findIndex((section) => section.chapterId === document.chapters[1].id);
+    const onNavigateToOffset = vi.fn();
+
+    renderReader({
+      text: getReaderSectionText(document.text, sections[crossing - 1]),
+      documents: [document],
+      activeDocument: document,
+      activeChapter: document.chapters[0],
+      activeSection: sections[crossing - 1],
+      previousSection: sections[crossing - 2] ?? null,
+      nextSection: sections[crossing],
+      onNavigateToOffset,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "Next chapter: Ending" }));
+    expect(onNavigateToOffset).toHaveBeenCalledWith(sections[crossing].start, undefined);
+  });
+
+  it("opens the contents straight from the chapter rail", () => {
+    const document = createReaderDocument({
+      id: "doc-rail-contents",
+      title: "Quiet chapters",
+      text: "# Opening\nFirst text.\n\n# Ending\nFinal text.",
+    });
+    renderReader({ text: document.text, documents: [document], activeDocument: document });
+
+    fireEvent.click(screen.getByRole("button", { name: /^Contents · Chapter 1 of 2/ }));
+
+    expect(screen.getByRole("tab", { name: "Contents" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("imports article URLs from the toolbar", async () => {

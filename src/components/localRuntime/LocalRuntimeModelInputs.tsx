@@ -362,7 +362,7 @@ export function LocalRuntimeModelInputs(props: Props) {
           <input type="number" min={0} max={1000} value={props.qwen3TopK} onChange={(event) => props.onQwen3TopKChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 text-sm" />
         </label>
         <label className="flex flex-col gap-1">Max tokens
-          <input type="number" min={64} max={8192} step={64} value={props.qwen3MaxNewTokens} onChange={(event) => props.onQwen3MaxNewTokensChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 text-sm" />
+          <input type="number" min={64} max={4096} step={64} value={props.qwen3MaxNewTokens} onChange={(event) => props.onQwen3MaxNewTokensChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 text-sm" />
         </label>
       </div>
     </div>

@@ -189,16 +189,17 @@ describe("useQwen3LocalRuntime long-text batching", () => {
   it("waits for the final streamed-audio event when the IPC result arrives first", async () => {
     vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
     let emitAudioChunk: ((event: Record<string, unknown>) => void) | undefined;
-    const audio = new Float32Array([0.1, -0.1]);
+    const firstAudio = new Float32Array([0.1, -0.1]);
+    const secondAudio = new Float32Array([0.2, -0.2]);
     const generate = vi.fn(async (request: GenerateRequest) => {
       void request;
       return {
         sampleRate: 24_000,
         modelRepo: String(request.payload?.modelRepo),
-        durationSec: audio.length / 24_000,
+        durationSec: (firstAudio.length + secondAudio.length) / 24_000,
         elapsedSec: 0.1,
         audioTransport: "websocket-binary" as const,
-        audioChunkCount: 1,
+        audioChunkCount: 2,
         phaseTimingsSec: { inferenceSec: 0.1 },
       };
     });
@@ -237,17 +238,33 @@ describe("useQwen3LocalRuntime long-text batching", () => {
       emitAudioChunk?.({
         requestId: request.requestId,
         model: "qwen3",
-        index: 0,
-        total: 1,
+        index: 1,
+        total: 2,
         sampleRate: 24_000,
-        sampleCount: audio.length,
+        sampleCount: secondAudio.length,
         silenceAfterSamples: 0,
-        audio: audio.buffer,
+        audio: secondAudio.buffer,
       });
     });
-    await waitFor(() => expect(methods.scheduleChunk).toHaveBeenCalledTimes(1));
+    expect(methods.scheduleChunk).not.toHaveBeenCalled();
+    act(() => {
+      emitAudioChunk?.({
+        requestId: request.requestId,
+        model: "qwen3",
+        index: 0,
+        total: 2,
+        sampleRate: 24_000,
+        sampleCount: firstAudio.length,
+        silenceAfterSamples: 0,
+        audio: firstAudio.buffer,
+      });
+    });
+    await waitFor(() => expect(methods.scheduleChunk).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(result.current.isGenerating).toBe(false));
 
+    const scheduledAudio = methods.scheduleChunk.mock.calls
+      .map(([chunk]) => (chunk as { audio: Float32Array }).audio.buffer);
+    expect(scheduledAudio).toEqual([firstAudio.buffer, secondAudio.buffer]);
     expect(methods.endStream).toHaveBeenCalledTimes(1);
     expect(result.current.error).toBeNull();
   });
@@ -513,6 +530,175 @@ describe("useQwen3LocalRuntime long-text batching", () => {
     settings = { ...settings, instruct: "A calm documentary narrator." };
     rerender();
     await waitFor(() => expect(result.current.canGenerate).toBe(true));
+  });
+
+  it("stops finished playback without clearing generated Qwen audio", async () => {
+    vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
+    let emitAudioChunk: ((event: Record<string, unknown>) => void) | undefined;
+    let resolveGenerate: ((value: {
+      sampleRate: number;
+      modelRepo: string;
+      durationSec: number;
+      elapsedSec: number;
+      audioTransport: "websocket-binary";
+      audioChunkCount: number;
+      phaseTimingsSec: { inferenceSec: number };
+    }) => void) | undefined;
+    const cancel = vi.fn().mockResolvedValue({ cancelled: true });
+    const generate = vi.fn((request: GenerateRequest) => {
+      void request;
+      return new Promise<{
+        sampleRate: number;
+        modelRepo: string;
+        durationSec: number;
+        elapsedSec: number;
+        audioTransport: "websocket-binary";
+        audioChunkCount: number;
+        phaseTimingsSec: { inferenceSec: number };
+      }>((resolve) => {
+        resolveGenerate = resolve;
+      });
+    });
+    const audio = new Float32Array([0.1, -0.1]);
+    const generated = {
+        sampleRate: 24_000,
+        modelRepo: runtimeSettings().profile.repo,
+        durationSec: audio.length / 24_000,
+        elapsedSec: 0.1,
+        audioTransport: "websocket-binary" as const,
+        audioChunkCount: 1,
+        phaseTimingsSec: { inferenceSec: 0.1 },
+    };
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate,
+        cancel,
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn((listener) => {
+          emitAudioChunk = listener as (event: Record<string, unknown>) => void;
+          return () => undefined;
+        }),
+      },
+    } as never;
+    const { player, methods } = audioPlayer();
+    const setShowPlayer = vi.fn();
+    const { result } = renderHook(() => useQwen3LocalRuntime({
+      enabled: true,
+      text: "A completed Qwen sentence remains playable after Stop.",
+      player,
+      setShowPlayer,
+    }));
+
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+    act(() => result.current.handleGenerate());
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await act(async () => { await Promise.resolve(); });
+    const request = generate.mock.calls[0][0];
+    act(() => {
+      emitAudioChunk!({
+        requestId: request.requestId,
+        model: "qwen3",
+        index: 0,
+        total: 1,
+        sampleRate: 24_000,
+        sampleCount: audio.length,
+        silenceAfterSamples: 0,
+        audio: audio.buffer,
+      });
+    });
+    expect(methods.scheduleChunk).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(methods.getAudioChunkCount()).toBe(1));
+    await act(async () => {
+      resolveGenerate?.(generated);
+    });
+    await waitFor(() => expect(result.current.isGenerating).toBe(false));
+    expect(methods.getAudioChunkCount()).toBe(1);
+    const resetCount = methods.reset.mock.calls.length;
+    const endStreamCount = methods.endStream.mock.calls.length;
+
+    act(() => result.current.handleStop());
+
+    expect(methods.stopAll).toHaveBeenCalledTimes(1);
+    expect(methods.reset).toHaveBeenCalledTimes(resetCount);
+    expect(methods.endStream).toHaveBeenCalledTimes(endStreamCount);
+    expect(methods.getAudioChunkCount()).toBe(1);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("soft-cancels Qwen generation while retaining delivered audio chunks", async () => {
+    vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
+    let emitAudioChunk: ((event: Record<string, unknown>) => void) | undefined;
+    let rejectGenerate: ((error: Error) => void) | undefined;
+    const generate = vi.fn((request: GenerateRequest) => {
+      void request;
+      return new Promise<never>((_resolve, reject) => {
+        rejectGenerate = reject;
+      });
+    });
+    const cancel = vi.fn(async () => {
+      rejectGenerate?.(new Error("Generation cancelled."));
+      return { cancelled: true };
+    });
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate,
+        cancel,
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn((listener) => {
+          emitAudioChunk = listener as (event: Record<string, unknown>) => void;
+          return () => undefined;
+        }),
+      },
+    } as never;
+    const { player, methods } = audioPlayer();
+    const setShowPlayer = vi.fn();
+    const { result } = renderHook(() => useQwen3LocalRuntime({
+      enabled: true,
+      text: "A Qwen generation with an early playable audio chunk.",
+      player,
+      setShowPlayer,
+    }));
+
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+    act(() => result.current.handleGenerate());
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await act(async () => { await Promise.resolve(); });
+    const request = generate.mock.calls[0][0];
+    const audio = new Float32Array([0.2, -0.2]);
+    act(() => {
+      emitAudioChunk!({
+        requestId: request.requestId,
+        model: "qwen3",
+        index: 0,
+        total: 2,
+        sampleRate: 24_000,
+        sampleCount: audio.length,
+        silenceAfterSamples: 0,
+        audio: audio.buffer,
+      });
+    });
+    expect(methods.scheduleChunk).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(methods.getAudioChunkCount()).toBe(1));
+    const resetCount = methods.reset.mock.calls.length;
+
+    act(() => result.current.handleStop());
+    await waitFor(() => expect(cancel).toHaveBeenCalledTimes(1));
+
+    expect(result.current.isGenerating).toBe(false);
+    expect(methods.endStream).toHaveBeenCalledTimes(1);
+    expect(methods.reset).toHaveBeenCalledTimes(resetCount);
+    expect(methods.getAudioChunkCount()).toBe(1);
+    expect(result.current.error).toBeNull();
   });
 
   it("clears generated playback when an audible Qwen setting changes", () => {

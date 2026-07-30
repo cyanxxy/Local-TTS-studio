@@ -109,6 +109,7 @@ describe("useGenerationControl", () => {
     const setShowPlayer = vi.fn();
     const kokoroWorker = { current: worker as unknown as Worker };
     const supertonicWorker = { current: null as Worker | null };
+    const hardRestartModel = vi.fn();
 
     const { result } = renderHook(() =>
       useGenerationControl({
@@ -117,6 +118,7 @@ describe("useGenerationControl", () => {
         generationSettings: BASE_SETTINGS,
         kokoroWorker,
         supertonicWorker,
+        hardRestartModel,
         player,
         setShowPlayer,
         text: "Hello world",
@@ -134,6 +136,7 @@ describe("useGenerationControl", () => {
       result.current.cancelActiveGeneration(true);
     });
     expect(tts.cancel).toHaveBeenCalledTimes(1);
+    expect(hardRestartModel).toHaveBeenCalledWith("kokoro");
   });
 
   it("retakes a segment and replaces it with merged audio on completion", () => {
@@ -156,6 +159,7 @@ describe("useGenerationControl", () => {
         generationSettings: BASE_SETTINGS,
         kokoroWorker,
         supertonicWorker,
+        hardRestartModel: vi.fn(),
         player,
         setShowPlayer,
         text: "Hello world",
@@ -238,6 +242,7 @@ describe("useGenerationControl", () => {
         generationSettings: BASE_SETTINGS,
         kokoroWorker,
         supertonicWorker,
+        hardRestartModel: vi.fn(),
         player,
         setShowPlayer,
         text: "Hello world",
@@ -251,6 +256,35 @@ describe("useGenerationControl", () => {
     });
 
     expect(worker.postedMessages).toHaveLength(0);
+    expect(result.current.isRetakingSegment).toBe(false);
+  });
+
+  it("hard-restarts the worker that owns a cancelled retake", () => {
+    const worker = new MockWorker();
+    const segment = makeSegment();
+    const hardRestartModel = vi.fn();
+    const { result } = renderHook(() =>
+      useGenerationControl({
+        activeModel: "kokoro",
+        canGenerate: true,
+        generationSettings: BASE_SETTINGS,
+        hardRestartModel,
+        kokoroWorker: { current: worker as unknown as Worker },
+        supertonicWorker: { current: null },
+        player: createPlayerMock({ segments: [segment] }),
+        setShowPlayer: vi.fn(),
+        text: "Hello world",
+        tts: createTtsMock(),
+        voice: "af_heart",
+      }),
+    );
+    act(() => result.current.handleRetakeSegment(segment.id));
+
+    act(() => result.current.cancelRetake(true));
+
+    expect(worker.postedMessages.at(-1)).toEqual({ type: "CANCEL" });
+    expect(hardRestartModel).toHaveBeenCalledOnce();
+    expect(hardRestartModel).toHaveBeenCalledWith("kokoro");
     expect(result.current.isRetakingSegment).toBe(false);
   });
 });

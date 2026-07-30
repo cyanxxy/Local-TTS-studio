@@ -11,6 +11,7 @@ import { downloadAudioChunks } from "../lib/audioExportClient";
 import { downloadBlob } from "../lib/exportAudio";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
 import {
+  appendAudioSegment,
   buildAudioSegments,
   buildCaptionSegments,
   getChunkDuration,
@@ -69,6 +70,13 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+function publishAudioSegments(segments: readonly AudioSegment[]): AudioSegment[] {
+  const fallbackTotal = segments.length;
+  return segments.map((segment) => segment.total > 0
+    ? segment
+    : { ...segment, total: fallbackTotal });
+}
+
 /**
  * Web Audio API playback hook.
  * Uses AudioContext with createBufferSource() for streaming Float32 chunks.
@@ -89,6 +97,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const nextPlayTimeRef = useRef(0);
   const activeNodesRef = useRef<Set<AudioBufferSourceNode>>(new Set());
   const allChunksRef = useRef<StoredAudioChunk[]>([]);
+  // Incrementally maintained semantic timeline. Keeping it separate from the
+  // published state array lets streamed chunks update the tail in O(1) without
+  // mutating a snapshot React consumers may still be rendering.
+  const timelineSegmentsRef = useRef<AudioSegment[]>([]);
   const samplingRateRef = useRef(24000);
   const animFrameRef = useRef(0);
   const interruptedRef = useRef(false);
@@ -136,7 +148,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     if (timelineSegmentsDirtyRef.current) {
       timelineSegmentsDirtyRef.current = false;
-      setSegments(buildAudioSegments(allChunksRef.current));
+      setSegments(publishAudioSegments(timelineSegmentsRef.current));
     }
   }, []);
 
@@ -156,7 +168,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const rebuildSegmentState = useCallback(() => {
     cancelTimelineStateFlush();
-    setSegments(buildAudioSegments(allChunksRef.current));
+    timelineSegmentsRef.current = buildAudioSegments(allChunksRef.current);
+    setSegments([...timelineSegmentsRef.current]);
   }, [cancelTimelineStateFlush]);
 
   const activeSegmentCursorRef = useRef(0);
@@ -497,6 +510,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       segmentId,
     };
     allChunksRef.current.push(storedChunk);
+    appendAudioSegment(timelineSegmentsRef.current, storedChunk);
 
     syncTotalDuration(totalDurationRef.current + chunkDuration, { deferUi: true });
     timelineSegmentsDirtyRef.current = true;
@@ -740,7 +754,12 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const getAudioCacheSnapshot = useCallback((): CachedReaderAudioChunk[] => (
     allChunksRef.current.map((chunk) => ({
-      audio: new Float32Array(chunk.audio).buffer,
+      audio: chunk.audio.byteOffset === 0 && chunk.audio.byteLength === chunk.audio.buffer.byteLength
+        ? chunk.audio.buffer as ArrayBuffer
+        : chunk.audio.buffer.slice(
+            chunk.audio.byteOffset,
+            chunk.audio.byteOffset + chunk.audio.byteLength,
+          ) as ArrayBuffer,
       samplingRate: chunk.samplingRate,
       text: chunk.text ?? "",
       index: chunk.index ?? 0,
@@ -808,7 +827,9 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       previousSegmentId = segmentId;
       return {
         ...chunk,
-        audio: new Float32Array(chunk.audio.slice(0)),
+        // Cached PCM is immutable. Sharing it avoids a second full chapter copy;
+        // the player only reads this view when filling Web Audio buffers.
+        audio: new Float32Array(chunk.audio),
         startSec: 0,
         endSec: 0,
         segmentId,
@@ -835,7 +856,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     setIsPlaying(false);
     setError(null);
     setTotalDuration(duration);
-    setSegments(buildAudioSegments(allChunksRef.current));
+    timelineSegmentsRef.current = buildAudioSegments(allChunksRef.current);
+    setSegments([...timelineSegmentsRef.current]);
     clock.set(restoredTime);
     updateActiveSegment(restoredTime);
     decodedLowIndexRef.current = 0;
@@ -869,6 +891,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     cancelTimelineStateFlush();
 
     allChunksRef.current = [];
+    timelineSegmentsRef.current = [];
     nextPlayTimeRef.current = 0;
     scheduleCursorRef.current = 0;
     decodedLowIndexRef.current = 0;

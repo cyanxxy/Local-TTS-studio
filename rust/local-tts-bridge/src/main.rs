@@ -8,9 +8,12 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::{Parser, ValueEnum};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::collections::{HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -44,6 +47,20 @@ const WEBSOCKET_HANDSHAKE_DEADLINE_SEC: u64 = 10;
 const WEBSOCKET_IDLE_READ_TIMEOUT_SEC: u64 = 30 * 60;
 const WEBSOCKET_WRITE_TIMEOUT_SEC: u64 = 30;
 const MAX_WEBSOCKET_WRITE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+// Handshakes run on their own threads so one slow or silent peer cannot stall
+// the accept loop past the client's connect budget. Cap the concurrent
+// handshakes so that indirection is not itself an unbounded-thread vector.
+const MAX_CONCURRENT_HANDSHAKES: usize = 8;
+// Poll budget for draining cancel frames between generation chunks. Short
+// enough to add no measurable latency per chunk, long enough for a frame that
+// is already in the socket buffer to be read in one pass.
+const CANCEL_POLL_TIMEOUT: Duration = Duration::from_millis(1);
+// Bound the request/cancel bookkeeping a peer can accumulate between requests.
+const MAX_PENDING_REQUESTS: usize = 8;
+const MAX_TRACKED_CANCELLATIONS: usize = 64;
+// Cancellation unwinds generation through the normal error path; the exact
+// text is what the client matches on to keep the worker warm.
+const CANCELLED_MESSAGE: &str = "Generation cancelled.";
 const MAX_LOCAL_TTS_TEXT_CHARS: usize = 6_000;
 const MAX_REFERENCE_TEXT_CHARS: usize = 2_000;
 const MAX_REFERENCE_CACHE_KEY_CHARS: usize = 120;
@@ -311,31 +328,96 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
         neutts_encoder: None,
     };
 
-    loop {
-        let (stream, _) = listener
-            .accept()
-            .context("Failed accepting WebSocket client")?;
-        let _ = stream.set_nodelay(true);
-        let mut websocket = match WebSocketConnection::accept(stream, &auth_token) {
-            Ok(connection) => connection,
-            Err(err) => {
-                eprintln!("WebSocket bridge rejected connection: {err}");
+    // The handshake (header read, token check, upgrade write) runs off the
+    // accept loop: a peer that connects and then goes silent would otherwise
+    // hold the loop for the whole handshake deadline and lock the legitimate
+    // client out for longer than its connect budget.
+    listener
+        .set_nonblocking(true)
+        .context("Failed configuring WebSocket listener")?;
+    // There is exactly one process owner. The bounded channel is a backstop;
+    // the atomic claim below is what prevents every later completed handshake
+    // from retaining a socket after the receiver has taken that owner.
+    let (connections, incoming) = mpsc::sync_channel::<WebSocketConnection>(1);
+    let in_flight = Arc::new(AtomicUsize::new(0));
+    let owner_delivered = Arc::new(AtomicBool::new(false));
+    let accept_owner_delivered = Arc::clone(&owner_delivered);
+    thread::spawn(move || {
+        loop {
+            if accept_owner_delivered.load(Ordering::Acquire) {
+                return;
+            }
+            // Dropping the sender on a listener failure surfaces as a recv
+            // error below, matching the previous fatal-accept-error behaviour
+            // instead of spinning on a socket that will never accept again.
+            let (stream, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                Err(_) => return,
+            };
+            // A connection can arrive between the pre-accept ownership check
+            // and accept itself. Close it without starting another handshake.
+            if accept_owner_delivered.load(Ordering::Acquire) {
+                return;
+            }
+            let _ = stream.set_nodelay(true);
+            if in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_CONCURRENT_HANDSHAKES {
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                eprintln!("WebSocket bridge refused a connection: too many pending handshakes.");
                 continue;
             }
-        };
-        match serve_websocket_connection(&mut websocket, &mut state) {
-            Ok(_) => {}
-            Err(err) if is_client_disconnect(&err) => {
-                eprintln!("WebSocket bridge client disconnected: {err:#}");
+            let auth_token = auth_token.clone();
+            let connections = connections.clone();
+            let handshake_in_flight = Arc::clone(&in_flight);
+            let handshake_owner_delivered = Arc::clone(&accept_owner_delivered);
+            if thread::Builder::new()
+                .name("ws-handshake".to_string())
+                .spawn(move || {
+                    match WebSocketConnection::accept(stream, &auth_token) {
+                        Ok(connection) => {
+                            if claim_websocket_owner(&handshake_owner_delivered) {
+                                // The receiver is waiting for this sole owner.
+                                // If it disappeared unexpectedly, dropping the
+                                // connection here still closes the stream.
+                                let _ = connections.send(connection);
+                            }
+                            // A successful orphan is dropped immediately.
+                        }
+                        Err(err) => eprintln!("WebSocket bridge rejected connection: {err}"),
+                    }
+                    handshake_in_flight.fetch_sub(1, Ordering::SeqCst);
+                })
+                .is_err()
+            {
+                in_flight.fetch_sub(1, Ordering::SeqCst);
             }
-            Err(err) => return Err(err),
         }
-        let _ = websocket.close();
-        // One authenticated connection owns this process. Electron never
-        // reconnects to an existing child, so exit when that owner disconnects
-        // instead of leaving an unreachable loopback listener orphaned.
-        return Ok(());
+    });
+
+    let mut websocket = incoming
+        .recv()
+        .context("Failed accepting WebSocket client")?;
+    match serve_websocket_connection(&mut websocket, &mut state) {
+        Ok(_) => {}
+        Err(err) if is_client_disconnect(&err) => {
+            eprintln!("WebSocket bridge client disconnected: {err:#}");
+        }
+        Err(err) => return Err(err),
     }
+    let _ = websocket.close();
+    // One authenticated connection owns this process. Electron never reconnects
+    // to an existing child, so exit when that owner disconnects instead of
+    // leaving an unreachable loopback listener orphaned.
+    Ok(())
+}
+
+fn claim_websocket_owner(owner_delivered: &AtomicBool) -> bool {
+    owner_delivered
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
 }
 
 fn resolve_loopback_bind_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>> {
@@ -395,6 +477,12 @@ fn serve_websocket_connection(
         if request.command.as_deref() == Some("shutdown") {
             return Ok(true);
         }
+        if request.command.as_deref() == Some("cancel") {
+            // A cancel that lands between generations has nothing to abort; the
+            // mid-generation poll consumes the ones that matter. Acknowledging
+            // it here would look like a result frame to the client.
+            continue;
+        }
 
         let request_id = request.request_id.unwrap_or_default();
         if request_id.trim().is_empty() {
@@ -427,6 +515,7 @@ fn serve_websocket_connection(
             let _heartbeat = Heartbeat::start();
             state.generate(&request_id, payload, websocket)
         };
+        websocket.finish_request(&request_id);
         match outcome {
             Ok(output) => send_generation_result(websocket, &request_id, output)?,
             Err(err) => {
@@ -589,7 +678,7 @@ impl RuntimeState {
         let controls = GenerationControls::new(
             payload.temperature.unwrap_or(0.9),
             payload.top_k.unwrap_or(50),
-            payload.max_new_tokens.unwrap_or(8_192),
+            payload.max_new_tokens.unwrap_or(4_096),
         );
         let started = Instant::now();
         let inference_started = Instant::now();
@@ -743,6 +832,9 @@ impl RuntimeState {
         };
         let reference_validation_elapsed = reference_started.elapsed();
 
+        // NeuTTS inference is a single opaque call, so cancellation can only be
+        // observed at the phase boundaries around it.
+        bail_if_cancelled(websocket, request_id)?;
         websocket.send_progress(
             request_id,
             "model_load",
@@ -782,6 +874,7 @@ impl RuntimeState {
             json!(round_secs(reference_elapsed.as_secs_f64())),
         );
 
+        bail_if_cancelled(websocket, request_id)?;
         websocket.send_progress(
             request_id,
             "inference",
@@ -896,8 +989,23 @@ struct WebSocketQwenSink<'a> {
     all(target_os = "macos", target_arch = "aarch64"),
     all(target_os = "windows", target_arch = "x86_64")
 ))]
+impl WebSocketQwenSink<'_> {
+    /// Abort the generation if the client asked for it. Every Qwen3 mode now
+    /// streams audio during a text unit, so a Stop is observed within a few
+    /// code frames and unwinds through the normal error path, leaving the
+    /// loaded model in place.
+    fn bail_if_cancelled(&mut self) -> Result<()> {
+        bail_if_cancelled(self.websocket, self.request_id)
+    }
+}
+
+#[cfg(any(
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64")
+))]
 impl AudioSink for WebSocketQwenSink<'_> {
     fn progress(&mut self, phase: &str, message: &str) -> Result<()> {
+        self.bail_if_cancelled()?;
         self.websocket
             .send_progress(self.request_id, phase, message, self.started)
     }
@@ -910,6 +1018,7 @@ impl AudioSink for WebSocketQwenSink<'_> {
         total: usize,
         silence_after_samples: usize,
     ) -> Result<()> {
+        self.bail_if_cancelled()?;
         for (part_index, chunk) in samples.chunks(MAX_AUDIO_CHUNK_SAMPLES).enumerate() {
             let is_last_part = (part_index + 1) * MAX_AUDIO_CHUNK_SAMPLES >= samples.len();
             let mut metadata = json!({
@@ -934,6 +1043,39 @@ impl AudioSink for WebSocketQwenSink<'_> {
         }
         Ok(())
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum BufferedRequest {
+    /// A cancel for this request id.
+    Cancel(String),
+    /// Anything else the peer sent out of turn; replayed by `recv_text`.
+    Deferred(String),
+    /// A cancel carrying no usable request id.
+    Ignored,
+}
+
+fn classify_buffered_request(text: String) -> BufferedRequest {
+    let Ok(request) = serde_json::from_str::<WebSocketRequest>(&text) else {
+        return BufferedRequest::Deferred(text);
+    };
+    if request.command.as_deref() != Some("cancel") {
+        return BufferedRequest::Deferred(text);
+    }
+    match request.request_id {
+        Some(request_id) if !request_id.trim().is_empty() => BufferedRequest::Cancel(request_id),
+        _ => BufferedRequest::Ignored,
+    }
+}
+
+/// Abort a request the client has cancelled. Generation unwinds through the
+/// normal error path so the process — and whatever model it has loaded — stays
+/// alive for the next request instead of being killed from the outside.
+fn bail_if_cancelled(websocket: &mut WebSocketConnection, request_id: &str) -> Result<()> {
+    if websocket.poll_cancelled(request_id)? {
+        bail!("{CANCELLED_MESSAGE}");
+    }
+    Ok(())
 }
 
 fn validate_generation_output(output: &GenerationOutput) -> Result<()> {
@@ -1316,19 +1458,33 @@ fn is_client_disconnect(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
             .downcast_ref::<tungstenite::Error>()
-            .is_some_and(|error| {
-                matches!(
-                    error,
-                    tungstenite::Error::ConnectionClosed
-                        | tungstenite::Error::AlreadyClosed
-                        | tungstenite::Error::Io(_)
-                )
+            .is_some_and(|error| match error {
+                tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed => true,
+                // Only the kinds that actually mean "the peer went away" count.
+                // Treating every I/O error as a disconnect made a stalled write
+                // (WEBSOCKET_WRITE_TIMEOUT_SEC) exit 0 with no result frame, so
+                // the client reported a generic close and the cause was lost.
+                tungstenite::Error::Io(io) => matches!(
+                    io.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                        | std::io::ErrorKind::UnexpectedEof
+                ),
+                _ => false,
             })
     })
 }
 
 struct WebSocketConnection {
     socket: WebSocket<TcpStream>,
+    /// Non-cancel requests read while draining the socket mid-generation.
+    /// `recv_text` serves these before touching the wire so an out-of-turn
+    /// request is deferred rather than dropped.
+    pending_requests: VecDeque<String>,
+    cancelled_requests: HashSet<String>,
+    peer_closed: bool,
 }
 
 impl WebSocketConnection {
@@ -1360,18 +1516,33 @@ impl WebSocketConnection {
             .set_write_timeout(Some(Duration::from_secs(WEBSOCKET_WRITE_TIMEOUT_SEC)))
             .context("Failed to set WebSocket write timeout")?;
         let socket = WebSocket::from_partially_read(stream, tail, Role::Server, Some(config));
-        Ok(Self { socket })
+        Ok(Self {
+            socket,
+            pending_requests: VecDeque::new(),
+            cancelled_requests: HashSet::new(),
+            peer_closed: false,
+        })
     }
 
     fn recv_text(&mut self) -> Result<Option<String>> {
+        if let Some(deferred) = self.pending_requests.pop_front() {
+            return Ok(Some(deferred));
+        }
+        if self.peer_closed {
+            return Ok(None);
+        }
         loop {
             match self.socket.read() {
                 Ok(Message::Text(text)) => return Ok(Some(text.to_string())),
                 Ok(Message::Binary(_)) => bail!("Binary WebSocket requests are not supported."),
-                Ok(Message::Close(_)) => return Ok(None),
+                Ok(Message::Close(_)) => {
+                    self.peer_closed = true;
+                    return Ok(None);
+                }
                 Ok(Message::Ping(payload)) => self.socket.send(Message::Pong(payload))?,
                 Ok(Message::Pong(_) | Message::Frame(_)) => {}
                 Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    self.peer_closed = true;
                     return Ok(None);
                 }
                 Err(tungstenite::Error::Io(err))
@@ -1387,6 +1558,82 @@ impl WebSocketConnection {
                 Err(err) => return Err(err).context("Failed reading WebSocket request"),
             }
         }
+    }
+
+    /// Drain whatever is already buffered on the socket and report whether
+    /// `request_id` has been cancelled. Called between generation chunks so a
+    /// Stop unwinds the request through the normal error path, leaving the
+    /// process (and its loaded model) alive for the next generation.
+    fn poll_cancelled(&mut self, request_id: &str) -> Result<bool> {
+        if self.peer_closed || self.cancelled_requests.contains(request_id) {
+            return Ok(true);
+        }
+        self.socket
+            .get_ref()
+            .set_read_timeout(Some(CANCEL_POLL_TIMEOUT))
+            .context("Failed arming WebSocket cancel poll")?;
+        let outcome = self.drain_buffered_requests();
+        // Restore the idle deadline even when draining failed, so a caller that
+        // ignores the error does not inherit the 1ms poll timeout.
+        let restored = self
+            .socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_IDLE_READ_TIMEOUT_SEC)));
+        outcome?;
+        restored.context("Failed restoring WebSocket idle read timeout")?;
+        Ok(self.peer_closed || self.cancelled_requests.contains(request_id))
+    }
+
+    fn drain_buffered_requests(&mut self) -> Result<()> {
+        loop {
+            match self.socket.read() {
+                Ok(Message::Text(text)) => self.record_buffered_request(text.to_string()),
+                Ok(Message::Close(_)) => {
+                    self.peer_closed = true;
+                    return Ok(());
+                }
+                Ok(Message::Ping(payload)) => self.socket.send(Message::Pong(payload))?,
+                Ok(Message::Binary(_) | Message::Pong(_) | Message::Frame(_)) => {}
+                Err(tungstenite::Error::Io(err))
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(());
+                }
+                Err(tungstenite::Error::ConnectionClosed | tungstenite::Error::AlreadyClosed) => {
+                    self.peer_closed = true;
+                    return Ok(());
+                }
+                Err(err) => return Err(err).context("Failed reading WebSocket cancel poll"),
+            }
+        }
+    }
+
+    fn record_buffered_request(&mut self, text: String) {
+        match classify_buffered_request(text) {
+            BufferedRequest::Cancel(request_id) => {
+                if self.cancelled_requests.len() >= MAX_TRACKED_CANCELLATIONS {
+                    self.cancelled_requests.clear();
+                }
+                self.cancelled_requests.insert(request_id);
+            }
+            // Not a cancel: defer it so the request loop still sees it. Dropping
+            // the overflow is deliberate — the client never pipelines requests.
+            BufferedRequest::Deferred(text) => {
+                if self.pending_requests.len() < MAX_PENDING_REQUESTS {
+                    self.pending_requests.push_back(text);
+                }
+            }
+            BufferedRequest::Ignored => {}
+        }
+    }
+
+    /// Release the cancellation bookkeeping for a request that has finished, so
+    /// a later request can never inherit a stale cancel.
+    fn finish_request(&mut self, request_id: &str) {
+        self.cancelled_requests.remove(request_id);
     }
 
     fn send_progress(
@@ -1424,6 +1671,14 @@ impl WebSocketConnection {
 }
 
 fn websocket_request_path_is_authorized(request: &Request, auth_token: &str) -> bool {
+    // WebSocket upgrades are exempt from CORS, so a page in any browser can
+    // reach a loopback listener. The path token already makes that useless, but
+    // the only legitimate client here is Electron's main process, which never
+    // sends Origin — so refusing any browser-originated upgrade costs nothing
+    // and removes the attack class entirely.
+    if request.headers().contains_key("origin") {
+        return false;
+    }
     let uri = request.uri();
     let Some(path_token) = uri.path().strip_prefix('/') else {
         return false;
@@ -1751,6 +2006,55 @@ mod tests {
     }
 
     #[test]
+    fn websocket_upgrade_rejects_browser_origins() {
+        // Electron's main process never sends Origin; anything that does is a
+        // browser and has no business on this socket even with a valid token.
+        let browser = Request::builder()
+            .uri("/secret")
+            .header("origin", "https://evil.example")
+            .body(())
+            .unwrap();
+        let same_origin = Request::builder()
+            .uri("/secret")
+            .header("Origin", "http://127.0.0.1:1234")
+            .body(())
+            .unwrap();
+        assert!(!websocket_request_path_is_authorized(&browser, "secret"));
+        assert!(!websocket_request_path_is_authorized(
+            &same_origin,
+            "secret"
+        ));
+    }
+
+    #[test]
+    fn client_disconnect_covers_peer_loss_but_not_stalled_writes() {
+        use std::io::{Error as IoError, ErrorKind};
+
+        let disconnects = [
+            tungstenite::Error::ConnectionClosed,
+            tungstenite::Error::AlreadyClosed,
+            tungstenite::Error::Io(IoError::from(ErrorKind::BrokenPipe)),
+            tungstenite::Error::Io(IoError::from(ErrorKind::ConnectionReset)),
+            tungstenite::Error::Io(IoError::from(ErrorKind::UnexpectedEof)),
+        ];
+        for error in disconnects {
+            assert!(is_client_disconnect(&anyhow::Error::from(error)));
+        }
+
+        // A write that hit WEBSOCKET_WRITE_TIMEOUT_SEC is a stalled peer, not a
+        // departed one: reporting it as a clean disconnect exits 0 and loses the
+        // cause. Same for any other unrelated I/O failure.
+        let stalls = [
+            tungstenite::Error::Io(IoError::from(ErrorKind::WouldBlock)),
+            tungstenite::Error::Io(IoError::from(ErrorKind::TimedOut)),
+            tungstenite::Error::Io(IoError::from(ErrorKind::PermissionDenied)),
+        ];
+        for error in stalls {
+            assert!(!is_client_disconnect(&anyhow::Error::from(error)));
+        }
+    }
+
+    #[test]
     fn websocket_bind_host_must_resolve_only_to_loopback() {
         let ipv4 = resolve_loopback_bind_addresses("127.0.0.1", 0).unwrap();
         assert!(ipv4.iter().all(|address| address.ip().is_loopback()));
@@ -1765,6 +2069,42 @@ mod tests {
                     .contains("loopback")
             );
         }
+    }
+
+    #[test]
+    fn websocket_owner_can_only_be_delivered_once() {
+        let owner_delivered = AtomicBool::new(false);
+        assert!(claim_websocket_owner(&owner_delivered));
+        assert!(!claim_websocket_owner(&owner_delivered));
+    }
+
+    #[test]
+    fn buffered_requests_separate_cancels_from_deferred_work() {
+        assert_eq!(
+            classify_buffered_request(r#"{"command":"cancel","requestId":"r1"}"#.to_string()),
+            BufferedRequest::Cancel("r1".to_string()),
+        );
+        // A cancel with no usable id must not abort whatever is running.
+        assert_eq!(
+            classify_buffered_request(r#"{"command":"cancel"}"#.to_string()),
+            BufferedRequest::Ignored,
+        );
+        assert_eq!(
+            classify_buffered_request(r#"{"command":"cancel","requestId":"  "}"#.to_string()),
+            BufferedRequest::Ignored,
+        );
+        // Anything that is not a cancel is replayed to the request loop rather
+        // than swallowed by the mid-generation poll.
+        let generate = r#"{"requestId":"r2","payload":{"text":"hi"}}"#.to_string();
+        assert_eq!(
+            classify_buffered_request(generate.clone()),
+            BufferedRequest::Deferred(generate),
+        );
+        let garbage = "not json".to_string();
+        assert_eq!(
+            classify_buffered_request(garbage.clone()),
+            BufferedRequest::Deferred(garbage),
+        );
     }
 
     #[test]

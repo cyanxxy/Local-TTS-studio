@@ -120,11 +120,23 @@ function responseHeaders(rawHeaders: Record<string, string | string[] | undefine
   return headers;
 }
 
-const pinnedFetch: PinnedFetcher = (target, signal) => new Promise((resolve, reject) => {
-  const hostname = target.url.hostname.replace(/^\[|\]$/g, "");
-  const pinnedLookup: LookupFunction = (_requestedHostname, _options, callback) => {
+export function createPinnedLookup(target: SafeImportTarget): LookupFunction {
+  return (_requestedHostname, options, callback) => {
+    // Electron's Node runtime enables `autoSelectFamily`, which asks custom
+    // lookup functions for every address (`all: true`). Returning the legacy
+    // single-address shape in that mode makes Node read `address` from a string
+    // entry and fail with ERR_INVALID_IP_ADDRESS: undefined.
+    if (options.all) {
+      callback(null, [{ address: target.address, family: target.family }]);
+      return;
+    }
     callback(null, target.address, target.family);
   };
+}
+
+const pinnedFetch: PinnedFetcher = (target, signal) => new Promise((resolve, reject) => {
+  const hostname = target.url.hostname.replace(/^\[|\]$/g, "");
+  const pinnedLookup = createPinnedLookup(target);
   const request = (target.url.protocol === "https:" ? httpsRequest : httpRequest)({
     protocol: target.url.protocol,
     hostname,

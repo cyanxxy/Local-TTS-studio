@@ -227,7 +227,14 @@ Shortcuts work while Open TTS is the active application. Space remains normal te
 
 ## Document Import
 
-The desktop app adds an **Import** button to Studio and Reader. [LiteParse](https://www.llamaindex.ai/liteparse) handles PDF, Office/OpenDocument, and image extraction in the Electron main process. Plain text is read directly, while EPUB and HTML structure is parsed in the renderer. Reader can also extract an article from a URL.
+The desktop app adds an **Import** button to Studio and Reader. Electron's main
+process owns the native file dialog and bounded import IPC, while
+[LiteParse](https://www.llamaindex.ai/liteparse) handles PDF,
+Office/OpenDocument, and image extraction in a one-shot worker thread. The
+worker is terminated after completion or at the five-minute deadline, so parser
+CPU work and native state do not live in the Electron main process. Plain text
+is read directly, while EPUB and HTML structure is parsed in the renderer.
+Reader can also extract an article from a URL.
 
 | Format | Extensions / source | Availability | Processing path |
 |---|---|---|---|

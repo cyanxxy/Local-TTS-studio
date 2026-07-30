@@ -218,6 +218,13 @@ describe("localTtsIpc request sanitizers", () => {
       topK: 64,
       maxNewTokens: 2304,
     });
+    expect(() => sanitizeGeneratePayload("qwen3", {
+      text: "Reject an unsafe generation ceiling.",
+      mode: "customVoice",
+      modelRepo: customRepo,
+      modelPath: "/models/qwen3-customvoice",
+      maxNewTokens: 4097,
+    }, "darwin", "arm64")).toThrow("between 64 and 4096");
 
     expect(sanitizeGeneratePayload("qwen3", {
       text: "Built-in speaker.",

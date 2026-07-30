@@ -4,6 +4,7 @@ import { strToU8, zipSync } from "fflate";
 import WebApp from "../apps/web/WebApp";
 import { SynthesisApp } from "./SynthesisApp";
 import { useGenerationControl } from "../hooks/useGenerationControl";
+import { useModelLoader } from "../hooks/useModelLoader";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { ModelState } from "../types";
 import {
@@ -853,7 +854,7 @@ describe("SynthesisApp", () => {
       .toBeLessThan(mock.readerLibrary.finalizeActiveTextEdit.mock.invocationCallOrder[0]);
   });
 
-  it("exposes Supertonic 3 only when the Electron entry supplies its worker", () => {
+  it("exposes Supertonic 3 only when the Electron entry supplies its worker and loads it lazily", async () => {
     mock.browserSupport = {
       ...mock.browserSupport,
       supportedModels: ["kokoro"],
@@ -885,7 +886,14 @@ describe("SynthesisApp", () => {
 
     expect(screen.getByRole("button", { name: "studio-desktop-supertonic3" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "switch-supertonic" })).not.toBeInTheDocument();
-    expect(createSupertonic3Worker).toHaveBeenCalledTimes(1);
+    expect(createSupertonic3Worker).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-supertonic3" }));
+
+    await waitFor(() => expect(createSupertonic3Worker).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1])
+      .toEqual(expect.objectContaining({ enabled: false })));
+    expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
     unmount();
     expect(worker.terminate).toHaveBeenCalledTimes(1);
   });
@@ -1436,6 +1444,8 @@ describe("SynthesisApp", () => {
     expect(screen.queryByRole("link", { name: "Qwen3-TTS" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+    await waitFor(() => expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1])
+      .toEqual(expect.objectContaining({ enabled: false })));
 
     fireEvent.click(screen.getByRole("button", { name: "Open app settings" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "Optional models" }))[0]);
@@ -1765,7 +1775,7 @@ describe("SynthesisApp", () => {
     expect(await screen.findByText("Qwen3-TTS 12Hz Native")).toBeInTheDocument();
   });
 
-  it("preserves local runtime tab DOM state when switching tabs", async () => {
+  it("unmounts inactive local runtimes so their model and audio state is released", async () => {
     showOptionalDesktopModels();
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
@@ -1796,7 +1806,7 @@ describe("SynthesisApp", () => {
     };
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
-    expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
+    expect(screen.queryByTestId("local-runtime-panel-neutts")).not.toBeInTheDocument();
     const qwen3State = await screen.findByTestId("local-draft-qwen3") as HTMLInputElement;
     fireEvent.change(qwen3State, { target: { value: "qwen3 settings kept" } });
 
@@ -1808,10 +1818,8 @@ describe("SynthesisApp", () => {
     };
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
-    expect(screen.getByTestId("local-runtime-panel-neutts")).toHaveAttribute("hidden");
-    expect(screen.getByTestId("local-runtime-panel-qwen3")).toHaveAttribute("hidden");
-    expect(screen.getByTestId("local-draft-neutts")).toHaveValue("voice reference kept");
-    expect(screen.getByTestId("local-draft-qwen3")).toHaveValue("qwen3 settings kept");
+    expect(screen.queryByTestId("local-runtime-panel-neutts")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("local-runtime-panel-qwen3")).not.toBeInTheDocument();
 
     mock.routing = {
       ...mock.routing,
@@ -1821,8 +1829,8 @@ describe("SynthesisApp", () => {
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
     expect(screen.getByTestId("local-runtime-panel-neutts")).not.toHaveAttribute("hidden");
-    expect(screen.getByTestId("local-runtime-panel-qwen3")).toHaveAttribute("hidden");
-    expect(screen.getByTestId("local-draft-neutts")).toHaveValue("voice reference kept");
+    expect(screen.queryByTestId("local-runtime-panel-qwen3")).not.toBeInTheDocument();
+    expect(screen.getByTestId("local-draft-neutts")).toHaveValue("neutts draft");
   });
 
   it("renders browser support fallback when local inference is unsupported", () => {

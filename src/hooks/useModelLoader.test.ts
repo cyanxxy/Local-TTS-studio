@@ -8,6 +8,7 @@ class MockWorker {
 
   public postedMessages: WorkerInMessage[] = [];
   public onmessage: ((event: MessageEvent<WorkerOutMessage>) => void) | null = null;
+  public terminate = vi.fn();
 
   constructor() {
     MockWorker.instances.push(this);
@@ -19,8 +20,6 @@ class MockWorker {
       this.emit({ type: "LOAD_PROGRESS", percent: 0 });
     }
   }
-
-  terminate(): void {}
 
   emit(message: WorkerOutMessage): void {
     this.onmessage?.({ data: message } as MessageEvent<WorkerOutMessage>);
@@ -34,6 +33,7 @@ describe("useModelLoader", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     MockWorker.instances = [];
   });
@@ -154,5 +154,72 @@ describe("useModelLoader", () => {
       preferredVoice: undefined,
       debugProfiling: false,
     });
+  });
+
+  it("evicts an inactive model worker after the grace period and recreates it on selection", async () => {
+    vi.useFakeTimers();
+    type Props = { model: "kokoro" | "supertonic" };
+    const { result, rerender } = renderHook(
+      ({ model }: Props) => useModelLoader(model),
+      { initialProps: { model: "kokoro" } as Props },
+    );
+
+    expect(MockWorker.instances).toHaveLength(2);
+    rerender({ model: "supertonic" });
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+
+    expect(MockWorker.instances[0].terminate).toHaveBeenCalledOnce();
+    expect(result.current.kokoroWorker.current).toBeNull();
+    expect(result.current.supertonicWorker.current).toBe(MockWorker.instances[1]);
+
+    rerender({ model: "kokoro" });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(MockWorker.instances).toHaveLength(3);
+    expect(result.current.kokoroWorker.current).toBe(MockWorker.instances[2]);
+    expect(MockWorker.instances[2].postedMessages).toContainEqual({
+      type: "LOAD",
+      preferredVoice: undefined,
+      debugProfiling: false,
+    });
+  });
+
+  it("recreates and reloads the active worker after hard cancellation", async () => {
+    const { result } = renderHook(() => useModelLoader("kokoro"));
+    await waitFor(() => expect(MockWorker.instances).toHaveLength(2));
+    const cancelledWorker = MockWorker.instances[0];
+
+    act(() => cancelledWorker.emit({ type: "CANCELLED" }));
+
+    await waitFor(() => expect(MockWorker.instances).toHaveLength(3));
+    expect(cancelledWorker.terminate).toHaveBeenCalledOnce();
+    expect(result.current.kokoroWorker.current).toBe(MockWorker.instances[2]);
+    await waitFor(() => expect(MockWorker.instances[2].postedMessages).toContainEqual({
+      type: "LOAD",
+      preferredVoice: undefined,
+      debugProfiling: false,
+    }));
+  });
+
+  it("terminates the active worker synchronously before recreating it", async () => {
+    const { result } = renderHook(() => useModelLoader("kokoro"));
+    await waitFor(() => expect(MockWorker.instances).toHaveLength(2));
+    const activeWorker = MockWorker.instances[0];
+
+    act(() => result.current.hardRestartModel("kokoro"));
+
+    expect(activeWorker.terminate).toHaveBeenCalledOnce();
+    expect(result.current.kokoroWorker.current).not.toBe(activeWorker);
+    await waitFor(() => expect(MockWorker.instances).toHaveLength(3));
+    await waitFor(() => expect(MockWorker.instances[2].postedMessages).toContainEqual({
+      type: "LOAD",
+      preferredVoice: undefined,
+      debugProfiling: false,
+    }));
   });
 });

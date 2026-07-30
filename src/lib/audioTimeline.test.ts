@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendAudioSegment,
   buildAudioSegments,
   buildCaptionSegments,
   getCaptionEndSec,
   getChunkDuration,
   retimeStoredChunks,
   toAudioSegment,
+  type AudioSegment,
   type StoredAudioChunk,
 } from "./audioTimeline";
 
@@ -103,5 +105,33 @@ describe("audioTimeline", () => {
       endSec: 2.8,
       text: "A complete Qwen sentence.",
     }]);
+  });
+
+  it("updates a streamed semantic segment incrementally", () => {
+    const segments: AudioSegment[] = [];
+    appendAudioSegment(segments, chunk({
+      segmentId: "streamed",
+      startSec: 0,
+      endSec: 1,
+      index: 1,
+      total: 2,
+    }));
+    const publishedFirst = [...segments];
+    appendAudioSegment(segments, chunk({
+      segmentId: "streamed",
+      startSec: 1,
+      endSec: 3,
+      pauseAfterSec: 0.25,
+      index: 1,
+      total: 2,
+    }));
+
+    expect(segments).toEqual([expect.objectContaining({
+      id: "streamed",
+      startSec: 0,
+      endSec: 3,
+      pauseAfterSec: 0.25,
+    })]);
+    expect(publishedFirst[0].endSec).toBe(1);
   });
 });
