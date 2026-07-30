@@ -1,4 +1,4 @@
-name: Release desktop installers
+name: Verify release tags
 
 on:
   push:
@@ -6,10 +6,10 @@ on:
       - "v*.*.*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: release-verification-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -42,112 +42,3 @@ jobs:
       - run: npx tsc --noEmit -p tsconfig.electron.json
       - run: npm run test:js
       - run: npm run build:web
-
-  create-release:
-    name: Create draft release
-    needs: verify
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v6
-      - name: Create draft if needed
-        shell: bash
-        run: |
-          if ! gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            notes_file="docs/releases/$GITHUB_REF_NAME.md"
-            if [[ -f "$notes_file" ]]; then
-              gh release create "$GITHUB_REF_NAME" \
-                --repo "$GITHUB_REPOSITORY" \
-                --verify-tag \
-                --draft \
-                --title "Open TTS $GITHUB_REF_NAME" \
-                --notes-file "$notes_file"
-            else
-              gh release create "$GITHUB_REF_NAME" \
-                --repo "$GITHUB_REPOSITORY" \
-                --verify-tag \
-                --draft \
-                --generate-notes \
-                --title "Open TTS $GITHUB_REF_NAME" \
-                --notes "Desktop downloads include unsigned DMG and ZIP builds for Apple Silicon Macs running macOS 26 or newer. These artifacts are not notarized, so macOS may require Control-clicking the app and choosing Open on first launch. Model weights download on first use and are not bundled. Windows packages are not included in this release."
-            fi
-          fi
-
-  build-macos:
-    name: Build macOS arm64
-    needs: create-release
-    runs-on: macos-26
-    timeout-minutes: 120
-    env:
-      MACOSX_DEPLOYMENT_TARGET: "26.0"
-      CSC_IDENTITY_AUTO_DISCOVERY: "false"
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: "22"
-          cache: npm
-      - name: Install native build tools
-        run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
-          brew install cmake libomp openssl@3 pkg-config automake autoconf libtool
-      - run: npm ci
-      - name: Build unsigned package
-        shell: bash
-        env:
-          CARGO_TARGET_DIR: ${{ runner.temp }}/open-tts-rust-target
-        run: |
-          OPENSSL_DIR="$(brew --prefix openssl@3)"
-          export OPENSSL_DIR
-          export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-          npm run build:electron
-          npm run test:rust -- --release
-          rm -rf "$CARGO_TARGET_DIR"
-          npx electron-builder --mac --arm64
-      - name: Verify unsigned package and native bridge
-        shell: bash
-        run: |
-          app_path="release/mac-arm64/Open TTS.app"
-          bridge_path="$app_path/Contents/Resources/dist-rust/open-tts-local-bridge"
-          test -d "$app_path"
-          test -x "$bridge_path"
-          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app_path/Contents/Info.plist")" = "26.0"
-          "$bridge_path" --action probe --model qwen3 --cache-dir "$RUNNER_TEMP/open-tts-probe"
-          if find "$app_path/Contents/Resources/dist-rust" -type f -print0 | xargs -0 file | grep -q 'Mach-O'; then
-            while IFS= read -r -d '' candidate; do
-              if file "$candidate" | grep -q 'Mach-O'; then
-                if otool -L "$candidate" | grep -E '/opt/homebrew|/usr/local'; then
-                  echo "Non-portable library reference in $candidate" >&2
-                  exit 1
-                fi
-                min_os="$(vtool -show-build "$candidate" 2>/dev/null | awk '/minos/{print $2; exit}')"
-                if [[ -n "$min_os" ]]; then
-                  min_major="${min_os%%.*}"
-                  min_rest="${min_os#*.}"
-                  min_minor="${min_rest%%.*}"
-                  if (( min_major > 26 || (min_major == 26 && min_minor > 0) )); then
-                    echo "$candidate requires macOS $min_os, newer than the supported 26.0 minimum." >&2
-                    exit 1
-                  fi
-                fi
-              fi
-            done < <(find "$app_path/Contents/Resources/dist-rust" -type f -print0)
-          fi
-      - name: Upload macOS release assets
-        shell: bash
-        run: gh release upload "$GITHUB_REF_NAME" release/Open-TTS-*.dmg release/Open-TTS-*.zip --clobber --repo "$GITHUB_REPOSITORY"
-
-  publish-release:
-    name: Publish release
-    needs: build-macos
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Publish completed desktop release
-        run: gh release edit "$GITHUB_REF_NAME" --draft=false --latest --repo "$GITHUB_REPOSITORY"
