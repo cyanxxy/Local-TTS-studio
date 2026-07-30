@@ -9,7 +9,7 @@ index 7dca060..d724092 100644
 -# Requires the mlx-c git submodule: `git submodule update --init --recursive`
 +# Requires the bundled mlx-c source tree documented in OPEN_TTS_VENDOR.md.
  mlx = []
- 
+
  [build-dependencies]
 diff --git a/build.rs b/build.rs
 index f6ba158..94e40cd 100644
@@ -22,12 +22,12 @@ index f6ba158..94e40cd 100644
 -// 1. Builds the mlx-c library from the git submodule via CMake
 +// 1. Builds the bundled mlx-c source tree via CMake
  // 2. Emits linker directives for mlx-c, MLX, Metal, and system frameworks
- 
+
  fn main() {
 @@ -24,14 +24,15 @@ fn build_mlx() {
          );
      }
- 
+
 -    let mlx_c_dir = std::path::PathBuf::from("mlx-c");
 +    let mlx_c_dir = std::path::PathBuf::from(
 +        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not provide CARGO_MANIFEST_DIR"),
@@ -45,12 +45,54 @@ index f6ba158..94e40cd 100644
 +            mlx_c_dir.display()
          );
      }
- 
+
+diff --git a/src/bin/qwen3_tts_cli.rs b/src/bin/qwen3_tts_cli.rs
+index 6a64fe5..9401023 100644
+--- a/src/bin/qwen3_tts_cli.rs
++++ b/src/bin/qwen3_tts_cli.rs
+@@ -60,7 +60,7 @@ struct Args {
+     top_k: i64,
+
+     /// Maximum generated codec frames.
+-    #[arg(long, alias = "max-new-tokens", default_value_t = 1536)]
++    #[arg(long, alias = "max-new-tokens", default_value_t = 8192)]
+     max_tokens: i64,
+
+     /// Output sample rate.
+diff --git a/src/bin/worker.rs b/src/bin/worker.rs
+index 954f379..d70073d 100644
+--- a/src/bin/worker.rs
++++ b/src/bin/worker.rs
+@@ -25,7 +25,7 @@ use std::time::Instant;
+
+ const DEFAULT_MODEL_PATH: &str = "/tmp/qwen3-tts.cpp/models/Qwen3-TTS-12Hz-0.6B-Base";
+ const DEFAULT_REF_TEXT: &str = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes.";
+-const DEFAULT_MAX_NEW_TOKENS: i64 = 1536;
++const DEFAULT_MAX_NEW_TOKENS: i64 = 8192;
+ const DEFAULT_BLOCKSIZE: usize = 512;
+ const FRAME_HEADER_BYTES: usize = 9;
+ const STDOUT_FILENO: i32 = 1;
 diff --git a/src/inference.rs b/src/inference.rs
-index e908a86..7028c70 100644
+index e908a86..6bd7c44 100644
 --- a/src/inference.rs
 +++ b/src/inference.rs
-@@ -667,6 +667,70 @@ impl TalkerModel {
+@@ -22,6 +22,15 @@ use std::time::{Duration, Instant};
+ use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+ use tokenizers::Tokenizer;
+ 
++fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
++    if max_codes > 0 && generated_frames >= max_codes as usize {
++        return Err(Qwen3TTSError::Generation(format!(
++            "Qwen3 reached the {max_codes}-token generation limit before producing end-of-speech. Increase max tokens or split the text into smaller sections."
++        )));
++    }
++    Ok(())
++}
++
+ fn round_f32_to_bf16_value(value: f32) -> f32 {
+     let bits = value.to_bits();
+     let rounding_bias = 0x7fff + ((bits >> 16) & 1);
+@@ -667,6 +676,70 @@ impl TalkerModel {
          input_embeddings
      }
  
@@ -121,7 +163,69 @@ index e908a86..7028c70 100644
      /// Build dual-stream input embeddings using a speaker embedding (x-vector)
      /// instead of a speaker ID. Used for voice cloning with the Base model.
      #[allow(clippy::too_many_arguments)]
-@@ -1790,7 +1854,8 @@ impl TTSInference {
+@@ -1394,6 +1467,16 @@ pub struct TTSInference {
+     device: Device,
+ }
+ 
++/// Conditioning for one instruct-style request, ready to hand to the talker.
++struct InstructPrompt {
++    input_embeddings: Tensor,
++    tts_pad_embed: Tensor,
++    codec_eos_id: i64,
++    /// VoiceDesign keeps stdout quiet: it runs in the resident bridge, whose
++    /// stdout carries the port announcement and diagnostics.
++    voice_design: bool,
++}
++
+ impl TTSInference {
+     /// Create a new TTS inference engine.
+     pub fn new(model_path: &Path, device: Device) -> Result<Self> {
+@@ -1541,9 +1624,11 @@ impl TTSInference {
+ 
+         let vocoder = self.vocoder.as_ref()?;
+         let codes_tensor = self.codes_to_vocoder_tensor(codes, 2048);
+-        println!("Streaming codes tensor shape: {:?}", codes_tensor.size());
++        // Deliberately silent: this runs once per streamed chunk, and the
++        // resident bridge's stdout is a bounded diagnostic buffer whose
++        // overflow kills the worker. Per-chunk shape dumps would exhaust it on
++        // a long generation.
+         let audio_tensor = vocoder.decode_streaming(&codes_tensor, state);
+-        println!("Streaming vocoder output shape: {:?}", audio_tensor.size());
+         let audio_len = audio_tensor.numel();
+         Some(audio_tensor.view(&[audio_len]).to_vec_f32())
+     }
+@@ -1703,6 +1788,7 @@ impl TTSInference {
+             codec_eos_id,
+             &tts_pad_embed,
+         );
++        ensure_generation_reached_eos(codes.len(), max_codes)?;
+         println!("Generated {} code frames", codes.len());
+ 
+         // Convert codes to audio using vocoder
+@@ -1769,17 +1855,16 @@ impl TTSInference {
+     ///     2048,
+     /// )?;
+     /// ```
+-    #[allow(clippy::too_many_arguments)]
+-    pub fn generate_with_instruct(
++    /// Build the conditioning for an instruct-style request (CustomVoice and
++    /// VoiceDesign). Shared by the buffered and streaming entry points so the
++    /// two can never drift in how they prompt the talker.
++    fn build_instruct_prompt(
+         &self,
+         text: &str,
+         speaker: &str,
+         language: &str,
+         instruct: &str,
+-        temperature: f64,
+-        top_k: i64,
+-        max_codes: i64,
+-    ) -> Result<(Vec<f32>, u32)> {
++    ) -> Result<InstructPrompt> {
+         // Get speaker ID
+         let speaker_id = self
+             .config
+@@ -1790,7 +1875,8 @@ impl TTSInference {
              .copied()
              .unwrap_or(0) as i64;
  
@@ -131,7 +235,7 @@ index e908a86..7028c70 100644
          let language_id = self
              .config
              .talker_config
-@@ -1798,19 +1863,28 @@ impl TTSInference {
+@@ -1798,19 +1884,28 @@ impl TTSInference {
              .as_ref()
              .and_then(|map| map.get(&language.to_lowercase()))
              .copied()
@@ -167,7 +271,7 @@ index e908a86..7028c70 100644
          let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
          let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
          let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
-@@ -1878,19 +1952,35 @@ impl TTSInference {
+@@ -1878,19 +1973,35 @@ impl TTSInference {
  
          // Build dual-stream input embeddings for main text
          println!("Building input embeddings...");
@@ -216,73 +320,175 @@ index e908a86..7028c70 100644
  
          // Concatenate instruction prefix (if any) with main embeddings
          let input_embeddings = if let Some(inst_emb) = instruct_embeddings {
-diff --git a/src/model.rs b/src/model.rs
-index a6cd70d..e1b722e 100644
---- a/src/model.rs
-+++ b/src/model.rs
-@@ -211,5 +211,5 @@ impl Qwen3TTSModel {
-         // Load generation config if available
--        let gen_config_path = Path::new(&model_path).join("generate_config.json");
-+        let gen_config_path = Path::new(&model_path).join("generation_config.json");
-         let generate_defaults = if gen_config_path.exists() {
-             GenerationConfig::from_file(&gen_config_path)?
-         } else {
-diff --git a/src/bin/qwen3_tts_cli.rs b/src/bin/qwen3_tts_cli.rs
-index 6a64fe5..9401023 100644
---- a/src/bin/qwen3_tts_cli.rs
-+++ b/src/bin/qwen3_tts_cli.rs
-@@ -62,3 +62,3 @@ struct Args {
-     /// Maximum generated codec frames.
--    #[arg(long, alias = "max-new-tokens", default_value_t = 1536)]
-+    #[arg(long, alias = "max-new-tokens", default_value_t = 8192)]
-     max_tokens: i64,
-diff --git a/src/bin/worker.rs b/src/bin/worker.rs
-index 954f379..d70073d 100644
---- a/src/bin/worker.rs
-+++ b/src/bin/worker.rs
-@@ -27,3 +27,3 @@ const DEFAULT_MODEL_PATH: &str = "/tmp/qwen3-tts.cpp/models/Qwen3-TTS-12Hz-0.6B
- const DEFAULT_REF_TEXT: &str = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes.";
--const DEFAULT_MAX_NEW_TOKENS: i64 = 1536;
-+const DEFAULT_MAX_NEW_TOKENS: i64 = 8192;
- const DEFAULT_BLOCKSIZE: usize = 512;
-diff --git a/src/inference.rs b/src/inference.rs
-index 7028c70..f597efa 100644
---- a/src/inference.rs
-+++ b/src/inference.rs
-@@ -22,5 +22,14 @@ use std::time::{Duration, Instant};
- use tokenizers::pre_tokenizers::byte_level::ByteLevel;
- use tokenizers::Tokenizer;
--
-+
-+fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
-+    if max_codes > 0 && generated_frames >= max_codes as usize {
-+        return Err(Qwen3TTSError::Generation(format!(
-+            "Qwen3 reached the {max_codes}-token generation limit before producing end-of-speech. Increase max tokens or split the text into smaller sections."
-+        )));
+@@ -1902,19 +2013,45 @@ impl TTSInference {
+         // Pre-compute tts_pad embedding
+         let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
+ 
++        Ok(InstructPrompt {
++            input_embeddings,
++            tts_pad_embed,
++            codec_eos_id,
++            voice_design,
++        })
 +    }
-+    Ok(())
-+}
 +
- fn round_f32_to_bf16_value(value: f32) -> f32 {
-     let bits = value.to_bits();
-@@ -1768,3 +1777,4 @@ impl TTSInference {
-             &tts_pad_embed,
++    /// Generate a complete CustomVoice or VoiceDesign waveform in one call.
++    ///
++    /// Prefer [`Self::generate_with_instruct_streaming`] when audio should be
++    /// delivered incrementally.
++    #[allow(clippy::too_many_arguments)]
++    pub fn generate_with_instruct(
++        &self,
++        text: &str,
++        speaker: &str,
++        language: &str,
++        instruct: &str,
++        temperature: f64,
++        top_k: i64,
++        max_codes: i64,
++    ) -> Result<(Vec<f32>, u32)> {
++        let prompt = self.build_instruct_prompt(text, speaker, language, instruct)?;
++
+         // Generate codes
+         println!(
+             "Generating audio codes (temp={}, top_k={}, max={})...",
+             temperature, top_k, max_codes
+         );
+         let codes = self.talker.generate_codes(
+-            &input_embeddings,
++            &prompt.input_embeddings,
+             max_codes,
+             temperature,
+             top_k,
+-            codec_eos_id,
+-            &tts_pad_embed,
++            prompt.codec_eos_id,
++            &prompt.tts_pad_embed,
          );
 +        ensure_generation_reached_eos(codes.len(), max_codes)?;
          println!("Generated {} code frames", codes.len());
-@@ -2006,3 +2016,4 @@ impl TTSInference {
-             &tts_pad_embed,
-         );
-+        ensure_generation_reached_eos(codes.len(), max_codes)?;
-         println!("Generated {} code frames", codes.len());
-@@ -2863,3 +2874,6 @@ impl TTSInference {
+ 
+         // Decode with vocoder
+@@ -1932,6 +2069,86 @@ impl TTSInference {
+         Ok((waveform, sample_rate))
+     }
+ 
++    /// Streaming twin of [`Self::generate_with_instruct`]: decodes each batch of
++    /// `chunk_size` code frames as it is generated and hands the samples to
++    /// `on_audio`, so playback can start long before the utterance finishes.
++    /// Returning `false` from `on_audio` stops generation.
++    ///
++    /// Mirrors `generate_with_icl_streaming`; the conditioning is entirely
++    /// upstream of the talker, so both share the same generate/decode tail.
++    #[allow(clippy::too_many_arguments)]
++    pub fn generate_with_instruct_streaming<F>(
++        &self,
++        text: &str,
++        speaker: &str,
++        language: &str,
++        instruct: &str,
++        temperature: f64,
++        top_k: i64,
++        max_codes: i64,
++        chunk_size: usize,
++        mut on_audio: F,
++    ) -> Result<()>
++    where
++        F: FnMut(&[f32], u32) -> bool,
++    {
++        let prompt = self.build_instruct_prompt(text, speaker, language, instruct)?;
++        let sample_rate = 24000u32;
++
++        if !prompt.voice_design {
++            println!(
++                "Streaming audio codes (temp={}, top_k={}, max={}, chunk={})...",
++                temperature, top_k, max_codes, chunk_size
++            );
++        }
++
++        let mut should_continue = true;
++        let mut generated = 0usize;
++        // Vocoder state carries the causal-convolution overlap across chunks;
++        // without it every chunk boundary would be decoded as an utterance start.
++        let mut vocoder_state = self
++            .vocoder
++            .as_ref()
++            .map(|vocoder| vocoder.streaming_state());
++
++        self.talker.generate_codes_streaming(
++            &prompt.input_embeddings,
++            max_codes,
++            temperature,
++            top_k,
++            prompt.codec_eos_id,
++            &prompt.tts_pad_embed,
++            chunk_size,
++            |code_chunk| {
++                // generate_codes_streaming flushes its pending buffer after a
++                // stop without clearing it, so the final chunk can arrive twice.
++                if !should_continue || code_chunk.is_empty() {
++                    return should_continue;
++                }
++                generated += code_chunk.len();
++                let waveform = if let Some(state) = vocoder_state.as_mut() {
++                    self.decode_codes_to_audio_streaming(code_chunk, state)
++                } else {
++                    self.decode_codes_to_audio(code_chunk)
++                };
++                if let Some(waveform) = waveform {
++                    // A chunk shorter than the transposed-convolution lookahead
++                    // decodes to nothing; that is buffered state, not audio.
++                    if !waveform.is_empty() {
++                        should_continue = on_audio(&waveform, sample_rate);
++                    }
++                }
++                should_continue
++            },
++        );
++
++        if should_continue {
++            ensure_generation_reached_eos(generated, max_codes)?;
++        }
++
++        Ok(())
++    }
++
+     /// Get a reference to the loaded model weights.
+     pub fn weights(&self) -> &HashMap<String, Tensor> {
+         &self.weights
+@@ -2757,21 +2974,25 @@ impl TTSInference {
+                     return should_continue;
+                 }
+                 generated += code_chunk.len();
+-                println!(
+-                    "Streaming decode {} generated code frames",
+-                    code_chunk.len()
+-                );
+                 let waveform = if let Some(state) = vocoder_state.as_mut() {
+                     self.decode_codes_to_audio_streaming(code_chunk, state)
+                 } else {
+                     self.decode_codes_to_audio(code_chunk)
+                 };
+                 if let Some(waveform) = waveform {
+-                    should_continue = on_audio(&waveform, sample_rate);
++                    // A chunk shorter than the transposed-convolution lookahead
++                    // decodes to nothing; that is buffered state, not audio, and
++                    // consumers reject an empty buffer as a failed generation.
++                    if !waveform.is_empty() {
++                        should_continue = on_audio(&waveform, sample_rate);
++                    }
+                 }
+                 should_continue
              },
          );
 +        if should_continue {
 +            ensure_generation_reached_eos(generated, max_codes)?;
 +        }
          println!("Generated {} streamed code frames", generated);
-@@ -2870,7 +2884,11 @@ impl TTSInference {
+         Ok(())
+     }
+@@ -2779,8 +3000,12 @@ impl TTSInference {
+ 
  #[cfg(test)]
  mod tests {
 +    use super::ensure_generation_reached_eos;
@@ -296,3 +502,16 @@ index 7028c70..f597efa 100644
 +        assert!(ensure_generation_reached_eos(63, 64).is_ok());
      }
  }
+diff --git a/src/model.rs b/src/model.rs
+index a6cd70d..e1b722e 100644
+--- a/src/model.rs
++++ b/src/model.rs
+@@ -209,7 +209,7 @@ impl Qwen3TTSModel {
+         };
+
+         // Load generation config if available
+-        let gen_config_path = Path::new(&model_path).join("generate_config.json");
++        let gen_config_path = Path::new(&model_path).join("generation_config.json");
+         let generate_defaults = if gen_config_path.exists() {
+             GenerationConfig::from_file(&gen_config_path)?
+         } else {

@@ -50,6 +50,7 @@ class FakeWebSocketServer {
   private socket: net.Socket | null = null;
   private buffer = Buffer.alloc(0);
   private handshaken = false;
+  private handshakePending = false;
 
   constructor(
     private readonly host: string,
@@ -57,6 +58,7 @@ class FakeWebSocketServer {
     private readonly expectedPath: string,
     private readonly onListening: (port: number) => void,
     private readonly onMessage?: (message: Record<string, unknown>, server: FakeWebSocketServer) => void,
+    private readonly handshakeDelayMs = 0,
   ) {
     this.server.on("listening", () => {
       const address = this.server.address();
@@ -108,11 +110,22 @@ class FakeWebSocketServer {
   private handleConnection(socket: net.Socket) {
     this.socket = socket;
     socket.on("data", (chunk) => this.handleData(chunk));
+    socket.on("close", () => {
+      if (this.socket !== socket) return;
+      this.socket = null;
+      if (!this.handshaken) {
+        this.buffer = Buffer.alloc(0);
+        this.handshakePending = false;
+      }
+    });
   }
 
   private handleData(chunk: Buffer) {
+    const socket = this.socket;
+    if (!socket) return;
     this.buffer = Buffer.concat([this.buffer, chunk]);
     if (!this.handshaken) {
+      if (this.handshakePending) return;
       const headerEnd = this.buffer.indexOf("\r\n\r\n");
       if (headerEnd === -1) return;
       const header = this.buffer.subarray(0, headerEnd).toString("latin1");
@@ -127,14 +140,25 @@ class FakeWebSocketServer {
       const accept = createHash("sha1")
         .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
         .digest("base64");
-      this.socket.write(
-        "HTTP/1.1 101 Switching Protocols\r\n"
-        + "Upgrade: websocket\r\n"
-        + "Connection: Upgrade\r\n"
-        + `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
-      );
       this.buffer = this.buffer.subarray(headerEnd + 4);
-      this.handshaken = true;
+      this.handshakePending = true;
+      const completeHandshake = () => {
+        if (this.socket !== socket || socket.destroyed) return;
+        socket.write(
+          "HTTP/1.1 101 Switching Protocols\r\n"
+          + "Upgrade: websocket\r\n"
+          + "Connection: Upgrade\r\n"
+          + `Sec-WebSocket-Accept: ${accept}\r\n\r\n`,
+        );
+        this.handshakePending = false;
+        this.handshaken = true;
+        this.readFrames();
+      };
+      if (this.handshakeDelayMs > 0) {
+        setTimeout(completeHandshake, this.handshakeDelayMs);
+        return;
+      }
+      completeHandshake();
     }
     this.readFrames();
   }
@@ -197,6 +221,8 @@ const RUN_DEFAULTS = {
 
 function makePool(
   onMessage?: (message: Record<string, unknown>, server: FakeWebSocketServer) => void,
+  poolOverrides: { cancelDrainMs?: number; connectTimeoutMs?: number } = {},
+  handshakeDelayMs = 0,
 ) {
   const children: FakeChild[] = [];
   const servers: FakeWebSocketServer[] = [];
@@ -209,6 +235,7 @@ function makePool(
       `/${config.authToken}`,
       (port) => child.emitStdout(`__PORT__${port}\n`),
       onMessage,
+      handshakeDelayMs,
     );
     child.onKill = () => server.close();
     children.push(child);
@@ -221,6 +248,7 @@ function makePool(
     idleEvictMs: 60_000,
     killGraceMs: 2_000,
     connectTimeoutMs: 5_000,
+    ...poolOverrides,
   });
   return { pool, spawn, children, servers, spawnModels };
 }
@@ -419,10 +447,10 @@ describe("createWebSocketBridgeWorkerPool", () => {
     })).rejects.toThrow(/unsupported encoding/);
   });
 
-  it("sends a graceful shutdown WebSocket command when cancelling an in-flight request", async () => {
+  it("keeps a cancellation authoritative over a success result already in flight", async () => {
     const { pool, servers, children } = makePool((message, server) => {
-      if (message.command === "shutdown") {
-        // A result already queued by the transport must not beat an accepted
+      if (message.command === "cancel") {
+        // A result the transport had already queued must not beat an accepted
         // cancellation and resolve the generation promise.
         server.sendJson({
           type: "result",
@@ -441,14 +469,38 @@ describe("createWebSocketBridgeWorkerPool", () => {
     });
     await waitFor(() => servers[0].messages.some((message) => message.requestId === "r1"));
 
-    // Keep the fake server alive long enough to read the graceful shutdown frame.
-    children[0].onKill = null;
     const cancelledRun = expect(run).rejects.toThrow(/cancelled/i);
     expect(pool.cancel("r1")).toBe(true);
-    await waitFor(() => servers[0].messages.some((message) => message.command === "shutdown"));
+    await waitFor(() => servers[0].messages.some((message) => message.command === "cancel"));
     await cancelledRun;
     servers[0].close();
     children[0].exit(null as unknown as number);
+  });
+
+  it("sends a graceful shutdown WebSocket command when tearing a worker down", async () => {
+    const { pool, servers, children } = makePool();
+
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+    await waitFor(() => servers[0].messages.some((message) => message.requestId === "r1"));
+
+    // Keep the fake server alive long enough to read the graceful shutdown frame.
+    children[0].onKill = null;
+    const cancelledRun = expect(run).rejects.toThrow(/cancelled/i);
+    // shutdown waits out the kill grace period, so observe the frame first.
+    const shutdown = pool.shutdown("qwen3");
+    await waitFor(() => servers[0].messages.some((message) => message.command === "shutdown"));
+    expect(children[0].killed).toBe(true);
+    // The stub server never answers the close handshake, so drop the transport
+    // by hand to stand in for the killed process going away.
+    servers[0].close();
+    children[0].exit(null as unknown as number);
+    await cancelledRun;
+    await shutdown;
   });
 
   it("keeps cancellation authoritative when request sending fails in the activation gap", async () => {
@@ -1053,6 +1105,27 @@ describe("createWebSocketBridgeWorkerPool", () => {
     })).rejects.toThrow(/exited during startup|exited before announcing/i);
   });
 
+  it("gives a slow first WebSocket handshake the remaining connect budget", async () => {
+    const { pool } = makePool((message, server) => {
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: { audioChunkCount: 0, sampleRate: 24_000 },
+      });
+    }, { connectTimeoutMs: 1_600 }, 1_100);
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "slow-handshake",
+      command: "warm",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    })).resolves.toMatchObject({
+      response: { ok: true },
+    });
+  });
+
   it("surfaces a bounded structured startup failure", async () => {
     const children: FakeChild[] = [];
     const spawn = vi.fn(() => {
@@ -1126,7 +1199,7 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(error?.message).not.toMatch(/ws:\/\/[^ ]+\//);
   });
 
-  it("cancels an in-flight request by killing the WebSocket worker", async () => {
+  it("cancels an in-flight request over the socket without killing the worker", async () => {
     const { pool, children, servers } = makePool();
     const run = pool.run("qwen3", {
       ...RUN_DEFAULTS,
@@ -1136,10 +1209,88 @@ describe("createWebSocketBridgeWorkerPool", () => {
     });
 
     await waitFor(() => servers[0]?.messages.length === 1);
+    const cancelled = expect(run).rejects.toThrow(/cancelled/i);
     expect(pool.cancel("r1")).toBe(true);
-    expect(children[0].killed).toBe(true);
-    children[0].exit(null as unknown as number);
-    await expect(run).rejects.toThrow(/cancelled/i);
+    // The caller is settled immediately, but the worker keeps its loaded model
+    // while the bridge unwinds.
+    await cancelled;
+    await waitFor(() => servers[0].messages.some(
+      (message) => message.command === "cancel" && message.requestId === "r1",
+    ));
+    expect(children[0].killed).toBe(false);
+  });
+
+  it("reuses the drained worker for the next generation after a cancel", async () => {
+    const { pool, spawn, children, servers } = makePool((message, server) => {
+      // Acknowledge the cancel the way the bridge does: a terminal result frame
+      // for the cancelled request, after which it is idle and reusable.
+      if (message.command === "cancel") {
+        server.sendJson({
+          type: "result",
+          requestId: message.requestId,
+          ok: false,
+          error: "Generation cancelled.",
+        });
+        return;
+      }
+      if (message.requestId === "r2") {
+        server.sendJson({
+          type: "audio_chunk",
+          requestId: "r2",
+          index: 0,
+          total: 1,
+          sampleRate: 24_000,
+          sampleCount: 2,
+          silenceAfterSamples: 0,
+        });
+        server.sendBinary(Buffer.from(new Float32Array([0.1, 0.2]).buffer));
+        server.sendJson({
+          type: "result",
+          requestId: "r2",
+          ok: true,
+          result: { audioChunkCount: 1, sampleRate: 24_000 },
+        });
+      }
+    });
+
+    const first = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "one" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+    await waitFor(() => servers[0]?.messages.some((message) => message.requestId === "r1"));
+    const cancelled = expect(first).rejects.toThrow(/cancelled/i);
+    expect(pool.cancel("r1")).toBe(true);
+    await cancelled;
+
+    const { response } = await pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r2",
+      payload: { text: "two" },
+      spawnConfig: SPAWN_CONFIG,
+    });
+    expect(response).toMatchObject({ ok: true });
+    // Same process, same connection: the model never had to be reloaded.
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(children[0].killed).toBe(false);
+  });
+
+  it("kills a worker that never acknowledges a cancel", async () => {
+    const { pool, children, servers } = makePool(undefined, { cancelDrainMs: 20 });
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+    });
+    await waitFor(() => servers[0]?.messages.length === 1);
+    const cancelled = expect(run).rejects.toThrow(/cancelled/i);
+    expect(pool.cancel("r1")).toBe(true);
+    await cancelled;
+    // The bridge is stuck somewhere that never reaches a cancel checkpoint, so
+    // the drain deadline has to fall back to killing it.
+    await waitFor(() => children[0].killed);
   });
 
   it("rejects a concurrent generate for a model whose worker is already mid-request", async () => {
@@ -1280,6 +1431,29 @@ describe("createWebSocketBridgeWorkerPool", () => {
       payload: { text: "x" },
       spawnConfig: SPAWN_CONFIG,
     })).rejects.toThrow(/unexpected request/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("surfaces a bridge failure that carries no request id", async () => {
+    // Rust reports failures it cannot attribute to a request — an unparseable
+    // request envelope, say — with an empty id. That message is the only
+    // diagnostic there is, so it must not be lost behind an id mismatch.
+    const { pool, children, servers } = makePool((_message, server) => {
+      server.sendJson({
+        type: "result",
+        requestId: "",
+        ok: false,
+        error: "Invalid WebSocket request JSON.",
+      });
+    });
+
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId: "r1",
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/^Invalid WebSocket request JSON\.$/);
     expect(children[0].killed).toBe(true);
     servers[0].close();
   });

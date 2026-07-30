@@ -24,7 +24,7 @@ import {
   type Qwen3Profile,
 } from "../../electron/qwen3Profiles";
 
-export const QWEN3_DEFAULT_MAX_NEW_TOKENS = 8_192;
+export const QWEN3_DEFAULT_MAX_NEW_TOKENS = 4_096;
 
 export interface Qwen3RuntimeSettings {
   profile: Qwen3Profile;
@@ -251,7 +251,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const setTemperature = useCallback((value: number) => setTemperatureState((current) => clamp(value, current, 0.2, 2)), []);
   const setTopK = useCallback((value: number) => setTopKState((current) => Math.round(clamp(value, current, 0, 1_000))), []);
   const setMaxNewTokens = useCallback(
-    (value: number) => setMaxNewTokensState((current) => Math.round(clamp(value, current, 64, 8_192))),
+    (value: number) => setMaxNewTokensState((current) => Math.round(clamp(value, current, 64, 4_096))),
     [],
   );
   const setReferenceAudio = useCallback((name: string, base64: string | null, signature = "") => {

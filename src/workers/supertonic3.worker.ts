@@ -14,9 +14,10 @@ import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { getSafeWasmThreadCount } from "../lib/onnxRuntime";
 import { verifyPinnedAssetIntegrity, type PinnedAssetIntegrity } from "../lib/pinnedModelFetch";
 import {
-  createSupertonic3Runtime,
+  createSupertonic3RuntimeStreaming,
   createSupertonic3Style,
   type Supertonic3Config,
+  type Supertonic3ModelName,
   type Supertonic3Style,
   type VoiceStyleJson,
   type Supertonic3Runtime,
@@ -32,6 +33,12 @@ const MODEL_FILES = [
   "onnx/vector_estimator.onnx",
   "onnx/vocoder.onnx",
 ] as const;
+const MODEL_FILE_BY_NAME: Record<Supertonic3ModelName, string> = {
+  duration_predictor: "onnx/duration_predictor.onnx",
+  text_encoder: "onnx/text_encoder.onnx",
+  vector_estimator: "onnx/vector_estimator.onnx",
+  vocoder: "onnx/vocoder.onnx",
+};
 const LOAD_FILE_COUNT = MODEL_FILES.length + 1;
 // Exact sizes and repository hashes from the pinned revision's HF siblings metadata.
 // Update this table together with SUPERTONIC3_MODEL_REVISION.
@@ -116,24 +123,38 @@ async function fetchAsset(file: string): Promise<ArrayBuffer> {
     return buffer;
   }
 
+  const canPreallocate = Number.isSafeInteger(declaredLength) && declaredLength >= 0;
+  const preallocated = canPreallocate ? new Uint8Array(declaredLength) : null;
   const chunks: Uint8Array[] = [];
   let received = 0;
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
     if (value) {
-      chunks.push(value);
+      if (preallocated) {
+        if (received + value.byteLength > preallocated.byteLength) {
+          throw new Error(`Supertonic 3 ${file} exceeded its declared size.`);
+        }
+        preallocated.set(value, received);
+      } else {
+        chunks.push(value);
+      }
       received += value.byteLength;
       if (Number.isFinite(declaredLength) && declaredLength > 0) {
         updateLoadProgress(file, received / declaredLength);
       }
     }
   }
-  const merged = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    merged.set(chunk, offset);
-    offset += chunk.byteLength;
+  if (preallocated && received !== preallocated.byteLength) {
+    throw new Error(`Supertonic 3 ${file} did not match its declared size.`);
+  }
+  const merged = preallocated ?? new Uint8Array(received);
+  if (!preallocated) {
+    let offset = 0;
+    for (const chunk of chunks) {
+      merged.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
   }
   await assertAssetIntegrity(file, merged.buffer);
   await cache?.put(url, new Response(merged, { headers: response.headers }));
@@ -199,24 +220,18 @@ async function loadModel(forceReload: boolean): Promise<void> {
     post({ type: "LOAD_PROGRESS", percent: 0 });
     ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;
     ort.env.wasm.numThreads = getSafeWasmThreadCount(MAX_WASM_THREADS);
-    const [configBuffer, indexerBuffer, durationPredictor, textEncoder, vectorEstimator, vocoder] = await Promise.all(
-      MODEL_FILES.map((file) => fetchAsset(file)),
-    );
+    const configBuffer = await fetchAsset("onnx/tts.json");
+    const indexerBuffer = await fetchAsset("onnx/unicode_indexer.json");
     const config = parseJson<Supertonic3Config>(configBuffer, "onnx/tts.json");
     const indexer = parseJson<number[]>(indexerBuffer, "onnx/unicode_indexer.json");
-    const models = {
-      duration_predictor: durationPredictor,
-      text_encoder: textEncoder,
-      vector_estimator: vectorEstimator,
-      vocoder,
-    };
+    const loadModelBuffer = (name: Supertonic3ModelName) => fetchAsset(MODEL_FILE_BY_NAME[name]);
     const preferredBackend: InferenceBackend = await canInitializeWebGPU() ? "webgpu" : "wasm";
     try {
-      runtime = await createSupertonic3Runtime(config, indexer, models, preferredBackend);
+      runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, preferredBackend);
       backend = preferredBackend;
     } catch (error) {
       if (preferredBackend === "wasm") throw error;
-      runtime = await createSupertonic3Runtime(config, indexer, models, "wasm");
+      runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, "wasm");
       backend = "wasm";
     }
     await loadStyle("M1");
@@ -292,6 +307,8 @@ self.onmessage = (event: MessageEvent<WorkerInMessage & { language?: string }>) 
   const message = event.data;
   if (message.type === "CANCEL") {
     activeGenerationEpoch += 1;
+    post({ type: "CANCELLED" });
+    self.close();
     return;
   }
   if (message.type === "LOAD") {

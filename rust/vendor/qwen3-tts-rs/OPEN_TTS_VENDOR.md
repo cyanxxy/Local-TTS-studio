@@ -14,9 +14,15 @@ this bundled source tree, and corrects the generation-config filename in
 `generate_config.json`). It also aligns CLI/worker defaults with the model's
 8,192-token generation configuration and rejects budget exhaustion without an
 end-of-speech token instead of returning truncated audio as a successful
-completion. The upstream high-level VoiceDesign API at the pinned revision
-returns placeholder silence; the rest of the low-level inference engine
-remains the native backend used by Open TTS.
+completion. The instruct path also exposes a bounded streaming twin used by
+CustomVoice and VoiceDesign, sharing prompt construction with the buffered API
+and decoding completed code batches incrementally. Both streaming paths skip a
+batch that decodes to no samples — that is vocoder lookahead state rather than
+audio, and consumers reject an empty buffer as a failed generation — and the
+per-batch decode is silent, because it now runs many times per request against
+the bridge's bounded stdout buffer. The upstream high-level
+VoiceDesign API at the pinned revision returns placeholder silence; the rest of
+the low-level inference engine remains the native backend used by Open TTS.
 
 ## Re-vendor checklist
 
@@ -34,9 +40,9 @@ remains the native backend used by Open TTS.
    vendor root with `git apply --check OPEN_TTS.patch` followed by
    `git apply OPEN_TTS.patch`.
 5. Review the patch rather than resolving failures mechanically. In particular,
-   confirm `build_voice_design_input_embeddings`, the VoiceDesign branch in
-   `generate_with_instruct`, and the bundled mlx-c error message still match
-   the new upstream APIs.
+   confirm `build_voice_design_input_embeddings`, the shared instruct prompt,
+   `generate_with_instruct_streaming`, and the bundled mlx-c error message still
+   match the new upstream APIs.
 6. Update both pinned revisions, refresh `OPEN_TTS.patch`, and update the
    expected vendor digest in `electron/qwen3Vendor.test.ts` in the same change.
 7. Run `npx vitest run electron/qwen3Vendor.test.ts`, then the Rust bridge tests

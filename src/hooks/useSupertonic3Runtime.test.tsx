@@ -1,5 +1,5 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useSupertonic3Runtime } from "./useSupertonic3Runtime";
 
@@ -52,6 +52,10 @@ describe("useSupertonic3Runtime", () => {
     ttsState.generate.mockReset();
     ttsState.cancel.mockReset();
     baseOptions.setShowPlayer.mockReset();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("ends only the stream started by the active Supertonic runtime", async () => {
@@ -153,5 +157,70 @@ describe("useSupertonic3Runtime", () => {
     rerender({ active: false });
 
     expect(player.endStream).not.toHaveBeenCalled();
+  });
+
+  it("evicts the loaded worker after it remains inactive", async () => {
+    vi.useFakeTimers();
+    const workers: FakeWorker[] = [];
+    const createWorker = vi.fn(() => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker as unknown as Worker;
+    });
+    const { result, rerender } = renderHook(
+      (props: { active: boolean }) => useSupertonic3Runtime({
+        ...baseOptions,
+        active: props.active,
+        createWorker,
+        player: createPlayer(),
+      }),
+      { initialProps: { active: true } },
+    );
+    expect(workers).toHaveLength(1);
+    act(() => workers[0].dispatchEvent(new MessageEvent("message", {
+      data: { type: "READY", voices: ["M1"], backend: "wasm" },
+    })));
+    expect(result.current.modelState.ready).toBe(true);
+
+    rerender({ active: false });
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+
+    expect(workers[0].terminate).toHaveBeenCalledOnce();
+    expect(result.current.modelState.ready).toBe(false);
+
+    rerender({ active: true });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(workers).toHaveLength(2);
+    expect(workers[1].postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
+  });
+
+  it("hard-stops compute and recreates the worker when generation is cancelled", async () => {
+    const workers: FakeWorker[] = [];
+    const createWorker = vi.fn(() => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker as unknown as Worker;
+    });
+    const { result } = renderHook(() => useSupertonic3Runtime({
+      ...baseOptions,
+      createWorker,
+      player: createPlayer(),
+    }));
+    act(() => workers[0].dispatchEvent(new MessageEvent("message", {
+      data: { type: "READY", voices: ["M1"], backend: "wasm" },
+    })));
+    ttsState.isGenerating = true;
+
+    act(() => result.current.handleStop());
+
+    expect(ttsState.cancel).toHaveBeenCalledOnce();
+    expect(workers[0].terminate).toHaveBeenCalledOnce();
+    await waitFor(() => expect(workers).toHaveLength(2));
+    expect(workers[1].postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
   });
 });

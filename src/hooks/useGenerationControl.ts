@@ -15,6 +15,7 @@ interface UseGenerationControlOptions {
   generationSettings: GenerationTuningSettings;
   kokoroWorker: React.RefObject<Worker | null>;
   supertonicWorker: React.RefObject<Worker | null>;
+  hardRestartModel: (model: ModelType) => void;
   player: UseAudioPlayerReturn;
   setShowPlayer: (showPlayer: boolean) => void;
   text: string;
@@ -46,6 +47,7 @@ export function useGenerationControl({
   generationSettings,
   kokoroWorker,
   supertonicWorker,
+  hardRestartModel,
   player,
   setShowPlayer,
   text,
@@ -62,6 +64,7 @@ export function useGenerationControl({
   const retakeErrorListenerRef = useRef<((event: Event) => void) | null>(null);
   const retakeMessageErrorListenerRef = useRef<((event: Event) => void) | null>(null);
   const retakeGenerationSeqRef = useRef(0);
+  const retakeModelRef = useRef<ModelType | null>(null);
 
   const clearRetakeListener = useCallback(() => {
     if (retakeWorkerRef.current && retakeListenerRef.current) {
@@ -74,6 +77,7 @@ export function useGenerationControl({
       retakeWorkerRef.current.removeEventListener("messageerror", retakeMessageErrorListenerRef.current as EventListener);
     }
     retakeWorkerRef.current = null;
+    retakeModelRef.current = null;
     retakeListenerRef.current = null;
     retakeErrorListenerRef.current = null;
     retakeMessageErrorListenerRef.current = null;
@@ -91,11 +95,13 @@ export function useGenerationControl({
   }, [endStream, tts.isGenerating]);
 
   const cancelRetake = useCallback((notifyWorker: boolean) => {
-    if (notifyWorker && retakeWorkerRef.current) {
+    const retakeModel = retakeModelRef.current;
+    if (notifyWorker && retakeWorkerRef.current && retakeModel) {
       retakeWorkerRef.current.postMessage({ type: "CANCEL" } satisfies WorkerInMessage);
+      hardRestartModel(retakeModel);
     }
     clearRetakeListener();
-  }, [clearRetakeListener]);
+  }, [clearRetakeListener, hardRestartModel]);
 
   const resetGeneratedAudio = useCallback(() => {
     setRetakeError(null);
@@ -104,11 +110,13 @@ export function useGenerationControl({
   }, [player, setShowPlayer]);
 
   const cancelActiveGeneration = useCallback((forceCancelTts: boolean = false) => {
+    const hadRetake = retakeWorkerRef.current !== null;
     cancelRetake(true);
     if (forceCancelTts || tts.isGenerating) {
       tts.cancel();
+      if (!hadRetake) hardRestartModel(activeModel);
     }
-  }, [cancelRetake, tts]);
+  }, [activeModel, cancelRetake, hardRestartModel, tts]);
 
   const isGenerationBusy = tts.isGenerating || isRetakingSegment;
 
@@ -150,6 +158,7 @@ export function useGenerationControl({
     clearRetakeListener();
     setRetakeError(null);
     retakeWorkerRef.current = worker;
+    retakeModelRef.current = activeModel;
     retakeGenerationSeqRef.current += 1;
     const generationId = `retake-${retakeGenerationSeqRef.current}`;
 

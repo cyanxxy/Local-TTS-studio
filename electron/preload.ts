@@ -162,12 +162,15 @@ function saveReaderAudio(value: unknown): Promise<void> {
       }
       const chunk = chunks[nextOrder] as Record<string, unknown> & { audio: ArrayBuffer };
       const { audio: sourceAudio, ...chunkMetadata } = chunk;
+      // Keep the renderer/player's immutable source buffer intact, but transfer
+      // the one persistence copy through both MessagePort hops instead of
+      // cloning that copy again.
       const audio = sourceAudio.slice(0);
       channel.port1.postMessage({
         type: "chunk",
         order: nextOrder,
         chunk: { ...chunkMetadata, audio },
-      });
+      }, [audio]);
     };
 
     const timeout = setTimeout(() => {

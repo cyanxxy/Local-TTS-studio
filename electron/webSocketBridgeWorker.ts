@@ -61,6 +61,7 @@ export interface CreateWebSocketBridgeWorkerPoolOptions<TModel extends string> {
   host?: string;
   maxRequestAudioBytes?: number;
   maxRequestTextBytes?: number;
+  cancelDrainMs?: number;
 }
 
 export interface WebSocketBridgeWorkerPool<TModel extends string> {
@@ -102,10 +103,21 @@ interface Worker {
   socket: WebSocket | null;
   spawnKey: string;
   active: ActiveRequest | null;
+  // Set between a cancel being sent and the bridge acknowledging it. The run
+  // promise has already settled; the worker is finishing its unwind and is not
+  // yet safe to hand a new request.
+  draining: DrainState | null;
   evictTimer: ReturnType<typeof setTimeout> | null;
   alive: boolean;
   exitPromise: Promise<void>;
   resolveExit: () => void;
+}
+
+interface DrainState {
+  requestId: string;
+  timer: ReturnType<typeof setTimeout> | null;
+  promise: Promise<void>;
+  resolve: () => void;
 }
 
 const BRIDGE_PORT_PREFIX = "__PORT__";
@@ -122,7 +134,16 @@ const MAX_AUDIO_CHUNK_SAMPLES = 262_144;
 const MAX_AUDIO_SILENCE_SAMPLES = 192_000;
 const MAX_REQUEST_AUDIO_CHUNKS = 10_000;
 const DEFAULT_MAX_REQUEST_AUDIO_BYTES = 256 * 1024 * 1024;
-const DEFAULT_MAX_REQUEST_TEXT_BYTES = 64 * 1024 * 1024;
+// Stay strictly under the bridge's 64 MiB frame ceiling so an oversize request
+// fails here, with a message naming the limit, instead of tripping the server's
+// frame-size abort and surfacing as an unexplained transport close. The largest
+// real payload is a 60,000,000-byte reference-audio base64 string plus its
+// bounded JSON envelope, which clears this with room to spare.
+const DEFAULT_MAX_REQUEST_TEXT_BYTES = 63 * 1024 * 1024;
+// How long the bridge gets to acknowledge a cancel and return to idle before
+// the worker is killed instead. Cancellation is observed between text units, so
+// this only needs to cover one unit of inference.
+const DEFAULT_CANCEL_DRAIN_MS = 20_000;
 const MIN_AUDIO_SAMPLE_RATE = 8_000;
 const MAX_AUDIO_SAMPLE_RATE = 192_000;
 
@@ -209,7 +230,12 @@ async function openWebSocketWithRetry(
 
   while (Date.now() - started < timeoutMs && isWorkerAlive()) {
     try {
-      return await openWebSocketOnce(url, Math.min(1_000, timeoutMs - (Date.now() - started)));
+      // Each attempt gets the whole remaining budget rather than a short slice.
+      // A slice that expires mid-handshake closes a socket the bridge may have
+      // already accepted, and the bridge exits after its one owning connection
+      // — so every later retry would hit a dead port. Retrying is only here to
+      // cover a connection refused outright, which fails fast on its own.
+      return await openWebSocketOnce(url, timeoutMs - (Date.now() - started));
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err));
       await delay(50);
@@ -395,6 +421,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   host = "127.0.0.1",
   maxRequestAudioBytes = DEFAULT_MAX_REQUEST_AUDIO_BYTES,
   maxRequestTextBytes = DEFAULT_MAX_REQUEST_TEXT_BYTES,
+  cancelDrainMs = DEFAULT_CANCEL_DRAIN_MS,
 }: CreateWebSocketBridgeWorkerPoolOptions<TModel>): WebSocketBridgeWorkerPool<TModel> {
   const maxRequestAudioSamples = Math.floor(maxRequestAudioBytes / Float32Array.BYTES_PER_ELEMENT);
   if (!Number.isSafeInteger(maxRequestAudioSamples) || maxRequestAudioSamples <= 0) {
@@ -428,8 +455,79 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       clearTimeout(worker.evictTimer);
       worker.evictTimer = null;
     }
+    // A dying worker will never acknowledge its cancel; release anyone waiting
+    // on the drain so acquireWorker cannot hang on a dead process.
+    finishDrain(worker);
     if (workers.get(model) === worker) {
       workers.delete(model);
+    }
+  }
+
+  function finishDrain(worker: Worker): void {
+    const draining = worker.draining;
+    if (!draining) return;
+    if (draining.timer) clearTimeout(draining.timer);
+    worker.draining = null;
+    draining.resolve();
+  }
+
+  // Ask the bridge to abort `requestId` and keep the worker (and its loaded
+  // model) alive. The run promise has already settled as cancelled; this only
+  // governs when the worker becomes reusable.
+  function beginDrain(model: TModel, worker: Worker, requestId: string): void {
+    finishDrain(worker);
+    let resolve!: () => void;
+    const promise = new Promise<void>((settle) => {
+      resolve = settle;
+    });
+    const timer = setTimeout(() => {
+      // The bridge never came back — it may be stuck inside an inference step
+      // that never reaches a cancel checkpoint. Fall back to killing it.
+      killWorker(model, worker);
+    }, cancelDrainMs);
+    timer.unref?.();
+    worker.draining = { requestId, timer, promise, resolve };
+  }
+
+  // Send the bridge a cancel and start draining. Falls back to killing the
+  // worker when the socket cannot carry the request, which is the only way to
+  // stop a bridge that will never hear about it.
+  function requestBridgeCancel(model: TModel, worker: Worker, requestId: string): void {
+    if (!worker.alive || !isOpen(worker.socket)) {
+      killWorker(model, worker);
+      return;
+    }
+    try {
+      worker.socket.send(JSON.stringify({ command: "cancel", requestId }));
+    } catch {
+      killWorker(model, worker);
+      return;
+    }
+    beginDrain(model, worker, requestId);
+  }
+
+  // While draining, the only frame that matters is the bridge's terminal
+  // result for the cancelled request. Progress and audio still in flight are
+  // dropped: the caller already saw the cancellation.
+  function handleDrainMessage(model: TModel, worker: Worker, data: unknown): void {
+    const draining = worker.draining;
+    if (!draining) return;
+    if (dataToArrayBuffer(data)) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(dataToText(data));
+    } catch {
+      return;
+    }
+    if (!isRecord(parsed) || parsed.type !== "result") return;
+    if (parsed.requestId !== draining.requestId) return;
+    finishDrain(worker);
+    // The worker is idle and still holding its model; restart the eviction
+    // clock that settleActive started when the run promise was rejected.
+    if (worker.alive && isOpen(worker.socket)) {
+      if (worker.evictTimer) clearTimeout(worker.evictTimer);
+      worker.evictTimer = setTimeout(() => killWorker(model, worker), idleEvictionDelay(model));
+      worker.evictTimer.unref?.();
     }
   }
 
@@ -580,13 +678,19 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
 
   function handleWebSocketMessage(model: TModel, worker: Worker, data: unknown): void {
     const active = worker.active;
-    if (!active || active.settled) return;
+    if (!active || active.settled) {
+      handleDrainMessage(model, worker, data);
+      return;
+    }
     if (cancelledRequests.has(active.requestId)) {
+      // A cancel raced the transport. Settle as cancelled, then let the drain
+      // path collect the bridge's terminal frame so the worker survives.
       settleActive(model, worker, {
         ok: false,
         error: new Error("Generation cancelled."),
       });
-      killWorker(model, worker);
+      requestBridgeCancel(model, worker, active.requestId);
+      handleDrainMessage(model, worker, data);
       return;
     }
     armIdleTimer(model, worker, active);
@@ -672,9 +776,19 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     }
 
     if (parsed.requestId !== active.requestId) {
+      // The bridge reports failures it cannot attribute to a request — an
+      // unparseable request envelope, say — with an empty id. Surface its
+      // message instead of discarding it behind an id-mismatch error.
+      const unattributed = parsed.requestId === ""
+        && (parsed.type === "result" || parsed.type === "error")
+        && parsed.ok !== true;
       settleActive(model, worker, {
         ok: false,
-        error: new Error(`WebSocket bridge returned a message for unexpected request ${parsed.requestId}.`),
+        error: new Error(
+          unattributed && typeof parsed.error === "string" && parsed.error.trim()
+            ? parsed.error
+            : `WebSocket bridge returned a message for unexpected request ${parsed.requestId}.`,
+        ),
       });
       killWorker(model, worker);
       return;
@@ -862,6 +976,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       socket: null,
       spawnKey: spawnKeyOf(spawnConfig),
       active: null,
+      draining: null,
       evictTimer: null,
       alive: true,
       exitPromise,
@@ -986,6 +1101,13 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   }
 
   async function acquireWorker(model: TModel, spawnConfig: WebSocketWorkerSpawnConfig): Promise<Worker> {
+    const draining = workers.get(model)?.draining;
+    if (draining) {
+      // Let the previous cancel finish unwinding so this request can reuse the
+      // still-loaded model. beginDrain's timer bounds the wait: if the bridge
+      // never acknowledges, it is killed and this falls through to a respawn.
+      await draining.promise;
+    }
     const existing = workers.get(model);
     const wantedKey = spawnKeyOf(spawnConfig);
     if (existing && existing.alive && existing.spawnKey === wantedKey && isOpen(existing.socket)) {
@@ -1123,13 +1245,19 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       // rejects the pending run with a cancellation error.
       if (worker.active && worker.active.requestId !== requestId) return false;
       cancelledRequests.add(requestId);
-      if (worker.active) {
-        settleActive(model, worker, {
-          ok: false,
-          error: new Error("Generation cancelled."),
-        });
+      if (!worker.active) {
+        killWorker(model, worker);
+        return true;
       }
-      killWorker(model, worker);
+      // Settle the caller immediately — Stop must feel instant — then ask the
+      // bridge to unwind rather than killing it. A killed worker drops the
+      // model it just spent seconds loading, so the next generation pays for
+      // it again; draining keeps the process warm and reusable.
+      settleActive(model, worker, {
+        ok: false,
+        error: new Error("Generation cancelled."),
+      });
+      requestBridgeCancel(model, worker, requestId);
       return true;
     },
 

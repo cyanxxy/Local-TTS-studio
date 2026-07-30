@@ -108,7 +108,7 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
           <div className="grid grid-cols-3 gap-2">
             <label className="text-xs text-text-secondary">Temperature<input aria-label="Qwen temperature" type="number" min={0.2} max={2} step={0.05} value={qwen.temperature} onChange={(event) => qwen.setTemperature(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
             <label className="text-xs text-text-secondary">Top-k<input aria-label="Qwen top-k" type="number" min={0} max={1000} step={1} value={qwen.topK} onChange={(event) => qwen.setTopK(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
-            <label className="text-xs text-text-secondary">Max tokens<input aria-label="Qwen max tokens" type="number" min={64} max={8192} step={64} value={qwen.maxNewTokens} onChange={(event) => qwen.setMaxNewTokens(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary">Max tokens<input aria-label="Qwen max tokens" type="number" min={64} max={4096} step={64} value={qwen.maxNewTokens} onChange={(event) => qwen.setMaxNewTokens(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
           </div>
         </div>
       </details>

@@ -69,10 +69,13 @@ function requestId(kind: "probe" | "generate" | "job"): string {
 
 function playbackSamples(chunk: ReceivedAudioChunk): Float32Array {
   const samples = new Float32Array(chunk.audio, 0, chunk.sampleCount);
-  const output = new Float32Array(samples.length + Math.max(0, chunk.silenceAfterSamples));
   for (let index = 0; index < samples.length; index += 1) {
-    output[index] = Number.isFinite(samples[index]) ? samples[index] : 0;
+    if (!Number.isFinite(samples[index])) samples[index] = 0;
   }
+  const trailingSilence = Math.max(0, chunk.silenceAfterSamples);
+  if (trailingSilence === 0) return samples;
+  const output = new Float32Array(samples.length + trailingSilence);
+  output.set(samples);
   return output;
 }
 
@@ -129,7 +132,10 @@ export function useQwen3LocalRuntime({
   const activeRequestRef = useRef<string | null>(null);
   const activeRequestVersionRef = useRef<number | null>(null);
   const activeProbeRef = useRef<string | null>(null);
-  const chunksRef = useRef<ReceivedAudioChunk[]>([]);
+  // Retain PCM only until an in-order chunk has been handed to the player.
+  // A Set tracks delivery without keeping a second reference to every buffer.
+  const pendingChunksRef = useRef(new Map<number, ReceivedAudioChunk>());
+  const receivedChunkIndexesRef = useRef(new Set<number>());
   const sampleRateRef = useRef<number | null>(null);
   const scheduledCountRef = useRef(0);
   const activeRequestUnitOffsetRef = useRef(0);
@@ -171,7 +177,7 @@ export function useQwen3LocalRuntime({
     generationVersion: number,
     expectedChunkCount: number,
   ): Promise<void> => {
-    if (chunksRef.current.filter(Boolean).length === expectedChunkCount) {
+    if (receivedChunkIndexesRef.current.size === expectedChunkCount) {
       return Promise.resolve();
     }
 
@@ -207,7 +213,8 @@ export function useQwen3LocalRuntime({
   }, [cancelPendingAudioDelivery]);
 
   const clearGeneratedResult = useCallback(() => {
-    chunksRef.current = [];
+    pendingChunksRef.current.clear();
+    receivedChunkIndexesRef.current.clear();
     sampleRateRef.current = null;
     scheduledCountRef.current = 0;
     activeRequestUnitOffsetRef.current = 0;
@@ -363,23 +370,26 @@ export function useQwen3LocalRuntime({
       if (!mountedRef.current || event.model !== LOCAL_MODEL || event.requestId !== activeRequestRef.current) return;
       if (activeRequestVersionRef.current !== generationVersionRef.current) return;
       if (event.sampleCount <= 0 || event.audio.byteLength !== event.sampleCount * Float32Array.BYTES_PER_ELEMENT) return;
-      if (event.index === 0 || sampleRateRef.current !== event.sampleRate) {
-        chunksRef.current = [];
+      if (sampleRateRef.current !== event.sampleRate) {
+        pendingChunksRef.current.clear();
+        receivedChunkIndexesRef.current.clear();
         sampleRateRef.current = event.sampleRate;
         scheduledCountRef.current = 0;
       }
-      chunksRef.current[event.index] = {
-        audio: event.audio,
-        sampleCount: event.sampleCount,
-        silenceAfterSamples: event.silenceAfterSamples,
-        textUnitIndex: event.textUnitIndex,
-        textUnitTotal: event.textUnitTotal,
-      };
-      const contiguous = chunksRef.current.slice(0, event.index + 1).filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
-      if (contiguous.length !== event.index + 1) return;
-      while (scheduledCountRef.current < contiguous.length) {
+      if (!receivedChunkIndexesRef.current.has(event.index)) {
+        receivedChunkIndexesRef.current.add(event.index);
+        pendingChunksRef.current.set(event.index, {
+          audio: event.audio,
+          sampleCount: event.sampleCount,
+          silenceAfterSamples: event.silenceAfterSamples,
+          textUnitIndex: event.textUnitIndex,
+          textUnitTotal: event.textUnitTotal,
+        });
+      }
+      while (pendingChunksRef.current.has(scheduledCountRef.current)) {
         const index = scheduledCountRef.current++;
-        const chunk = contiguous[index];
+        const chunk = pendingChunksRef.current.get(index)!;
+        pendingChunksRef.current.delete(index);
         const reportedUnitIndex = chunk.textUnitIndex
           ?? (event.total > 0 ? index : activeRequestUnitCountRef.current === 1 ? 0 : index);
         const localTextUnitIndex = Math.min(
@@ -410,7 +420,7 @@ export function useQwen3LocalRuntime({
         pending
         && pending.requestId === event.requestId
         && pending.generationVersion === generationVersionRef.current
-        && chunksRef.current.filter(Boolean).length === pending.expectedChunkCount
+        && receivedChunkIndexesRef.current.size === pending.expectedChunkCount
       ) {
         settlePendingAudioDelivery();
       }
@@ -529,7 +539,8 @@ export function useQwen3LocalRuntime({
 
           const activateRequest = (nextId: string, progressMessage: string) => {
             id = nextId;
-            chunksRef.current = [];
+            pendingChunksRef.current.clear();
+            receivedChunkIndexesRef.current.clear();
             scheduledCountRef.current = 0;
             activeRequestRef.current = nextId;
             activeRequestVersionRef.current = version;
@@ -687,16 +698,38 @@ export function useQwen3LocalRuntime({
   ]);
 
   const handleStop = useCallback(() => {
+    const hasActiveGeneration = generateBusy || activeRequestRef.current !== null;
+    if (!hasActiveGeneration) {
+      // Finished audio belongs to the player until an explicit reset or a new
+      // generation. Stopping playback must not throw that work away.
+      stopAll();
+      return;
+    }
+
     generationVersionRef.current += 1;
     cancelPendingAudioDelivery();
-    cancelActiveGeneration();
+    if (activeRequestRef.current) cancelActiveGeneration();
+    else stopAll();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
+    pendingChunksRef.current.clear();
+    receivedChunkIndexesRef.current.clear();
+    sampleRateRef.current = null;
+    scheduledCountRef.current = 0;
+    pendingProgressRef.current = null;
+    cancelProgressFlushRef.current?.();
+    cancelProgressFlushRef.current = null;
     endStream();
-    clearGeneratedResult();
+    setProgress(null);
     setGenerateBusy(false);
     setError(null);
-  }, [cancelActiveGeneration, cancelPendingAudioDelivery, clearGeneratedResult, endStream]);
+  }, [
+    cancelActiveGeneration,
+    cancelPendingAudioDelivery,
+    endStream,
+    generateBusy,
+    stopAll,
+  ]);
 
   return {
     modelState,

@@ -55,33 +55,13 @@ jobs:
         with:
           workspaces: rust/local-tts-bridge
           env-vars: CARGO_TARGET_DIR MACOSX_DEPLOYMENT_TARGET
-          # llama-cpp-sys keeps its CMake outputs beside Cargo's normal build
-          # artifacts. rust-cache cleans unknown target entries before saving,
-          # so cache these dylibs explicitly and bump the key whenever this
-          # native-cache contract changes.
+          # llama-cpp-sys keeps shared CMake dylibs in a non-Cargo directory
+          # inside target. rust-cache prunes non-dependency target entries before
+          # saving, which can otherwise restore an rlib whose linked dylibs are
+          # missing. Cache the CMake tree explicitly, but rebuild Cargo artifacts.
+          cache-targets: false
           cache-directories: rust/local-tts-bridge/target/llama-cmake-cache
-          key: llama-native-v1
-      - name: Repair incomplete llama.cpp native cache
-        shell: bash
-        run: |
-          llama_cache="$CARGO_TARGET_DIR/llama-cmake-cache"
-          cached_llama_rlib="$(find "$CARGO_TARGET_DIR/release/deps" \
-            -maxdepth 1 \
-            -name 'libllama_cpp_sys_4-*.rlib' \
-            -print \
-            -quit 2>/dev/null || true)"
-          cached_ggml_dylib="$(find "$llama_cache" \
-            -type f \
-            -name 'libggml-base*.dylib' \
-            -print \
-            -quit 2>/dev/null || true)"
-          if [[ -n "$cached_llama_rlib" && -z "$cached_ggml_dylib" ]]; then
-            echo "Restored llama-cpp-sys artifacts without their native dylibs; rebuilding that dependency."
-            rm -rf "$llama_cache"
-            cargo clean \
-              --manifest-path rust/local-tts-bridge/Cargo.toml \
-              -p llama-cpp-sys-4
-          fi
+          key: llama-cmake-only-v2
       - run: npm ci
       - name: Build bridge and run Rust checks
         shell: bash

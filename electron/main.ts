@@ -23,6 +23,7 @@ import {
   importDocumentFromDialog,
   type DocumentParser,
 } from "./documentImport";
+import { DocumentParseWorkerClient } from "./documentParseWorkerClient";
 import { importRemoteDocument } from "./urlImport";
 import { createGenerateRateLimiter } from "./generateRateLimiter";
 import { runHfXetDownloader } from "./hfXetDownload";
@@ -119,6 +120,10 @@ const GENERATE_RATE_WINDOW_MS = 500;
 // worker is killed after this much idle time to release model memory; the next
 // request transparently respawns it.
 const RUST_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
+// Qwen's MLX/Metal backend has a much larger working set than the CPU-oriented
+// local runtimes. Keep its warm-start grace short so macOS can reclaim unified
+// memory promptly after the user finishes a generation.
+const QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS = 60 * 1000;
 // Local runtimes use the resident WebSocket worker for generation
 // instead of the legacy stdout line-framed subprocess protocol. There is
 // intentionally no stdout fallback for models in this set; generation is
@@ -156,6 +161,7 @@ let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
 const qwen3DownloadAbortController = new AbortController();
 const activeQwenModelDownloads = new Set<Promise<unknown>>();
 let readerLibraryWorker: ReaderLibraryWorkerClient | null = null;
+let documentParser: DocumentParseWorkerClient | null = null;
 // Tracked apart from `bridgeShuttingDown`: the quit asks every renderer to
 // flush its debounced Reader writes first, so `reader-library:*` has to keep
 // working after the local runtime has already been told to stop.
@@ -337,7 +343,11 @@ function getWebSocketBridgeWorkers(): WebSocketBridgeWorkerPool<LocalModel> {
   assertBridgeAcceptingRequests();
   if (!webSocketBridgeWorkers) {
     webSocketBridgeWorkers = createWebSocketBridgeWorkerPool<LocalModel>({
-      idleEvictMs: RUST_BRIDGE_WORKER_IDLE_EVICT_MS,
+      idleEvictMs: (model) => (
+        model === "qwen3"
+          ? QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS
+          : RUST_BRIDGE_WORKER_IDLE_EVICT_MS
+      ),
       killGraceMs: RUST_CANCEL_KILL_AFTER_MS,
       spawn: (model, { bridgeBinary, cacheDir, env, authToken, host, port }) =>
         spawn(
@@ -686,65 +696,21 @@ async function handleChooseQwen3ModelDir(request: unknown): Promise<{
   };
 }
 
-// LiteParse ships ESM-only exports (no "require" condition), so the CommonJS
-// main process must load it through a real dynamic import. A literal import()
-// here would be transpiled to require() by the CJS TypeScript build, hence the
-// Function-constructor indirection. Loaded lazily so app startup never pays the
-// native-addon load cost, and cached because the module keeps no per-parse state.
-const dynamicImport = new Function("specifier", "return import(specifier)") as (
-  specifier: string,
-) => Promise<{ LiteParse: new (config?: Record<string, unknown>) => LiteParseInstance }>;
-
-interface LiteParseInstance {
-  parse: (input: string) => Promise<{ text: string; pages: unknown[] }>;
-}
-
-let liteParseDocumentParser: Promise<DocumentParser> | null = null;
-
-// OCR of a large scanned document is unbounded CPU work in the parser's native
-// thread pool; without a deadline the renderer's Import button would spin
-// forever on a wedged parse. The native work is not cancellable — the deadline
-// only unblocks the UI.
+// OCR and document conversion run in a one-shot worker thread. Terminating the
+// worker at the deadline stops native parser CPU work as well as unblocking the
+// renderer, and releasing it after each import prevents LiteParse/native state
+// from becoming part of the Electron main process's permanent footprint.
 const IMPORT_PARSE_TIMEOUT_MS = 5 * 60 * 1000;
 
-function withImportDeadline<T>(work: Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error("Import timed out after 5 minutes."));
-    }, IMPORT_PARSE_TIMEOUT_MS);
-    timer.unref();
-    work.then(
-      (value) => { clearTimeout(timer); resolve(value); },
-      (error) => { clearTimeout(timer); reject(error instanceof Error ? error : new Error(String(error))); },
-    );
-  });
-}
-
 function getLiteParseDocumentParser(): Promise<DocumentParser> {
-  if (!liteParseDocumentParser) {
-    const pending = dynamicImport("@llamaindex/liteparse").then(({ LiteParse }) => {
-      const parser = new LiteParse({
-        outputFormat: "text",
-        quiet: true,
-        maxPages: MAX_IMPORT_PAGES,
-      });
-      return {
-        parse: async (filePath: string) => {
-          const result = await withImportDeadline(parser.parse(filePath));
-          return { text: result.text, pageCount: result.pages.length };
-        },
-      };
-    });
-    pending.catch(() => {
-      // Reset so a transient load failure (e.g. missing platform addon) can
-      // retry on the next import instead of caching the rejection forever.
-      if (liteParseDocumentParser === pending) {
-        liteParseDocumentParser = null;
-      }
-    });
-    liteParseDocumentParser = pending;
+  if (!documentParser) {
+    documentParser = new DocumentParseWorkerClient(
+      path.join(__dirname, "documentParseWorker.js"),
+      IMPORT_PARSE_TIMEOUT_MS,
+      MAX_IMPORT_PAGES,
+    );
   }
-  return liteParseDocumentParser;
+  return Promise.resolve(documentParser);
 }
 
 function terminateBridgeChild(child: ChildProcessWithoutNullStreams): void {
@@ -1366,6 +1332,8 @@ app.on("before-quit", (event) => {
   } else {
     readerLibraryShuttingDown = true;
   }
+  documentParser?.close();
+  documentParser = null;
   qwen3DownloadAbortController.abort();
   for (const requestId of activeBridgeRequestOwners.keys()) {
     cancelledBridgeRequests.add(requestId);

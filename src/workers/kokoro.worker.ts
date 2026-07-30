@@ -77,6 +77,12 @@ function invalidateActiveGeneration(): void {
   activeGenerationEpoch += 1;
 }
 
+function hardCancelGeneration(): void {
+  invalidateActiveGeneration();
+  post({ type: "CANCELLED" });
+  self.close();
+}
+
 function isGenerationCurrent(generationEpoch: number): boolean {
   return activeGenerationEpoch === generationEpoch;
 }
@@ -481,7 +487,7 @@ self.onmessage = (e: MessageEvent<WorkerInMessage>) => {
       );
       break;
     case "CANCEL":
-      invalidateActiveGeneration();
+      hardCancelGeneration();
       break;
   }
 };

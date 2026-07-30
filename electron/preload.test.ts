@@ -15,6 +15,7 @@ interface StreamPort {
 }
 
 interface ReaderLibraryBridge {
+  saveAudio: (audio: unknown) => Promise<void>;
   getAudio: (documentId: string, sectionId: string) => Promise<unknown>;
   subscribeFlushRequests: (listener: () => Promise<void> | void) => () => void;
 }
@@ -121,6 +122,55 @@ describe("preload reader audio stream", () => {
     expect(audio.documentId).toBe("doc");
     expect(audio.chunks.map((chunk) => chunk.index)).toEqual([0, 1, 2]);
     expect(audio.chunks.map((chunk) => new Float32Array(chunk.audio)[0])).toEqual([0, 1, 2]);
+  });
+
+  it("transfers one persistence copy without detaching the renderer source", async () => {
+    ipcPostMessage.mockClear();
+    const source = new Float32Array([0.25, -0.5]).buffer;
+    const result = exposed.readerLibrary!.saveAudio({
+      cacheKey: "cache",
+      documentId: "doc",
+      chapterId: "chapter",
+      sectionId: "section-1",
+      signature: "signature",
+      byteLength: source.byteLength,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      updatedAt: 1,
+      chunks: [{
+        audio: source,
+        samplingRate: 24_000,
+        text: "Spoken text.",
+        index: 0,
+        total: 1,
+      }],
+    });
+    const [channel, , transfer] = ipcPostMessage.mock.calls[0] as [string, unknown, StreamPort[]];
+    expect(channel).toBe("reader-library:save-audio-stream");
+    const port = transfer[0];
+    openPorts.push(port);
+
+    const received: number[][] = [];
+    port.onmessage = (event) => {
+      const message = event.data as {
+        type?: unknown;
+        order?: number;
+        chunk?: { audio?: ArrayBuffer };
+      };
+      if (message.type === "chunk" && message.chunk?.audio) {
+        received.push([...new Float32Array(message.chunk.audio)]);
+        port.postMessage({ type: "accepted", order: message.order });
+      } else if (message.type === "end") {
+        port.postMessage({ type: "result", ok: true });
+      }
+    };
+    port.postMessage({ type: "ready" });
+
+    await result;
+    expect(received).toEqual([[0.25, -0.5]]);
+    expect(source.byteLength).toBe(Float32Array.BYTES_PER_ELEMENT * 2);
+    expect([...new Float32Array(source)]).toEqual([0.25, -0.5]);
   });
 
   it("rejects a chunk larger than the per-chunk stream limit", async () => {

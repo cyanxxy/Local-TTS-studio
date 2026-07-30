@@ -2,6 +2,7 @@ import * as ort from "onnxruntime-web";
 import { describe, expect, it, vi } from "vitest";
 import {
   createSupertonic3Runtime,
+  createSupertonic3RuntimeStreaming,
   normalizeSupertonic3Text,
   Supertonic3Runtime,
 } from "./supertonic3Runtime";
@@ -96,6 +97,48 @@ describe("Supertonic 3 runtime resources", () => {
     await expect(createSupertonic3Runtime(config, [], models, "wasm"))
       .rejects.toThrow("second model failed");
     expect(release).toHaveBeenCalledOnce();
+    create.mockRestore();
+  });
+
+  it("loads and instantiates model files one at a time", async () => {
+    const events: string[] = [];
+    const createdSessions = [0, 1, 2, 3].map(() => session(async () => ({})));
+    const create = vi.spyOn(ort.InferenceSession, "create")
+      .mockImplementation(async (buffer) => {
+        const bytes = buffer instanceof Uint8Array
+          ? buffer
+          : new Uint8Array(buffer as unknown as ArrayBuffer);
+        events.push(`create:${bytes[0]}`);
+        return createdSessions.shift()!;
+      });
+    const modelIds = {
+      duration_predictor: 1,
+      text_encoder: 2,
+      vector_estimator: 3,
+      vocoder: 4,
+    } as const;
+
+    const runtime = await createSupertonic3RuntimeStreaming(
+      config,
+      [],
+      async (name) => {
+        events.push(`load:${name}`);
+        return new Uint8Array([modelIds[name]]).buffer;
+      },
+      "wasm",
+    );
+
+    expect(events).toEqual([
+      "load:duration_predictor",
+      "create:1",
+      "load:text_encoder",
+      "create:2",
+      "load:vector_estimator",
+      "create:3",
+      "load:vocoder",
+      "create:4",
+    ]);
+    await runtime.dispose();
     create.mockRestore();
   });
 });

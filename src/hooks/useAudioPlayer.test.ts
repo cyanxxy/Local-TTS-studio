@@ -195,6 +195,9 @@ describe("useAudioPlayer", () => {
       });
     });
     const snapshot = result.current.getAudioCacheSnapshot();
+    expect(snapshot[0].audio).toBe(
+      (result.current.getAudioCacheSnapshot()[0].audio),
+    );
     expect([...new Float32Array(snapshot[0].audio)]).toEqual([0.25, -0.5, 0.75, 0]);
 
     act(() => {
@@ -212,6 +215,7 @@ describe("useAudioPlayer", () => {
       startSec: 0,
       endSec: 1,
     });
+    expect(result.current.getAudioCacheSnapshot()[0].audio).toBe(snapshot[0].audio);
     expect(result.current.isPlaying).toBe(false);
   });
 

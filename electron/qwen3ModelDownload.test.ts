@@ -328,11 +328,17 @@ describe("download stream integrity", () => {
     const destination = path.join(makeTempDir(), "model.safetensors");
     const stalled = new Readable({ read() {} }) as unknown as IncomingMessage;
     Object.assign(stalled, { statusCode: 200, headers: {} });
+    const dataListenerAttached = new Promise<void>((resolve) => {
+      const handleNewListener = (eventName: string | symbol) => {
+        if (eventName !== "data") return;
+        stalled.off("newListener", handleNewListener);
+        resolve();
+      };
+      stalled.on("newListener", handleNewListener);
+    });
     const promise = downloadHuggingFaceFile(url, destination, () => {}, () => Promise.resolve(stalled));
     promise.catch(() => undefined);
-    for (let index = 0; index < 100 && stalled.listenerCount("data") === 0; index += 1) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+    await dataListenerAttached;
     expect(stalled.listenerCount("data")).toBeGreaterThan(0);
     await vi.advanceTimersByTimeAsync(IDLE_DOWNLOAD_TIMEOUT_MS + 1);
     await expect(promise).rejects.toThrow(/stalled/);

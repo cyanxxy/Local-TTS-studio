@@ -19,7 +19,7 @@ Browser-native neural speech synthesis through WebGPU, plus optional Electron de
 [![Electron 42](https://img.shields.io/badge/Electron-42-47848F?style=flat-square&logo=electron&logoColor=white)](https://www.electronjs.org)
 [![Rust](https://img.shields.io/badge/Rust-local%20bridge-B7410E?style=flat-square&logo=rust&logoColor=white)](https://www.rust-lang.org)
 
-[Quick Start](#quick-start) · [Downloads](#desktop-downloads) · [Changelog](./CHANGELOG.md) · [Screenshots](#screenshots) · [Capabilities](#capabilities) · [Models](#models) · [Settings](#app-settings) · [Shortcuts](#keyboard-shortcuts) · [Docs](#documentation)
+[Quick Start](#quick-start) · [Releases](#releases-and-desktop-packaging) · [Changelog](./CHANGELOG.md) · [Screenshots](#screenshots) · [Capabilities](#capabilities) · [Models](#models) · [Settings](#app-settings) · [Shortcuts](#keyboard-shortcuts) · [Docs](#documentation)
 
 </div>
 
@@ -169,17 +169,22 @@ Use the top-right Settings button to choose the theme, accent, interface size, i
 | `npm run test:rust` | Rust bridge unit tests |
 | `npm run eval:inference` | Reproducible inference-speed benchmark (see [docs](./docs/performance.md)) |
 
-Packaged desktop builds bundle the Electron shell, the Rust local bridge, and its scoped Xet download helper. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the build makes both Rust executables self-contained — their native libraries are bundled into `dist-rust/` and relinked to `@rpath` — so they run without Homebrew. Current tagged releases contain unsigned macOS 26 Apple Silicon builds; Windows packages remain available only through custom builds. There is no adapter script, interpreter discovery, or managed virtual environment setup; see [local runtime setup](./docs/local-runtimes.md).
+Packaged desktop builds bundle the Electron shell, the Rust local bridge, and its scoped Xet download helper. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the build makes both Rust executables self-contained — their native libraries are bundled into `dist-rust/` and relinked to `@rpath` — so they run without Homebrew. Tagged releases are source-only; macOS and Windows packages remain local build outputs. There is no adapter script, interpreter discovery, or managed virtual environment setup; see [local runtime setup](./docs/local-runtimes.md).
 
 ---
 
-## Desktop Downloads
+## Releases and Desktop Packaging
 
-Installers are attached to the [latest GitHub Release](https://github.com/cyanxxy/Local-TTS-studio/releases/latest):
+The [latest GitHub Release](https://github.com/cyanxxy/Local-TTS-studio/releases/latest)
+contains the tagged source archive and curated release notes. Open TTS does not
+publish unsigned desktop installers.
 
-- **macOS 26+ on Apple Silicon:** unsigned DMG, plus an unsigned ZIP build.
-
-These builds are not signed or notarized. macOS may require Control-clicking the app, choosing **Open**, and confirming the security prompt on first launch. Model weights are not bundled; the app downloads the selected model on first use and verifies its pinned revision. Intel Macs, Windows, and Linux are not attached to GitHub Releases. Release maintainers can find the packaging and tagging procedure in [Desktop release process](./docs/releasing.md).
+Developers can create local packages with `npm run dist:mac` on Apple Silicon
+macOS 26+ or `npm run dist:win` on Windows x64 with a compatible LibTorch 2.7.0
+installation. These local builds are unsigned and unnotarized, do not bundle
+model weights, and are not attached to GitHub Releases. See the
+[release process](./docs/releasing.md) for the source-release workflow and local
+packaging checks.
 
 ---
 
@@ -227,7 +232,14 @@ Shortcuts work while Open TTS is the active application. Space remains normal te
 
 ## Document Import
 
-The desktop app adds an **Import** button to Studio and Reader. [LiteParse](https://www.llamaindex.ai/liteparse) handles PDF, Office/OpenDocument, and image extraction in the Electron main process. Plain text is read directly, while EPUB and HTML structure is parsed in the renderer. Reader can also extract an article from a URL.
+The desktop app adds an **Import** button to Studio and Reader. Electron's main
+process owns the native file dialog and bounded import IPC, while
+[LiteParse](https://www.llamaindex.ai/liteparse) handles PDF,
+Office/OpenDocument, and image extraction in a one-shot worker thread. The
+worker is terminated after completion or at the five-minute deadline, so parser
+CPU work and native state do not live in the Electron main process. Plain text
+is read directly, while EPUB and HTML structure is parsed in the renderer.
+Reader can also extract an article from a URL.
 
 | Format | Extensions / source | Availability | Processing path |
 |---|---|---|---|
@@ -337,7 +349,7 @@ src/
 - [Architecture](./docs/architecture.md) — source map, worker protocol, and audio path
 - [Local persistence](./docs/storage.md) — Reader library storage on web and desktop
 - [Desktop local runtimes](./docs/local-runtimes.md) — Rust bridge protocol, setup, and troubleshooting
-- [Desktop release process](./docs/releasing.md) — unsigned macOS packaging and tagging
+- [Release process](./docs/releasing.md) — source releases and local desktop packaging
 - [Performance benchmarks](./docs/performance.md) — reproducible inference-speed eval
 - [Design system](./docs/design-system.md) — tokens, typography, and color
 

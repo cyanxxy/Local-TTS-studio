@@ -16,7 +16,7 @@ This document keeps maintainer-facing architecture details out of the top-level 
 ## Source Map
 
 ```text
-electron/        Desktop shell, custom protocol, preload bridge, runtime helpers
+electron/        Desktop shell, custom protocol, preload bridge, runtime helpers and native workers
 rust/            Rust local bridge plus the scoped Hugging Face Xet download helper
 src/
 |-- apps/
@@ -47,6 +47,19 @@ Worker -> Main:  LOAD_PROGRESS, READY, AUDIO_CHUNK, GENERATION_COMPLETE, ERROR
 ```
 
 Workers are created at startup and load models lazily on selection.
+
+## Desktop Document Import
+
+Desktop import crosses three bounded ownership layers. The renderer asks through
+the preload bridge; Electron's main process owns the native file dialog, validates
+the request, reads direct-text formats, and returns the result over IPC. Formats
+that require LiteParse (PDF, Office/OpenDocument, and images) are delegated by
+`DocumentParseWorkerClient` to the one-shot `documentParseWorker` worker thread.
+That worker dynamically loads LiteParse, performs conversion/OCR, and returns only
+bounded text plus a page count. The client terminates it after success, failure,
+shutdown, or the five-minute deadline, keeping parser CPU work and native parser
+state out of the long-lived main process. EPUB bytes are transferred to the
+renderer, where archive and document structure are parsed under separate limits.
 
 ## Browser Audio Path
 

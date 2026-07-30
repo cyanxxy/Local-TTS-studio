@@ -431,7 +431,7 @@ export function sanitizeQwen3Payload(
 
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
   const topK = parseOptionalInteger(payload.topK, "topK", { min: 0, max: 1000 });
-  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 8192 });
+  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 4096 });
   const resolvedSpeaker = mode === "customVoice" ? speaker ?? QWEN3_DEFAULT_SPEAKER : speaker;
   const resolvedLanguage = mode === "customVoice" ? language ?? QWEN3_DEFAULT_LANGUAGE : language;
 

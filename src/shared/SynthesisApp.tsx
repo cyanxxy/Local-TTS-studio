@@ -1,4 +1,4 @@
-import { lazy, Suspense, useState, useCallback, useEffect, useMemo, useRef } from "react";
+import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Settings2 } from "lucide-react";
 import type { ChunkPauseKind, ModelType } from "../types";
 import { MIN_TEXT_LENGTH } from "../constants";
@@ -188,6 +188,34 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     return true;
   }), [preferences.showNeuTTS, preferences.showQwen3TTS, qwen3Settings.available, routeTabs]);
 
+  /* ── Page tab indicator ───────────────────────────────────── */
+  // Tab widths follow their labels and the row reflows between grid and inline
+  // layouts, so the travelling pill is measured rather than computed from an
+  // index. `animate` stays false until the first measurement lands, otherwise
+  // the pill would slide in from the left edge on the very first paint.
+  const pageTabsRef = useRef<HTMLElement>(null);
+  const [pageTabIndicator, setPageTabIndicator] = useState({ left: 0, width: 0, animate: false });
+
+  useLayoutEffect(() => {
+    const nav = pageTabsRef.current;
+    if (!nav) return;
+    const measure = () => {
+      const active = nav.querySelector<HTMLElement>("[data-page-tab][aria-current='page']");
+      if (!active) return;
+      setPageTabIndicator((previous) => {
+        const left = active.offsetLeft;
+        const width = active.offsetWidth;
+        if (previous.left === left && previous.width === width) return previous;
+        return { left, width, animate: previous.width > 0 };
+      });
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(nav);
+    for (const tab of nav.querySelectorAll("[data-page-tab]")) observer.observe(tab);
+    return () => observer.disconnect();
+  }, [activePage, availableTabs, isReaderPage]);
+
   const [text, setText] = useState(initialState.text);
   const [activeModel, setActiveModel] = useState<ModelType>(() => (
     isModelSupportedInBrowser(initialState.model, browserSupport)
@@ -205,9 +233,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(null);
   const [supertonic3Voice, setSupertonic3Voice] = useState("M1");
   const [supertonic3Language, setSupertonic3Language] = useState("en");
-  const [visitedLocalRuntimePages, setVisitedLocalRuntimePages] = useState<Set<LocalRuntimePageKey>>(
-    () => (enableDesktopRuntimes && isLocalRuntimePage(activePage) ? new Set([activePage]) : new Set()),
-  );
   const readerLibrary = useReaderLibrary(initialState.text);
   // Quitting holds the window open while the Reader worker drains, so a cache
   // write that loses that race is expected and must not surface as an error.
@@ -308,28 +333,30 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     if (activePage === "qwen3") navigateToPage("studio");
   }, [activePage, navigateToPage, qwen3Settings.available]);
 
-  const {
-    kokoroState,
-    supertonicState,
-    kokoroWorker,
-    supertonicWorker,
-    kokoroVoices,
-    loadModel,
-    reloadModel,
-  } = useModelLoader(activeModel, {
-    enabled: localInferenceSupported,
-    preferredSupertonicVoice: voicesByModel.supertonic,
-    debugProfiling,
-    supportedModels: browserSupport.supportedModels,
-  });
-
-  const player = useAudioPlayer();
   const isReaderUsingQwen3 = isReaderPage && readerDesktopModel === "qwen3";
   const isStudioUsingQwen3 = isStudioPage && studioDesktopModel === "qwen3";
   const isReaderUsingSupertonic3 = isReaderPage && readerDesktopModel === "supertonic3";
   const isStudioUsingSupertonic3 = isStudioPage && studioDesktopModel === "supertonic3";
   const isUsingQwen3Inline = isReaderUsingQwen3 || isStudioUsingQwen3;
   const isUsingSupertonic3Inline = isReaderUsingSupertonic3 || isStudioUsingSupertonic3;
+
+  const {
+    kokoroState,
+    supertonicState,
+    kokoroWorker,
+    supertonicWorker,
+    kokoroVoices,
+    hardRestartModel,
+    loadModel,
+    reloadModel,
+  } = useModelLoader(activeModel, {
+    enabled: localInferenceSupported && !isUsingQwen3Inline && !isUsingSupertonic3Inline,
+    preferredSupertonicVoice: voicesByModel.supertonic,
+    debugProfiling,
+    supportedModels: browserSupport.supportedModels,
+  });
+
+  const player = useAudioPlayer();
   // The SHA-256 is calculated asynchronously from the selected file once.
   // Avoid re-scanning a potentially 60 MB Base64 string on the render thread.
   const qwenReferenceAudioSignature = qwen3Settings.profile.mode === "voiceClone"
@@ -446,6 +473,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     activeModel,
     canGenerate,
     generationSettings: creator.generationSettings,
+    hardRestartModel,
     kokoroWorker,
     supertonicWorker,
     player,
@@ -803,27 +831,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     };
   }, [localInferenceSupported]);
 
-  const rememberLocalRuntimePage = useCallback((page: LocalRuntimePageKey) => {
-    if (!enableDesktopRuntimes) return;
-
-    setVisitedLocalRuntimePages((prev) => {
-      if (prev.has(page)) return prev;
-      const next = new Set(prev);
-      next.add(page);
-      return next;
-    });
-  }, [enableDesktopRuntimes]);
-
   const handlePageNavigation = useCallback((page: AppPage) => {
     if (isReaderPage && page !== "reader") flushReaderAudioRef.current();
-    if (enableDesktopRuntimes && isLocalRuntimePage(activePage)) {
-      rememberLocalRuntimePage(activePage);
-    }
-    if (enableDesktopRuntimes && isLocalRuntimePage(page)) {
-      rememberLocalRuntimePage(page);
-    }
     navigateToPage(page);
-  }, [activePage, enableDesktopRuntimes, isReaderPage, navigateToPage, rememberLocalRuntimePage]);
+  }, [isReaderPage, navigateToPage]);
 
   const selectInlineDesktopModel = useCallback((
     page: InlineDesktopModelKey,
@@ -906,14 +917,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   }, [handleReaderDesktopModelSelect, qwen3ProviderDetail, qwen3Settings.available, readerDesktopModel, supertonic3Available, supertonic3Language, supertonic3Voice]);
 
   const mountedLocalRuntimePages = useMemo(() => {
-    if (!enableDesktopRuntimes) return [];
-
-    const pages = new Set(visitedLocalRuntimePages);
-    if (isLocalRuntimePage(activePage)) {
-      pages.add(activePage);
-    }
-    return LOCAL_RUNTIME_PAGE_KEYS.filter((page) => pages.has(page));
-  }, [activePage, enableDesktopRuntimes, visitedLocalRuntimePages]);
+    if (!enableDesktopRuntimes || !isLocalRuntimePage(activePage)) return [];
+    // Local runtime pages own model/audio buffers and an active native request.
+    // Unmounting the inactive page releases those resources immediately instead
+    // of retaining every runtime visited during the session.
+    return [activePage];
+  }, [activePage, enableDesktopRuntimes]);
 
   const isUsingWasmFallback = currentModelState.ready && currentModelState.backend === "wasm";
 
@@ -1579,21 +1588,39 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
             </div>
           </div>
 
-          {/* Page navigation */}
-          <nav className={`${isReaderPage ? "mt-4" : "mt-6 lg:mt-8"} grid w-full grid-cols-2 gap-1 rounded-2xl glass p-1 sm:inline-flex sm:w-auto`}>
+          {/* Page navigation. One pill travels between the tabs instead of
+              blinking out of one and into the next. */}
+          <nav
+            ref={pageTabsRef}
+            className={`${isReaderPage ? "mt-4" : "mt-6 lg:mt-8"} relative grid w-full grid-cols-2 gap-1 rounded-2xl glass p-1 sm:inline-flex sm:w-auto`}
+          >
+            <span
+              aria-hidden
+              className={`pointer-events-none absolute inset-y-1 left-0 rounded-xl bg-panel shadow-glass-sm ${
+                pageTabIndicator.animate
+                  ? "transition-[transform,width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                  : ""
+              } ${pageTabIndicator.width > 0 ? "opacity-100" : "opacity-0"}`}
+              style={{
+                transform: `translateX(${pageTabIndicator.left}px)`,
+                width: pageTabIndicator.width,
+              }}
+            />
             {availableTabs.map((tab) => (
               <a
                 key={tab.key}
                 href={getPagePath(tab.key, routeBasePath)}
+                data-page-tab={tab.key}
+                aria-current={activePage === tab.key ? "page" : undefined}
                 onClick={(event) => {
                   event.preventDefault();
                   handlePageNavigation(tab.key);
                 }}
-                className={`relative px-5 py-2 text-base font-semibold transition-all duration-200 rounded-xl ${
+                className={`relative z-10 rounded-xl px-5 py-2 text-center text-base font-semibold transition-colors duration-200 active:scale-[0.98] ${
                   activePage === tab.key
-                    ? "bg-panel text-text-primary shadow-glass-sm"
-                    : "text-text-muted hover:text-text-secondary hover:bg-white/50"
-                } text-center`}
+                    ? "text-text-primary"
+                    : "text-text-muted hover:text-text-secondary"
+                }`}
               >
                 {tab.label}
               </a>
@@ -1611,6 +1638,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           </div>
         )}
 
+        {/* Studio and Reader swap in place. Keying the wrapper on the page
+            replays the fade; the animation is opacity-only so the Reader's
+            fixed player dock keeps the viewport as its containing block. */}
+        <div key={activePage} className="animate-page-swap">
         {/* Studio page */}
         {isStudioPage ? (
           localInferenceSupported ? (
@@ -1751,7 +1782,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               activeSection={activeReaderSection}
               previousSection={previousReaderSection}
               nextSection={nextReaderSection}
-              totalSectionCount={readerSections.length}
               onNavigateToOffset={handleReaderNavigateToOffset}
               viewPreferences={readerViewPreferences}
               onViewPreferencesChange={updateReaderViewPreferences}
@@ -1780,6 +1810,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onModelChange={handleReaderModelChange}
               desktopModelOptions={readerDesktopModelOptions}
               desktopQwenMode={isReaderUsingQwen3 ? qwen3Settings.profile.mode : undefined}
+              estimatedWordTrackingStable={!isReaderUsingQwen3 || !readerGenerationBusy}
               desktopVoiceLabel={isReaderUsingQwen3
                 ? qwen3Settings.profile.mode === "customVoice"
                   ? qwen3Settings.speaker.replace(/_/g, " ")
@@ -1836,6 +1867,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
             </Suspense>
           ) : browserSupportPanel
         ) : null}
+        </div>
 
         {mountedLocalRuntimePages.map((page) => {
           const config = LOCAL_RUNTIME_PAGE_CONFIG[page];

@@ -1467,6 +1467,16 @@ pub struct TTSInference {
     device: Device,
 }
 
+/// Conditioning for one instruct-style request, ready to hand to the talker.
+struct InstructPrompt {
+    input_embeddings: Tensor,
+    tts_pad_embed: Tensor,
+    codec_eos_id: i64,
+    /// VoiceDesign keeps stdout quiet: it runs in the resident bridge, whose
+    /// stdout carries the port announcement and diagnostics.
+    voice_design: bool,
+}
+
 impl TTSInference {
     /// Create a new TTS inference engine.
     pub fn new(model_path: &Path, device: Device) -> Result<Self> {
@@ -1614,9 +1624,11 @@ impl TTSInference {
 
         let vocoder = self.vocoder.as_ref()?;
         let codes_tensor = self.codes_to_vocoder_tensor(codes, 2048);
-        println!("Streaming codes tensor shape: {:?}", codes_tensor.size());
+        // Deliberately silent: this runs once per streamed chunk, and the
+        // resident bridge's stdout is a bounded diagnostic buffer whose
+        // overflow kills the worker. Per-chunk shape dumps would exhaust it on
+        // a long generation.
         let audio_tensor = vocoder.decode_streaming(&codes_tensor, state);
-        println!("Streaming vocoder output shape: {:?}", audio_tensor.size());
         let audio_len = audio_tensor.numel();
         Some(audio_tensor.view(&[audio_len]).to_vec_f32())
     }
@@ -1843,17 +1855,16 @@ impl TTSInference {
     ///     2048,
     /// )?;
     /// ```
-    #[allow(clippy::too_many_arguments)]
-    pub fn generate_with_instruct(
+    /// Build the conditioning for an instruct-style request (CustomVoice and
+    /// VoiceDesign). Shared by the buffered and streaming entry points so the
+    /// two can never drift in how they prompt the talker.
+    fn build_instruct_prompt(
         &self,
         text: &str,
         speaker: &str,
         language: &str,
         instruct: &str,
-        temperature: f64,
-        top_k: i64,
-        max_codes: i64,
-    ) -> Result<(Vec<f32>, u32)> {
+    ) -> Result<InstructPrompt> {
         // Get speaker ID
         let speaker_id = self
             .config
@@ -2002,18 +2013,43 @@ impl TTSInference {
         // Pre-compute tts_pad embedding
         let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
 
+        Ok(InstructPrompt {
+            input_embeddings,
+            tts_pad_embed,
+            codec_eos_id,
+            voice_design,
+        })
+    }
+
+    /// Generate a complete CustomVoice or VoiceDesign waveform in one call.
+    ///
+    /// Prefer [`Self::generate_with_instruct_streaming`] when audio should be
+    /// delivered incrementally.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_instruct(
+        &self,
+        text: &str,
+        speaker: &str,
+        language: &str,
+        instruct: &str,
+        temperature: f64,
+        top_k: i64,
+        max_codes: i64,
+    ) -> Result<(Vec<f32>, u32)> {
+        let prompt = self.build_instruct_prompt(text, speaker, language, instruct)?;
+
         // Generate codes
         println!(
             "Generating audio codes (temp={}, top_k={}, max={})...",
             temperature, top_k, max_codes
         );
         let codes = self.talker.generate_codes(
-            &input_embeddings,
+            &prompt.input_embeddings,
             max_codes,
             temperature,
             top_k,
-            codec_eos_id,
-            &tts_pad_embed,
+            prompt.codec_eos_id,
+            &prompt.tts_pad_embed,
         );
         ensure_generation_reached_eos(codes.len(), max_codes)?;
         println!("Generated {} code frames", codes.len());
@@ -2031,6 +2067,86 @@ impl TTSInference {
         );
 
         Ok((waveform, sample_rate))
+    }
+
+    /// Streaming twin of [`Self::generate_with_instruct`]: decodes each batch of
+    /// `chunk_size` code frames as it is generated and hands the samples to
+    /// `on_audio`, so playback can start long before the utterance finishes.
+    /// Returning `false` from `on_audio` stops generation.
+    ///
+    /// Mirrors `generate_with_icl_streaming`; the conditioning is entirely
+    /// upstream of the talker, so both share the same generate/decode tail.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_with_instruct_streaming<F>(
+        &self,
+        text: &str,
+        speaker: &str,
+        language: &str,
+        instruct: &str,
+        temperature: f64,
+        top_k: i64,
+        max_codes: i64,
+        chunk_size: usize,
+        mut on_audio: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[f32], u32) -> bool,
+    {
+        let prompt = self.build_instruct_prompt(text, speaker, language, instruct)?;
+        let sample_rate = 24000u32;
+
+        if !prompt.voice_design {
+            println!(
+                "Streaming audio codes (temp={}, top_k={}, max={}, chunk={})...",
+                temperature, top_k, max_codes, chunk_size
+            );
+        }
+
+        let mut should_continue = true;
+        let mut generated = 0usize;
+        // Vocoder state carries the causal-convolution overlap across chunks;
+        // without it every chunk boundary would be decoded as an utterance start.
+        let mut vocoder_state = self
+            .vocoder
+            .as_ref()
+            .map(|vocoder| vocoder.streaming_state());
+
+        self.talker.generate_codes_streaming(
+            &prompt.input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            prompt.codec_eos_id,
+            &prompt.tts_pad_embed,
+            chunk_size,
+            |code_chunk| {
+                // generate_codes_streaming flushes its pending buffer after a
+                // stop without clearing it, so the final chunk can arrive twice.
+                if !should_continue || code_chunk.is_empty() {
+                    return should_continue;
+                }
+                generated += code_chunk.len();
+                let waveform = if let Some(state) = vocoder_state.as_mut() {
+                    self.decode_codes_to_audio_streaming(code_chunk, state)
+                } else {
+                    self.decode_codes_to_audio(code_chunk)
+                };
+                if let Some(waveform) = waveform {
+                    // A chunk shorter than the transposed-convolution lookahead
+                    // decodes to nothing; that is buffered state, not audio.
+                    if !waveform.is_empty() {
+                        should_continue = on_audio(&waveform, sample_rate);
+                    }
+                }
+                should_continue
+            },
+        );
+
+        if should_continue {
+            ensure_generation_reached_eos(generated, max_codes)?;
+        }
+
+        Ok(())
     }
 
     /// Get a reference to the loaded model weights.
@@ -2858,17 +2974,18 @@ impl TTSInference {
                     return should_continue;
                 }
                 generated += code_chunk.len();
-                println!(
-                    "Streaming decode {} generated code frames",
-                    code_chunk.len()
-                );
                 let waveform = if let Some(state) = vocoder_state.as_mut() {
                     self.decode_codes_to_audio_streaming(code_chunk, state)
                 } else {
                     self.decode_codes_to_audio(code_chunk)
                 };
                 if let Some(waveform) = waveform {
-                    should_continue = on_audio(&waveform, sample_rate);
+                    // A chunk shorter than the transposed-convolution lookahead
+                    // decodes to nothing; that is buffered state, not audio, and
+                    // consumers reject an empty buffer as a failed generation.
+                    if !waveform.is_empty() {
+                        should_continue = on_audio(&waveform, sample_rate);
+                    }
                 }
                 should_continue
             },

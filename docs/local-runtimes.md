@@ -15,7 +15,7 @@ Electron main process
   │    ├─ NeuTTS / GGUF
   │    └─ Qwen3-TTS / pinned qwen3-tts-rs
   │         ├─ Apple Silicon: MLX + Metal
-  │         └─ Windows x64: LibTorch (CPU in GitHub releases; CUDA in custom builds)
+  │         └─ Windows x64: LibTorch (CPU or CUDA in custom builds)
   └─ open-tts-hf-xet-downloader (download-only, short-lived when needed)
 ```
 
@@ -90,7 +90,7 @@ Warm-up uses only `{mode, modelRepo, modelPath}` and never downloads weights. Th
 
 The Rust dependency is pinned by Git revision in `rust/local-tts-bridge/Cargo.toml`. Production generation uses the low-level `TTSInference`, `AudioEncoder`, and `SpeakerEncoder` APIs.
 
-The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; a CUDA-enabled custom build selects CUDA when LibTorch reports it available and otherwise selects CPU. The GitHub Release installer uses CPU-only LibTorch because the official CUDA archive is larger than GitHub's per-asset release limit. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
+The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; a CUDA-enabled custom build selects CUDA when LibTorch reports it available and otherwise selects CPU. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
 
 CustomVoice splits accepted text at Unicode-scalar-safe sentence or clause boundaries. It never slices arbitrary UTF-8 byte positions. Each completed text unit is streamed through one or more bounded Float32 transport chunks; repeated `textUnitIndex`/`textUnitTotal` metadata keeps those chunks associated with the source unit, and 0.2 seconds of inter-unit silence is declared only on that unit's final transport chunk.
 
@@ -113,19 +113,26 @@ Rust resolves the configured host once and refuses to start unless every bind ad
 ```json
 {"requestId":"...","payload":{}}
 {"command":"warm","requestId":"...","payload":{}}
+{"command":"cancel","requestId":"..."}
 {"command":"shutdown"}
 ```
 
-For generation the bridge emits progress JSON, then an `audio_chunk` JSON frame immediately followed by exactly `sampleCount * 4` bytes of little-endian Float32 audio. Rust bounds an outgoing Float32 frame to 262,144 samples (about 1 MiB); a Qwen text unit can therefore span multiple transport frames. One final result frame includes sample rate, model repository, timings, duration, transport marker, and the authoritative transport-chunk count. It never contains `wavBase64`.
+The upgrade is refused outright when it carries an `Origin` header: only Electron's main process is a legitimate client, and it never sends one, so no browser can reach the socket even if the token leaked. Handshakes run off the accept loop (at most 8 concurrent) so a peer that connects and then goes silent cannot hold the listener for its whole handshake deadline.
 
-`electron/webSocketBridgeWorker.ts` owns process lifecycle, connection retry, progress routing, inactivity monitoring, cancellation, and idle eviction. Generation is serialized per model. Cancellation is authoritative even at the worker-acquisition/request-activation boundary, and terminates the bridge when a native provider call is blocking; the next request transparently starts a fresh resident process.
+For generation the bridge emits progress JSON, then an `audio_chunk` JSON frame immediately followed by exactly `sampleCount * 4` bytes of little-endian Float32 audio. Rust bounds an outgoing Float32 frame to 262,144 samples (about 1 MiB); a Qwen text unit can therefore span multiple transport frames.
+
+All three Qwen3 modes stream audio *during* a text unit rather than emitting one buffer per unit. The talker's codes are decoded in batches of four frames and sent as they are produced, so first audio arrives after a fraction of a sentence instead of after the whole sentence — the dominant term in perceived latency. Voice cloning already worked this way; CustomVoice and VoiceDesign now share the same generate/decode tail through `generate_with_instruct_streaming`, whose conditioning is built by the same helper as the buffered API so the two cannot drift. Because a unit's 0.2 s trailing gap has to ride on that unit's *final* chunk, and which chunk is final is only known once the unit ends, the bridge holds each chunk back by one before sending it. Every streamed chunk still carries `textUnitIndex`/`textUnitTotal`, so the renderer can map audio back to sentences for highlighting. One final result frame includes sample rate, model repository, timings, duration, transport marker, and the authoritative transport-chunk count. It never contains `wavBase64`.
+
+`electron/webSocketBridgeWorker.ts` owns process lifecycle, connection retry, progress routing, inactivity monitoring, cancellation, and idle eviction. Generation is serialized per model. Cancellation is authoritative even at the worker-acquisition/request-activation boundary.
+
+Cancelling settles the caller immediately, then sends `{"command":"cancel"}` and lets the bridge unwind rather than killing it. Rust checks for a buffered cancel on each streamed chunk, so a Stop is observed within a few code frames and the request fails with `Generation cancelled.` through the normal result path — the process keeps the model it just loaded, and the next generation reuses it instead of paying for a reload. A worker that is still draining is awaited by the next request. The bridge only gets 20 seconds to acknowledge: if it is stuck somewhere that never reaches a checkpoint (NeuTTS inference is a single opaque call, so it can only be cancelled at its phase boundaries), the worker is killed and the next request starts a fresh resident process. Cancelling before the worker finishes spawning still kills it outright.
 
 The transport applies bounded resource and liveness rules:
 
 - reference uploads accept only canonical padded base64 and are capped before encoding at 65,536 bytes for NeuCodec `.npy` codes and 45,000,000 bytes for WAV audio (64 KiB and about 42.9 MiB); decoded `.npy` references must contain 1–1,000 whole-number codes in the range 0–65,535;
 - a single NeuTTS or Qwen generation request accepts at most 6,000 Unicode scalar values after outer whitespace is trimmed; Studio and Reader automatically divide longer inline Qwen3 jobs into ordered, sentence-aware requests and stream them as one continuous job;
 - the 500 ms renderer-request cooldown does not apply to the exact next section of the same validated job, while concurrent generation, unrelated requests, and skipped/mismatched section metadata remain limited;
-- the serialized JSON request and each Rust WebSocket message/frame are capped at 64 MiB;
+- each Rust WebSocket message/frame is capped at 64 MiB, and the serialized JSON request is capped at 63 MiB so an oversize request is rejected in Electron, naming the limit, rather than tripping the server's frame-size abort;
 - one request may deliver at most 256 MiB of Float32 audio, including declared inter-chunk silence, with no more than 10,000 chunks;
 - a two-minute liveness watchdog is reset by Rust heartbeats or WebSocket traffic, while a 30-minute protocol-progress watchdog is reset only by WebSocket frames;
 - an idle resident worker is evicted after five minutes to release model memory.
@@ -175,7 +182,11 @@ npm run test
 npm run build:desktop
 ```
 
-The tagged-release workflow builds an unsigned package on a native Apple Silicon macOS 26 runner. It verifies portable Mach-O dependencies, deployment targets, and the packaged bridge probe before publishing. Windows CPU/CUDA packages remain custom-build outputs and are not attached to GitHub Releases.
+Tagged releases publish source archives only. Maintainers can build unsigned
+Apple Silicon macOS packages locally with `npm run dist:mac`; the build scripts
+still verify and bundle the native bridge dependencies. Windows CPU/CUDA
+packages also remain custom-build outputs and are not attached to GitHub
+Releases.
 
 ## Troubleshooting
 

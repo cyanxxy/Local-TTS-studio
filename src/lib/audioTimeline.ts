@@ -73,17 +73,44 @@ export function toAudioSegment(
 }
 
 export function buildAudioSegments(chunks: readonly StoredAudioChunk[]): AudioSegment[] {
-  const groups = groupSemanticChunks(chunks);
-  return groups.map((group, index) => {
-    const first = group[0];
-    const last = group[group.length - 1];
-    return toAudioSegment({
-      ...first,
-      endSec: last.endSec,
-      pauseAfterSec: last.pauseAfterSec,
-      pauseKind: last.pauseKind,
-    }, index, groups.length);
-  });
+  const segments: AudioSegment[] = [];
+  const fallbackTotalSegmentIds = new Set<string>();
+  for (const chunk of chunks) {
+    if (
+      segments.at(-1)?.id !== chunk.segmentId
+      && !(typeof chunk.total === "number" && chunk.total > 0)
+    ) {
+      fallbackTotalSegmentIds.add(chunk.segmentId);
+    }
+    appendAudioSegment(segments, chunk);
+  }
+  if (fallbackTotalSegmentIds.size === 0) return segments;
+  return segments.map((segment) => fallbackTotalSegmentIds.has(segment.id)
+    ? { ...segment, total: segments.length }
+    : segment);
+}
+
+/**
+ * Incrementally folds one transport chunk into a semantic timeline.
+ *
+ * The caller owns and may reuse `segments`; existing segment objects are never
+ * mutated, which keeps previously published React state snapshots stable.
+ */
+export function appendAudioSegment(segments: AudioSegment[], chunk: StoredAudioChunk): void {
+  const lastIndex = segments.length - 1;
+  const current = segments[lastIndex];
+  if (current?.id === chunk.segmentId) {
+    segments[lastIndex] = {
+      ...current,
+      endSec: chunk.endSec,
+      pauseAfterSec: chunk.pauseAfterSec,
+      pauseKind: chunk.pauseKind,
+    };
+    return;
+  }
+
+  const hasExplicitTotal = typeof chunk.total === "number" && chunk.total > 0;
+  segments.push(toAudioSegment(chunk, segments.length, hasExplicitTotal ? segments.length + 1 : 0));
 }
 
 export function retimeStoredChunks(chunks: readonly StoredAudioChunk[]): StoredAudioChunk[] {

@@ -59,6 +59,7 @@ export type WorkerInMessage =
 export type WorkerOutMessage =
   | { type: "LOAD_PROGRESS"; percent: number }
   | { type: "READY"; voices?: string[]; backend?: InferenceBackend }
+  | { type: "CANCELLED" }
   | {
       type: "AUDIO_CHUNK";
       generationId?: string;
