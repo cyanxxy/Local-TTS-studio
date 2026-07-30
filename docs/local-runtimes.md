@@ -15,7 +15,7 @@ Electron main process
   │    ├─ NeuTTS / GGUF
   │    └─ Qwen3-TTS / pinned qwen3-tts-rs
   │         ├─ Apple Silicon: MLX + Metal
-  │         └─ Windows x64: LibTorch (CPU in GitHub releases; CUDA in custom builds)
+  │         └─ Windows x64: LibTorch (CPU or CUDA in custom builds)
   └─ open-tts-hf-xet-downloader (download-only, short-lived when needed)
 ```
 
@@ -90,7 +90,7 @@ Warm-up uses only `{mode, modelRepo, modelPath}` and never downloads weights. Th
 
 The Rust dependency is pinned by Git revision in `rust/local-tts-bridge/Cargo.toml`. Production generation uses the low-level `TTSInference`, `AudioEncoder`, and `SpeakerEncoder` APIs.
 
-The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; a CUDA-enabled custom build selects CUDA when LibTorch reports it available and otherwise selects CPU. The GitHub Release installer uses CPU-only LibTorch because the official CUDA archive is larger than GitHub's per-asset release limit. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
+The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; a CUDA-enabled custom build selects CUDA when LibTorch reports it available and otherwise selects CPU. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
 
 CustomVoice splits accepted text at Unicode-scalar-safe sentence or clause boundaries. It never slices arbitrary UTF-8 byte positions. Each completed text unit is streamed through one or more bounded Float32 transport chunks; repeated `textUnitIndex`/`textUnitTotal` metadata keeps those chunks associated with the source unit, and 0.2 seconds of inter-unit silence is declared only on that unit's final transport chunk.
 
@@ -182,7 +182,11 @@ npm run test
 npm run build:desktop
 ```
 
-The tagged-release workflow builds an unsigned package on a native Apple Silicon macOS 26 runner. It verifies portable Mach-O dependencies, deployment targets, and the packaged bridge probe before publishing. Windows CPU/CUDA packages remain custom-build outputs and are not attached to GitHub Releases.
+Tagged releases publish source archives only. Maintainers can build unsigned
+Apple Silicon macOS packages locally with `npm run dist:mac`; the build scripts
+still verify and bundle the native bridge dependencies. Windows CPU/CUDA
+packages also remain custom-build outputs and are not attached to GitHub
+Releases.
 
 ## Troubleshooting
 

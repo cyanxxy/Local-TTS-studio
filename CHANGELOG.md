@@ -118,6 +118,9 @@ All notable changes to Open TTS are documented here.
 ### Release
 
 - Bumped the application and lockfile version to `1.7.5`.
+- A verified release PR merged to `main` now creates its matching version tag
+  and publishes a source-only GitHub Release from the checked-in notes. Unsigned
+  desktop installers remain local build outputs and are not published.
 
 ## [1.7.4] - 2026-07-29
 

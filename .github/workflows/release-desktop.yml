@@ -1,7 +1,9 @@
-name: Verify release tags
+name: Publish source release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
 
@@ -9,36 +11,131 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-verification-${{ github.ref }}
+  group: source-release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
   verify:
     name: Verify release source
     runs-on: ubuntu-24.04
+    outputs:
+      create_tag: ${{ steps.release.outputs.create_tag }}
+      publish_release: ${{ steps.release.outputs.publish_release }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      should_verify: ${{ steps.release.outputs.should_verify }}
     # test:js includes rustLocalBridge.test.ts, which cargo-builds the native
     # bridge on this Ubuntu runner; leave headroom for a cold compile.
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Resolve release
+        id: release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          package_version="$(node -p "require('./package.json').version")"
+          if [[ ! "$package_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Package version must use MAJOR.MINOR.PATCH." >&2
+            exit 1
+          fi
+          release_tag="v$package_version"
+
+          create_tag=false
+          publish_release=false
+          should_verify=false
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$GITHUB_REF_NAME" != "$release_tag" ]]; then
+              echo "Tag $GITHUB_REF_NAME does not match package version $package_version." >&2
+              exit 1
+            fi
+            publish_release=true
+            should_verify=true
+          elif git ls-remote --exit-code --tags origin "refs/tags/$release_tag" >/dev/null 2>&1; then
+            if [[ "$(gh release view "$release_tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json isDraft \
+              --jq '.isDraft' 2>/dev/null || true)" == "false" ]]; then
+              echo "$release_tag and its published release already exist; this main push is not a new release."
+            else
+              publish_release=true
+              should_verify=true
+            fi
+          else
+            create_tag=true
+            publish_release=true
+            should_verify=true
+          fi
+
+          if [[ "$publish_release" == "true" ]]; then
+            test -f "docs/releases/$release_tag.md"
+          fi
+
+          {
+            echo "create_tag=$create_tag"
+            echo "publish_release=$publish_release"
+            echo "release_tag=$release_tag"
+            echo "should_verify=$should_verify"
+          } >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@v6
+        if: steps.release.outputs.should_verify == 'true'
         with:
           node-version: "22"
           cache: npm
-      - name: Verify tag and package version
+      - if: steps.release.outputs.should_verify == 'true'
+        run: npm ci
+      - if: steps.release.outputs.should_verify == 'true'
+        run: npm run lint
+      - if: steps.release.outputs.should_verify == 'true'
+        run: npx tsc --noEmit -p tsconfig.electron.json
+      - if: steps.release.outputs.should_verify == 'true'
+        run: npm run test:js
+      - if: steps.release.outputs.should_verify == 'true'
+        run: npm run build:web
+
+  publish:
+    name: Publish source archive
+    needs: verify
+    if: needs.verify.outputs.publish_release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Create release tag
+        if: needs.verify.outputs.create_tag == 'true'
         shell: bash
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must use vMAJOR.MINOR.PATCH." >&2
-            exit 1
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$RELEASE_TAG" "$GITHUB_SHA" -m "Open TTS $RELEASE_TAG"
+          git push origin "$RELEASE_TAG"
+      - name: Publish GitHub Release
+        shell: bash
+        run: |
+          notes_file="docs/releases/$RELEASE_TAG.md"
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft=false \
+              --latest \
+              --title "Open TTS $RELEASE_TAG" \
+              --notes-file "$notes_file"
+          else
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --latest \
+              --title "Open TTS $RELEASE_TAG" \
+              --notes-file "$notes_file"
           fi
-          package_version="$(node -p "require('./package.json').version")"
-          if [[ "v$package_version" != "$GITHUB_REF_NAME" ]]; then
-            echo "Tag $GITHUB_REF_NAME does not match package version $package_version." >&2
-            exit 1
-          fi
-      - run: npm ci
-      - run: npm run lint
-      - run: npx tsc --noEmit -p tsconfig.electron.json
-      - run: npm run test:js
-      - run: npm run build:web

@@ -1,27 +1,60 @@
-# Desktop release process
+# Release process
 
-Tagged releases are built natively by `.github/workflows/release-desktop.yml`. The workflow creates a draft GitHub Release, builds an unsigned macOS package, verifies the packaged native bridge, uploads the artifacts, and publishes after the macOS job succeeds.
+Open TTS publishes source-only GitHub Releases. The repository does not publish
+unsigned DMG, ZIP app bundles, or Windows installers.
 
-Before a release ever runs, `.github/workflows/ci.yml` validates pushes to `main` and pull requests (lint, Electron type check, Vitest without the native-bridge integration test, web build), and `.github/workflows/rust-bridge.yml` builds, tests, and probes the native bridge on macOS arm64 whenever Rust sources or the bridge build scripts change. The release workflow's own `verify` job runs the full JS suite, including the native-bridge integration test.
+`.github/workflows/release-desktop.yml` runs on every push to `main`. It compares
+the semantic version in `package.json` with existing tags. When that version has
+not been released, the workflow runs the full source-release checks, creates an
+annotated `vMAJOR.MINOR.PATCH` tag on the verified `main` commit, and publishes a
+GitHub Release using `docs/releases/vMAJOR.MINOR.PATCH.md`. GitHub supplies the
+standard source ZIP and tarball archives.
 
-## Release outputs
+The same workflow also verifies a manually pushed version tag, provided the tag
+matches the package version. Existing versions are skipped on ordinary
+non-release pushes to `main`.
 
-- macOS 26+ Apple Silicon: unsigned DMG and ZIP.
+## Release gates
 
-Windows remains available as a custom build target but is not attached to GitHub Releases.
+Before a release branch merges, `.github/workflows/ci.yml` validates linting,
+the Electron type check, Vitest without the native-bridge integration test, and
+the web build. When Rust sources or bridge build scripts change,
+`.github/workflows/rust-bridge.yml` also formats, builds, tests, and probes the
+native bridge on Apple Silicon.
 
-## Signing status
+The source-release workflow repeats the release-critical checks on the exact
+merged commit:
 
-Current release artifacts are intentionally unsigned and unnotarized. Users may need to Control-click **Open** and approve the first launch in macOS security settings. No signing secrets are required by the workflow.
+- `npm ci`
+- `npm run lint`
+- `npx tsc --noEmit -p tsconfig.electron.json`
+- `npm run test:js`
+- `npm run build:web`
 
-Signing and notarization should be restored before presenting the download as a trusted Gatekeeper-ready distribution.
+The tag and GitHub Release are created only after those checks pass and a
+matching checked-in release-notes file is present.
 
 ## Cut a release
 
 1. Set the same semantic version in `package.json` and `package-lock.json`.
-2. Run `npm run lint`, `npm run test`, and `npm run build`.
-3. Commit every release input, including `rust/vendor/`; CI cannot build an untracked path dependency.
-4. Create and push an annotated `vMAJOR.MINOR.PATCH` tag.
-5. Watch **Release desktop installers**. A draft remains unpublished if the macOS package fails verification.
+2. Move the accumulated changelog entries into a dated version section and add
+   `docs/releases/vMAJOR.MINOR.PATCH.md`.
+3. Run `npm run lint`, `npm run typecheck`, `npm run test`,
+   `npm run build:web`, and `npm run build:electron:main`.
+4. Commit every release input, including `rust/vendor/`; CI cannot build an
+   untracked path dependency.
+5. Open a release pull request against `main` and wait for all required checks.
+6. Merge the pull request. The verified `main` push creates the tag and
+   source-only GitHub Release automatically.
 
-The macOS job sets `MACOSX_DEPLOYMENT_TARGET=26.0`, builds on an Apple Silicon macOS 26 runner, disables signing discovery, rejects Homebrew paths and newer deployment targets, and probes the packaged bridge before publishing.
+## Local desktop packages
+
+Developers can still build unsigned desktop packages locally:
+
+- Apple Silicon macOS 26+: `npm run dist:mac`
+- Windows x64: `npm run dist:win` with a compatible LibTorch 2.7.0 installation
+
+Local packages bundle the Electron shell, native bridge, provider resources, and
+required native libraries, but not model weights. They are unsigned,
+unnotarized, and must not be attached to an official GitHub Release until a
+proper signing and notarization process is in place.
