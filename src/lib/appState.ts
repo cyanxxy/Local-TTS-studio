@@ -1,4 +1,6 @@
 import {
+  AUDIO8_DEFAULT_VOICE,
+  AUDIO8_VOICES,
   CREATOR_PRESETS,
   DEFAULT_CREATOR_PRESET,
   MODELS,
@@ -30,6 +32,7 @@ export interface PersistedAppState {
   text?: string;
   voicesByModel?: Partial<Record<ModelType, string>>;
   quality?: number;
+  audio8Voice?: string;
 }
 
 export interface PersistedCreatorState {
@@ -50,6 +53,7 @@ export interface InitialAppState {
   text: string;
   voicesByModel: Record<ModelType, string>;
   quality: number;
+  audio8Voice: string;
 }
 
 export interface CreatorState {
@@ -83,6 +87,10 @@ function isModelType(value: unknown): value is ModelType {
 
 function isSupertonicVoice(value: unknown): value is (typeof MODELS.supertonic.voices)[number] {
   return typeof value === "string" && MODELS.supertonic.voices.some((voice) => voice === value);
+}
+
+function isAudio8Voice(value: unknown): value is (typeof AUDIO8_VOICES)[number]["id"] {
+  return typeof value === "string" && AUDIO8_VOICES.some((voice) => voice.id === value);
 }
 
 function clampQuality(quality: number): number {
@@ -136,6 +144,7 @@ export function getInitialAppState(): InitialAppState {
       supertonic: MODELS.supertonic.defaultVoice,
     },
     quality: QUALITY_DEFAULT,
+    audio8Voice: AUDIO8_DEFAULT_VOICE,
   };
 
   const legacyModel = getLegacyModelSelection();
@@ -165,6 +174,7 @@ export function getInitialAppState(): InitialAppState {
       quality: typeof parsed.quality === "number" && Number.isFinite(parsed.quality)
         ? clampQuality(parsed.quality)
         : defaults.quality,
+      audio8Voice: isAudio8Voice(parsed.audio8Voice) ? parsed.audio8Voice : defaults.audio8Voice,
     };
   } catch {
     return legacyModel ? { ...defaults, model: legacyModel } : defaults;

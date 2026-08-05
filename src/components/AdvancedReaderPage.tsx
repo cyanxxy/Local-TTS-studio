@@ -1634,15 +1634,19 @@ export function AdvancedReaderPage({
       {selectedDesktopModel && modelError && (
         <div className="flex flex-col gap-3 rounded-2xl border border-danger/20 bg-danger/[0.06] px-4 py-3 sm:flex-row sm:items-center sm:justify-between" role="status">
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-text-primary">{activeModelLabel} needs setup in Reader</p>
+            <p className="text-sm font-semibold text-text-primary">
+              {selectedDesktopModel.key === "qwen3"
+                ? `${activeModelLabel} needs setup in Reader`
+                : `${activeModelLabel} is unavailable`}
+            </p>
             <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-text-secondary">{modelError}</p>
           </div>
           <button
             type="button"
-            onClick={() => setSettingsOpen(true)}
+            onClick={selectedDesktopModel.key === "qwen3" ? () => setSettingsOpen(true) : onRetryLoad}
             className="shrink-0 rounded-xl border border-white/60 bg-white/50 px-3 py-2 text-sm font-semibold text-text-primary shadow-glass-sm transition-all hover:bg-white/70 active:scale-[0.98]"
           >
-            Open Qwen settings
+            {selectedDesktopModel.key === "qwen3" ? "Open Qwen settings" : "Retry"}
           </button>
         </div>
       )}

@@ -180,6 +180,34 @@ interface LocalTtsBridge {
   subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;
 }
 
+export interface Audio8LoadResult {
+  sampleRate: number;
+}
+
+export interface Audio8GenerateResult {
+  sampleRate: number;
+  elapsedSec: number;
+  audio: ArrayBuffer;
+}
+
+export interface Audio8ProgressEvent {
+  requestId: string;
+  percent: number;
+}
+
+interface Audio8Bridge {
+  load: (request: { requestId: string }) => Promise<Audio8LoadResult>;
+  generate: (request: {
+    requestId: string;
+    text: string;
+    voice: string;
+  }) => Promise<Audio8GenerateResult>;
+  cancel: (request: { requestId: string }) => Promise<{ cancelled: boolean }>;
+  getCacheInfo: () => Promise<LocalTtsCacheInfo>;
+  clearCache: () => Promise<{ path: string; cleared: boolean }>;
+  subscribeProgress: (listener: (event: Audio8ProgressEvent) => void) => () => void;
+}
+
 declare global {
   interface Window {
     electron?: {
@@ -189,6 +217,7 @@ declare global {
       readerLibrary?: ReaderLibraryBridge;
       documents?: DocumentsBridge;
       localTts?: LocalTtsBridge;
+      audio8?: Audio8Bridge;
     };
   }
 }

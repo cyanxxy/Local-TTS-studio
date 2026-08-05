@@ -2,13 +2,13 @@
 
 # Open TTS
 
-**A local-first text-to-speech studio that runs entirely on your device.**
+**A fully local text-to-speech studio with on-device engines.**
 
-Browser-native neural speech synthesis through WebGPU, plus optional Electron desktop runtimes through a local Rust bridge — no server, no account, no API key, no usage cap.
+Browser-native neural speech synthesis through WebGPU/WASM and optional Electron desktop runtimes through native workers and a local Rust bridge — no account, API key, or hosted inference required.
 
 [![Release](https://img.shields.io/github/v/release/cyanxxy/Local-TTS-studio?style=flat-square&color=0071E3&label=Release)](https://github.com/cyanxxy/Local-TTS-studio/releases/latest)
 [![CI](https://img.shields.io/github/actions/workflow/status/cyanxxy/Local-TTS-studio/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/cyanxxy/Local-TTS-studio/actions/workflows/ci.yml)
-[![Local first](https://img.shields.io/badge/Inference-100%25%20Local-1D1D1F?style=flat-square)](#capabilities)
+[![Local inference](https://img.shields.io/badge/Inference-Local-1D1D1F?style=flat-square)](#capabilities)
 [![WebGPU](https://img.shields.io/badge/WebGPU-Preferred-FF6F00?style=flat-square)](https://www.w3.org/TR/webgpu/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-1D1D1F?style=flat-square)](./LICENSE)
 
@@ -29,8 +29,8 @@ Browser-native neural speech synthesis through WebGPU, plus optional Electron de
 
 Open TTS is two applications built from a single codebase:
 
-- **Web** — a browser-native Studio and Reader at `/studio` and `/reader`, with every inference step running client-side in Web Workers.
-- **Desktop** — an Electron shell that serves the same Studio and Reader under `/desktop/*`, adds Supertonic 3 and Qwen3-TTS as in-place Studio/Reader model options, and exposes optional local-runtime setup pages through a Rust bridge.
+- **Web** — a Studio and Reader at `/studio` and `/reader`, with local browser engines.
+- **Desktop** — an Electron shell that serves the same Studio and Reader under `/desktop/*`, adds Audio8, Supertonic 3, and Qwen3-TTS as in-place Studio/Reader model options, and exposes optional local-runtime setup pages through native workers and a Rust bridge.
 - **Shared core** — model loading, generation, playback, export, and routing live in shared React/TypeScript modules used by both shells.
 
 ```mermaid
@@ -43,6 +43,7 @@ flowchart TD
     S["Supertonic 2 / 3"]
     N["NeuTTS Nano / Air"]
     Q["Qwen3-TTS<br/>MLX · LibTorch"]
+    A["Audio8 TTS<br/>native ONNX Runtime · desktop"]
     OUT["WAV · MP3 · SRT / VTT / JSON"]
 
     IN --> CORE
@@ -50,17 +51,19 @@ flowchart TD
     CORE --> BRIDGE
     WEB --> K
     WEB --> S
+    CORE --> A
     BRIDGE --> N
     BRIDGE --> Q
     K --> OUT
     S --> OUT
     N --> OUT
     Q --> OUT
+    A --> OUT
 ```
 
-Every stage above runs on your machine. Browser models prefer WebGPU, fall back to WASM where supported, and cache their weights after first load for repeat use. Electron local runtimes run through `open-tts-local-bridge`, a compiled Rust binary that Electron probes and keeps warm behind a per-launch loopback capability token. This is local IPC protection—not user, account, or cloud authentication.
+The built-in browser and Electron engines run on your machine. Browser models prefer WebGPU, fall back to WASM where supported, and cache their weights after first load for repeat use. NeuTTS and Qwen3 run through `open-tts-local-bridge`, a compiled Rust binary that Electron probes and keeps warm behind a per-launch loopback capability token. Audio8 instead runs its ONNX graphs in an Electron-owned Node worker thread, while Supertonic 3 uses a renderer worker. The loopback token protects the Rust bridge's local IPC; it is not user, account, or cloud authentication.
 
-**The one caveat to the "local" claim:** synthesis runs locally, but first-run model and runtime downloads still contact upstream hosts for asset retrieval, and cached browser assets remain subject to browser storage policy.
+All synthesis runs locally. First use downloads revision-pinned model and voice assets from their upstream hosts; after those files are cached, neither Audio8 nor the browser engines send synthesis text or generated audio over the network. Cached browser assets remain subject to browser storage quota and eviction policy.
 
 The same app-wide settings system is shared by Web and Electron: system/light/dark themes, four accent colors, interface scaling, separate interface and Reader fonts, reduced transparency/motion, and optional desktop model navigation.
 
@@ -93,7 +96,7 @@ The same app-wide settings system is shared by Web and Electron: system/light/da
 
 | Capability | Details |
 |---|---|
-| **Local & private** | Built-in synthesis paths run on-device — no hosted inference server, account, API key, or usage cap. |
+| **Local & private** | Every synthesis path runs on-device. Network access is used only to download model/runtime assets on first use. |
 | **Web models** | Web browsers expose Kokoro-82M and Supertonic 2 with WebGPU/WASM; Electron replaces Supertonic 2 with Supertonic 3. |
 | **Studio & Reader** | A focused synthesis workspace plus a long-book Reader with a searchable table of contents, full-text search, paragraph-block rendering, bounded section rendering/generation, stable whole-book progress, arrow-key section paging, double-click-to-listen seeking, bookmarks with text previews, quoted notes, and automatic continuation (on by default). |
 | **Studio-grade export** | WAV (32-bit float, 24-bit, 16-bit PCM) and MP3, with optional loudness normalization, sample-peak limiting, and resampling. |
@@ -118,12 +121,13 @@ The same app-wide settings system is shared by Web and Electron: system/light/da
 | **Kokoro-82M** | `onnx-community/Kokoro-82M-v1.0-ONNX` via `kokoro-js` | `/studio`, `/reader` (`/desktop/*` on desktop) | Yes | Yes | 24 kHz browser model, 28 named voices; model and voice assets are pinned to revision `1939ad2a8e416c0acfeecc08a694d14ef25f2231` |
 | **Supertonic TTS 2** | `onnx-community/Supertonic-TTS-2-ONNX` via `@huggingface/transformers` | `/studio`, `/reader` | Yes | No | Legacy 44.1 kHz web/iOS model; replaced by Supertonic 3 in Electron |
 | **Supertonic 3** | Revision-pinned `Supertone/supertonic-3` ONNX assets | `/desktop/studio`, `/desktop/reader` | No | Yes | Electron-only renderer worker; 99M parameters, 10 voices, 31 languages, expression tags, WebGPU/WASM |
+| **Audio8 TTS Preview 0.6B ONNX INT4** | [`Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4`](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4) | `/desktop/studio`, `/desktop/reader` | No | Yes | Native local 44.1 kHz CPU inference in an Electron worker thread; 572 MiB one-time model download, six voices whose small profiles are cached on first use; model revision `818569c6b832118ad68d61bbd873abe250fcd68a`, voice profiles from the Space of the same name at revision `6417ebaafc996620bebc3eb27cde0d5acb19f13b` |
 | **NeuTTS Nano / Air** | Neuphonic GGUF variants via Rust `neutts` | `/desktop/neutts` | No | Yes | Nano Q4 for English, German, French, and Spanish, plus higher-quality Air 0.7B Q4/Q8 for English; accepts a reference WAV or pre-encoded `.npy` codes plus its matching transcript |
 | **Qwen3-TTS Native** | Pinned `qwen3-tts-rs` inside the Rust bridge: MLX on Apple Silicon and LibTorch on Windows x64 | `/desktop/studio`, `/desktop/reader`, `/desktop/qwen3` | No | Yes | One resident inference process; CustomVoice, Base voice cloning, and VoiceDesign 1.7B share revision-pinned downloads and one renderer settings state. Windows remains available for custom builds but is not distributed in GitHub Releases |
 
 > The deployed web app exposes browser Studio and Reader only. Desktop routes live under `/desktop/*` and are opened by Electron.
 
-Kokoro's 28 voice IDs are `af_heart`, `af_alloy`, `af_aoede`, `af_bella`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`, `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa`, `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily`, `bm_daniel`, `bm_fable`, `bm_george`, and `bm_lewis`.
+Kokoro's 28 voice IDs are `af_heart`, `af_alloy`, `af_aoede`, `af_bella`, `af_jessica`, `af_kore`, `af_nicole`, `af_nova`, `af_river`, `af_sarah`, `af_sky`, `am_adam`, `am_echo`, `am_eric`, `am_fenrir`, `am_liam`, `am_michael`, `am_onyx`, `am_puck`, `am_santa`, `bf_alice`, `bf_emma`, `bf_isabella`, `bf_lily`, `bm_daniel`, `bm_fable`, `bm_george`, and `bm_lewis`. Audio8's six voice ids are `clara`, `iris`, `arthur`, `mia`, `ben`, and `sophie`.
 
 ---
 
@@ -315,10 +319,11 @@ Continuous integration runs on pushes to `main` and on pull requests: `.github/w
 ## Runtime Notes
 
 - Browser model assets download on first use and cache locally for repeat use. Network-free operation depends on the required app/model assets still being present in browser storage.
+- Audio8 downloads only the three inference graphs, their external weights, the tokenizer, and the runtime manifest — eight files, 572 MiB — plus a small voice profile the first time each voice is used. The repository's ~395 MiB voice-registration encoder is not downloaded: Open TTS ships pre-registered voices and never registers new ones on the device. Every file is checked against a pinned byte length and digest before it is loaded, and the cache can be inspected and cleared from Audio8's model settings.
 - WebGPU is preferred where available; the WASM fallback is expected behavior.
 - iPhone and iPad browsers expose Supertonic only — Kokoro is intentionally disabled on iOS pending further validation.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch for desktop WebGPU support.
-- Electron local runtimes generate through `OPEN_TTS_WS_AUTH_TOKEN=<token> open-tts-local-bridge --action serve-ws --port 0`; Rust announces the bound loopback port, metadata travels over authenticated WebSocket JSON, and audio streams as binary Float32 chunks. Electron creates and supplies the secret automatically.
+- NeuTTS and Qwen3 generate through `OPEN_TTS_WS_AUTH_TOKEN=<token> open-tts-local-bridge --action serve-ws --port 0`; Rust announces the bound loopback port, metadata travels over authenticated WebSocket JSON, and audio streams as binary Float32 chunks. Audio8 and Supertonic 3 stay inside Electron workers and do not use this loopback transport. Electron creates and supplies the bridge secret automatically.
 - Qwen3 model weights are downloaded explicitly from its setup page and cached by immutable profile revision. The app reports overall/file progress, verifies the result, offers repair/re-download, and keeps manual folder selection behind an optional disclosure. CustomVoice needs no reference clip; Base voice cloning requires a WAV and its exact transcript; VoiceDesign uses a natural-language voice description. No extra Qwen inference executable or Python environment is required. NeuTTS accepts a WAV reference or pre-encoded `.npy` codes plus the matching transcript.
 - App preferences and Reader library data stay local: the web build uses browser storage and Electron keeps the Reader library in a per-user SQLite file. No account or hosted database is required.
 - `vercel.json` provides SPA rewrites plus COOP/COEP headers, which keep the WASM fallback cross-origin isolated (and multi-threaded) for the browser build.
@@ -338,7 +343,7 @@ src/
 ├─ components/   Studio, Reader, player, settings, local-runtime UI
 ├─ hooks/        Model loading, playback, generation, routing, creator state
 ├─ lib/          Audio, chunking, captions, cache, browser/runtime helpers
-├─ workers/      Kokoro, Supertonic 2/3 inference workers, and the audio export worker
+├─ workers/      Kokoro, Supertonic 2/3, and audio export workers
 └─ types.ts      Worker protocol and shared UI types
 ```
 
@@ -347,8 +352,8 @@ src/
 ## Documentation
 
 - [Architecture](./docs/architecture.md) — source map, worker protocol, and audio path
-- [Local persistence](./docs/storage.md) — Reader library storage on web and desktop
-- [Desktop local runtimes](./docs/local-runtimes.md) — Rust bridge protocol, setup, and troubleshooting
+- [Local persistence](./docs/storage.md) — Reader library storage on web and desktop, and the Audio8 model cache
+- [Desktop local runtimes](./docs/local-runtimes.md) — Rust bridge protocol, the Audio8 worker, setup, and troubleshooting
 - [Release process](./docs/releasing.md) — source releases and local desktop packaging
 - [Performance benchmarks](./docs/performance.md) — reproducible inference-speed eval
 - [Design system](./docs/design-system.md) — tokens, typography, and color
@@ -363,6 +368,7 @@ Open TTS is a shell around other people's research and engineering. The speech m
 |---|---|
 | [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) by hexgrad | Default browser model, loaded from the [`onnx-community`](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX) ONNX export through [`kokoro-js`](https://github.com/hexgrad/kokoro) |
 | [Supertonic](https://huggingface.co/Supertone) by Supertone | Supertonic 2 on the web and Supertonic 3 on the desktop |
+| [Audio8 TTS](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4) by Audio8 | Local ONNX INT4 model in Studio and Reader, adapted from Audio8's Apache-2.0 reference runtime |
 | [NeuTTS](https://github.com/neuphonic/neutts-air) by Neuphonic | Nano and Air voices, run through the `neutts` Rust crate |
 | [Qwen3-TTS](https://github.com/QwenLM) by the Qwen team | Native desktop voice model — CustomVoice, voice cloning, and VoiceDesign |
 | [`qwen3-tts-rs`](https://github.com/juntao/qwen3_tts_rs) by juntao | Rust Qwen3-TTS implementation, vendored and patched (see [`OPEN_TTS_VENDOR.md`](./rust/vendor/qwen3-tts-rs/OPEN_TTS_VENDOR.md)) |
