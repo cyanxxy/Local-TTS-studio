@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Settings2 } from "lucide-react";
-import type { ChunkPauseKind, ModelType } from "../types";
-import { MIN_TEXT_LENGTH } from "../constants";
+import type { ChunkPauseKind, GenerationStats, ModelState, ModelType } from "../types";
+import { AUDIO8_VOICES, MIN_TEXT_LENGTH } from "../constants";
 import { useModelLoader } from "../hooks/useModelLoader";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { useTTS } from "../hooks/useTTS";
@@ -12,13 +12,15 @@ import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelCacheControls } from "../hooks/useModelCacheControls";
 import { useQwen3LocalRuntime } from "../hooks/useQwen3LocalRuntime";
 import { useSupertonic3Runtime } from "../hooks/useSupertonic3Runtime";
+import { useAudio8Runtime } from "../hooks/useAudio8Runtime";
 import { Qwen3RuntimeProvider, useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { Qwen3InlineSettings } from "../components/Qwen3InlineSettings";
 import { Supertonic3InlineSettings } from "../components/Supertonic3InlineSettings";
+import { Audio8InlineSettings } from "../components/Audio8InlineSettings";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
 import { TextInput } from "../components/TextInput";
-import { ModelToggle } from "../components/ModelToggle";
+import { ModelToggle, type ModelToggleDesktopOption } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
 import { Controls } from "../components/Controls";
 import { ControlsProvider } from "../components/ControlsContext";
@@ -63,7 +65,7 @@ import {
 import { isReaderLibraryShutdownError } from "../lib/readerLibrary";
 
 type LocalRuntimePageKey = Extract<AppPage, "neutts" | "qwen3">;
-type InlineDesktopModelKey = "qwen3" | "supertonic3";
+type InlineModelKey = "audio8" | "qwen3" | "supertonic3";
 
 interface SynthesisAppProps {
   enableDesktopRuntimes: boolean;
@@ -145,8 +147,100 @@ function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
   return (LOCAL_RUNTIME_PAGE_KEYS as readonly AppPage[]).includes(page);
 }
 
+/**
+ * `badge` and `detail` are optional on `ModelToggleDesktopOption`, but this
+ * builder always supplies both — and it has to, because `AdvancedReaderPage`
+ * redeclares the same option shape privately with both fields required. Stating
+ * the guarantee here is what lets one list feed the toggle and the Reader.
+ */
+type DesktopModelOption = ModelToggleDesktopOption
+  & Required<Pick<ModelToggleDesktopOption, "badge" | "detail">>;
+
+interface DesktopModelOptionsInput {
+  audio8Available: boolean;
+  audio8Voice: string;
+  supertonic3Available: boolean;
+  supertonic3Language: string;
+  supertonic3Voice: string;
+  qwen3Available: boolean;
+  qwen3ProviderDetail: string;
+  selected: InlineModelKey | null;
+  onSelect: (model: InlineModelKey) => void;
+}
+
+/**
+ * Studio and the Reader offer the identical desktop model list; they differ
+ * only in which entry is selected and where the selection is recorded.
+ */
+function buildDesktopModelOptions({
+  audio8Available,
+  audio8Voice,
+  supertonic3Available,
+  supertonic3Language,
+  supertonic3Voice,
+  qwen3Available,
+  qwen3ProviderDetail,
+  selected,
+  onSelect,
+}: DesktopModelOptionsInput): DesktopModelOption[] {
+  const options: DesktopModelOption[] = [];
+  if (audio8Available) {
+    const selectedVoice = AUDIO8_VOICES.find((item) => item.id === audio8Voice);
+    options.push({
+      key: "audio8",
+      label: "Audio8 TTS",
+      badge: "Local",
+      detail: `0.6B · ONNX INT4 · ${selectedVoice?.name ?? audio8Voice}`,
+      selected: selected === "audio8",
+      onSelect: () => onSelect("audio8"),
+    });
+  }
+  if (supertonic3Available) {
+    options.push({
+      key: "supertonic3",
+      label: "Supertonic 3",
+      badge: "Electron",
+      detail: `99M · ${supertonic3Language.toUpperCase()} · ${supertonic3Voice}`,
+      selected: selected === "supertonic3",
+      onSelect: () => onSelect("supertonic3"),
+    });
+  }
+  if (qwen3Available) {
+    options.push({
+      key: "qwen3",
+      label: "Qwen3-TTS",
+      badge: "Electron",
+      detail: qwen3ProviderDetail,
+      selected: selected === "qwen3",
+      onSelect: () => onSelect("qwen3"),
+    });
+  }
+  return options;
+}
+
+/**
+ * The fields every surface reads off whichever runtime is currently driving it.
+ * The browser path is assembled from several hooks rather than one object, so
+ * it is adapted into this shape instead of the shape being bent to fit it.
+ */
+interface SurfaceRuntime {
+  modelState: ModelState;
+  canGenerate: boolean;
+  isGenerating: boolean;
+  generationProgress: number;
+  stats: GenerationStats;
+  error: string | null;
+  handleGenerate: () => void;
+  handleStop: () => void;
+  retryLoad: () => void;
+}
+
 function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", createSupertonic3Worker }: SynthesisAppProps) {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
+  // Every desktop-only runtime needs both halves: the entry point that opts in
+  // and a live preload bridge. Studio previously gated Audio8 on the bridge
+  // alone, so the two surfaces could disagree about which models exist.
+  const desktopRuntimesAvailable = enableDesktopRuntimes && isElectronRuntime;
   const { preferences, updatePreferences, resetPreferences } = useAppPreferences();
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const qwen3Settings = useQwen3Runtime();
@@ -229,10 +323,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const [exportError, setExportError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [isImportingDocument, setIsImportingDocument] = useState(false);
-  const [studioDesktopModel, setStudioDesktopModel] = useState<InlineDesktopModelKey | null>(null);
-  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineDesktopModelKey | null>(null);
+  const [studioDesktopModel, setStudioDesktopModel] = useState<InlineModelKey | null>(null);
+  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineModelKey | null>(null);
   const [supertonic3Voice, setSupertonic3Voice] = useState("M1");
   const [supertonic3Language, setSupertonic3Language] = useState("en");
+  const [audio8Voice, setAudio8Voice] = useState<string>(initialState.audio8Voice);
   const readerLibrary = useReaderLibrary(initialState.text);
   // Quitting holds the window open while the Reader worker drains, so a cache
   // write that loses that race is expected and must not surface as an error.
@@ -337,8 +432,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const isStudioUsingQwen3 = isStudioPage && studioDesktopModel === "qwen3";
   const isReaderUsingSupertonic3 = isReaderPage && readerDesktopModel === "supertonic3";
   const isStudioUsingSupertonic3 = isStudioPage && studioDesktopModel === "supertonic3";
+  const isReaderUsingAudio8 = isReaderPage && readerDesktopModel === "audio8";
+  const isStudioUsingAudio8 = isStudioPage && studioDesktopModel === "audio8";
   const isUsingQwen3Inline = isReaderUsingQwen3 || isStudioUsingQwen3;
   const isUsingSupertonic3Inline = isReaderUsingSupertonic3 || isStudioUsingSupertonic3;
+  const isUsingAudio8Inline = isReaderUsingAudio8 || isStudioUsingAudio8;
 
   const {
     kokoroState,
@@ -350,7 +448,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     loadModel,
     reloadModel,
   } = useModelLoader(activeModel, {
-    enabled: localInferenceSupported && !isUsingQwen3Inline && !isUsingSupertonic3Inline,
+    enabled: localInferenceSupported && !isUsingQwen3Inline && !isUsingSupertonic3Inline && !isUsingAudio8Inline,
     preferredSupertonicVoice: voicesByModel.supertonic,
     debugProfiling,
     supportedModels: browserSupport.supportedModels,
@@ -390,7 +488,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     qwenReferenceAudioSignature,
   ]);
   const qwen3LocalRuntime = useQwen3LocalRuntime({
-    enabled: enableDesktopRuntimes && isElectronRuntime && qwen3Settings.available && isUsingQwen3Inline,
+    enabled: desktopRuntimesAvailable && qwen3Settings.available && isUsingQwen3Inline,
     text: synthesisText,
     allowLongText: isUsingQwen3Inline,
     player,
@@ -454,6 +552,14 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     player,
     setShowPlayer,
   });
+  const audio8Runtime = useAudio8Runtime({
+    active: isUsingAudio8Inline,
+    text: synthesisText,
+    voice: audio8Voice,
+    generationSettings: creator.generationSettings,
+    player,
+    setShowPlayer,
+  });
 
   const kokoroVoice = useMemo(() => {
     if (kokoroVoices.length === 0) return voicesByModel.kokoro;
@@ -503,12 +609,13 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
         text,
         voicesByModel,
         quality,
+        audio8Voice,
       };
       persistAppState(persisted);
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeModel, quality, text, voicesByModel]);
+  }, [activeModel, audio8Voice, quality, text, voicesByModel]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -520,15 +627,17 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
   const selectBrowserModel = useCallback((
     model: ModelType,
-    currentDesktopModel: InlineDesktopModelKey | null,
+    currentDesktopModel: InlineModelKey | null,
     clearDesktopModel: () => void,
   ) => {
     if (!isModelSupportedInBrowser(model, browserSupport)) return;
     if (model === activeModel && currentDesktopModel === null) return;
     cancelActiveGeneration();
+    audio8Runtime.cancelActiveGeneration();
     qwen3LocalRuntime.cancelActiveGeneration();
     supertonic3Runtime.cancelActiveGeneration();
     resetGeneratedAudio();
+    audio8Runtime.resetGeneratedAudio();
     qwen3LocalRuntime.resetGeneratedAudio();
     supertonic3Runtime.resetGeneratedAudio();
     clearDesktopModel();
@@ -539,6 +648,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setExportError(null);
   }, [
     activeModel,
+    audio8Runtime,
     browserSupport,
     cancelActiveGeneration,
     loadModel,
@@ -558,6 +668,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
   const resetAudioForTextEdit = useCallback(() => {
     const hasActiveAudioState = tts.isGenerating
+      || audio8Runtime.isGenerating
       || qwen3LocalRuntime.isGenerating
       || supertonic3Runtime.isGenerating
       || isRetakingSegment
@@ -565,14 +676,17 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       || player.totalDuration > 0;
     if (hasActiveAudioState) {
       cancelActiveGeneration(true);
+      audio8Runtime.cancelActiveGeneration();
       qwen3LocalRuntime.cancelActiveGeneration();
       supertonic3Runtime.cancelActiveGeneration();
       resetGeneratedAudio();
+      audio8Runtime.resetGeneratedAudio();
       qwen3LocalRuntime.resetGeneratedAudio();
       supertonic3Runtime.resetGeneratedAudio();
     }
   }, [
     cancelActiveGeneration,
+    audio8Runtime,
     isRetakingSegment,
     player.segments.length,
     player.totalDuration,
@@ -644,7 +758,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     finalizeActiveReaderTextEdit(edit.documentId);
   }, [activeReaderDocumentId, finalizeActiveReaderTextEdit]);
 
-  const documentsBridge = enableDesktopRuntimes && isElectronRuntime
+  const documentsBridge = desktopRuntimesAvailable
     ? window.electron?.documents
     : undefined;
 
@@ -787,6 +901,15 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setExportError(null);
   }, [activeModel, cancelActiveGeneration, isReaderPage, resetGeneratedAudio, voice]);
 
+  const handleAudio8VoiceChange = useCallback((nextVoice: string) => {
+    if (nextVoice === audio8Voice) return;
+    if (isReaderPage) flushReaderAudioRef.current();
+    audio8Runtime.cancelActiveGeneration();
+    audio8Runtime.resetGeneratedAudio();
+    setAudio8Voice(nextVoice);
+    setExportError(null);
+  }, [audio8Runtime, audio8Voice, isReaderPage]);
+
   const handleSupertonic3VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === supertonic3Voice) return;
     if (isReaderPage) flushReaderAudioRef.current();
@@ -837,84 +960,59 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   }, [isReaderPage, navigateToPage]);
 
   const selectInlineDesktopModel = useCallback((
-    page: InlineDesktopModelKey,
-    currentDesktopModel: InlineDesktopModelKey | null,
-    setDesktopModel: (model: InlineDesktopModelKey) => void,
+    page: InlineModelKey,
+    currentDesktopModel: InlineModelKey | null,
+    setDesktopModel: (model: InlineModelKey) => void,
   ) => {
     if (currentDesktopModel === page) return;
     cancelActiveGeneration();
+    audio8Runtime.cancelActiveGeneration();
     qwen3LocalRuntime.cancelActiveGeneration();
     supertonic3Runtime.cancelActiveGeneration();
     resetGeneratedAudio();
+    audio8Runtime.resetGeneratedAudio();
     qwen3LocalRuntime.resetGeneratedAudio();
     supertonic3Runtime.resetGeneratedAudio();
     setDesktopModel(page);
     setExportError(null);
   }, [
+    audio8Runtime,
     cancelActiveGeneration,
     qwen3LocalRuntime,
     resetGeneratedAudio,
     supertonic3Runtime,
   ]);
 
-  const handleStudioDesktopModelSelect = useCallback((page: InlineDesktopModelKey) => {
+  const handleStudioDesktopModelSelect = useCallback((page: InlineModelKey) => {
     selectInlineDesktopModel(page, studioDesktopModel, setStudioDesktopModel);
   }, [selectInlineDesktopModel, studioDesktopModel]);
 
-  const handleReaderDesktopModelSelect = useCallback((page: InlineDesktopModelKey) => {
+  const handleReaderDesktopModelSelect = useCallback((page: InlineModelKey) => {
     flushReaderAudioRef.current();
     selectInlineDesktopModel(page, readerDesktopModel, setReaderDesktopModel);
   }, [readerDesktopModel, selectInlineDesktopModel]);
 
-  const studioDesktopModelOptions = useMemo(() => {
-    const options = [];
-    if (supertonic3Available) {
-      options.push({
-        key: "supertonic3",
-        label: "Supertonic 3",
-        badge: "Electron",
-        detail: `99M · ${supertonic3Language.toUpperCase()} · ${supertonic3Voice}`,
-        selected: studioDesktopModel === "supertonic3",
-        onSelect: () => handleStudioDesktopModelSelect("supertonic3"),
-      });
-    }
-    if (qwen3Settings.available) {
-      options.push({
-          key: "qwen3",
-          label: "Qwen3-TTS",
-          badge: "Electron",
-          detail: qwen3ProviderDetail,
-          selected: studioDesktopModel === "qwen3",
-          onSelect: () => handleStudioDesktopModelSelect("qwen3"),
-      });
-    }
-    return options;
-  }, [handleStudioDesktopModelSelect, qwen3ProviderDetail, qwen3Settings.available, studioDesktopModel, supertonic3Available, supertonic3Language, supertonic3Voice]);
+  const sharedDesktopModelOptions = useMemo(() => ({
+    audio8Available: desktopRuntimesAvailable,
+    audio8Voice,
+    supertonic3Available,
+    supertonic3Language,
+    supertonic3Voice,
+    qwen3Available: qwen3Settings.available,
+    qwen3ProviderDetail,
+  }), [audio8Voice, desktopRuntimesAvailable, qwen3ProviderDetail, qwen3Settings.available, supertonic3Available, supertonic3Language, supertonic3Voice]);
 
-  const readerDesktopModelOptions = useMemo(() => {
-    const options = [];
-    if (supertonic3Available) {
-      options.push({
-        key: "supertonic3",
-        label: "Supertonic 3",
-        badge: "Electron",
-        detail: `99M · ${supertonic3Language.toUpperCase()} · ${supertonic3Voice}`,
-        selected: readerDesktopModel === "supertonic3",
-        onSelect: () => handleReaderDesktopModelSelect("supertonic3"),
-      });
-    }
-    if (qwen3Settings.available) {
-      options.push({
-          key: "qwen3",
-          label: "Qwen3-TTS",
-          badge: "Electron",
-          detail: qwen3ProviderDetail,
-          selected: readerDesktopModel === "qwen3",
-          onSelect: () => handleReaderDesktopModelSelect("qwen3"),
-      });
-    }
-    return options;
-  }, [handleReaderDesktopModelSelect, qwen3ProviderDetail, qwen3Settings.available, readerDesktopModel, supertonic3Available, supertonic3Language, supertonic3Voice]);
+  const studioDesktopModelOptions = useMemo(() => buildDesktopModelOptions({
+    ...sharedDesktopModelOptions,
+    selected: studioDesktopModel,
+    onSelect: handleStudioDesktopModelSelect,
+  }), [handleStudioDesktopModelSelect, sharedDesktopModelOptions, studioDesktopModel]);
+
+  const readerDesktopModelOptions = useMemo(() => buildDesktopModelOptions({
+    ...sharedDesktopModelOptions,
+    selected: readerDesktopModel,
+    onSelect: handleReaderDesktopModelSelect,
+  }), [handleReaderDesktopModelSelect, readerDesktopModel, sharedDesktopModelOptions]);
 
   const mountedLocalRuntimePages = useMemo(() => {
     if (!enableDesktopRuntimes || !isLocalRuntimePage(activePage)) return [];
@@ -932,79 +1030,68 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setShowPlayer(true);
   }, [player]);
 
+  // The browser path is spread across `useModelLoader`, `useTTS` and
+  // `useGenerationControl`; the three desktop runtimes each expose the whole
+  // surface from one hook. Adapting the browser path once is what lets every
+  // reader below pick a runtime instead of re-deriving the same four-way
+  // choice per field.
+  const browserRuntime = useMemo<SurfaceRuntime>(() => ({
+    modelState: currentModelState,
+    canGenerate,
+    isGenerating: isGenerationBusy,
+    generationProgress: tts.generationProgress,
+    stats: tts.stats,
+    error: tts.error ?? retakeError,
+    handleGenerate: runBrowserGeneration,
+    handleStop,
+    retryLoad: handleRetryActiveModelLoad,
+  }), [
+    canGenerate,
+    currentModelState,
+    handleRetryActiveModelLoad,
+    handleStop,
+    isGenerationBusy,
+    retakeError,
+    runBrowserGeneration,
+    tts.error,
+    tts.generationProgress,
+    tts.stats,
+  ]);
+
+  const studioRuntime: SurfaceRuntime = isStudioUsingAudio8 ? audio8Runtime
+    : isStudioUsingQwen3 ? qwen3LocalRuntime
+    : isStudioUsingSupertonic3 ? supertonic3Runtime
+    : browserRuntime;
+  const readerRuntime: SurfaceRuntime = isReaderUsingAudio8 ? audio8Runtime
+    : isReaderUsingQwen3 ? qwen3LocalRuntime
+    : isReaderUsingSupertonic3 ? supertonic3Runtime
+    : browserRuntime;
+
   const handleGenerate = useCallback(() => {
     setExportError(null);
-    if (isStudioUsingQwen3) {
-      qwen3LocalRuntime.handleGenerate();
-      return;
-    }
-    if (isStudioUsingSupertonic3) {
-      supertonic3Runtime.handleGenerate();
-      return;
-    }
-    runBrowserGeneration();
-  }, [isStudioUsingQwen3, isStudioUsingSupertonic3, qwen3LocalRuntime, runBrowserGeneration, supertonic3Runtime]);
+    studioRuntime.handleGenerate();
+  }, [studioRuntime]);
 
   const handleStudioStop = useCallback(() => {
-    if (isStudioUsingQwen3) {
-      qwen3LocalRuntime.handleStop();
-      return;
-    }
-    if (isStudioUsingSupertonic3) {
-      supertonic3Runtime.handleStop();
-      return;
-    }
-    handleStop();
-  }, [handleStop, isStudioUsingQwen3, isStudioUsingSupertonic3, qwen3LocalRuntime, supertonic3Runtime]);
+    studioRuntime.handleStop();
+  }, [studioRuntime]);
 
   const handleStudioRetryLoad = useCallback(() => {
-    if (isStudioUsingQwen3) {
-      qwen3LocalRuntime.retryLoad();
-      return;
-    }
-    if (isStudioUsingSupertonic3) {
-      supertonic3Runtime.retryLoad();
-      return;
-    }
-    handleRetryActiveModelLoad();
-  }, [handleRetryActiveModelLoad, isStudioUsingQwen3, isStudioUsingSupertonic3, qwen3LocalRuntime, supertonic3Runtime]);
+    studioRuntime.retryLoad();
+  }, [studioRuntime]);
 
   const handleReaderGenerate = useCallback(() => {
     setExportError(null);
-    if (isReaderUsingQwen3) {
-      qwen3LocalRuntime.handleGenerate();
-      return;
-    }
-    if (isReaderUsingSupertonic3) {
-      supertonic3Runtime.handleGenerate();
-      return;
-    }
-    runBrowserGeneration();
-  }, [isReaderUsingQwen3, isReaderUsingSupertonic3, qwen3LocalRuntime, runBrowserGeneration, supertonic3Runtime]);
+    readerRuntime.handleGenerate();
+  }, [readerRuntime]);
 
   const handleReaderStop = useCallback(() => {
-    if (isReaderUsingQwen3) {
-      qwen3LocalRuntime.handleStop();
-      return;
-    }
-    if (isReaderUsingSupertonic3) {
-      supertonic3Runtime.handleStop();
-      return;
-    }
-    handleStop();
-  }, [handleStop, isReaderUsingQwen3, isReaderUsingSupertonic3, qwen3LocalRuntime, supertonic3Runtime]);
+    readerRuntime.handleStop();
+  }, [readerRuntime]);
 
   const handleReaderRetryLoad = useCallback(() => {
-    if (isReaderUsingQwen3) {
-      qwen3LocalRuntime.retryLoad();
-      return;
-    }
-    if (isReaderUsingSupertonic3) {
-      supertonic3Runtime.retryLoad();
-      return;
-    }
-    handleRetryActiveModelLoad();
-  }, [handleRetryActiveModelLoad, isReaderUsingQwen3, isReaderUsingSupertonic3, qwen3LocalRuntime, supertonic3Runtime]);
+    readerRuntime.retryLoad();
+  }, [readerRuntime]);
 
   const handleDownloadAudio = useCallback(() => {
     setExportError(null);
@@ -1023,6 +1110,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       onPresetChange={creator.onCreatorPresetChange}
       speed={creator.speed}
       onSpeedChange={creator.onSpeedChange}
+      speedDisabled={isUsingAudio8Inline}
       pauseCommaSec={creator.pauseCommaSec}
       onPauseCommaSecChange={creator.onPauseCommaChange}
       pauseSentenceSec={creator.pauseSentenceSec}
@@ -1045,6 +1133,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const showWasmBadge = localInferenceSupported
     && (isStudioPage || isReaderPage)
     && !isUsingQwen3Inline
+    && !isUsingAudio8Inline
     && ((webgpuStatus !== null && !webgpuStatus.available)
       || (isUsingSupertonic3Inline ? supertonic3Runtime.modelState.backend === "wasm" : isUsingWasmFallback));
   const webgpuModeNote = showWasmBadge
@@ -1052,42 +1141,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     : null;
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
   const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
-  const studioModelState = isStudioUsingQwen3
-    ? qwen3LocalRuntime.modelState
-    : isStudioUsingSupertonic3 ? supertonic3Runtime.modelState : currentModelState;
-  const studioCanGenerate = isStudioUsingQwen3
-    ? qwen3LocalRuntime.canGenerate
-    : isStudioUsingSupertonic3 ? supertonic3Runtime.canGenerate : canGenerate;
-  const studioGenerationBusy = isStudioUsingQwen3
-    ? qwen3LocalRuntime.isGenerating
-    : isStudioUsingSupertonic3 ? supertonic3Runtime.isGenerating : isGenerationBusy;
-  const studioGenerationProgress = isStudioUsingQwen3
-    ? qwen3LocalRuntime.generationProgress
-    : isStudioUsingSupertonic3 ? supertonic3Runtime.generationProgress : tts.generationProgress;
-  const studioStats = isStudioUsingQwen3
-    ? qwen3LocalRuntime.stats
-    : isStudioUsingSupertonic3 ? supertonic3Runtime.stats : tts.stats;
-  const studioVisibleError = isStudioUsingQwen3
-    ? qwen3LocalRuntime.error
-    : isStudioUsingSupertonic3 ? supertonic3Runtime.error : (tts.error ?? retakeError);
-  const readerModelState = isReaderUsingQwen3
-    ? qwen3LocalRuntime.modelState
-    : isReaderUsingSupertonic3 ? supertonic3Runtime.modelState : currentModelState;
-  const readerCanGenerate = isReaderUsingQwen3
-    ? qwen3LocalRuntime.canGenerate
-    : isReaderUsingSupertonic3 ? supertonic3Runtime.canGenerate : canGenerate;
-  const readerGenerationBusy = isReaderUsingQwen3
-    ? qwen3LocalRuntime.isGenerating
-    : isReaderUsingSupertonic3 ? supertonic3Runtime.isGenerating : isGenerationBusy;
-  const readerGenerationProgress = isReaderUsingQwen3
-    ? qwen3LocalRuntime.generationProgress
-    : isReaderUsingSupertonic3 ? supertonic3Runtime.generationProgress : tts.generationProgress;
-  const readerStats = isReaderUsingQwen3
-    ? qwen3LocalRuntime.stats
-    : isReaderUsingSupertonic3 ? supertonic3Runtime.stats : tts.stats;
-  const readerVisibleError = isReaderUsingQwen3
-    ? qwen3LocalRuntime.error
-    : isReaderUsingSupertonic3 ? supertonic3Runtime.error : (tts.error ?? retakeError);
 
   useEffect(() => {
     const handleAppShortcut = (event: KeyboardEvent) => {
@@ -1114,10 +1167,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       }
 
       if (primaryModifier && event.key === "Enter") {
-        if (isStudioPage && studioCanGenerate && !studioGenerationBusy) {
+        if (isStudioPage && studioRuntime.canGenerate && !studioRuntime.isGenerating) {
           event.preventDefault();
           handleGenerate();
-        } else if (isReaderPage && readerCanGenerate && !readerGenerationBusy) {
+        } else if (isReaderPage && readerRuntime.canGenerate && !readerRuntime.isGenerating) {
           event.preventDefault();
           handleReaderGenerate();
         }
@@ -1125,10 +1178,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       }
 
       if (primaryModifier && event.key === ".") {
-        if (isStudioPage && studioGenerationBusy) {
+        if (isStudioPage && studioRuntime.isGenerating) {
           event.preventDefault();
           handleStudioStop();
-        } else if (isReaderPage && readerGenerationBusy) {
+        } else if (isReaderPage && readerRuntime.isGenerating) {
           event.preventDefault();
           handleReaderStop();
         }
@@ -1138,7 +1191,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       if (isLocalRuntimePage(activePage) || isEditableShortcutTarget(event.target)) return;
 
       const canTogglePlayback = player.totalDuration > 0
-        && (!isStudioPage || !studioGenerationBusy);
+        && (!isStudioPage || !studioRuntime.isGenerating);
       if (!primaryModifier && !event.altKey && event.code === "Space" && canTogglePlayback) {
         event.preventDefault();
         void player.togglePlay();
@@ -1169,21 +1222,21 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     isReaderPage,
     isStudioPage,
     player,
-    readerCanGenerate,
-    readerGenerationBusy,
-    studioCanGenerate,
-    studioGenerationBusy,
+    readerRuntime.canGenerate,
+    readerRuntime.isGenerating,
+    studioRuntime.canGenerate,
+    studioRuntime.isGenerating,
   ]);
 
   const visibleModelError = isReaderPage
-    ? readerModelState.error
+    ? readerRuntime.modelState.error
     : isStudioPage
-    ? studioModelState.error
+    ? studioRuntime.modelState.error
     : currentModelState.error;
   const visibleGenerationError = isReaderPage
-    ? readerVisibleError
+    ? readerRuntime.error
     : isStudioPage
-    ? studioVisibleError
+    ? studioRuntime.error
     : (tts.error ?? retakeError);
   const visibleError = visibleGenerationError ?? visibleModelError ?? importError ?? exportError ?? player.error;
 
@@ -1220,19 +1273,27 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     activeReaderSection
       ? buildAudioSignature({
           text: activeReaderSectionText,
-          model: isReaderUsingQwen3 ? "qwen3" : isReaderUsingSupertonic3 ? "supertonic3" : activeModel,
-          voice: isReaderUsingQwen3
-            ? qwenPlaybackSignature
-            : isReaderUsingSupertonic3 ? `${supertonic3Voice}:${supertonic3Language}` : voice,
+          model: isReaderUsingAudio8
+            ? "audio8"
+            : isReaderUsingQwen3 ? "qwen3" : isReaderUsingSupertonic3 ? "supertonic3" : activeModel,
+          voice: isReaderUsingAudio8
+            ? audio8Voice
+            : isReaderUsingQwen3
+              ? qwenPlaybackSignature
+              : isReaderUsingSupertonic3 ? `${supertonic3Voice}:${supertonic3Language}` : voice,
           quality,
-          tuning: creator.generationSettings,
+          tuning: isReaderUsingAudio8
+            ? { ...creator.generationSettings, speed: 1 }
+            : creator.generationSettings,
         })
       : null
   ), [
     activeModel,
     activeReaderSection,
     activeReaderSectionText,
+    audio8Voice,
     creator.generationSettings,
+    isReaderUsingAudio8,
     isReaderUsingQwen3,
     isReaderUsingSupertonic3,
     quality,
@@ -1249,10 +1310,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   });
   desktopReaderControlsRef.current = {
     cancel: () => {
+      audio8Runtime.cancelActiveGeneration();
       qwen3LocalRuntime.cancelActiveGeneration();
       supertonic3Runtime.cancelActiveGeneration();
     },
     reset: () => {
+      audio8Runtime.resetGeneratedAudio();
       qwen3LocalRuntime.resetGeneratedAudio();
       supertonic3Runtime.resetGeneratedAudio();
     },
@@ -1456,7 +1519,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       || !activeReaderSection
       || !nextReaderSection
       || readerRestorePendingRef.current
-      || readerGenerationBusy
+      || readerRuntime.isGenerating
       || player.isPlaying
       || player.segments.length === 0
       || player.totalDuration <= 0
@@ -1474,7 +1537,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     player.isPlaying,
     player.segments.length,
     player.totalDuration,
-    readerGenerationBusy,
+    readerRuntime.isGenerating,
     readerViewPreferences.autoAdvance,
   ]);
   const maybeAutoAdvanceSectionRef = useRef(maybeAutoAdvanceSection);
@@ -1552,7 +1615,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               </h1>
               {!isReaderPage && (
                 <p className="mt-3 text-base font-medium tracking-wide text-text-secondary sm:text-lg">
-                  Text to speech, entirely on your device.
+                  {isStudioUsingAudio8
+                    ? "Audio8 ONNX INT4 synthesis runs locally after its one-time model download."
+                    : "Text to speech, entirely on your device."}
                 </p>
               )}
             </div>
@@ -1692,7 +1757,18 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     />
                   )}
 
-                  {!isStudioUsingQwen3 && !isStudioUsingSupertonic3 && (
+                  {isStudioUsingAudio8 && (
+                    <Audio8InlineSettings
+                      voice={audio8Voice}
+                      onVoiceChange={handleAudio8VoiceChange}
+                      cacheInfo={audio8Runtime.cacheInfo}
+                      cacheBusy={audio8Runtime.cacheBusy}
+                      cacheStatus={audio8Runtime.cacheStatus}
+                      onClearCache={audio8Runtime.clearCache}
+                    />
+                  )}
+
+                  {!isStudioUsingAudio8 && !isStudioUsingQwen3 && !isStudioUsingSupertonic3 && (
                     <VoiceSelector
                       activeModel={activeModel}
                       voice={voice}
@@ -1703,20 +1779,27 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
                   <ControlsProvider
                     value={{
-                      activeModel: isStudioUsingQwen3
+                      // `Controls` reads this for one decision only: whether to
+                      // render the Supertonic quality slider. The desktop
+                      // runtimes have no `ModelType` of their own, so they map
+                      // onto whichever browser model wants the same control —
+                      // Supertonic 3 exposes quality, Audio8 and Qwen3 do not.
+                      activeModel: isStudioUsingQwen3 || isStudioUsingAudio8
                         ? "kokoro"
-                        : isStudioUsingSupertonic3 ? "supertonic" : activeModel,
+                        : isStudioUsingSupertonic3
+                          ? "supertonic"
+                          : activeModel,
                       quality,
                       onQualityChange: handleQualityChange,
                       onGenerate: handleGenerate,
                       onRetryLoad: handleStudioRetryLoad,
                       onStop: handleStudioStop,
-                      isGenerating: studioGenerationBusy,
-                      canGenerate: studioCanGenerate,
-                      modelReady: studioModelState.ready,
-                      modelError: studioModelState.error,
-                      loadingProgress: studioModelState.downloadProgress,
-                      generationProgress: studioGenerationProgress,
+                      isGenerating: studioRuntime.isGenerating,
+                      canGenerate: studioRuntime.canGenerate,
+                      modelReady: studioRuntime.modelState.ready,
+                      modelError: studioRuntime.modelState.error,
+                      loadingProgress: studioRuntime.modelState.downloadProgress,
+                      generationProgress: studioRuntime.generationProgress,
                     }}
                   >
                     <Controls />
@@ -1733,8 +1816,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     totalDuration={player.totalDuration}
                     segmentCount={player.segments.length}
                     activeSegmentNumber={activeSegmentNumber}
-                    stats={studioStats}
-                    isGenerating={studioGenerationBusy}
+                    stats={studioRuntime.stats}
+                    isGenerating={studioRuntime.isGenerating}
                     onTogglePlay={player.togglePlay}
                     onSeek={player.seek}
                     onSkipBackward={() => player.skip(-10)}
@@ -1746,7 +1829,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               )}
             </div>
 
-            {!isStudioUsingQwen3 && !isStudioUsingSupertonic3 && (
+            {!isStudioUsingAudio8 && !isStudioUsingQwen3 && !isStudioUsingSupertonic3 && (
               <div className="mt-4">
                 <SettingsPanel
                   activeModel={activeModel}
@@ -1810,14 +1893,27 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onModelChange={handleReaderModelChange}
               desktopModelOptions={readerDesktopModelOptions}
               desktopQwenMode={isReaderUsingQwen3 ? qwen3Settings.profile.mode : undefined}
-              estimatedWordTrackingStable={!isReaderUsingQwen3 || !readerGenerationBusy}
-              desktopVoiceLabel={isReaderUsingQwen3
+              estimatedWordTrackingStable={!isReaderUsingQwen3 || !readerRuntime.isGenerating}
+              desktopVoiceLabel={isReaderUsingAudio8
+                ? AUDIO8_VOICES.find((item) => item.id === audio8Voice)?.name ?? audio8Voice
+                : isReaderUsingQwen3
                 ? qwen3Settings.profile.mode === "customVoice"
                   ? qwen3Settings.speaker.replace(/_/g, " ")
                   : qwenModeDetail
                 : isReaderUsingSupertonic3 ? supertonic3Voice : undefined}
-              desktopModelSettings={isReaderUsingQwen3
-                ? <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />
+              desktopModelSettings={isReaderUsingAudio8
+                ? (
+                  <Audio8InlineSettings
+                    voice={audio8Voice}
+                    onVoiceChange={handleAudio8VoiceChange}
+                    cacheInfo={audio8Runtime.cacheInfo}
+                    cacheBusy={audio8Runtime.cacheBusy}
+                    cacheStatus={audio8Runtime.cacheStatus}
+                    onClearCache={audio8Runtime.clearCache}
+                  />
+                )
+                : isReaderUsingQwen3
+                  ? <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />
                 : isReaderUsingSupertonic3
                   ? (
                     <Supertonic3InlineSettings
@@ -1837,16 +1933,16 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onVoiceChange={handleVoiceChange}
               quality={quality}
               onQualityChange={handleQualityChange}
-              canGenerate={readerCanGenerate}
-              modelReady={readerModelState.ready}
-              modelError={readerModelState.error}
-              loadingProgress={readerModelState.downloadProgress}
-              generationProgress={readerGenerationProgress}
-              isGenerating={readerGenerationBusy}
+              canGenerate={readerRuntime.canGenerate}
+              modelReady={readerRuntime.modelState.ready}
+              modelError={readerRuntime.modelState.error}
+              loadingProgress={readerRuntime.modelState.downloadProgress}
+              generationProgress={readerRuntime.generationProgress}
+              isGenerating={readerRuntime.isGenerating}
               onGenerate={handleReaderGenerate}
               onRetryLoad={handleReaderRetryLoad}
               onStop={handleReaderStop}
-              stats={readerStats}
+              stats={readerRuntime.stats}
               isPlaying={player.isPlaying}
               clock={player.clock}
               totalDuration={player.totalDuration}
@@ -1859,9 +1955,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onSkipBackward={() => player.skip(-10)}
               onSkipForward={() => player.skip(10)}
               onDownload={handleDownloadAudio}
-              isRetaking={isReaderUsingQwen3 || isReaderUsingSupertonic3 ? false : isRetakingSegment}
+              isRetaking={isReaderUsingAudio8 || isReaderUsingQwen3 || isReaderUsingSupertonic3 ? false : isRetakingSegment}
               onRetakeSegment={handleRetakeSegment}
-              canRetakeSegments={!isReaderUsingQwen3 && !isReaderUsingSupertonic3}
+              canRetakeSegments={!isReaderUsingAudio8 && !isReaderUsingQwen3 && !isReaderUsingSupertonic3}
               onJumpToSegment={handleJumpToSegment}
             />
             </Suspense>
@@ -1900,7 +1996,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           <footer className="mt-16 border-t border-border/40 pt-5">
             {isStudioPage && localInferenceSupported && !browserSupport.message ? (
               <div className="flex items-center flex-wrap gap-1.5">
-                {(["Kokoro", "Supertonic", "WebGPU · CPU"] as const).map((label) => (
+                {/* The badges name the runtimes this build ships, not the one
+                    that happens to be selected, so Audio8 is listed on the
+                    same terms as Kokoro and Supertonic wherever it exists. */}
+                {["Kokoro", "Supertonic", "WebGPU · CPU", ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : [])].map((label) => (
                   <span
                     key={label}
                     className="px-2.5 py-1 rounded-full border border-white/50 bg-white/40 backdrop-blur-sm font-mono text-xs text-text-muted/70"
@@ -1908,9 +2007,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     {label}
                   </span>
                 ))}
-                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full border border-success/25 bg-success/[0.07] backdrop-blur-sm font-mono text-xs text-success/80">
+                <span className="flex items-center gap-1.5 rounded-full border border-success/25 bg-success/[0.07] px-2.5 py-1 font-mono text-xs text-success/80 backdrop-blur-sm">
                   <span
-                    className="w-1 h-1 rounded-full bg-success opacity-80 animate-pulse"
+                    className="h-1 w-1 animate-pulse rounded-full bg-success opacity-80"
                     style={{ boxShadow: "0 0 5px var(--color-success)" }}
                   />
                   all local
@@ -1933,7 +2032,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
         <Suspense fallback={null}>
           <AppSettingsDialog
             open={appSettingsOpen}
-            desktopModelsAvailable={enableDesktopRuntimes && isElectronRuntime}
+            desktopModelsAvailable={desktopRuntimesAvailable}
             preferences={preferences}
             onChange={updatePreferences}
             onReset={resetPreferences}

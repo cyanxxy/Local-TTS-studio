@@ -24,6 +24,7 @@ interface CreatorToolsPanelProps {
   onPresetChange: (preset: CreatorPresetId) => void;
   speed: number;
   onSpeedChange: (value: number) => void;
+  speedDisabled?: boolean;
   pauseCommaSec: number;
   onPauseCommaSecChange: (value: number) => void;
   pauseSentenceSec: number;
@@ -70,6 +71,7 @@ export function CreatorToolsPanel({
   onPresetChange,
   speed,
   onSpeedChange,
+  speedDisabled = false,
   pauseCommaSec,
   onPauseCommaSecChange,
   pauseSentenceSec,
@@ -184,8 +186,15 @@ export function CreatorToolsPanel({
                 step={SPEED_STEP}
                 value={speed}
                 aria-valuetext={`${speed.toFixed(2)} times`}
+                aria-describedby={speedDisabled ? `${speedId}-note` : undefined}
+                disabled={speedDisabled}
                 onChange={(event) => onSpeedChange(parseFloat(event.target.value))}
               />
+              {speedDisabled && (
+                <p id={`${speedId}-note`} className="mt-1 text-xs text-text-muted">
+                  Audio8 uses its model-native speaking rate.
+                </p>
+              )}
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">

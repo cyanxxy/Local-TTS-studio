@@ -427,4 +427,20 @@ contextBridge.exposeInMainWorld("electron", {
       };
     },
   },
+  audio8: {
+    load: (request: { requestId: string }) => ipcRenderer.invoke("audio8:load", request),
+    generate: (request: { requestId: string; text: string; voice: string }) => (
+      ipcRenderer.invoke("audio8:generate", request)
+    ),
+    cancel: (request: { requestId: string }) => ipcRenderer.invoke("audio8:cancel", request),
+    getCacheInfo: () => ipcRenderer.invoke("audio8:cache-info"),
+    clearCache: () => ipcRenderer.invoke("audio8:clear-cache"),
+    subscribeProgress: (listener: (event: unknown) => void) => {
+      const wrapped = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("audio8:progress", wrapped);
+      return () => {
+        ipcRenderer.off("audio8:progress", wrapped);
+      };
+    },
+  },
 });

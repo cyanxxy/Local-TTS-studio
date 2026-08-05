@@ -12,6 +12,24 @@ export const SUPERTONIC3_LANGUAGES = [
   "id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi",
 ] as const;
 
+// Renderer-facing display metadata for the desktop-only Audio8 runtime. The
+// asset table, pinned revisions, cache layout, and canonical voice ids live in
+// `electron/audio8Model.ts`; the renderer cannot import that module without
+// dragging the desktop download machinery into the web bundle, so
+// `vite.audio8Catalogue.test.ts` guards that these two lists stay in agreement.
+export const AUDIO8_MODEL_URL = "https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4";
+/** Cold-load download size, rounded for UI copy. Verified against the asset table. */
+export const AUDIO8_MODEL_DOWNLOAD_LABEL = "572 MiB";
+export const AUDIO8_VOICES = [
+  { id: "clara", name: "Clara", detail: "English · Female" },
+  { id: "iris", name: "Iris", detail: "English · Female" },
+  { id: "arthur", name: "Arthur", detail: "English · Male" },
+  { id: "mia", name: "Mia", detail: "Chinese · Female" },
+  { id: "ben", name: "Ben", detail: "Chinese · Male" },
+  { id: "sophie", name: "Sophie", detail: "Chinese / English · Female" },
+] as const;
+export const AUDIO8_DEFAULT_VOICE = AUDIO8_VOICES[0].id;
+
 export const MODELS = {
   kokoro: {
     id: KOKORO_MODEL_ID,

@@ -71,6 +71,7 @@ const mock = vi.hoisted(() => {
         supertonic: "Female",
       },
       quality: 5,
+      audio8Voice: "clara",
     },
     initialCreatorState: {
       preset: "youtube-shorts",
@@ -179,6 +180,30 @@ const mock = vi.hoisted(() => {
       handleStop: vi.fn(),
       handleRetakeSegment: vi.fn(),
     },
+    audio8Runtime: {
+      modelState: readyState,
+      canGenerate: true,
+      isGenerating: false,
+      generationProgress: 0,
+      stats: {
+        firstLatency: null,
+        processingTime: 0,
+        charsPerSec: 0,
+        rtf: 0,
+        totalDuration: 0,
+        currentDuration: 0,
+      },
+      error: null as string | null,
+      cacheInfo: null as { path: string; exists: boolean; sizeBytes: number } | null,
+      cacheBusy: false,
+      cacheStatus: null as { tone: "success" | "error" | "info"; text: string } | null,
+      handleGenerate: vi.fn(),
+      handleStop: vi.fn(),
+      cancelActiveGeneration: vi.fn(),
+      resetGeneratedAudio: vi.fn(),
+      retryLoad: vi.fn(),
+      clearCache: vi.fn(),
+    },
     cache: {
       cacheBusy: false,
       cacheStatus: null,
@@ -257,6 +282,18 @@ vi.mock("../hooks/useGenerationControl", () => ({
   })),
 }));
 
+vi.mock("../hooks/useAudio8Runtime", () => ({
+  // The real hook calls setShowPlayer(true) when generation starts; mirror that
+  // so tests can observe the fields Studio only renders alongside the player.
+  useAudio8Runtime: (options: { setShowPlayer: (value: boolean) => void }) => ({
+    ...mock.audio8Runtime,
+    handleGenerate: () => {
+      mock.audio8Runtime.handleGenerate();
+      options.setShowPlayer(true);
+    },
+  }),
+}));
+
 vi.mock("../hooks/useModelCacheControls", () => ({
   useModelCacheControls: () => mock.cache,
 }));
@@ -332,12 +369,28 @@ vi.mock("../components/ControlsContext", () => ({
     onStop: () => void;
     onQualityChange: (value: number) => void;
     quality: number;
+    activeModel: string;
+    canGenerate: boolean;
+    isGenerating: boolean;
+    modelReady: boolean;
+    modelError: string | null;
+    loadingProgress: number;
+    generationProgress: number;
   }; children: React.ReactNode }) => (
     <div>
       <button type="button" onClick={value.onGenerate}>generate</button>
       <button type="button" onClick={value.onRetryLoad}>retry-load</button>
       <button type="button" onClick={value.onStop}>stop</button>
       <button type="button" onClick={() => value.onQualityChange(value.quality + 1)}>quality-up</button>
+      {/* Every field Studio hands to Controls is rendered so a test can tell
+          which runtime each one came from. */}
+      <div data-testid="controls-active-model">{value.activeModel}</div>
+      <div data-testid="controls-can-generate">{String(value.canGenerate)}</div>
+      <div data-testid="controls-is-generating">{String(value.isGenerating)}</div>
+      <div data-testid="controls-model-ready">{String(value.modelReady)}</div>
+      <div data-testid="controls-model-error">{value.modelError ?? "none"}</div>
+      <div data-testid="controls-loading-progress">{value.loadingProgress}</div>
+      <div data-testid="controls-generation-progress">{value.generationProgress}</div>
       {children}
     </div>
   ),
@@ -364,11 +417,13 @@ vi.mock("../components/SettingsPanel", () => ({
 }));
 
 vi.mock("../components/CreatorToolsPanel", () => ({
-  CreatorToolsPanel: ({ onDownloadAudio, onDownloadCaptions }: {
+  CreatorToolsPanel: ({ onDownloadAudio, onDownloadCaptions, speedDisabled }: {
     onDownloadAudio: () => void;
     onDownloadCaptions: (format: "srt" | "vtt" | "json") => void;
+    speedDisabled?: boolean;
   }) => (
     <div>
+      <div data-testid="creator-speed-disabled">{String(speedDisabled ?? false)}</div>
       <button type="button" onClick={onDownloadAudio}>creator-audio</button>
       <button type="button" onClick={() => onDownloadCaptions("vtt")}>creator-vtt</button>
     </div>
@@ -376,15 +431,17 @@ vi.mock("../components/CreatorToolsPanel", () => ({
 }));
 
 vi.mock("../components/AudioPlayer", () => ({
-  AudioPlayer: ({ onTogglePlay, onSeek, onSkipBackward, onSkipForward, onDownload, onStop }: {
+  AudioPlayer: ({ onTogglePlay, onSeek, onSkipBackward, onSkipForward, onDownload, onStop, stats }: {
     onTogglePlay: () => void;
     onSeek: (value: number) => void;
     onSkipBackward: () => void;
     onSkipForward: () => void;
     onDownload: () => void;
     onStop: () => void;
+    stats?: { processingTime: number };
   }) => (
     <div data-testid="audio-player">
+      <div data-testid="player-processing-time">{stats?.processingTime}</div>
       <button type="button" onClick={onTogglePlay}>toggle-play</button>
       <button type="button" onClick={() => onSeek(2)}>seek-two</button>
       <button type="button" onClick={onSkipBackward}>skip-back</button>
@@ -420,6 +477,13 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onNavigateToOffset,
     onEditStart,
     onEditEnd,
+    canGenerate,
+    isGenerating,
+    modelReady,
+    modelError,
+    loadingProgress,
+    generationProgress,
+    stats,
   }: {
     text: string;
     onTextChange: (value: string) => void;
@@ -444,10 +508,26 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onNavigateToOffset?: (offset: number, positionSec?: number) => void;
     onEditStart?: () => void;
     onEditEnd?: () => void;
+    canGenerate?: boolean;
+    isGenerating?: boolean;
+    modelReady?: boolean;
+    modelError?: string | null;
+    loadingProgress?: number;
+    generationProgress?: number;
+    stats?: { processingTime: number };
   }) => (
     <div>
       <div data-testid="reader-text-value">{text}</div>
       <div data-testid="reader-section-id">{activeSection?.id ?? "none"}</div>
+      {/* Mirrors the Controls mock: the Reader's own copy of the runtime
+          fields, so a mis-wired arm shows up here too. */}
+      <div data-testid="reader-can-generate">{String(canGenerate)}</div>
+      <div data-testid="reader-is-generating">{String(isGenerating)}</div>
+      <div data-testid="reader-model-ready">{String(modelReady)}</div>
+      <div data-testid="reader-model-error">{modelError ?? "none"}</div>
+      <div data-testid="reader-loading-progress">{loadingProgress}</div>
+      <div data-testid="reader-generation-progress">{generationProgress}</div>
+      <div data-testid="reader-processing-time">{stats?.processingTime}</div>
       {desktopVoiceLabel && <div data-testid="reader-desktop-voice">{desktopVoiceLabel}</div>}
       {desktopModelSettings}
       {onImportDocument && (
@@ -527,6 +607,7 @@ function resetMockState() {
       supertonic: "Female",
     },
     quality: 5,
+    audio8Voice: "clara",
   };
   mock.modelLoader = {
     ...mock.modelLoader,
@@ -578,6 +659,23 @@ function resetMockState() {
     handleGenerate: vi.fn(),
     handleStop: vi.fn(),
     handleRetakeSegment: vi.fn(),
+  };
+  mock.audio8Runtime = {
+    ...mock.audio8Runtime,
+    modelState: mock.readyState,
+    canGenerate: true,
+    isGenerating: false,
+    generationProgress: 0,
+    error: null,
+    cacheInfo: null,
+    cacheBusy: false,
+    cacheStatus: null,
+    handleGenerate: vi.fn(),
+    handleStop: vi.fn(),
+    cancelActiveGeneration: vi.fn(),
+    resetGeneratedAudio: vi.fn(),
+    retryLoad: vi.fn(),
+    clearCache: vi.fn(),
   };
   mock.cache = {
     cacheBusy: false,
@@ -770,6 +868,192 @@ describe("SynthesisApp", () => {
     };
     view.rerender(<WebApp />);
     expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("A new Studio-only script.");
+  });
+
+  it("supports Audio8 local generation in both Studio and Reader", async () => {
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
+    expect(screen.getByRole("button", { name: "studio-desktop-audio8-selected" })).toBeInTheDocument();
+    expect(screen.getByText(/Audio8 ONNX INT4 synthesis runs locally/i)).toBeInTheDocument();
+    expect(screen.getByText(/Text and generated audio stay local/i)).toBeInTheDocument();
+    expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("true");
+    fireEvent.click(screen.getByRole("button", { name: "generate" }));
+    expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(1);
+
+    mock.routing = {
+      ...mock.routing,
+      activePage: "reader",
+      isReaderPage: true,
+      isStudioPage: false,
+    };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-audio8" }));
+    expect(screen.getByRole("button", { name: "reader-desktop-audio8-selected" })).toBeInTheDocument();
+    expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Clara");
+    fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
+    expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(2);
+  });
+
+  it("restores and persists the selected Audio8 voice", async () => {
+    mock.initialAppState.audio8Voice = "iris";
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
+
+    expect(screen.getByRole("button", { name: /IrisEnglish/i })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+      expect.objectContaining({ audio8Voice: "iris" }),
+    ));
+  });
+
+  it("shows the Audio8 cache row and clears it from the inline settings", async () => {
+    mock.audio8Runtime = {
+      ...mock.audio8Runtime,
+      cacheInfo: { path: "/Users/x/Library/local-model-cache/audio8", exists: true, sizeBytes: 599_933_441 },
+    };
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
+
+    const cachePanel = screen.getByRole("region", { name: "Audio8 model cache" });
+    expect(cachePanel).toHaveTextContent("/Users/x/Library/local-model-cache/audio8");
+    expect(cachePanel).toHaveTextContent("572 MB");
+    // The download size in the blurb is derived from the same constant the
+    // catalogue guard test pins to electron/audio8Model.ts.
+    expect(screen.getByText(/one-time 572 MiB model download/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Clear Local Cache" }));
+    expect(mock.audio8Runtime.clearCache).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
+  });
+
+  it("reads each surface field from the runtime driving that surface", async () => {
+    // Values chosen so no field can be mistaken for the browser fallback's.
+    mock.audio8Runtime = {
+      ...mock.audio8Runtime,
+      modelState: { ready: false, loading: true, downloadProgress: 73, error: "audio8 load failed", backend: null },
+      canGenerate: false,
+      isGenerating: true,
+      generationProgress: 42,
+      stats: { ...mock.audio8Runtime.stats, processingTime: 33 },
+      error: "audio8 generation failed",
+    };
+    mock.tts = {
+      ...mock.tts,
+      generationProgress: 7,
+      stats: { ...mock.tts.stats, processingTime: 11 },
+      error: "browser generation failed",
+    };
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    // Before Audio8 is selected Studio must read the browser runtime.
+    fireEvent.click(screen.getByRole("button", { name: "generate" }));
+    expect(mock.generation.handleGenerate).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("controls-model-error")).toHaveTextContent("none");
+    expect(screen.getByTestId("controls-loading-progress")).toHaveTextContent("100");
+    expect(screen.getByTestId("controls-generation-progress")).toHaveTextContent("7");
+    expect(screen.getByTestId("controls-is-generating")).toHaveTextContent("false");
+    expect(screen.getByTestId("controls-active-model")).toHaveTextContent("kokoro");
+    expect(screen.getByTestId("player-processing-time")).toHaveTextContent("11");
+    expect(screen.getByText("browser generation failed")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
+
+    expect(screen.getByTestId("controls-model-ready")).toHaveTextContent("false");
+    expect(screen.getByTestId("controls-model-error")).toHaveTextContent("audio8 load failed");
+    expect(screen.getByTestId("controls-loading-progress")).toHaveTextContent("73");
+    expect(screen.getByTestId("controls-generation-progress")).toHaveTextContent("42");
+    expect(screen.getByTestId("controls-is-generating")).toHaveTextContent("true");
+    expect(screen.getByTestId("controls-can-generate")).toHaveTextContent("false");
+    // Audio8 has no quality control, so it presents as Kokoro to Controls.
+    expect(screen.getByTestId("controls-active-model")).toHaveTextContent("kokoro");
+    expect(screen.getByText("audio8 generation failed")).toBeInTheDocument();
+    expect(screen.queryByText("browser generation failed")).not.toBeInTheDocument();
+
+    // Studio's three handlers must dispatch to Audio8, not the browser path.
+    // Selecting a desktop model resets the player, so generating again is also
+    // what brings the stats readout back — now sourced from Audio8.
+    fireEvent.click(screen.getByRole("button", { name: "generate" }));
+    expect(screen.getByTestId("player-processing-time")).toHaveTextContent("33");
+    fireEvent.click(screen.getByRole("button", { name: "stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "retry-load" }));
+    expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(1);
+    expect(mock.audio8Runtime.handleStop).toHaveBeenCalledTimes(1);
+    expect(mock.audio8Runtime.retryLoad).toHaveBeenCalledTimes(1);
+    expect(mock.generation.handleGenerate).toHaveBeenCalledTimes(1);
+    expect(mock.generation.handleStop).not.toHaveBeenCalled();
+    expect(mock.cache.retryActiveModelLoad).not.toHaveBeenCalled();
+
+    // The Reader is a separate selection: it must still be on the browser
+    // runtime even though Studio moved to Audio8.
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    expect(await screen.findByTestId("reader-model-error")).toHaveTextContent("none");
+    expect(screen.getByTestId("reader-loading-progress")).toHaveTextContent("100");
+    expect(screen.getByTestId("reader-generation-progress")).toHaveTextContent("7");
+    expect(screen.getByTestId("reader-is-generating")).toHaveTextContent("false");
+    expect(screen.getByTestId("reader-processing-time")).toHaveTextContent("11");
+
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-audio8" }));
+    expect(screen.getByTestId("reader-model-ready")).toHaveTextContent("false");
+    expect(screen.getByTestId("reader-model-error")).toHaveTextContent("audio8 load failed");
+    expect(screen.getByTestId("reader-loading-progress")).toHaveTextContent("73");
+    expect(screen.getByTestId("reader-generation-progress")).toHaveTextContent("42");
+    expect(screen.getByTestId("reader-is-generating")).toHaveTextContent("true");
+    expect(screen.getByTestId("reader-can-generate")).toHaveTextContent("false");
+    expect(screen.getByTestId("reader-processing-time")).toHaveTextContent("33");
+
+    fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
+    fireEvent.click(screen.getByRole("button", { name: "reader-stop" }));
+    fireEvent.click(screen.getByRole("button", { name: "reader-retry" }));
+    expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(2);
+    expect(mock.audio8Runtime.handleStop).toHaveBeenCalledTimes(2);
+    expect(mock.audio8Runtime.retryLoad).toHaveBeenCalledTimes(2);
+    expect(mock.generation.handleGenerate).toHaveBeenCalledTimes(1);
+    expect(mock.generation.handleStop).not.toHaveBeenCalled();
+    expect(mock.cache.retryActiveModelLoad).not.toHaveBeenCalled();
+  });
+
+  it("lists Audio8 among the desktop runtimes whether or not it is selected", async () => {
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    expect(screen.getByText("Audio8 · Native CPU")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
+    expect(screen.getByText("Audio8 · Native CPU")).toBeInTheDocument();
+    await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
+  });
+
+  it("hides the desktop runtimes when the web build runs inside Electron", async () => {
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    render(<WebApp />);
+
+    // `enableDesktopRuntimes` is the entry point's opt-in; a live preload
+    // bridge alone must not surface desktop-only models on either surface.
+    expect(screen.queryByRole("button", { name: "studio-desktop-audio8" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Audio8 · Native CPU")).not.toBeInTheDocument();
+    await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
   });
 
   it("splices an edit into its frozen section even when chapter and section ids churn", async () => {
@@ -1321,12 +1605,16 @@ describe("SynthesisApp", () => {
     };
     mock.readerLibrary.documents = [revisitedDocument];
     mock.readerLibrary.activeDocument = revisitedDocument;
+    mock.audio8Runtime.cancelActiveGeneration.mockClear();
+    mock.audio8Runtime.resetGeneratedAudio.mockClear();
     view.rerender(<WebApp />);
 
     await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
       expect.any(Array),
       expect.objectContaining({ currentTime: 4 }),
     ));
+    expect(mock.audio8Runtime.cancelActiveGeneration).toHaveBeenCalled();
+    expect(mock.audio8Runtime.resetGeneratedAudio).toHaveBeenCalled();
   });
 
   it("does not reopen IndexedDB audio when text changes inside the active section", async () => {

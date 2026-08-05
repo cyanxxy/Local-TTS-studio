@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { ModelToggle } from "./ModelToggle";
 import type { ModelState } from "../types";
 
@@ -25,8 +25,13 @@ const errorState: ModelState = {
   backend: null,
 };
 
+function openPicker() {
+  fireEvent.click(screen.getByTestId("model-picker-trigger"));
+  return screen.getByRole("menu", { name: "Select model" });
+}
+
 describe("ModelToggle", () => {
-  it("renders both model buttons", () => {
+  it("keeps the model catalogue collapsed until the picker is opened", () => {
     render(
       <ModelToggle
         activeModel="kokoro"
@@ -35,8 +40,12 @@ describe("ModelToggle", () => {
         supertonicState={readyState}
       />,
     );
-    expect(screen.getByText("Kokoro")).toBeInTheDocument();
-    expect(screen.getByText("Supertonic")).toBeInTheDocument();
+
+    expect(screen.getByTestId("model-picker-trigger")).toHaveTextContent("Kokoro");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    const menu = openPicker();
+    expect(within(menu).getByText("Kokoro")).toBeInTheDocument();
+    expect(within(menu).getByText("Supertonic")).toBeInTheDocument();
   });
 
   it("omits legacy Supertonic when Electron exposes only Kokoro", () => {
@@ -50,11 +59,12 @@ describe("ModelToggle", () => {
       />,
     );
 
-    expect(screen.getByText("Kokoro")).toBeInTheDocument();
-    expect(screen.queryByText("Supertonic")).not.toBeInTheDocument();
+    const menu = openPicker();
+    expect(within(menu).getByText("Kokoro")).toBeInTheDocument();
+    expect(within(menu).queryByText("Supertonic")).not.toBeInTheDocument();
   });
 
-  it("calls onModelChange when clicking inactive model", () => {
+  it("selects a browser model and closes the menu", () => {
     const onModelChange = vi.fn();
     render(
       <ModelToggle
@@ -64,54 +74,33 @@ describe("ModelToggle", () => {
         supertonicState={readyState}
       />,
     );
-    fireEvent.click(screen.getByText("Supertonic"));
+
+    const supertonic = within(openPicker()).getByRole("menuitemradio", { name: /Supertonic/i });
+    fireEvent.pointerDown(supertonic);
+    fireEvent.click(supertonic);
     expect(onModelChange).toHaveBeenCalledWith("supertonic");
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
   });
 
-  it("shows green dot for ready model", () => {
-    const { container } = render(
+  it.each([
+    ["ready", readyState],
+    ["loading", loadingState],
+    ["error", errorState],
+  ])("shows the %s state for a browser model", (status, state) => {
+    render(
       <ModelToggle
         activeModel="kokoro"
         onModelChange={() => {}}
-        kokoroState={readyState}
-        supertonicState={loadingState}
-      />,
-    );
-    const dots = container.querySelectorAll("span.rounded-full");
-    // The kokoro dot should have bg-success
-    const kokoroDot = dots[0];
-    expect(kokoroDot.className).toContain("bg-success");
-  });
-
-  it("shows pulsing dot for loading model", () => {
-    const { container } = render(
-      <ModelToggle
-        activeModel="kokoro"
-        onModelChange={() => {}}
-        kokoroState={readyState}
-        supertonicState={loadingState}
-      />,
-    );
-    const dots = container.querySelectorAll("span.rounded-full");
-    const supertonicDot = dots[1];
-    expect(supertonicDot.className).toContain("animate-ping-ring");
-  });
-
-  it("shows red dot for errored model", () => {
-    const { container } = render(
-      <ModelToggle
-        activeModel="kokoro"
-        onModelChange={() => {}}
-        kokoroState={errorState}
+        kokoroState={state}
         supertonicState={readyState}
       />,
     );
-    const dots = container.querySelectorAll("span.rounded-full");
-    const kokoroDot = dots[0];
-    expect(kokoroDot.className).toContain("bg-danger");
+
+    const option = screen.getByTestId("model-picker-trigger");
+    expect(option.querySelector(`[data-status='${status}']`)).toBeInTheDocument();
   });
 
-  it("disables unavailable models", () => {
+  it("disables unavailable models and explains why", () => {
     render(
       <ModelToggle
         activeModel="supertonic"
@@ -122,14 +111,15 @@ describe("ModelToggle", () => {
       />,
     );
 
-    const kokoroButton = screen.getByRole("button", { name: /kokoro/i });
+    const menu = openPicker();
+    const kokoroButton = within(menu).getByRole("menuitemradio", { name: /Kokoro/i });
     expect(kokoroButton).toBeDisabled();
     expect(kokoroButton).toHaveAttribute("title", "Disabled on iOS");
-    expect(screen.getByText("unavailable")).toBeInTheDocument();
+    expect(within(menu).getByText("Unavailable")).toBeInTheDocument();
   });
 
-  it("renders optional Electron desktop model options alongside browser models", () => {
-    const { container } = render(
+  it("shows desktop models inside the same compact picker", () => {
+    render(
       <ModelToggle
         activeModel="kokoro"
         onModelChange={() => {}}
@@ -145,21 +135,17 @@ describe("ModelToggle", () => {
       />,
     );
 
-    expect(screen.getByText("Kokoro")).toBeInTheDocument();
-    expect(screen.getByText("Supertonic")).toBeInTheDocument();
-    expect(screen.getByText("Qwen3-TTS")).toBeInTheDocument();
-    expect(screen.getByText("Electron")).toBeInTheDocument();
-    expect(screen.getByText("0.6B CustomVoice MLX / local runtime")).toBeInTheDocument();
-    expect(container.querySelector("[data-testid='model-toggle-grid']")).toHaveClass(
-      "grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))]",
-      "items-start",
-    );
+    const menu = openPicker();
+    expect(within(menu).getByText("Kokoro")).toBeInTheDocument();
+    expect(within(menu).getByText("Supertonic")).toBeInTheDocument();
+    expect(within(menu).getByText("Qwen3-TTS")).toBeInTheDocument();
+    expect(within(menu).getByText("Electron")).toBeInTheDocument();
+    expect(within(menu).getByText("0.6B CustomVoice MLX / local runtime")).toBeInTheDocument();
   });
 
-  it("calls the desktop model callback when clicking an Electron option", () => {
+  it("calls the desktop model callback without changing the browser model", () => {
     const onModelChange = vi.fn();
     const onSelectQwen3 = vi.fn();
-
     render(
       <ModelToggle
         activeModel="kokoro"
@@ -176,13 +162,12 @@ describe("ModelToggle", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Qwen3-TTS/i }));
-
+    fireEvent.click(within(openPicker()).getByRole("menuitemradio", { name: /Qwen3-TTS/i }));
     expect(onSelectQwen3).toHaveBeenCalledTimes(1);
     expect(onModelChange).not.toHaveBeenCalled();
   });
 
-  it("marks the selected desktop model as the active pressed option", () => {
+  it("shows the selected desktop model in the closed picker", () => {
     render(
       <ModelToggle
         activeModel="kokoro"
@@ -200,7 +185,199 @@ describe("ModelToggle", () => {
       />,
     );
 
-    expect(screen.getByRole("button", { name: /Qwen3-TTS/i })).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByRole("button", { name: /Kokoro/i })).toHaveAttribute("aria-pressed", "false");
+    const trigger = screen.getByTestId("model-picker-trigger");
+    expect(trigger).toHaveTextContent("Qwen3-TTS");
+    expect(trigger).toHaveTextContent("0.6B CustomVoice MLX / local runtime");
+    const menu = openPicker();
+    expect(within(menu).getByRole("menuitemradio", { name: /Qwen3-TTS/i })).toHaveAttribute("aria-checked", "true");
+    expect(within(menu).getByRole("menuitemradio", { name: /Kokoro/i })).toHaveAttribute("aria-checked", "false");
+  });
+
+  it("supports arrow navigation and Escape", () => {
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={() => {}}
+        kokoroState={readyState}
+        supertonicState={readyState}
+      />,
+    );
+
+    const trigger = screen.getByTestId("model-picker-trigger");
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    const menu = screen.getByRole("menu");
+    const kokoro = within(menu).getByRole("menuitemradio", { name: /Kokoro/i });
+    const supertonic = within(menu).getByRole("menuitemradio", { name: /Supertonic/i });
+    kokoro.focus();
+    fireEvent.keyDown(kokoro, { key: "ArrowDown" });
+    expect(supertonic).toHaveFocus();
+    fireEvent.keyDown(supertonic, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("skips unavailable models during keyboard navigation", () => {
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={() => {}}
+        kokoroState={readyState}
+        supertonicState={readyState}
+        unavailableModels={{ supertonic: "Unavailable in this environment" }}
+        desktopModelOptions={[{
+          key: "qwen3",
+          label: "Qwen3-TTS",
+          onSelect: () => {},
+        }]}
+      />,
+    );
+
+    const menu = openPicker();
+    const kokoro = within(menu).getByRole("menuitemradio", { name: /Kokoro/i });
+    const qwen = within(menu).getByRole("menuitemradio", { name: /Qwen3-TTS/i });
+    kokoro.focus();
+    fireEvent.keyDown(kokoro, { key: "ArrowDown" });
+    expect(qwen).toHaveFocus();
+    fireEvent.keyDown(qwen, { key: "ArrowDown" });
+    expect(kokoro).toHaveFocus();
+  });
+
+  it("focuses the first available model when the selected model is unavailable", () => {
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={() => {}}
+        kokoroState={readyState}
+        supertonicState={readyState}
+        unavailableModels={{ kokoro: "Unavailable in this environment" }}
+      />,
+    );
+
+    const trigger = screen.getByTestId("model-picker-trigger");
+    fireEvent.keyDown(trigger, { key: "ArrowDown" });
+    expect(screen.getByRole("menuitemradio", { name: /Supertonic/i })).toHaveFocus();
+  });
+
+  it("closes with Escape while focus remains on the trigger", () => {
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={() => {}}
+        kokoroState={readyState}
+        supertonicState={readyState}
+      />,
+    );
+
+    const trigger = screen.getByTestId("model-picker-trigger");
+    fireEvent.click(trigger);
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+  });
+
+  it("keeps picker Escape from closing a parent dialog", () => {
+    const parentKeyDown = vi.fn();
+    render(
+      <div onKeyDown={parentKeyDown}>
+        <ModelToggle
+          activeModel="kokoro"
+          onModelChange={() => {}}
+          kokoroState={readyState}
+          supertonicState={readyState}
+        />
+      </div>,
+    );
+
+    const trigger = screen.getByTestId("model-picker-trigger");
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: "Escape" });
+    expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  it("closes on Tab and moves focus past the picker", async () => {
+    render(
+      <div>
+        <button type="button">Before picker</button>
+        <ModelToggle
+          activeModel="kokoro"
+          onModelChange={() => {}}
+          kokoroState={readyState}
+          supertonicState={readyState}
+        />
+        <button type="button">After picker</button>
+      </div>,
+    );
+
+    const trigger = screen.getByTestId("model-picker-trigger");
+    trigger.focus();
+    fireEvent.click(trigger);
+    fireEvent.keyDown(trigger, { key: "Tab" });
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole("button", { name: "After picker" })).toHaveFocus());
+  });
+
+  it("portals the menu outside clipping containers", () => {
+    render(
+      <div className="overflow-y-auto">
+        <ModelToggle
+          activeModel="kokoro"
+          onModelChange={() => {}}
+          kokoroState={readyState}
+          supertonicState={readyState}
+        />
+      </div>,
+    );
+
+    expect(openPicker().parentElement).toBe(document.body);
+  });
+
+  it("constrains and flips the menu within a short viewport", () => {
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, "innerHeight", { configurable: true, value: 420 });
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+      if (this.dataset.testid === "model-picker-trigger") {
+        return {
+          x: 10,
+          y: 180,
+          top: 180,
+          right: 310,
+          bottom: 256,
+          left: 10,
+          width: 300,
+          height: 76,
+          toJSON: () => ({}),
+        };
+      }
+      return {
+        x: 0,
+        y: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+        left: 0,
+        width: 0,
+        height: 0,
+        toJSON: () => ({}),
+      };
+    });
+    const scrollHeightSpy = vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(320);
+
+    try {
+      render(
+        <ModelToggle
+          activeModel="kokoro"
+          onModelChange={() => {}}
+          kokoroState={readyState}
+          supertonicState={readyState}
+        />,
+      );
+
+      const menu = openPicker();
+      expect(menu).toHaveStyle({ left: "10px", top: "8px", width: "300px", maxHeight: "164px" });
+    } finally {
+      rectSpy.mockRestore();
+      scrollHeightSpy.mockRestore();
+      Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
+    }
   });
 });

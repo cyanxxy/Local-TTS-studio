@@ -4,6 +4,45 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-08-05
+
+### Added
+
+- Added Audio8 TTS Preview 0.6B ONNX INT4 as a desktop model in Studio and
+  Reader. It runs the pinned INT4 graphs on the CPU through `onnxruntime-node`
+  in an Electron worker thread — not through the Rust bridge and not in the
+  renderer — and returns 44.1 kHz mono audio. Six pre-registered voices are
+  offered: Clara, Iris, Arthur, Mia, Ben, and Sophie.
+- First use downloads 572 MiB of Audio8 assets into
+  `local-model-cache/audio8/<revision>/` inside the per-user app data
+  directory: three inference graphs with their external weights, the tokenizer,
+  and the runtime manifest. Each file is checked against an exact byte length
+  and an upstream digest before it is loaded, and a voice profile is fetched
+  the first time that voice is used. The 395 MiB voice-registration encoder is
+  deliberately not downloaded, because Open TTS ships pre-registered voices and
+  never registers new ones on the device.
+- Audio8's model settings now report the cache path and size and can clear it,
+  the way the NeuTTS and Qwen3 setup pages already did for their models. Both
+  figures cover every Audio8 revision on disk rather than the current one, so a
+  later revision bump cannot leave behind half a gigabyte the app never counts
+  and no in-app action can reclaim; superseded revisions are also pruned after
+  a load succeeds. Clearing stops the inference worker before unlinking,
+  because the graphs stay memory-mapped while it runs and Windows fails such an
+  unlink outright instead of deferring it the way POSIX does.
+
+### Changed
+
+- `onnxruntime-node` is now a direct dependency pinned to one exact version,
+  with an `overrides` entry that holds every other consumer to it.
+  Transformers.js and `kokoro-js` each depend on it as well, and
+  Transformers.js imports it from a static top-level import, so the previous
+  three resolved copies (677 MB in `node_modules`) could load a second native
+  ONNX Runtime into the same worker thread. One shared copy is 259 MB, and
+  `vite.onnxRuntimeVersion.test.ts` now fails if the lockfile ever resolves
+  more than one version again.
+- Desktop packaging now ships only the target platform's ONNX Runtime binaries
+  instead of all 258 MB of them: 74 MB on macOS arm64 and 61 MB on Windows x64.
+
 ## [1.7.5] - 2026-07-30
 
 ### Changed
@@ -207,6 +246,7 @@ All notable changes to Open TTS are documented here.
   tagged build can publish the full curated notes instead of only generated
   commit summaries.
 
+[1.8.0]: https://github.com/cyanxxy/Local-TTS-studio/releases/tag/v1.8.0
 [1.7.5]: https://github.com/cyanxxy/Local-TTS-studio/releases/tag/v1.7.5
 [1.7.4]: https://github.com/cyanxxy/Local-TTS-studio/releases/tag/v1.7.4
 [1.7.3]: https://github.com/cyanxxy/Local-TTS-studio/releases/tag/v1.7.3

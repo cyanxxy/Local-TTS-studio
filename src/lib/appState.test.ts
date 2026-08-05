@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CREATOR_PRESETS, MODELS, QUALITY_MAX, QUALITY_MIN } from "../constants";
+import { AUDIO8_DEFAULT_VOICE, CREATOR_PRESETS, MODELS, QUALITY_MAX, QUALITY_MIN } from "../constants";
 import {
   analyzePronunciationLexicon,
   DEFAULT_TEXT,
@@ -30,6 +30,7 @@ describe("appState", () => {
         supertonic: MODELS.supertonic.defaultVoice,
       },
       quality: 5,
+      audio8Voice: AUDIO8_DEFAULT_VOICE,
     });
 
     localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, "supertonic");
@@ -57,6 +58,7 @@ describe("appState", () => {
         supertonic: MODELS.supertonic.defaultVoice,
       },
       quality: QUALITY_MAX,
+      audio8Voice: AUDIO8_DEFAULT_VOICE,
     });
   });
 
@@ -69,6 +71,7 @@ describe("appState", () => {
         supertonic: "Male 2",
       },
       quality: QUALITY_MIN - 10,
+      audio8Voice: "iris",
     }));
 
     expect(getInitialAppState()).toEqual({
@@ -79,7 +82,14 @@ describe("appState", () => {
         supertonic: "Male 2",
       },
       quality: QUALITY_MIN,
+      audio8Voice: "iris",
     });
+  });
+
+  it("falls back from an unknown persisted Audio8 voice", () => {
+    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({ audio8Voice: "not-a-voice" }));
+
+    expect(getInitialAppState().audio8Voice).toBe(AUDIO8_DEFAULT_VOICE);
   });
 
   it("falls back to defaults when stored app JSON or localStorage access fails", () => {

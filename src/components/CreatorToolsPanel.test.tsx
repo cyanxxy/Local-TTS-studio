@@ -80,6 +80,13 @@ describe("CreatorToolsPanel", () => {
     expect(props.onMasteringEnabledChange).toHaveBeenCalledWith(false);
   });
 
+  it("disables the speed control when the selected model has a fixed speaking rate", () => {
+    renderPanel({ speedDisabled: true });
+
+    expect(screen.getByLabelText("Base Speed")).toBeDisabled();
+    expect(screen.getByText("Audio8 uses its model-native speaking rate.")).toBeInTheDocument();
+  });
+
   it("downloads audio and captions when audio exists", () => {
     const props = renderPanel();
 

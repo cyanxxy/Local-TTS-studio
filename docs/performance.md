@@ -1,6 +1,6 @@
 # Performance Benchmarks
 
-Open TTS includes a reproducible inference-speed benchmark that runs the same browser Web Worker inference path used by the app. It currently covers Kokoro and Supertonic 2; it does not benchmark the Electron-only Supertonic 3, Qwen, or NeuTTS runtimes.
+Open TTS includes a reproducible inference-speed benchmark that runs the same browser Web Worker inference path used by the app. It currently covers Kokoro and Supertonic 2; it does not benchmark the Electron-only Supertonic 3, Audio8, Qwen, or NeuTTS runtimes.
 
 ```bash
 npm run eval:inference
@@ -47,6 +47,19 @@ Qwen3-TTS runs inside the resident Rust bridge, outside the browser eval harness
 - input text, speaker/language, sampling settings, warm-up count, and measured iterations
 
 Do not compare Qwen native results with browser-model evals or measurements from the removed pre-v1.2 child-server/adapter architecture. Those paths have different loading, streaming, and transport costs.
+
+## Native Audio8 evaluation
+
+Audio8 runs on the CPU through `onnxruntime-node` in an Electron worker thread, outside both the browser eval harness and the Rust bridge. Any Audio8 report should identify:
+
+- Open TTS version and commit
+- pinned model revision and the voice used
+- machine, CPU, and memory, plus the intra-op thread count the runtime selected (up to four Apple performance cores on arm64 macOS, `min(6, availableParallelism())` elsewhere)
+- whether assets were already cached or downloaded during the run, and the load time separately from generation
+- generation wall time, produced audio duration, and RTF
+- the input text and its length, since the renderer splits at 180 characters and every chunk re-prefills the voice-reference prompt before its first token
+
+One compiled-worker smoke run on an M1 Pro, from a warm cache, produced 3.715 seconds of audio for a 49-character sentence in 6.23 seconds with four inference threads — an RTF of 1.68 — and loaded the sessions in 2.46 seconds. The six-thread comparison took 7.28 seconds and reached 1.96 RTF, confirming that these INT4 graphs become memory-bandwidth bound above four threads. This is one machine and one sentence, so it sets expectations for a CPU-only runtime rather than serving as a universal baseline. Run `npm run test:audio8-smoke` with `OPEN_TTS_AUDIO8_MODEL_DIR` pointing at a complete cached revision to reproduce the measurement on another system.
 
 ## Release validation
 

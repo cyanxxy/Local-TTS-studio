@@ -7,6 +7,7 @@ This document keeps maintainer-facing architecture details out of the top-level 
 - React 19 + TypeScript 5.9 in strict mode + Vite 7 + Tailwind CSS 4
 - `@huggingface/transformers` v4 for the Supertonic TTS pipeline
 - `onnxruntime-web` for the Electron-only Supertonic 3 graph sessions
+- `onnxruntime-node` for the Electron-only Audio8 graph sessions, run natively in a `worker_threads` worker
 - `kokoro-js` v1 for Kokoro-82M generation with custom phonemization
 - Electron 42.3.0 for the optional desktop wrapper
 - Rust local bridge for Electron probe/WebSocket transport
@@ -37,6 +38,18 @@ so opening the app does not parse code for surfaces the session never reaches.
 Tests that assert into one of those subtrees must await its mount
 (`findBy*`/`waitFor`) rather than querying synchronously after `render`.
 
+The Audio8 runtime is spread across `electron/` by ownership rather than by
+feature: `audio8Model.ts` holds the pinned revisions, asset table, and voice
+catalogue that every other module reads; `audio8NativeWorker.ts` is the worker
+thread that downloads, loads, and runs the graphs; `audio8AssetCache.ts` does
+the download and integrity verification; `audio8SharedTask.ts` provides the
+reference-counted single-flight both use; `audio8NativeClient.ts` is the
+main-process client that owns the worker; `audio8Cache.ts` reports, clears, and
+prunes the on-disk cache; and `audio8Threading.ts` picks the intra-op thread
+count. The renderer half is `src/hooks/useAudio8Runtime.ts` and
+`src/components/Audio8InlineSettings.tsx`, with display metadata in
+`src/constants.ts`.
+
 ## Worker Protocol
 
 The browser inference path is a strict message contract between the main thread and Web Workers. The canonical TypeScript definitions live in `src/types.ts`.
@@ -47,6 +60,29 @@ Worker -> Main:  LOAD_PROGRESS, READY, AUDIO_CHUNK, GENERATION_COMPLETE, ERROR
 ```
 
 Workers are created at startup and load models lazily on selection.
+
+Audio8 uses a separate contract, because its worker is a Node `worker_threads`
+worker owned by Electron's main process rather than a Web Worker owned by the
+renderer. The canonical definitions live in `electron/audio8NativeClient.ts`.
+
+```text
+Renderer -> Main (IPC):  audio8:load, audio8:generate, audio8:cancel,
+                         audio8:cache-info, audio8:clear-cache
+Main -> Renderer:        audio8:progress
+Main -> Worker:          load, generate, cancel
+Worker -> Main:          progress, result, error
+```
+
+Every message on the worker side carries a `requestId`, and progress is
+delivered to the request that produced it rather than fanned out, so a second
+window's download percentages cannot appear in an unrelated progress bar. One
+worker serves the whole app: it is spawned on the first request and reused by
+every window. Generated audio comes back as one transferred `ArrayBuffer` of
+Float32 PCM per request — there is no chunk stream on this path, so the
+renderer chunks the text instead and schedules each returned buffer through the
+same player. A worker that exits, errors, or goes
+`AUDIO8_REQUEST_INACTIVITY_TIMEOUT_MS` (five minutes) without sending anything
+rejects everything waiting on it; the next request starts a fresh worker.
 
 ## Desktop Document Import
 
@@ -63,7 +99,7 @@ renderer, where archive and document structure are parsed under separate limits.
 
 ## Browser Audio Path
 
-This contract applies to Studio, Reader, and Electron local-runtime playback. Browser models stream chunks from Web Workers; Supertonic 3 uses a separate worker imported only by the Electron renderer. Electron local-runtime pages (NeuTTS and Qwen3) generate through the resident Rust WebSocket bridge worker (`electron/webSocketBridgeWorker.ts` driving `open-tts-local-bridge --action serve-ws`), which streams binary Float32 audio chunks that the renderer schedules through the same Web Audio player. Qwen3 runs in-process through the pinned `qwen3-tts-rs` `TTSInference` APIs: the target package supplies MLX on Apple Silicon or LibTorch on Windows x64, and the bridge dynamically resolves Metal/CUDA availability with a provider-local CPU fallback. Long Qwen jobs carry ordered continuation metadata through main-process admission, reuse Base reference features by worker-session key, and roll back audio from a failed section before exposing partial results. CustomVoice, Base voice cloning, and VoiceDesign share this runtime contract; there is no Candle or upstream Qwen worker fallback. See [Desktop local runtimes](./local-runtimes.md) for the bridge protocol.
+This contract applies to Studio, Reader, and Electron local-runtime playback. Browser models stream chunks from Web Workers; Supertonic 3 uses a separate worker imported only by the Electron renderer. Electron local-runtime pages (NeuTTS and Qwen3) generate through the resident Rust WebSocket bridge worker (`electron/webSocketBridgeWorker.ts` driving `open-tts-local-bridge --action serve-ws`), which streams binary Float32 audio chunks that the renderer schedules through the same Web Audio player. Qwen3 runs in-process through the pinned `qwen3-tts-rs` `TTSInference` APIs: the target package supplies MLX on Apple Silicon or LibTorch on Windows x64, and the bridge dynamically resolves Metal/CUDA availability with a provider-local CPU fallback. Long Qwen jobs carry ordered continuation metadata through main-process admission, reuse Base reference features by worker-session key, and roll back audio from a failed section before exposing partial results. CustomVoice, Base voice cloning, and VoiceDesign share this runtime contract; there is no Candle or upstream Qwen worker fallback. Audio8 uses neither transport: the renderer asks the main process over IPC, the main process runs the graphs in a Node worker thread, and each request returns one Float32 buffer that the renderer schedules through the same player. See [Desktop local runtimes](./local-runtimes.md) for the bridge protocol and the Audio8 worker.
 
 - Playback uses the Web Audio API: `AudioContext` + `AudioBufferSourceNode`.
 - Audio chunks are `Float32Array`.
@@ -90,6 +126,7 @@ Reader keeps the complete normalized document and its real chapter table of cont
 
 - **Kokoro** builds inference units through `buildKokoroInferenceUnits()` in `src/lib/chunking.ts`, merging sentence ranges up to the selected backend budget and splitting oversized single ranges before generation. It calls `tts.generate(string, ...)` per unit; `tts.stream()` is not used. `list_voices()` may return `void` in some `kokoro-js` versions, so fallback voices are required. Because `kokoro-js` 1.2.1 does not forward a model `revision`, the worker pins Transformers.js's remote path template to the immutable Kokoro revision and separately rewrites model/voice fetch URL variants to that revision. WebGPU loads run a small warmup generation before READY, forced reload disposes the previous model when supported, and WASM fallback sets a safe multi-thread count when cross-origin isolation allows SharedArrayBuffer.
 - **Supertonic 2 and 3** build semantic units for headings, lists, quotes, code, sentences, and paragraph boundaries, then adapt target and maximum chunk sizes to the active backend and quality. Failed chunks are subdivided and retried with bounded depth. Inter-chunk pauses are shaped by boundary kind (`none`, comma, sentence, or paragraph) and user overrides; they are not a fixed 0.5-second pad. Per-file download progress is aggregated dynamically. Supertonic 2 is web/iOS-only; Electron does not list or initialize its worker. Supertonic 3's revision-pinned direct ONNX runtime, 31-language table, and preset style loader exist only in the desktop dependency graph. The app-level `onnxruntime-web` version is an exact lockstep dependency of Transformers.js because both consumers use its emitted WASM assets; upgrading it independently can create an ABI mismatch, so `vite.onnxRuntimeVersion.test.ts` guards that relationship until Transformers.js moves to a stable runtime release.
+- **Audio8** is desktop-only and native: `electron/audio8NativeWorker.ts` runs three `onnxruntime-node` CPU sessions in a worker thread — a slow autoregressive transformer that emits one semantic token and a hidden state per frame, a fast transformer that expands that hidden state into the remaining acoustic codebooks, and a codec decoder that turns the finished code matrix into 44.1 kHz Float32 PCM. Everything shape-dependent (sequence lengths, layer and head counts, codebook size, token ids) is read from the model's own `runtime_manifest.json` rather than hard-coded, and everything repository-dependent (pinned model and voice-Space revisions, asset table, voice ids, text limit) lives in `electron/audio8Model.ts`. The renderer keeps only display metadata for the same voices in `src/constants.ts`, because importing the desktop module would pull the download machinery into the web bundle; `vite.audio8Catalogue.test.ts` asserts the two lists and the quoted download size stay in agreement. The sampler is seeded (mulberry32, seed 42), so one text, voice, and revision reproduce the same audio, which is what makes a regression in the inference loop detectable. The renderer chunks text to 180 characters because the voice-reference prompt is re-prefilled before every chunk's first token, while the IPC boundary independently rejects anything over `AUDIO8_MAX_TEXT_CHARACTERS` (1,000) so a malformed payload cannot pin a core. Intra-op threads use up to four Apple performance cores on arm64 macOS and `min(6, availableParallelism())` elsewhere; using efficiency cores hurts latency, while the cap avoids the memory-bandwidth regression measured above four threads on M1 Pro. The app-level `onnxruntime-node` version is pinned exactly and re-pinned through `overrides`: Transformers.js and `kokoro-js` depend on it too, Transformers.js imports it from a static top-level import, and the Audio8 worker loads both — so a second resolved copy would load a second native ONNX Runtime into that one thread. `vite.onnxRuntimeVersion.test.ts` therefore checks the installed version and that the whole lockfile resolves exactly one.
 
 ## Browser Support Notes
 
