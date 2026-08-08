@@ -440,12 +440,16 @@ async function waitForPrune(dir: string): Promise<void> {
 }
 
 /**
- * The barrier joins filesystem work, so it needs however many event-loop turns
- * that I/O takes rather than a fixed number. `setImmediate` is never faked here,
- * so this still drives a suite running on fake `setTimeout`.
+ * The barrier joins filesystem work on the libuv threadpool, so the bound has
+ * to be wall-clock time, not a turn count: a pending `setImmediate` keeps the
+ * poll phase from blocking, letting a turn-counted loop exhaust itself in
+ * microseconds while a loaded runner is still mid-`rm`. `setImmediate` and
+ * `Date.now` are never faked here, so this still drives a suite running on
+ * fake `setTimeout`.
  */
 async function waitForQuit(): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
     if (mocks.quit.mock.calls.length > 0) return;
     await new Promise((resolve) => setImmediate(resolve));
   }
