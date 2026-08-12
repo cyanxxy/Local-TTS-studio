@@ -846,7 +846,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       if (!documentsBridge && /failed to fetch|networkerror|load failed/i.test(message)) {
         message = "This site blocks direct browser imports. Use the desktop app for cross-origin article URLs.";
       }
-      setImportError(message);
+      // AdvancedReaderPage owns URL-import failures while its popover remains
+      // open. Storing the same rejection here also renders the global banner,
+      // duplicating the message and leaving it behind after the popover closes.
       throw new Error(message);
     } finally {
       importInFlightRef.current = false;
@@ -1229,7 +1231,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   ]);
 
   const visibleModelError = isReaderPage
-    ? readerRuntime.modelState.error
+    // Desktop Reader models render an inline recovery card beside the toolbar.
+    // Keep the global banner for browser-model failures, whose Reader controls
+    // otherwise expose only the generic "Model failed to load" status.
+    ? readerDesktopModel === null ? readerRuntime.modelState.error : null
     : isStudioPage
     ? studioRuntime.modelState.error
     : currentModelState.error;

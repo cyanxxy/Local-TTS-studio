@@ -92,7 +92,7 @@ export const AUDIO_PLAYER_RETAIN_BEHIND_SECONDS = 10;
 
 export const PAUSE_MIN = 0;
 export const PAUSE_MAX = 1.2;
-export const PAUSE_STEP = 0.02;
+export const PAUSE_STEP = 0.01;
 export const DEFAULT_PAUSE_OVERRIDES = {
   none: 0,
   comma: 0.14,

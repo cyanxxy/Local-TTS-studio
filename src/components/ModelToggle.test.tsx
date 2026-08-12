@@ -328,7 +328,9 @@ describe("ModelToggle", () => {
       </div>,
     );
 
-    expect(openPicker().parentElement).toBe(document.body);
+    const menu = openPicker();
+    expect(menu.parentElement).toBe(document.body);
+    expect(menu).toHaveAttribute("data-model-picker-menu");
   });
 
   it("constrains and flips the menu within a short viewport", () => {

@@ -33,6 +33,38 @@ import type { Audio8NativeResult, Audio8WorkerResponse } from "./audio8NativeCli
 import { SerialTaskQueue, SharedTask, SharedTaskGroup, type SharedTaskContext } from "./audio8SharedTask";
 import { selectAudio8InferenceThreads } from "./audio8Threading";
 
+/**
+ * onnxruntime-common selects its FP16 backing array lazily, the first time an
+ * `ort.Tensor` is constructed. Node 24 introduced a native `Float16Array`, so
+ * ORT 1.27 now selects that instead of the Uint16Array representation its Node
+ * binding has historically used. The native addon accepts the new array type,
+ * but node-addon-api 6 reports its byte length as zero. Every non-empty FP16
+ * input consequently fails with e.g. `not enough space: expected 524288, got
+ * 0`.
+ *
+ * Prime ORT's process-local type mapping while Float16Array is hidden. The map
+ * then keeps using Uint16Array, whose bits are identical and which the native
+ * binding handles correctly. Restore the global immediately so this worker
+ * does not change JavaScript semantics for the tokenizer or any other code.
+ */
+export function initialiseAudio8OrtFloat16Compatibility(): void {
+  const globalWithFloat16 = globalThis as typeof globalThis & { Float16Array?: unknown };
+  if (typeof globalWithFloat16.Float16Array !== "function") return;
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "Float16Array");
+  if (!descriptor?.configurable) {
+    throw new Error("Audio8 cannot initialise ONNX Runtime FP16 compatibility.");
+  }
+  try {
+    Object.defineProperty(globalThis, "Float16Array", { ...descriptor, value: undefined });
+    const probe = new ort.Tensor("float16", new Uint16Array(1), [1]);
+    probe.dispose();
+  } finally {
+    Object.defineProperty(globalThis, "Float16Array", descriptor);
+  }
+}
+
+initialiseAudio8OrtFloat16Compatibility();
+
 // ORT logs one info line per session and per optimisation pass otherwise, which
 // ends up in the packaged app's stderr for every load.
 ort.env.logLevel = "error";

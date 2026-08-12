@@ -54,6 +54,8 @@ describe("CreatorToolsPanel", () => {
     expect(screen.getByLabelText("Base Speed")).toBe(sliders[0]);
     expect(screen.getByLabelText("Base Speed")).toHaveAttribute("step", "0.01");
     expect(screen.getByLabelText("Comma pause")).toBe(sliders[1]);
+    expect(screen.getByLabelText("Comma pause")).toHaveAttribute("step", "0.01");
+    expect(screen.getByLabelText("Comma pause")).toHaveValue("0.11");
     expect(screen.getByLabelText("Sentence pause")).toBe(sliders[2]);
     expect(screen.getByLabelText("Paragraph pause")).toBe(sliders[3]);
 

@@ -315,6 +315,7 @@ export function ModelToggle({
           id={`${pickerId}-menu`}
           role="menu"
           aria-label="Select model"
+          data-model-picker-menu
           data-testid="model-picker-menu"
           className="glass-pop fixed z-[200] overflow-y-auto rounded-2xl border border-white/60 p-1.5 shadow-glass-lg animate-fade-up"
           style={{
