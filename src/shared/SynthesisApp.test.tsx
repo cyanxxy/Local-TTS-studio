@@ -489,7 +489,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onTextChange: (value: string) => void;
     onImportDocument?: () => void;
     onImportFile?: (file: File) => void;
-    onImportUrl?: (url: string) => void;
+    onImportUrl?: (url: string) => Promise<void>;
     isImportingDocument?: boolean;
     onModelChange: (model: "kokoro" | "supertonic") => void;
     onVoiceChange: (voice: string) => void;
@@ -536,7 +536,11 @@ vi.mock("../components/AdvancedReaderPage", () => ({
         </button>
       )}
       {onImportFile && <button type="button">reader-file-import</button>}
-      {onImportUrl && <button type="button" onClick={() => onImportUrl("https://example.com")}>reader-url-import</button>}
+      {onImportUrl && (
+        <button type="button" onClick={() => void onImportUrl("https://example.com").catch(() => undefined)}>
+          reader-url-import
+        </button>
+      )}
       <button type="button" onClick={() => onTextChange("Reader text with enough length.")}>reader-text</button>
       <button type="button" onClick={onEditStart}>reader-edit-start</button>
       <button
@@ -1027,6 +1031,41 @@ describe("SynthesisApp", () => {
     expect(mock.generation.handleGenerate).toHaveBeenCalledTimes(1);
     expect(mock.generation.handleStop).not.toHaveBeenCalled();
     expect(mock.cache.retryActiveModelLoad).not.toHaveBeenCalled();
+  });
+
+  it("leaves a desktop Reader model failure to the Reader recovery card", async () => {
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    mock.audio8Runtime = {
+      ...mock.audio8Runtime,
+      modelState: {
+        ready: false,
+        loading: false,
+        downloadProgress: 0,
+        error: "audio8 reader load failed",
+        backend: null,
+      },
+      canGenerate: false,
+      error: null,
+    };
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-audio8" }));
+
+    expect(screen.getByTestId("reader-model-error")).toHaveTextContent("audio8 reader load failed");
+    expect(screen.getAllByText("audio8 reader load failed")).toHaveLength(1);
   });
 
   it("lists Audio8 among the desktop runtimes whether or not it is selected", async () => {
@@ -1862,6 +1901,34 @@ describe("SynthesisApp", () => {
 
     expect(await screen.findByRole("button", { name: "reader-file-import" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "reader-url-import" })).toBeInTheDocument();
+  });
+
+  it("returns a Reader URL failure without duplicating it in the global banner", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = {
+      activePage: "reader",
+      availableTabs: [
+        { key: "studio", label: "Studio" },
+        { key: "reader", label: "Reader" },
+      ],
+      isReaderPage: true,
+      isStudioPage: false,
+      navigateToPage: vi.fn(),
+    };
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new TypeError("Failed to fetch"));
+
+    try {
+      render(<WebApp />);
+      fireEvent.click(await screen.findByRole("button", { name: "reader-url-import" }));
+      await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+
+      expect(screen.queryByText(
+        "This site blocks direct browser imports. Use the desktop app for cross-origin article URLs.",
+      )).not.toBeInTheDocument();
+      expect(mock.readerLibrary.createDocument).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 
   it("imports a desktop document into the structured Reader library", async () => {

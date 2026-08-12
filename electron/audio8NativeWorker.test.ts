@@ -275,6 +275,13 @@ describe("startAudio8Worker request validation", () => {
 });
 
 describe("readTrailingValues", () => {
+  it("keeps FP16 tensors on Uint16Array under Node 24", () => {
+    const tensor = new ort.Tensor("float16", new Uint16Array(262_144), [1, 2, 2048, 64]);
+
+    expect(tensor.data).toBeInstanceOf(Uint16Array);
+    expect(tensor.data.byteLength).toBe(524_288);
+  });
+
   it("reads the newest position of a float32 output", () => {
     const tensor = new ort.Tensor("float32", Float32Array.from([1, 2, 3, 4, 5, 6]), [1, 2, 3]);
 

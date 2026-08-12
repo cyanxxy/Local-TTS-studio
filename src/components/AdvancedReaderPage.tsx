@@ -807,10 +807,17 @@ export function AdvancedReaderPage({
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       const target = e.target as Node;
+      // ModelToggle portals its menu to document.body so it can escape this
+      // scrollable popover. Treat that nested portal as part of Voice settings;
+      // otherwise mousedown closes and unmounts the settings tree before the
+      // model option's click callback can select the new runtime.
+      const inModelPickerMenu = target instanceof Element
+        && target.closest("[data-model-picker-menu]") !== null;
       if (
         settingsOpenRef.current
         && !settingsRef.current?.contains(target)
         && !settingsPopoverRef.current?.contains(target)
+        && !inModelPickerMenu
       ) {
         setSettingsOpen(false);
       }

@@ -73,20 +73,19 @@ The same app-wide settings system is shared by Web and Electron: system/light/da
 
 <div align="center">
 
-### Studio
+Fresh captures from the Electron desktop app on macOS, using the default light appearance.
 
-<img src="./docs/screenshots/studio.png" alt="Open TTS Studio" width="900">
+### Studio workspace
 
-<table>
-  <tr>
-    <td align="center"><strong>Reader</strong></td>
-    <td align="center"><strong>Qwen3-TTS setup</strong></td>
-  </tr>
-  <tr>
-    <td><img src="./docs/screenshots/reader.png" alt="Open TTS Reader with long-form document playback"></td>
-    <td><img src="./docs/screenshots/qwen3-mlx.png" alt="Open TTS Qwen3-TTS native model setup and download"></td>
-  </tr>
-</table>
+<img src="./docs/screenshots/studio.png" alt="Open TTS Studio workspace with local Kokoro synthesis" width="900">
+
+### Long-form Reader
+
+<img src="./docs/screenshots/reader.png" alt="Open TTS Reader with document navigation and playback controls" width="900">
+
+### Native Qwen3-TTS setup
+
+<img src="./docs/screenshots/qwen3-mlx.png" alt="Open TTS Qwen3-TTS native model setup with a verified local model" width="720">
 
 </div>
 
@@ -234,7 +233,7 @@ Open Settings from the slider button in the top-right corner, or press <kbd>⌘<
 Preferences persist locally and apply across Studio, Reader, and desktop runtime pages.
 
 <div align="center">
-<img src="./docs/screenshots/settings-appearance.png" alt="Open TTS appearance, theme, size, and font settings" width="760">
+<img src="./docs/screenshots/settings-appearance.png" alt="Open TTS appearance settings with theme, accent, interface size, and font controls" width="900">
 </div>
 
 ---
@@ -255,7 +254,7 @@ Shortcuts work while Open TTS is the active application. Space remains normal te
 | Previous / next Reader section | <kbd>←</kbd> / <kbd>→</kbd> | <kbd>←</kbd> / <kbd>→</kbd> |
 
 <div align="center">
-<img src="./docs/screenshots/settings-shortcuts.png" alt="Open TTS macOS and Windows keyboard shortcuts" width="760">
+<img src="./docs/screenshots/settings-shortcuts.png" alt="Open TTS keyboard shortcuts for macOS, Windows, and Linux" width="900">
 </div>
 
 ---

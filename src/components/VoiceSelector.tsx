@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useId } from "react";
 import { ChevronDown, Check } from "lucide-react";
 import type { ModelType } from "../types";
 import { MODELS } from "../constants";
@@ -37,7 +37,9 @@ export function VoiceSelector({
 }: VoiceSelectorProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const openRef = useRef(open);
+  const menuId = useId();
 
   const voices =
     activeModel === "supertonic"
@@ -76,6 +78,8 @@ export function VoiceSelector({
           {voices.map((v) => (
             <button
               key={v}
+              type="button"
+              aria-pressed={voice === v}
               onClick={() => onVoiceChange(v)}
               className={`flex-1 py-2 px-3 text-sm rounded-xl border backdrop-blur-md transition-all duration-200 ${
                 voice === v
@@ -105,7 +109,18 @@ export function VoiceSelector({
       <div ref={containerRef} className="relative">
         {/* Trigger */}
         <button
+          ref={triggerRef}
+          type="button"
           onClick={() => setOpen((o) => !o)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape" && open) {
+              event.preventDefault();
+              setOpen(false);
+            }
+          }}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-controls={open ? menuId : undefined}
           className="w-full flex items-center gap-2 px-3 py-2.5 text-sm rounded-xl border border-white/50 bg-white/40 backdrop-blur-md text-text-primary shadow-glass-sm transition-all duration-200 hover:bg-white/60 hover:-translate-y-px active:translate-y-0 active:scale-[0.98]"
         >
           <span className="flex-1 text-left">{formatVoiceName(voice)}</span>
@@ -118,6 +133,16 @@ export function VoiceSelector({
         {/* Dropdown */}
         {open && (
           <div
+            id={menuId}
+            role="menu"
+            aria-label="Select voice"
+            onKeyDown={(event) => {
+              if (event.key === "Escape") {
+                event.preventDefault();
+                setOpen(false);
+                triggerRef.current?.focus();
+              }
+            }}
             className="absolute z-50 top-full mt-1.5 left-0 right-0 glass-pop rounded-2xl overflow-hidden animate-scale-in"
           >
             <div className="max-h-64 overflow-y-auto">
@@ -130,6 +155,9 @@ export function VoiceSelector({
                   {groupVoices.map((v) => (
                     <button
                       key={v}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={v === voice}
                       onClick={() => { onVoiceChange(v); setOpen(false); }}
                       className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-all duration-150 active:scale-[0.97] ${
                         v === voice

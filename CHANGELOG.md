@@ -4,6 +4,27 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.8.2] - 2026-08-12
+
+### Changed
+
+- Refreshed the README with current Electron screenshots for Studio, Reader,
+  Qwen3-TTS setup, appearance settings, and keyboard shortcuts.
+- Improved the Kokoro and Supertonic voice controls with explicit selection
+  state, accessible menu semantics, and predictable Escape-key dismissal.
+- Changed Creator Toolkit pause controls to 0.01-second increments so every
+  shipped preset value can be represented exactly by its slider.
+
+### Fixed
+
+- Fixed Audio8 generation on Node.js 24 runtimes where ONNX Runtime could
+  expose an empty native buffer for cached FP16 tensors and fail with
+  `not enough space: expected 524288, got 0`.
+- Fixed the Reader model picker closing its parent voice panel before a model
+  selection could complete.
+- Removed duplicate Reader model-load and URL-import errors while preserving
+  the Reader's inline recovery controls.
+
 ## [1.8.1] - 2026-08-12
 
 ### Added
