@@ -107,6 +107,18 @@ describe("audioTimeline", () => {
     }]);
   });
 
+  it("fills fallback totals without replacing explicit transport totals", () => {
+    const segments = buildAudioSegments([
+      chunk({ segmentId: "fallback", index: undefined, total: undefined }),
+      chunk({ segmentId: "explicit", index: 2, total: 2 }),
+    ]);
+
+    expect(segments.map(({ id, total }) => ({ id, total }))).toEqual([
+      { id: "fallback", total: 2 },
+      { id: "explicit", total: 2 },
+    ]);
+  });
+
   it("updates a streamed semantic segment incrementally", () => {
     const segments: AudioSegment[] = [];
     appendAudioSegment(segments, chunk({

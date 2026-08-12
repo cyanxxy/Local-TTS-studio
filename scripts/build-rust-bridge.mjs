@@ -33,7 +33,7 @@ if (process.platform === "win32" && process.arch !== "x64") {
   throw new Error(`Windows desktop packaging supports x64 only (received ${process.arch}).`);
 }
 
-execFileSync("cargo", ["build", "--release", "--manifest-path", manifestPath], {
+execFileSync("cargo", ["build", "--locked", "--release", "--manifest-path", manifestPath], {
   cwd: rootDir,
   env: { ...process.env, CARGO_TARGET_DIR: targetDir },
   stdio: "inherit",

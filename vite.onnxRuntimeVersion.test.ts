@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 interface PackageMetadata {
   version?: string;
   dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
 }
 
 interface LockfileMetadata {
@@ -26,7 +27,7 @@ describe("app-level ONNX Runtime dependency", () => {
     const app = readPackage("package.json");
     const transformers = readPackage("node_modules/@huggingface/transformers/package.json");
     const runtime = readPackage("node_modules/onnxruntime-web/package.json");
-    const appRuntime = app.dependencies?.["onnxruntime-web"];
+    const appRuntime = app.devDependencies?.["onnxruntime-web"];
     const transformersRuntime = transformers.dependencies?.["onnxruntime-web"];
 
     expect(appRuntime).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/);

@@ -23,6 +23,16 @@ per-batch decode is silent, because it now runs many times per request against
 the bridge's bounded stdout buffer. The upstream high-level
 VoiceDesign API at the pinned revision returns placeholder silence; the rest of
 the low-level inference engine remains the native backend used by Open TTS.
+The patch also refreshes the source-compatible `tokenizers`, `base64`, and
+`tower-http` dependency majors, and pins `base64` to `default-features = false`
+with only `std` so 0.23's default `simd-unsafe` engines stay out of the build;
+native/audio-coupled dependencies remain at their pinned versions. Only the
+`tokenizers` and `base64` bumps are verified here: both are used by the crate
+library, which Open TTS compiles through the vendored MLX backend and covers
+with the bridge suite. `tower-http` has no consumer outside
+`src/bin/api_server.rs`, and Open TTS depends on this crate as a library only,
+so nothing in this repository builds that binary — the `tower-http` bump is
+unverified and must be re-checked against upstream on the next re-vendor.
 
 ## Re-vendor checklist
 

@@ -1,9 +1,9 @@
-const fs = require("node:fs");
-const path = require("node:path");
-const asar = require("@electron/asar");
+import fs from "node:fs";
+import path from "node:path";
+import * as asar from "@electron/asar";
 
-const MAX_ASAR_BYTES = 2 * 1024 * 1024 * 1024;
-const ALLOWED_TOP_LEVEL = new Set(["dist", "dist-electron", "node_modules", "package.json"]);
+export const MAX_ASAR_BYTES = 2 * 1024 * 1024 * 1024;
+export const ALLOWED_TOP_LEVEL = new Set(["dist", "dist-electron", "node_modules", "package.json"]);
 const TARGET_ORT_DIRECTORY = {
   darwin: "darwin",
   win32: "win32",
@@ -23,7 +23,8 @@ function verifyArchive(archivePath) {
   }
   const entries = asar.listPackage(archivePath);
   const unexpected = entries.filter((entry) => {
-    const top = entry.replace(/^\//, "").split("/", 1)[0];
+    // asar builds entries with path.join, so a Windows host reports "\dist\index.html".
+    const top = entry.split(/[\\/]/).filter(Boolean)[0];
     return top && !ALLOWED_TOP_LEVEL.has(top);
   });
   if (unexpected.length > 0) {
@@ -50,11 +51,8 @@ function verifyNativeRuntime(resourcesPath, platform) {
   }
 }
 
-module.exports = async function verifyElectronPackage(context) {
+export default async function verifyElectronPackage(context) {
   const resourcesPath = resourcesDirectory(context);
   verifyArchive(path.join(resourcesPath, "app.asar"));
   verifyNativeRuntime(resourcesPath, context.electronPlatformName);
-};
-
-module.exports.MAX_ASAR_BYTES = MAX_ASAR_BYTES;
-module.exports.ALLOWED_TOP_LEVEL = ALLOWED_TOP_LEVEL;
+}

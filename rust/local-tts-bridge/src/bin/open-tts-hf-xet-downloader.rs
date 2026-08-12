@@ -96,25 +96,34 @@ fn resolve_xet_metadata(repo: &str, revision: &str, file: &str) -> Result<XetRes
     validate_file_path(file)?;
 
     let url = format!("https://huggingface.co/{repo}/resolve/{revision}/{file}");
-    let agent = ureq::AgentBuilder::new().redirects(0).build();
-    let response = match agent.head(&url).call() {
-        Ok(response) => response,
-        Err(ureq::Error::Status(_, response)) => response,
-        Err(error) => return Err(anyhow!(error)).context("Hugging Face resolve request failed"),
-    };
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .http_status_as_error(false)
+        .build()
+        .into();
+    let response = agent
+        .head(&url)
+        .call()
+        .context("Hugging Face resolve request failed")?;
 
     let hash = response
-        .header("x-xet-hash")
+        .headers()
+        .get("x-xet-hash")
+        .and_then(|value| value.to_str().ok())
         .filter(|value| value.bytes().all(|byte| byte.is_ascii_hexdigit()) && value.len() == 64)
         .ok_or_else(|| anyhow!("Hugging Face did not return Xet metadata for {file}"))?
         .to_string();
     let size = response
-        .header("x-linked-size")
+        .headers()
+        .get("x-linked-size")
+        .and_then(|value| value.to_str().ok())
         .ok_or_else(|| anyhow!("Hugging Face did not return the size for {file}"))?
         .parse::<u64>()
         .context("Hugging Face returned an invalid Xet file size")?;
     let token_refresh_url = response
-        .header("link")
+        .headers()
+        .get("link")
+        .and_then(|value| value.to_str().ok())
         .and_then(parse_xet_auth_link)
         .ok_or_else(|| anyhow!("Hugging Face did not return a Xet authorization endpoint"))?;
 

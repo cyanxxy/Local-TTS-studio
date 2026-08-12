@@ -95,7 +95,7 @@ pub fn prepare_decoded_reference_wav(
     Ok(PreparedReferenceWav {
         samples,
         sample_rate: target_sample_rate,
-        digest: format!("{:x}", hasher.finalize()),
+        digest: hex::encode(hasher.finalize()),
         truncated,
     })
 }

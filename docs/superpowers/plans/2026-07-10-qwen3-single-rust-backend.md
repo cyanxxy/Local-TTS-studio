@@ -8,7 +8,7 @@
 
 **Architecture:** Electron keeps its authenticated loopback WebSocket connection to the single resident Rust bridge. The bridge owns a focused `qwen3` module built on the pinned `badlogic/qwen3_tts_rs` `TTSInference` API; target-specific Cargo features select MLX or LibTorch without creating separate product backends. Electron owns immutable model profiles and downloads, while one React context owns Qwen settings and request state for Studio, Reader, and the settings page.
 
-**Tech Stack:** Rust 2024, `qwen3-tts-rs` revision `288a716ce38a91c826dd67968c75d1dd4b0f07bc`, MLX/Metal, `tch` 0.20 + LibTorch 2.7.1/CUDA 12.6, tungstenite, Electron 42, React 19, TypeScript 5.9, Vitest.
+**Tech Stack (historical at implementation time):** Rust 2024, `qwen3-tts-rs` revision `288a716ce38a91c826dd67968c75d1dd4b0f07bc`, MLX/Metal, `tch` 0.20 + LibTorch 2.7.1/CUDA 12.6, tungstenite, Electron 42, React 19, TypeScript 5.9, Vitest.
 
 ## Global Constraints
 

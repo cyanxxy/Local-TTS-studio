@@ -29,7 +29,14 @@ export default defineConfig([
       },
     },
     rules: {
+      // Stricter than the react-hooks preset, which sets this to "warn".
       "react-hooks/exhaustive-deps": "error",
+      // React Compiler rules newly enforced by eslint-plugin-react-hooks 7.1.1.
+      // They report 38 pre-existing findings in src/; kept visible as warnings
+      // pending a dedicated follow-up rather than dropped from the config.
+      "react-hooks/refs": "warn",
+      "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/immutability": "warn",
       "react/jsx-key": "error",
     },
   },

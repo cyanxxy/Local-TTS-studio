@@ -1,15 +1,43 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 7dca060..d724092 100644
+index 7dca060..83bf423 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -56,7 +56,7 @@ default = ["tch-backend"]
+@@ -16,7 +16,7 @@ exclude = ["models/", "*.wav", ".DS_Store"]
+ tch = { version = "0.20", optional = true }
+ 
+ # Tokenization
+-tokenizers = "0.21"
++tokenizers = "0.23"
+ 
+ # Serialization
+ serde = { version = "1.0", features = ["derive"] }
+@@ -32,7 +32,8 @@ audiopus_sys = { version = "0.1", features = ["static"] }
+ ogg = "0.9"
+ 
+ # HTTP and file handling
+-base64 = "0.22"
++# Open TTS: 0.23 enables `simd-unsafe` by default; keep the safe scalar decoder.
++base64 = { version = "0.23", default-features = false, features = ["std"] }
+ url = "2.5"
+ 
+ # Error handling
+@@ -48,7 +49,7 @@ tokio = { version = "1", features = ["full"] }
+ tokio-stream = "0.1"
+ async-stream = "0.3"
+ clap = { version = "4", features = ["derive"] }
+-tower-http = { version = "0.6", features = ["trace"] }
++tower-http = { version = "0.7", features = ["trace"] }
+ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ 
+ [features]
+@@ -56,7 +57,7 @@ default = ["tch-backend"]
  # Use libtorch/PyTorch as the computation backend (default)
  tch-backend = ["dep:tch"]
  # Use Apple MLX as the computation backend (macOS Apple Silicon only).
 -# Requires the mlx-c git submodule: `git submodule update --init --recursive`
 +# Requires the bundled mlx-c source tree documented in OPEN_TTS_VENDOR.md.
  mlx = []
-
+ 
  [build-dependencies]
 diff --git a/build.rs b/build.rs
 index f6ba158..94e40cd 100644
@@ -22,12 +50,12 @@ index f6ba158..94e40cd 100644
 -// 1. Builds the mlx-c library from the git submodule via CMake
 +// 1. Builds the bundled mlx-c source tree via CMake
  // 2. Emits linker directives for mlx-c, MLX, Metal, and system frameworks
-
+ 
  fn main() {
 @@ -24,14 +24,15 @@ fn build_mlx() {
          );
      }
-
+ 
 -    let mlx_c_dir = std::path::PathBuf::from("mlx-c");
 +    let mlx_c_dir = std::path::PathBuf::from(
 +        std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo did not provide CARGO_MANIFEST_DIR"),
@@ -45,26 +73,26 @@ index f6ba158..94e40cd 100644
 +            mlx_c_dir.display()
          );
      }
-
+ 
 diff --git a/src/bin/qwen3_tts_cli.rs b/src/bin/qwen3_tts_cli.rs
 index 6a64fe5..9401023 100644
 --- a/src/bin/qwen3_tts_cli.rs
 +++ b/src/bin/qwen3_tts_cli.rs
 @@ -60,7 +60,7 @@ struct Args {
      top_k: i64,
-
+ 
      /// Maximum generated codec frames.
 -    #[arg(long, alias = "max-new-tokens", default_value_t = 1536)]
 +    #[arg(long, alias = "max-new-tokens", default_value_t = 8192)]
      max_tokens: i64,
-
+ 
      /// Output sample rate.
 diff --git a/src/bin/worker.rs b/src/bin/worker.rs
 index 954f379..d70073d 100644
 --- a/src/bin/worker.rs
 +++ b/src/bin/worker.rs
 @@ -25,7 +25,7 @@ use std::time::Instant;
-
+ 
  const DEFAULT_MODEL_PATH: &str = "/tmp/qwen3-tts.cpp/models/Qwen3-TTS-12Hz-0.6B-Base";
  const DEFAULT_REF_TEXT: &str = "I'm confused why some people have super short timelines, yet at the same time are bullish on scaling up reinforcement learning atop LLMs. If we're actually close to a human-like learner, then this whole approach of training on verifiable outcomes.";
 -const DEFAULT_MAX_NEW_TOKENS: i64 = 1536;
@@ -508,7 +536,7 @@ index a6cd70d..e1b722e 100644
 +++ b/src/model.rs
 @@ -209,7 +209,7 @@ impl Qwen3TTSModel {
          };
-
+ 
          // Load generation config if available
 -        let gen_config_path = Path::new(&model_path).join("generate_config.json");
 +        let gen_config_path = Path::new(&model_path).join("generation_config.json");

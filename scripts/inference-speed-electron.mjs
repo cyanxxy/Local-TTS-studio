@@ -61,7 +61,8 @@ app.whenReady().then(async () => {
     finish(1);
   }, timeoutMs);
 
-  win.webContents.on("console-message", (_event, _level, message) => {
+  win.webContents.on("console-message", (details) => {
+    const { message } = details;
     if (message.startsWith(RESULT_PREFIX)) {
       clearTimeout(timeout);
       console.log(message);
