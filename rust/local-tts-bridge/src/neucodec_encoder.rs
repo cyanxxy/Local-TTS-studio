@@ -115,9 +115,15 @@ fn ensure_model_file(cache_dir: &Path, progress: &mut dyn FnMut(String)) -> Resu
     let response = ureq::get(ENCODER_MODEL_URL)
         .call()
         .context("Failed to download the NeuCodec encoder model")?;
-    let total_bytes = response
-        .header("content-length")
-        .and_then(|value| value.parse::<u64>().ok());
+    let headers = response.headers();
+    let total_bytes = declared_download_size(
+        headers
+            .get("content-length")
+            .and_then(|value| value.to_str().ok()),
+        headers
+            .get("content-encoding")
+            .and_then(|value| value.to_str().ok()),
+    );
     if total_bytes.is_some_and(|size| size != ENCODER_MODEL_BYTES) {
         bail!(
             "NeuCodec encoder response reported an unexpected size (expected {ENCODER_MODEL_BYTES} bytes)."
@@ -129,7 +135,7 @@ fn ensure_model_file(cache_dir: &Path, progress: &mut dyn FnMut(String)) -> Resu
         std::process::id()
     ));
     let result = stream_to_file(
-        response.into_reader(),
+        response.into_body().into_reader(),
         &temp_path,
         total_bytes,
         ENCODER_MODEL_BYTES,
@@ -152,6 +158,27 @@ fn ensure_model_file(cache_dir: &Path, progress: &mut dyn FnMut(String)) -> Resu
         )
     })?;
     Ok(path)
+}
+
+/// The download's size in decoded bytes, when the response actually states it.
+///
+/// The bridge's `ureq` carries the `gzip` feature (see Cargo.toml), so a
+/// compressed response is decompressed transparently while `content-length`
+/// still describes the *compressed* body. Comparing that against
+/// `ENCODER_MODEL_BYTES` would make the download permanently impossible, so a
+/// content-coded response reports no size at all; `stream_to_file` still
+/// verifies the decoded byte count and the SHA-256 either way.
+fn declared_download_size(
+    content_length: Option<&str>,
+    content_encoding: Option<&str>,
+) -> Option<u64> {
+    let identity = content_encoding
+        .map(str::trim)
+        .is_none_or(|encoding| encoding.is_empty() || encoding.eq_ignore_ascii_case("identity"));
+    if !identity {
+        return None;
+    }
+    content_length?.trim().parse::<u64>().ok()
 }
 
 fn stream_to_file(
@@ -197,7 +224,7 @@ fn stream_to_file(
             "NeuCodec encoder download has the wrong size ({written} of {expected_bytes} expected bytes)."
         );
     }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
     if digest != expected_sha256 {
         bail!("NeuCodec encoder download failed SHA-256 verification.");
     }
@@ -225,7 +252,7 @@ fn verify_model_file(path: &Path, expected_bytes: u64, expected_sha256: &str) ->
         }
         hasher.update(&buffer[..read]);
     }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
     if digest != expected_sha256 {
         bail!("NeuCodec encoder cache failed SHA-256 verification.");
     }
@@ -255,5 +282,25 @@ mod tests {
         verify_model_file(&path, 3, expected_sha256).unwrap();
         assert!(verify_model_file(&path, 4, expected_sha256).is_err());
         assert!(verify_model_file(&path, 3, &"0".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn compressed_responses_do_not_report_a_decoded_size() {
+        assert_eq!(
+            declared_download_size(Some("1772018304"), None),
+            Some(1_772_018_304)
+        );
+        assert_eq!(
+            declared_download_size(Some("1772018304"), Some("identity")),
+            Some(1_772_018_304)
+        );
+        // A gzipped body advertises the compressed length; treating that as the
+        // model size would fail the guard for every future download.
+        assert_eq!(
+            declared_download_size(Some("900000000"), Some("gzip")),
+            None
+        );
+        assert_eq!(declared_download_size(None, None), None);
+        assert_eq!(declared_download_size(Some("not-a-number"), None), None);
     }
 }

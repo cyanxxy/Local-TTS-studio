@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets";
+import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets.ts";
 
 const ROOT_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -15,11 +15,7 @@ export default defineConfig({
     // jsdom Storage object would otherwise remain hidden behind an undefined
     // Node accessor. Disable Node's experimental Web Storage in test workers.
     pool: "forks",
-    poolOptions: {
-      forks: {
-        execArgv: ["--no-experimental-webstorage"],
-      },
-    },
+    execArgv: ["--no-experimental-webstorage"],
     include: ["src/**/*.test.ts", "src/**/*.test.tsx", "electron/**/*.test.ts", "vite.*.test.ts"],
     setupFiles: [resolve(ROOT_DIR, "src/test-setup.ts")],
     coverage: {

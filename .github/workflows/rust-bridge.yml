@@ -6,12 +6,22 @@ on:
       - main
     paths:
       - "rust/**"
+      - "rust-toolchain.toml"
       - "scripts/*rust*"
+      - ".npmrc"
+      - ".nvmrc"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/rust-bridge.yml"
   pull_request:
     paths:
       - "rust/**"
+      - "rust-toolchain.toml"
       - "scripts/*rust*"
+      - ".npmrc"
+      - ".nvmrc"
+      - "package.json"
+      - "package-lock.json"
       - ".github/workflows/rust-bridge.yml"
 
 permissions:
@@ -28,7 +38,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
-      - run: rustup component add rustfmt
+      # No toolchain argument: rustup installs the active toolchain, so the
+      # channel, profile, and components all come from rust-toolchain.toml
+      # rather than being restated here. Needs rustup 1.28+, which the runner
+      # images ship. Pre-installing keeps the download off the cargo critical path.
+      - run: rustup toolchain install --no-self-update
       # The vendored qwen3-tts-rs tree is digest-pinned to its upstream
       # snapshot and is intentionally not held to local formatting.
       - run: cargo fmt --manifest-path rust/local-tts-bridge/Cargo.toml --check
@@ -44,12 +58,13 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
           cache: npm
       - name: Install native build tools
+        # `rustup toolchain install` without a toolchain argument resolves the
+        # channel, profile, and components from rust-toolchain.toml.
         run: |
-          rustup toolchain install stable --profile minimal --no-self-update
-          rustup default stable
+          rustup toolchain install --no-self-update
           brew install cmake libomp openssl@3 pkg-config automake autoconf libtool
       - uses: Swatinem/rust-cache@v2
         with:
@@ -70,6 +85,7 @@ jobs:
           export OPENSSL_DIR
           export PKG_CONFIG_PATH="$OPENSSL_DIR/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           npm run build:rust
+          npm run lint:rust
           npm run test:rust -- --release
       - name: Probe packaged bridge
         run: ./dist-rust/open-tts-local-bridge --action probe --model qwen3 --cache-dir "$RUNNER_TEMP/open-tts-probe"

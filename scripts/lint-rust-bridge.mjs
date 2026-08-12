@@ -8,13 +8,12 @@ const manifestPath = path.join(rootDir, "rust", "local-tts-bridge", "Cargo.toml"
 
 execFileSync(
   "cargo",
-  ["test", "--locked", "--manifest-path", manifestPath, ...process.argv.slice(2)],
+  // --release matches build:rust and test:rust so clippy reuses their artifacts
+  // instead of compiling the whole native dependency graph a second time.
+  ["clippy", "--locked", "--release", "--manifest-path", manifestPath, "--all-targets", "--", "-D", "warnings"],
   {
     cwd: rootDir,
-    env: {
-      ...process.env,
-      CARGO_TARGET_DIR: resolveRustTargetDir(rootDir),
-    },
+    env: { ...process.env, CARGO_TARGET_DIR: resolveRustTargetDir(rootDir) },
     stdio: "inherit",
   },
 );

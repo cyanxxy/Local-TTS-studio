@@ -6,6 +6,12 @@
     "module": "ESNext",
     "types": ["node"],
     "skipLibCheck": true,
+    /* The vite.*.test.ts files import build scripts that ship as plain .mjs.
+       Do not drop this in favour of hand-written .d.mts stubs: reading the .mjs
+       gives real inferred types where a stub would hand-maintain `any`. checkJs
+       stays off so the scripts are not held to the .ts rules below. */
+    "allowJs": true,
+    "checkJs": false,
 
     /* Bundler mode */
     "moduleResolution": "bundler",
@@ -22,5 +28,5 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["vite.config.ts", "vitest.config.ts", "vite.kokoroAssets.ts"]
+  "include": ["vite.config.ts", "vitest.config.ts", "vite.kokoroAssets.ts", "vite.*.test.ts"]
 }

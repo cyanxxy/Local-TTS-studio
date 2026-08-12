@@ -27,4 +27,24 @@ describe("TextInput", () => {
     expect(onTextChange).toHaveBeenCalledWith("New text");
   });
 
+  it("offers document import and reflects its busy state", () => {
+    const onImportDocument = vi.fn();
+    const { rerender } = render(
+      <TextInput text="" onTextChange={() => {}} onImportDocument={onImportDocument} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Import document" }));
+    expect(onImportDocument).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Import")).toBeInTheDocument();
+
+    rerender(
+      <TextInput
+        text=""
+        onTextChange={() => {}}
+        onImportDocument={onImportDocument}
+        isImportingDocument
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Import document" })).toBeDisabled();
+    expect(screen.getByText("Importing…")).toBeInTheDocument();
+  });
 });

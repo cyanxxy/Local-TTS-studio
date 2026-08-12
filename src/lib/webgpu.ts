@@ -1,16 +1,3 @@
-interface NavigatorWithGpu extends Navigator {
-  gpu?: {
-    requestAdapter: () => Promise<{
-      info?: { isFallbackAdapter?: boolean };
-      isFallbackAdapter?: boolean;
-      requestDevice: () => Promise<{
-        destroy?: () => void;
-        lost?: Promise<{ reason?: string; message?: string }>;
-      }>;
-    } | null>;
-  };
-}
-
 export type WebGPUStatusReason =
   | "unsupported"
   | "no-adapter"
@@ -64,7 +51,7 @@ export async function getWebGPUStatus(): Promise<WebGPUStatus> {
       } satisfies WebGPUStatus;
     }
 
-    const gpu = (navigator as NavigatorWithGpu).gpu;
+    const gpu = navigator.gpu;
     if (!gpu) {
       return {
         available: false,

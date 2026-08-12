@@ -16,27 +16,37 @@ function makeAssetRoot(): string {
   return root;
 }
 
-function loadVirtualModule(
-  plugin: ReturnType<typeof kokoroOnnxWasmAssetPlugin>,
-  context: object = {},
-): string {
-  if (typeof plugin.load !== "function") {
-    throw new Error("Expected plugin.load to be a function");
-  }
+type KokoroPlugin = ReturnType<typeof kokoroOnnxWasmAssetPlugin>;
 
-  return String(plugin.load.call(context as never, "\0virtual:kokoro-onnx-wasm-assets"));
+// Vite types every plugin hook as an ObjectHook union: the bare function, or an
+// object wrapping it as `handler`. Unwrap once here so each test can invoke a
+// hook directly. Declaring the parameter without a `this` also lets callers
+// supply the small stub context a hook reads instead of a real PluginContext.
+function pluginHook<Args extends unknown[], Result>(
+  hook: ((...args: Args) => Result) | { handler: (...args: Args) => Result } | undefined,
+  name: string,
+): (...args: Args) => Result {
+  const handler = typeof hook === "function" ? hook : hook?.handler;
+  if (typeof handler !== "function") {
+    throw new Error(`Expected plugin.${name} to be a function`);
+  }
+  return handler;
 }
 
-function transformCode(
-  plugin: ReturnType<typeof kokoroOnnxWasmAssetPlugin>,
-  code: string,
-  id: string,
-): string | null {
-  if (typeof plugin.transform !== "function") {
-    return null;
-  }
+function resolveId(plugin: KokoroPlugin, id: string) {
+  return pluginHook(plugin.resolveId, "resolveId")(id, undefined, { isEntry: false });
+}
 
-  const result = plugin.transform.call({} as never, code, id);
+function loadModule(plugin: KokoroPlugin, id: string, context: object = {}) {
+  return pluginHook(plugin.load, "load").call(context, id);
+}
+
+function loadVirtualModule(plugin: KokoroPlugin, context: object = {}): string {
+  return String(loadModule(plugin, "\0virtual:kokoro-onnx-wasm-assets", context));
+}
+
+function transformCode(plugin: KokoroPlugin, code: string, id: string): string | null {
+  const result = pluginHook(plugin.transform, "transform").call({}, code, id);
   if (typeof result === "string") return result;
   if (result && typeof result === "object" && "code" in result) {
     return String(result.code);
@@ -49,13 +59,13 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
   it("resolves the virtual module and emits URL imports for local assets", () => {
     const root = makeAssetRoot();
     const plugin = kokoroOnnxWasmAssetPlugin(root);
-    const resolved = plugin.resolveId?.("virtual:kokoro-onnx-wasm-assets");
+    const resolved = resolveId(plugin, "virtual:kokoro-onnx-wasm-assets");
 
     expect(plugin.name).toBe("open-tts:kokoro-onnx-wasm-assets");
     expect(plugin.enforce).toBe("pre");
     expect(resolved).toBe("\0virtual:kokoro-onnx-wasm-assets");
-    expect(plugin.resolveId?.("other")).toBeNull();
-    expect(plugin.load?.("other")).toBeNull();
+    expect(resolveId(plugin, "other")).toBeNull();
+    expect(loadModule(plugin, "other")).toBeNull();
     expect(loadVirtualModule(plugin)).toContain("KOKORO_ONNX_JSEP_ASSETS");
   });
 
@@ -64,9 +74,8 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
     const plugin = kokoroOnnxWasmAssetPlugin(root);
     const emitFile = vi.fn(() => "assetRef");
 
-    if (typeof plugin.configResolved === "function") {
-      plugin.configResolved.call({} as never, { command: "build" } as never);
-    }
+    // The hook reads only `config.command`; a full ResolvedConfig is not constructible here.
+    pluginHook(plugin.configResolved, "configResolved").call({}, { command: "build" } as never);
 
     const code = loadVirtualModule(plugin, { emitFile });
 
@@ -117,6 +126,6 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
     const root = mkdtempSync(join(tmpdir(), "kokoro-assets-missing-"));
     const plugin = kokoroOnnxWasmAssetPlugin(root);
 
-    expect(() => plugin.load?.("\0virtual:kokoro-onnx-wasm-assets")).toThrow("Missing Kokoro ONNX Runtime asset");
+    expect(() => loadModule(plugin, "\0virtual:kokoro-onnx-wasm-assets")).toThrow("Missing Kokoro ONNX Runtime asset");
   });
 });

@@ -77,7 +77,7 @@ vi.mock("electron", () => ({
 }));
 
 vi.mock("./readerLibraryWorkerClient", () => ({
-  ReaderLibraryWorkerClient: vi.fn(() => {
+  ReaderLibraryWorkerClient: vi.fn(function ReaderLibraryWorkerClient() {
     if (mocks.workerError) throw mocks.workerError;
     return { saveAudio: mocks.saveAudio, getAudio: mocks.getAudio, close: mocks.closeWorker };
   }),
@@ -88,7 +88,7 @@ vi.mock("./readerLibraryWorkerClient", () => ({
 // pending and then settles. `audio8NativeWorker.ts` and `audio8NativeClient.ts`
 // are being rewritten in parallel, and none of these assertions should care.
 vi.mock("./audio8NativeClient", () => ({
-  Audio8NativeClient: vi.fn((modelDir: string) => {
+  Audio8NativeClient: vi.fn(function Audio8NativeClient(modelDir: string) {
     // `destroy()` retires the instance for good, so a main process that kept
     // the reference across a clear would wedge every later request. Modelled
     // here so the tests notice if that reference is ever not dropped.

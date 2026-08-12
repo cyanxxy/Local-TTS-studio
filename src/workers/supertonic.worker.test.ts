@@ -11,10 +11,10 @@ interface MockTensorLike {
   dims: number[];
 }
 
-interface MockPipelineInstance extends ReturnType<typeof vi.fn> {
+type MockPipelineInstance = ReturnType<typeof vi.fn> & {
   dispose: ReturnType<typeof vi.fn>;
   model: { config: { style_dim: number } };
-}
+};
 
 interface LoadWorkerModuleOptions {
   allowRemoteModels?: boolean;
@@ -53,7 +53,7 @@ function createPipelineInstance(
     const next = responses.shift();
     if (next instanceof Error) throw next;
     return next;
-  }) as MockPipelineInstance;
+  }) as unknown as MockPipelineInstance;
 
   instance.dispose = vi.fn(async () => undefined);
   instance.model = { config: { style_dim: 128 } };

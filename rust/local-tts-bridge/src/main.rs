@@ -70,7 +70,7 @@ const MAX_NEUTTS_REFERENCE_CODES: usize = 1_000;
 const MAX_NEUTTS_REFERENCE_CODE_VALUE: i32 = 65_535;
 const MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES: usize = 64 * 1_024;
 const MAX_NEUTTS_REFERENCE_CODES_BASE64_CHARS: usize =
-    ((MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES + 2) / 3) * 4;
+    MAX_NEUTTS_REFERENCE_CODES_FILE_BYTES.div_ceil(3) * 4;
 const NEUTTS_DEFAULT_MODEL: &str = "neuphonic/neutts-nano-q4-gguf";
 const QWEN3_MLX_CUSTOMVOICE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const QWEN3_MLX_BASE_06B_MODEL: &str = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
@@ -2117,7 +2117,7 @@ mod tests {
 
     #[test]
     fn websocket_frame_limit_covers_electron_reference_audio_payload() {
-        assert!(MAX_WEBSOCKET_TEXT_FRAME_BYTES > 60_000_000);
+        const { assert!(MAX_WEBSOCKET_TEXT_FRAME_BYTES > 60_000_000) };
     }
 
     #[test]

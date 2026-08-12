@@ -16,7 +16,56 @@ import {
   RESULT_PREFIX,
 } from "./scripts/inference-speed-output.mjs";
 
-function benchmarkReport(meanGenerationMs = 100) {
+interface BenchmarkHost {
+  platform: string;
+  arch: string;
+  cpuModel: string;
+  logicalCpuCount: number;
+  totalMemoryBytes: number;
+}
+
+interface BenchmarkModelResult {
+  model: string;
+  // Legacy reports predate the strict fingerprint fields, and a failed model
+  // carries an error instead of a summary; the script optional-chains all four.
+  modelId?: string;
+  modelRevision?: string;
+  backend: string;
+  voice: string;
+  summary: { meanGenerationMs: number } | null;
+  error?: string;
+}
+
+interface BenchmarkReport {
+  runner: {
+    benchmarkSchemaVersion?: number;
+    userAgent: string;
+    crossOriginIsolated: boolean;
+    backgroundThrottling: boolean;
+    webgpuFeatureMode: string;
+    host?: BenchmarkHost;
+  };
+  options: {
+    model: string;
+    iterations: number;
+    warmups: number;
+    quality: number;
+    speed: number;
+    text: string;
+  };
+  webgpu: { available: boolean; reason: string | null; message: string | null };
+  models: BenchmarkModelResult[];
+}
+
+const BENCHMARK_HOST: BenchmarkHost = {
+  platform: "darwin",
+  arch: "arm64",
+  cpuModel: "Apple M4",
+  logicalCpuCount: 10,
+  totalMemoryBytes: 17_179_869_184,
+};
+
+function benchmarkReport(meanGenerationMs = 100): BenchmarkReport {
   return {
     runner: {
       benchmarkSchemaVersion: REPORT_SCHEMA_VERSION,
@@ -24,13 +73,7 @@ function benchmarkReport(meanGenerationMs = 100) {
       crossOriginIsolated: true,
       backgroundThrottling: false,
       webgpuFeatureMode: "unsafe-webgpu",
-      host: {
-        platform: "darwin",
-        arch: "arm64",
-        cpuModel: "Apple M4",
-        logicalCpuCount: 10,
-        totalMemoryBytes: 17_179_869_184,
-      },
+      host: { ...BENCHMARK_HOST },
     },
     options: {
       model: "kokoro",
@@ -134,7 +177,7 @@ describe("inference speed CLI", () => {
   it("marks option, runtime, hardware, and backend mismatches incompatible", () => {
     const baseline = benchmarkReport(100);
     const current = benchmarkReport(90);
-    current.runner.benchmarkSchemaVersion += 1;
+    current.runner.benchmarkSchemaVersion = REPORT_SCHEMA_VERSION + 1;
     current.models[0].modelId = "different/model";
     current.models[0].modelRevision = "different-revision";
     current.models[0].backend = "wasm";
@@ -147,11 +190,13 @@ describe("inference speed CLI", () => {
     current.options.speed = 1.1;
     current.runner.userAgent = "Mozilla/5.0 Chrome/147.0.0.0 Electron/43.0.0";
     current.runner.crossOriginIsolated = false;
-    current.runner.host.platform = "win32";
-    current.runner.host.arch = "x64";
-    current.runner.host.cpuModel = "Different CPU";
-    current.runner.host.logicalCpuCount = 12;
-    current.runner.host.totalMemoryBytes *= 2;
+    current.runner.host = {
+      platform: "win32",
+      arch: "x64",
+      cpuModel: "Different CPU",
+      logicalCpuCount: 12,
+      totalMemoryBytes: BENCHMARK_HOST.totalMemoryBytes * 2,
+    };
     current.webgpu.available = false;
     current.webgpu.reason = "unsupported";
 
@@ -194,7 +239,7 @@ describe("inference speed CLI", () => {
     expect(failedComparison).not.toHaveProperty("improvementPercent");
 
     const invalid = benchmarkReport(90);
-    invalid.models[0].summary.meanGenerationMs = 0;
+    invalid.models[0].summary = { meanGenerationMs: 0 };
     const [invalidComparison] = summarizeComparison(invalid, benchmarkReport(100));
     expect(invalidComparison).toMatchObject({ status: "skipped", compatible: false });
     expect(invalidComparison.reasons).toContain("Current benchmark has no valid mean generation time.");

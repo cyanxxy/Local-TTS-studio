@@ -316,7 +316,7 @@ async function createTokenizer(tokenizerJson: unknown): Promise<Audio8Tokenizer>
   // cannot satisfy.
   const dynamicImport = new Function("specifier", "return import(specifier)") as (
     specifier: string,
-  ) => Promise<typeof import("@huggingface/transformers")>;
+  ) => Promise<typeof import("@huggingface/transformers", { with: { "resolution-mode": "import" } })>;
   const { PreTrainedTokenizer } = await dynamicImport("@huggingface/transformers");
   return new PreTrainedTokenizer(
     tokenizerJson as ConstructorParameters<typeof PreTrainedTokenizer>[0],

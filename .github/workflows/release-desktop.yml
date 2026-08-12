@@ -26,6 +26,10 @@ jobs:
     # test:js includes rustLocalBridge.test.ts, which cargo-builds the native
     # bridge on this Ubuntu runner; leave headroom for a cold compile.
     timeout-minutes: 45
+    env:
+      # rustLocalBridge.test.ts honours CARGO_TARGET_DIR; point it inside the
+      # workspace so Swatinem/rust-cache can see and cache the build.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
     steps:
       - uses: actions/checkout@v6
         with:
@@ -84,8 +88,26 @@ jobs:
       - uses: actions/setup-node@v6
         if: steps.release.outputs.should_verify == 'true'
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
           cache: npm
+      - name: Install pinned Rust toolchain
+        if: steps.release.outputs.should_verify == 'true'
+        # No toolchain argument: rustup installs the active toolchain, so the
+        # channel, profile, and components all come from rust-toolchain.toml.
+        # Doing it here keeps the download off the critical path of test:js.
+        run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        if: steps.release.outputs.should_verify == 'true'
+        with:
+          workspaces: rust/local-tts-bridge
+          env-vars: CARGO_TARGET_DIR
+          # Mirrors rust-bridge.yml: llama-cpp-sys keeps shared CMake dylibs in a
+          # non-Cargo directory inside target, and rust-cache prunes non-dependency
+          # target entries before saving. Cache the CMake tree explicitly, but
+          # rebuild Cargo artifacts.
+          cache-targets: false
+          cache-directories: rust/local-tts-bridge/target/llama-cmake-cache
+          key: release-verify-llama-cmake-only-v1
       - if: steps.release.outputs.should_verify == 'true'
         run: npm ci
       - if: steps.release.outputs.should_verify == 'true'

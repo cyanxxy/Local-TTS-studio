@@ -4,6 +4,41 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-08-12
+
+### Added
+
+- Added reproducible `setup:web`, `setup:desktop`, and `doctor:desktop`
+  commands. The desktop setup validates the supported host, Rust toolchain, and
+  native build prerequisites before compiling anything.
+- Added fail-closed signed-package configurations for Apple Silicon macOS and
+  Windows x64. Official GitHub releases remain source-only until signing and
+  notarization credentials are supplied on the target platform.
+
+### Changed
+
+- Updated the application to Electron 43.4, React 19.2, Vite 8.2, Vitest 4.1,
+  TypeScript 6.0, Tailwind CSS 4.3, Electron Builder 26.15, and the latest
+  compatible supporting packages. Dependency versions are now exact and the
+  npm lockfile was regenerated.
+- Pinned Node.js 24.19 and Rust 1.97.1 for local development and CI. npm 11.17
+  now enforces an explicit install-script allowlist, and Rust changes run
+  formatting, Clippy, tests, packaging checks, and the native probe in CI.
+- Updated the native Rust bridge to current compatible HTTP, WebSocket,
+  hashing, tokenization, and Xet libraries while retaining the reviewed Qwen
+  and LibTorch pins that require platform-specific migration work.
+- Updated Electron packaging validation for ESM and target-specific native
+  files, including ONNX Runtime, LiteParse, Sharp, and the Rust bridge.
+
+### Fixed
+
+- Migrated Electron, Vite, Vitest, TypeScript, and Rust APIs affected by their
+  latest breaking changes, including constructor mocks, dependency optimizer
+  options, Node module resolution, console messages, HTTP response bodies, and
+  digest encoding.
+- Preserved deterministic test behavior across newer Web Audio and WebGPU
+  implementations and strengthened package, setup, and vendored-source tests.
+
 ## [1.8.0] - 2026-08-05
 
 ### Added

@@ -2,9 +2,9 @@ import { resolve } from "path";
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
-import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets";
+import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets.ts";
 
-const rootDir = __dirname;
+const rootDir = import.meta.dirname;
 
 function rewriteDesktopShellRequest(req: { url?: string }) {
   const requestUrl = new URL(req.url ?? "/", "http://localhost");
@@ -62,12 +62,14 @@ export default defineConfig({
       // The default export (kokoro.js) is the 11KB Node version that imports
       // phonemizer separately — it fails to phonemize in the browser, producing
       // garbled non-English audio. The web build (2.1MB) bundles everything needed.
-      "kokoro-js": resolve(__dirname, "node_modules/kokoro-js/dist/kokoro.web.js"),
+      "kokoro-js": resolve(rootDir, "node_modules/kokoro-js/dist/kokoro.web.js"),
     },
   },
   optimizeDeps: {
-    esbuildOptions: {
-      conditions: ["onnxruntime-web-use-extern-wasm"],
+    rolldownOptions: {
+      resolve: {
+        conditionNames: ["onnxruntime-web-use-extern-wasm"],
+      },
     },
     entries: [
       "src/apps/web/main.tsx",
@@ -87,10 +89,10 @@ export default defineConfig({
   build: {
     target: "esnext",
     chunkSizeWarningLimit: 2500,
-    rollupOptions: {
+    rolldownOptions: {
       input: {
-        web: resolve(__dirname, "index.html"),
-        desktop: resolve(__dirname, "desktop.html"),
+        web: resolve(rootDir, "index.html"),
+        desktop: resolve(rootDir, "desktop.html"),
       },
     },
   },

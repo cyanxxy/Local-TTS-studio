@@ -2,10 +2,14 @@
 name = "open-tts-local-bridge"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.94"
 
 [dependencies]
 anyhow = "1.0"
-base64 = "0.22"
+# `simd-unsafe` is on by default in 0.23 and swaps in hand-written AVX2/NEON
+# engines. Renderer-supplied base64 reaches this decoder, so keep the safe
+# scalar implementation.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
 hound = "3.5"
 neutts = { version = "0.1.1", features = ["espeak"] }
@@ -13,11 +17,16 @@ rten = "0.24"
 rten-tensor = "0.24"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-sha1 = "0.10"
-sha2 = "0.10"
-tungstenite = { version = "0.29.0", default-features = false, features = ["handshake"] }
-ureq = { version = "2.12", default-features = false, features = ["tls"] }
-xet = { package = "hf-xet", version = "1.5.3" }
+sha1 = "0.11"
+sha2 = "0.11"
+hex = "0.4"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# `default-features = false` would be a no-op: hf-hub (via neutts) depends on
+# the same ureq 3.4 with default features plus `json`/`socks-proxy`, and Cargo
+# unifies features per crate, so this build always gets `gzip` too. Declared
+# honestly — neucodec_encoder.rs must handle a transparently decoded body.
+ureq = { version = "3.4", features = ["rustls", "gzip"] }
+xet = { package = "hf-xet", version = "1.6" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

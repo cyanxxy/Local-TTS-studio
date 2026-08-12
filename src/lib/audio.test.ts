@@ -89,6 +89,27 @@ describe("buildWavHeader", () => {
 
     expect(() => buildWavHeader(tooManyFloat32Frames, 24000)).toThrow(/RIFF/i);
   });
+
+  it("rejects invalid sample rates and frame counts", () => {
+    for (const samplingRate of [0, 1.5, 0x1_0000_0000]) {
+      expect(() => buildWavHeader(1, samplingRate)).toThrow("sample rate");
+    }
+    for (const frameCount of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() => buildWavHeader(frameCount, 24000)).toThrow("frame count");
+    }
+  });
+
+  it("rejects header arithmetic beyond JavaScript safe integer limits", () => {
+    expect(() => buildWavHeader(Number.MAX_SAFE_INTEGER, 1, "float32", 32)).toThrow(
+      "safe integer limits",
+    );
+  });
+
+  it("rejects derived values beyond WAV 32-bit field limits", () => {
+    expect(() => buildWavHeader(1, 0xFFFF_FFFF, "float32", 32)).toThrow(
+      "WAV byte rate exceeds WAV 32-bit field limits",
+    );
+  });
 });
 
 describe("createWavBlob", () => {
@@ -173,5 +194,12 @@ describe("concatFloat32Arrays", () => {
     const result = concatFloat32Arrays([a, b]);
     expect(result[0]).toBeCloseTo(0.1, 5);
     expect(result[1]).toBeCloseTo(0.2, 5);
+  });
+
+  it("rejects concatenated lengths beyond JavaScript safe integer limits", () => {
+    const syntheticHugeArray = { length: Number.MAX_SAFE_INTEGER } as Float32Array;
+    expect(() => concatFloat32Arrays([syntheticHugeArray, new Float32Array(1)])).toThrow(
+      "safe integer limits",
+    );
   });
 });

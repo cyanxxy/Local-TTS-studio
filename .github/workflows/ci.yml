@@ -22,10 +22,12 @@ jobs:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
-          node-version: "22"
+          node-version-file: ".nvmrc"
           cache: npm
       - run: npm ci
       - run: npm run lint
+      # lint:rust is deliberately not run here: Clippy needs the full native
+      # build, so rust-bridge.yml on macOS is this repo's native gate.
       - run: npx tsc --noEmit -p tsconfig.electron.json
       # rustLocalBridge.test.ts compiles the native bridge in beforeAll; the
       # native gate for this repo is the rust-bridge workflow on macOS.
