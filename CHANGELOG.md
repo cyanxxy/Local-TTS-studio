@@ -4,6 +4,42 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Qwen3 sentence highlighting drifting on long passages: the renderer
+  split text into 400-character units while the Rust bridge used 200, so
+  streamed `textUnitIndex` values were mapped onto the wrong sentences.
+- Fixed Qwen3 CustomVoice with language `Auto` placing raw codec code 0 in the
+  prompt instead of the model's no-think prefix, and made an unknown speaker an
+  error instead of a silent fallback to speaker id 0.
+- Fixed long Chinese, Japanese, and Korean Qwen3 passages failing with a
+  generation-limit error: CJK characters now weigh double toward the text-unit
+  budget, so a unit's spoken length fits the per-unit token ceiling.
+- Fixed Qwen3 voice cloning running sentences together within one request. It
+  now streams through the same unit driver as CustomVoice and VoiceDesign,
+  with per-sentence metadata and 0.2-second inter-unit gaps.
+- Fixed Qwen3 text units splitting inside numbers such as `3.14`, `1,000`, or
+  `10:30`.
+
+### Changed
+
+- The Qwen3 "Max tokens" control is now "Max tokens per section" with a 64 to
+  384 range that matches what the bridge actually enforces; the previous 4,096
+  ceiling was never reachable. Temperature accepts 0 for greedy decoding, and
+  top-k no longer accepts 0.
+- The Qwen3 sampler applies its repetition penalty on the device instead of
+  copying the logits to the host every frame, and reads the penalty from the
+  model's `generation_config.json`.
+- Qwen3 warm-up forwards the model repository to the Rust bridge so it can
+  reject a repository that does not match the requested mode, and a Stop during
+  voice-reference encoding is now observed between its two encoding steps.
+- CI now runs the native-bridge integration test on Linux before merge, in its
+  own job and vitest process, enforces the coverage thresholds declared in
+  `vitest.config.ts`, and tests the pinned Node release alongside Node 26. The
+  macOS Rust job reports build, Clippy, and test as separate steps and can be
+  dispatched manually. Workflow actions are SHA-pinned and Dependabot keeps
+  them and the Cargo dependencies current.
+
 ## [1.8.2] - 2026-08-12
 
 ### Changed

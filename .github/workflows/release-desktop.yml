@@ -23,15 +23,15 @@ jobs:
       publish_release: ${{ steps.release.outputs.publish_release }}
       release_tag: ${{ steps.release.outputs.release_tag }}
       should_verify: ${{ steps.release.outputs.should_verify }}
-    # test:js includes rustLocalBridge.test.ts, which cargo-builds the native
-    # bridge on this Ubuntu runner; leave headroom for a cold compile.
+    # rustLocalBridge.test.ts cargo-builds the native bridge on this Ubuntu
+    # runner; leave headroom for a cold compile.
     timeout-minutes: 45
     env:
       # rustLocalBridge.test.ts honours CARGO_TARGET_DIR; point it inside the
       # workspace so Swatinem/rust-cache can see and cache the build.
       CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
       - name: Resolve release
@@ -85,7 +85,7 @@ jobs:
             echo "release_tag=$release_tag"
             echo "should_verify=$should_verify"
           } >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         if: steps.release.outputs.should_verify == 'true'
         with:
           node-version-file: ".nvmrc"
@@ -94,9 +94,9 @@ jobs:
         if: steps.release.outputs.should_verify == 'true'
         # No toolchain argument: rustup installs the active toolchain, so the
         # channel, profile, and components all come from rust-toolchain.toml.
-        # Doing it here keeps the download off the critical path of test:js.
+        # Doing it here keeps the download off the critical path of the bridge test.
         run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: steps.release.outputs.should_verify == 'true'
         with:
           workspaces: rust/local-tts-bridge
@@ -114,8 +114,14 @@ jobs:
         run: npm run lint
       - if: steps.release.outputs.should_verify == 'true'
         run: npx tsc --noEmit -p tsconfig.electron.json
+      # Same split as ci.yml: the unit suite with its coverage gate first, then
+      # the native-bridge integration test in its own vitest process so the
+      # cargo build in its beforeAll cannot starve timing-sensitive Electron
+      # tests.
       - if: steps.release.outputs.should_verify == 'true'
-        run: npm run test:js
+        run: npx vitest run --coverage --exclude "electron/rustLocalBridge.test.ts"
+      - if: steps.release.outputs.should_verify == 'true'
+        run: npx vitest run electron/rustLocalBridge.test.ts
       - if: steps.release.outputs.should_verify == 'true'
         run: npm run build:web
 
@@ -131,7 +137,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ needs.verify.outputs.release_tag }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           fetch-depth: 0
       - name: Create release tag

@@ -338,7 +338,7 @@ describe("LocalRuntimePage", () => {
       instruct: "Speak warmly",
       temperature: 0.9,
       topK: 50,
-      maxNewTokens: 4_096,
+      maxNewTokens: 384,
     }));
     for (const removed of ["baseModelPath", "deviceMap", "dtype", "attnImplementation", "topP"]) {
       expect(generate.mock.calls[0][0].payload).not.toHaveProperty(removed);

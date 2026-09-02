@@ -1,4 +1,12 @@
-import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
+import {
+  QWEN3_MAX_NEW_TOKENS,
+  QWEN3_MAX_TEMPERATURE,
+  QWEN3_MAX_TOP_K,
+  QWEN3_MIN_NEW_TOKENS,
+  QWEN3_MIN_TEMPERATURE,
+  QWEN3_MIN_TOP_K,
+  useQwen3Runtime,
+} from "../contexts/Qwen3RuntimeContext";
 import { QWEN3_LANGUAGE_OPTIONS, QWEN3_SPEAKER_OPTIONS } from "./localRuntime/modelOptions";
 
 export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void }) {
@@ -106,9 +114,9 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
             </label>
           )}
           <div className="grid grid-cols-3 gap-2">
-            <label className="text-xs text-text-secondary">Temperature<input aria-label="Qwen temperature" type="number" min={0.2} max={2} step={0.05} value={qwen.temperature} onChange={(event) => qwen.setTemperature(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
-            <label className="text-xs text-text-secondary">Top-k<input aria-label="Qwen top-k" type="number" min={0} max={1000} step={1} value={qwen.topK} onChange={(event) => qwen.setTopK(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
-            <label className="text-xs text-text-secondary">Max tokens<input aria-label="Qwen max tokens" type="number" min={64} max={4096} step={64} value={qwen.maxNewTokens} onChange={(event) => qwen.setMaxNewTokens(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary">Temperature<input aria-label="Qwen temperature" type="number" min={QWEN3_MIN_TEMPERATURE} max={QWEN3_MAX_TEMPERATURE} step={0.05} value={qwen.temperature} onChange={(event) => qwen.setTemperature(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary">Top-k<input aria-label="Qwen top-k" type="number" min={QWEN3_MIN_TOP_K} max={QWEN3_MAX_TOP_K} step={1} value={qwen.topK} onChange={(event) => qwen.setTopK(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary" title="Codec frames allowed per generated text section (12 frames per second)">Max tokens per section<input aria-label="Qwen max tokens" type="number" min={QWEN3_MIN_NEW_TOKENS} max={QWEN3_MAX_NEW_TOKENS} step={32} value={qwen.maxNewTokens} onChange={(event) => qwen.setMaxNewTokens(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
           </div>
         </div>
       </details>

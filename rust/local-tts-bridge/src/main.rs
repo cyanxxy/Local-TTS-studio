@@ -32,7 +32,7 @@ use qwen3::{
     GenerationSummary, Qwen3Runtime, VoiceCloneReference, VoiceCloneRequest, VoiceDesignRequest,
     resolved_runtime_target,
 };
-use qwen3::{ExpectedModelType, GenerationControls};
+use qwen3::{ExpectedModelType, GenerationControls, MAX_GENERATION_TOKENS};
 use reference_audio::decode_bounded_mono_wav;
 
 const RESULT_PREFIX: &str = "__RESULT__";
@@ -136,6 +136,7 @@ struct Qwen3Payload {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Qwen3WarmPayload {
     mode: String,
+    model_repo: Option<String>,
     model_path: String,
 }
 
@@ -591,6 +592,9 @@ impl RuntimeState {
         let payload: Qwen3WarmPayload =
             serde_json::from_value(payload).context("Invalid Qwen3 warm payload")?;
         let model_type = parse_model_type(&payload.mode)?;
+        if let Some(model_repo) = payload.model_repo.as_deref() {
+            ensure_repo_matches_mode(model_repo, model_type)?;
+        }
         self.qwen3
             .warm(Path::new(&payload.model_path), model_type)?;
         Ok(json!({
@@ -645,17 +649,7 @@ impl RuntimeState {
         );
         payload.text = trimmed_text.to_owned();
         let model_type = parse_model_type(payload.mode.as_deref().unwrap_or("customVoice"))?;
-        let repo_model_type = if payload.model_repo.contains("-Base") {
-            ExpectedModelType::Base
-        } else if payload.model_repo.contains("-VoiceDesign") {
-            ExpectedModelType::VoiceDesign
-        } else {
-            ExpectedModelType::CustomVoice
-        };
-        ensure!(
-            repo_model_type == model_type,
-            "Qwen3 model repository does not match the requested mode."
-        );
+        ensure_repo_matches_mode(&payload.model_repo, model_type)?;
         match model_type {
             ExpectedModelType::Base => ensure!(
                 payload.speaker.is_none() && payload.instruct.is_none(),
@@ -678,7 +672,7 @@ impl RuntimeState {
         let controls = GenerationControls::new(
             payload.temperature.unwrap_or(0.9),
             payload.top_k.unwrap_or(50),
-            payload.max_new_tokens.unwrap_or(4_096),
+            payload.max_new_tokens.unwrap_or(MAX_GENERATION_TOKENS),
         );
         let started = Instant::now();
         let inference_started = Instant::now();
@@ -963,6 +957,27 @@ fn qwen_generation_output(
         }),
         phase_timings,
     })
+}
+
+fn model_type_for_repo(model_repo: &str) -> ExpectedModelType {
+    if model_repo.contains("-Base") {
+        ExpectedModelType::Base
+    } else if model_repo.contains("-VoiceDesign") {
+        ExpectedModelType::VoiceDesign
+    } else {
+        ExpectedModelType::CustomVoice
+    }
+}
+
+/// Warm-up and generation both key the resident host by model type, so a
+/// repository that disagrees with the requested mode is rejected before any
+/// weights are touched rather than at the first generation.
+fn ensure_repo_matches_mode(model_repo: &str, model_type: ExpectedModelType) -> Result<()> {
+    ensure!(
+        model_type_for_repo(model_repo) == model_type,
+        "Qwen3 model repository does not match the requested mode."
+    );
+    Ok(())
 }
 
 fn parse_model_type(mode: &str) -> Result<ExpectedModelType> {

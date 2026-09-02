@@ -20,9 +20,9 @@ describe("buildQwen3TextUnits", () => {
     }
   });
 
-  it("uses the last boundary within each 400-code-point window", () => {
+  it("uses the last boundary within each 200-code-point window", () => {
     const first = `${"a".repeat(120)}.`;
-    const text = `${first}${"b".repeat(320)}:${"c".repeat(50)}`;
+    const text = `${first}${"b".repeat(150)}:${"c".repeat(50)}`;
     const units = buildQwen3TextUnits(text);
 
     expect(units[0].text).toBe(first);
@@ -31,13 +31,37 @@ describe("buildQwen3TextUnits", () => {
   });
 
   it("counts Unicode code points while returning UTF-16 offsets", () => {
-    const text = `  ${"🙂".repeat(400)}tail  `;
+    const text = `  ${"🙂".repeat(200)}tail  `;
     const units = buildQwen3TextUnits(text);
 
     expect(units).toHaveLength(2);
-    expect(Array.from(units[0].text)).toHaveLength(400);
+    expect(Array.from(units[0].text)).toHaveLength(200);
     expect(text.slice(units[0].start, units[0].end)).toBe(units[0].text);
     expect(units.map((unit) => unit.text).join("")).toBe(text.trim());
+  });
+
+  it("weights CJK scalars double so a unit holds at most 110 of them", () => {
+    // Mirrors the Rust test: 240 copies of a five-scalar sentence whose four
+    // ideographs weigh 2 and whose full stop weighs 1, so 22 sentences (110
+    // scalars, weight 198) fit a unit and each unit ends on the sentence mark.
+    const text = "你好世界。".repeat(240);
+    const units = buildQwen3TextUnits(text);
+
+    expect(units.map((unit) => unit.text).join("")).toBe(text);
+    expect(units.every((unit) => Array.from(unit.text).length <= 110)).toBe(true);
+    expect(units.every((unit) => unit.text.endsWith("。"))).toBe(true);
+    expect(units.length).toBe(11);
+  });
+
+  it("does not treat punctuation inside numbers as a boundary", () => {
+    // Mirrors the Rust test: with a 200 budget the sentence ends at its full
+    // stop, never at the decimal point, thousands separator, or clock colon.
+    const sentence = "Pi is 3.14159 and the total is 1,000 at 10:30.";
+    const text = `${sentence} ${"x".repeat(190)}`;
+    const units = buildQwen3TextUnits(text);
+
+    expect(units[0].text).toBe(sentence);
+    expect(units.map((unit) => unit.text).join("")).toBe(text);
   });
 
   it("preserves complete ranges for Reader chapters beyond the old IPC limit", () => {
@@ -71,7 +95,7 @@ describe("buildQwen3TextUnits", () => {
   });
 
   it("groups astral Unicode text by Rust-compatible scalar counts", () => {
-    const text = `  ${`${"🙂".repeat(399)}. `.repeat(35)}  `;
+    const text = `  ${`${"🙂".repeat(199)}. `.repeat(70)}  `;
     const sections = buildQwen3RequestSections(text);
 
     expect(countUnicodeScalars(text.trim())).toBeGreaterThan(MAX_LOCAL_TTS_TEXT_LENGTH * 2);

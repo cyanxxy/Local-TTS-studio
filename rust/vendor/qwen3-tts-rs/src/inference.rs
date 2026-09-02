@@ -9,7 +9,7 @@
 //! - CodePredictor: 5-layer sub-transformer for generating codes 1-15
 //! - Input format: text embeddings (projected 2048→1024) summed with codec embeddings (1024)
 
-use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
+use crate::config::{GenerationConfig, Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
 use crate::error::{Qwen3TTSError, Result};
 use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
 use crate::tensor::{DType, Device, Tensor};
@@ -21,6 +21,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::Tokenizer;
+
+/// Output rate of the 12 Hz speech tokenizer's vocoder.
+const OUTPUT_SAMPLE_RATE: u32 = 24000;
 
 fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
     if max_codes > 0 && generated_frames >= max_codes as usize {
@@ -595,11 +598,12 @@ impl TalkerModel {
         &self,
         text_token_ids: &[i64],
         speaker_id: i64,
-        language_id: i64,
+        language_id: Option<i64>,
         tts_pad_id: i64,
         tts_bos_id: i64,
         tts_eos_id: i64,
         codec_think_id: i64,
+        codec_nothink_id: i64,
         codec_think_bos_id: i64,
         codec_think_eos_id: i64,
         codec_pad_id: i64,
@@ -610,30 +614,41 @@ impl TalkerModel {
         // We need the actual token IDs for the role prefix
         let role_embed = self.embed_text(&text_token_ids[..3]); // [1, 3, 1024]
 
-        // Phase 2: Codec prefix (6 positions for custom_voice)
-        // Text side: tts_pad * 5 + tts_bos
+        // Phase 2: Codec prefix
         let tts_pad_embed = self.embed_text(&[tts_pad_id]); // [1, 1, 1024]
         let tts_bos_embed = self.embed_text(&[tts_bos_id]); // [1, 1, 1024]
         let tts_eos_embed = self.embed_text(&[tts_eos_id]); // [1, 1, 1024]
 
-        // Codec prefix tokens: [think_id, think_bos_id, language_id, think_eos_id, speaker_id, codec_pad_id, codec_bos_id]
-        let codec_prefix = self.embed_codec(&[
-            codec_think_id,
-            codec_think_bos_id,
-            language_id,
-            codec_think_eos_id,
-            speaker_id,
-            codec_pad_id,
-            codec_bos_id,
-        ]); // [1, 7, 1024]
+        // Codec prefix tokens. With a language:
+        //   [think_id, think_bos_id, language_id, think_eos_id, speaker_id, codec_pad_id, codec_bos_id]
+        // Without one ("Auto"), the reference implementation switches to the
+        // no-think form rather than inventing a language token:
+        //   [nothink_id, think_bos_id, think_eos_id, speaker_id, codec_pad_id, codec_bos_id]
+        let mut codec_prefill = match language_id {
+            Some(language_id) => vec![
+                codec_think_id,
+                codec_think_bos_id,
+                language_id,
+                codec_think_eos_id,
+            ],
+            None => vec![codec_nothink_id, codec_think_bos_id, codec_think_eos_id],
+        };
+        codec_prefill.extend_from_slice(&[speaker_id, codec_pad_id, codec_bos_id]);
+        let codec_prefix = self.embed_codec(&codec_prefill);
+        let prefix_without_bos_len = codec_prefix.size()[1] - 1;
+        let pad_count = prefix_without_bos_len - 1;
 
-        // Text side for codec prefix: tts_pad repeated 5 times + tts_bos
-        let tts_pad_5 = tts_pad_embed.expand(&[1, 5, self.hidden_size], false); // [1, 5, 1024]
-        let text_for_codec = Tensor::cat(&[tts_pad_5, tts_bos_embed.shallow_clone()], 1); // [1, 6, 1024]
+        // Text side for codec prefix: tts_pad repeated + tts_bos
+        let text_for_codec = Tensor::cat(
+            &[
+                tts_pad_embed.expand(&[1, pad_count, self.hidden_size], false),
+                tts_bos_embed.shallow_clone(),
+            ],
+            1,
+        );
 
-        // Sum text + codec (first 6 of 7 codec prefix positions)
-        let codec_prefix_6 = codec_prefix.narrow(1, 0, 6); // [1, 6, 1024]
-        let phase2 = &text_for_codec + &codec_prefix_6; // [1, 6, 1024]
+        // Sum text + codec (every codec prefix position except the final bos)
+        let phase2 = &text_for_codec + &codec_prefix.narrow(1, 0, prefix_without_bos_len);
 
         // Phase 3: Text content (N positions + tts_eos)
         // text_token_ids[3..] contains the text content + tail tokens
@@ -661,15 +676,16 @@ impl TalkerModel {
         let phase3 = &text_with_eos + &codec_pad_repeated; // [1, N+1, 1024]
 
         // Phase 4: Final codec_bos
-        let codec_bos_embed = codec_prefix.narrow(1, 6, 1); // Last position of codec prefix [1, 1, 1024]
+        let codec_bos_embed = codec_prefix.narrow(1, prefix_without_bos_len, 1); // [1, 1, 1024]
         let phase4 = &tts_pad_embed + &codec_bos_embed; // [1, 1, 1024]
 
         // Concatenate all phases
         let input_embeddings = Tensor::cat(&[role_embed, phase2, phase3, phase4], 1);
 
         println!(
-            "  Built input embeddings: {} positions (3 role + 6 codec_prefix + {} text + 1 eos + 1 bos)",
+            "  Built input embeddings: {} positions (3 role + {} codec_prefix + {} text + 1 eos + 1 bos)",
             input_embeddings.size()[1],
+            prefix_without_bos_len,
             num_text_tokens
         );
 
@@ -1110,28 +1126,31 @@ impl TalkerModel {
         let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
         let mut logits = self.codec_head.forward(&last_hidden);
 
-        // Apply repetition penalty to previously generated codes
+        // Apply repetition penalty to previously generated codes. This stays
+        // on the device: reading the logits back to the host would force a
+        // full pipeline sync every frame, on top of the one sampling needs.
+        // Only a small one-hot mask of the seen codes is uploaded.
         if repetition_penalty != 1.0 && !past_codes.is_empty() {
-            let logits_data = logits.to_vec_f32();
-            let vocab_size = logits.size()[logits.dim() - 1] as usize;
-            let mut modified = logits_data.clone();
-
+            let shape = logits.size();
+            let vocab_size = shape[shape.len() - 1] as usize;
+            let mut seen = vec![0.0f32; vocab_size];
             for &code in past_codes {
-                let idx = code as usize;
-                if idx < vocab_size {
-                    let score = modified[idx];
-                    // Penalize: divide positive logits, multiply negative logits
-                    modified[idx] = if score > 0.0 {
-                        score / repetition_penalty as f32
-                    } else {
-                        score * repetition_penalty as f32
-                    };
+                if let Ok(idx) = usize::try_from(code) {
+                    if idx < vocab_size {
+                        seen[idx] = 1.0;
+                    }
                 }
             }
-
-            logits = Tensor::from_slice_f32(&modified)
-                .reshape(&logits.size())
+            let seen = Tensor::from_slice_f32(&seen)
+                .reshape(&shape)
                 .to_device(self.device);
+            // Penalize: divide positive logits, multiply negative logits.
+            let negative = logits.lt_tensor(&Tensor::zeros(&shape, logits.kind(), self.device));
+            let scale = Tensor::full(&shape, 1.0 / repetition_penalty, DType::Float32, self.device)
+                .masked_fill(&negative, repetition_penalty);
+            // Blend the scale in only where a code has already been used.
+            let blend = (scale + (-1.0)) * seen + 1.0;
+            logits = &logits * &blend;
         }
 
         if temperature <= 0.0 {
@@ -1301,12 +1320,42 @@ impl TalkerModel {
         eos_code: i64,
         tts_pad_embed: &Tensor,
         chunk_size: usize,
+        on_chunk: F,
+    ) -> Vec<Vec<i64>>
+    where
+        F: FnMut(&[Vec<i64>]) -> bool,
+    {
+        self.generate_codes_streaming_with_penalty(
+            input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            eos_code,
+            tts_pad_embed,
+            chunk_size,
+            GenerationConfig::default().repetition_penalty,
+            on_chunk,
+        )
+    }
+
+    /// [`Self::generate_codes_streaming`] with the repetition penalty taken
+    /// from the model's `generation_config.json` instead of a fixed value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_codes_streaming_with_penalty<F>(
+        &self,
+        input_embeddings: &Tensor,
+        max_codes: i64,
+        temperature: f64,
+        top_k: i64,
+        eos_code: i64,
+        tts_pad_embed: &Tensor,
+        chunk_size: usize,
+        repetition_penalty: f64,
         mut on_chunk: F,
     ) -> Vec<Vec<i64>>
     where
         F: FnMut(&[Vec<i64>]) -> bool,
     {
-        let repetition_penalty = 1.05; // From generation_config.json
         let mut all_codes = Vec::new();
         let mut pending_codes = Vec::new();
         let mut past_code_0s: Vec<i64> = Vec::new();
@@ -1463,6 +1512,8 @@ pub struct TTSInference {
     vocoder: Option<Vocoder>,
     /// Model configuration
     config: Qwen3TTSConfig,
+    /// Sampling defaults from `generation_config.json`, when the model ships one.
+    generation_defaults: GenerationConfig,
     /// Device
     device: Device,
 }
@@ -1510,6 +1561,14 @@ impl TTSInference {
         // Load model config
         let config_path = model_path.join("config.json");
         let config = Qwen3TTSConfig::from_file(&config_path)?;
+
+        // Load generation defaults if the model ships them
+        let generation_config_path = model_path.join("generation_config.json");
+        let generation_defaults = if generation_config_path.exists() {
+            GenerationConfig::from_file(&generation_config_path)?
+        } else {
+            GenerationConfig::default()
+        };
 
         // Load weights
         let weights_path = model_path.join("model.safetensors");
@@ -1565,6 +1624,7 @@ impl TTSInference {
             talker,
             vocoder,
             config,
+            generation_defaults,
             device,
         })
     }
@@ -1688,7 +1748,7 @@ impl TTSInference {
             .copied()
             .unwrap_or(0) as i64;
 
-        // Get language ID
+        // Get language ID (None selects the no-think "Auto" prefix)
         let language_id = self
             .config
             .talker_config
@@ -1696,11 +1756,12 @@ impl TTSInference {
             .as_ref()
             .and_then(|map| map.get(&language.to_lowercase()))
             .copied()
-            .unwrap_or(0) as i64;
+            .map(|value| value as i64);
 
         // Get codec special token IDs from config
         let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
         let codec_think_id = self.config.talker_config.codec_think_id as i64;
+        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
         let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
         let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
         let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
@@ -1710,7 +1771,7 @@ impl TTSInference {
         let tts_eos_id = self.config.tts_eos_token_id as i64;
 
         println!(
-            "Speaker: {} (id={}), Language: {} (id={})",
+            "Speaker: {} (id={}), Language: {} (id={:?})",
             speaker, speaker_id, language, language_id
         );
         println!(
@@ -1766,6 +1827,7 @@ impl TTSInference {
             tts_bos_id,
             tts_eos_id,
             codec_think_id,
+            codec_nothink_id,
             codec_think_bos_id,
             codec_think_eos_id,
             codec_pad_id,
@@ -1865,18 +1927,29 @@ impl TTSInference {
         language: &str,
         instruct: &str,
     ) -> Result<InstructPrompt> {
-        // Get speaker ID
-        let speaker_id = self
-            .config
-            .talker_config
-            .spk_id
-            .as_ref()
-            .and_then(|map| map.get(&speaker.to_lowercase()))
-            .copied()
-            .unwrap_or(0) as i64;
+        let voice_design = self.config.tts_model_type.as_deref() == Some("voice_design");
 
-        // VoiceDesign supports Auto language (no language token); CustomVoice
-        // keeps the historical fallback for compatibility.
+        // Get speaker ID. VoiceDesign has no predefined speakers; CustomVoice
+        // must name one the model knows, because codec token 0 is a real
+        // acoustic code, not a neutral fallback.
+        let speaker_id = if voice_design {
+            0
+        } else {
+            self.config
+                .talker_config
+                .spk_id
+                .as_ref()
+                .and_then(|map| map.get(&speaker.to_lowercase()))
+                .copied()
+                .map(|value| value as i64)
+                .ok_or_else(|| {
+                    Qwen3TTSError::Generation(format!(
+                        "Unknown speaker '{speaker}' for this model."
+                    ))
+                })?
+        };
+
+        // No language id ("Auto") selects the no-think prefix in every mode.
         let language_id = self
             .config
             .talker_config
@@ -1885,7 +1958,6 @@ impl TTSInference {
             .and_then(|map| map.get(&language.to_lowercase()))
             .copied()
             .map(|value| value as i64);
-        let voice_design = self.config.tts_model_type.as_deref() == Some("voice_design");
 
         // Preserve upstream CLI diagnostics for CustomVoice, but keep the
         // resident VoiceDesign bridge from writing request details to stdout.
@@ -1991,11 +2063,12 @@ impl TTSInference {
             self.talker.build_input_embeddings(
                 &main_token_ids,
                 speaker_id,
-                language_id.unwrap_or(0),
+                language_id,
                 tts_pad_id,
                 tts_bos_id,
                 tts_eos_id,
                 codec_think_id,
+                codec_nothink_id,
                 codec_think_bos_id,
                 codec_think_eos_id,
                 codec_pad_id,
@@ -2093,7 +2166,7 @@ impl TTSInference {
         F: FnMut(&[f32], u32) -> bool,
     {
         let prompt = self.build_instruct_prompt(text, speaker, language, instruct)?;
-        let sample_rate = 24000u32;
+        let sample_rate = OUTPUT_SAMPLE_RATE;
 
         if !prompt.voice_design {
             println!(
@@ -2111,7 +2184,7 @@ impl TTSInference {
             .as_ref()
             .map(|vocoder| vocoder.streaming_state());
 
-        self.talker.generate_codes_streaming(
+        self.talker.generate_codes_streaming_with_penalty(
             &prompt.input_embeddings,
             max_codes,
             temperature,
@@ -2119,6 +2192,7 @@ impl TTSInference {
             prompt.codec_eos_id,
             &prompt.tts_pad_embed,
             chunk_size,
+            self.generation_defaults.repetition_penalty,
             |code_chunk| {
                 // generate_codes_streaming flushes its pending buffer after a
                 // stop without clearing it, so the final chunk can arrive twice.
@@ -2954,14 +3028,14 @@ impl TTSInference {
             max_codes,
             chunk_size.max(1)
         );
-        let sample_rate = 24000u32;
+        let sample_rate = OUTPUT_SAMPLE_RATE;
         let mut generated = 0usize;
         let mut should_continue = true;
         let mut vocoder_state = self
             .vocoder
             .as_ref()
             .map(|vocoder| vocoder.streaming_state());
-        self.talker.generate_codes_streaming(
+        self.talker.generate_codes_streaming_with_penalty(
             &input_embeddings,
             max_codes,
             temperature,
@@ -2969,6 +3043,7 @@ impl TTSInference {
             codec_eos_id,
             &tts_pad_embed,
             chunk_size,
+            self.generation_defaults.repetition_penalty,
             |code_chunk| {
                 if !should_continue || code_chunk.is_empty() {
                     return should_continue;

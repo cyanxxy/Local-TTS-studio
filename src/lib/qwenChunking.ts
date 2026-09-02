@@ -4,9 +4,12 @@ import {
   countUnicodeScalars,
 } from "../../electron/localTtsLimits";
 
-// Keep this in sync with CUSTOM_VOICE_UNIT_CHARS in
-// rust/local-tts-bridge/src/qwen3/runtime.rs.
-export const QWEN3_UNIT_MAX_CHARS = 400;
+// Keep these in sync with CUSTOM_VOICE_UNIT_CHARS and CJK_CHAR_WEIGHT in
+// rust/local-tts-bridge/src/qwen3/runtime.rs and .../qwen3/text.rs. Rust
+// reports textUnitIndex against the units it splits; the renderer maps those
+// onto the units built here, so both splitters must agree exactly.
+export const QWEN3_UNIT_MAX_CHARS = 200;
+export const QWEN3_CJK_CHAR_WEIGHT = 2;
 
 export interface Qwen3RequestSection extends TextChunk {
   /** Inclusive index of the first Qwen text unit in this request. */
@@ -18,6 +21,32 @@ export interface Qwen3RequestSection extends TextChunk {
 const SENTENCE_BOUNDARIES = new Set([".", "!", "?", "。", "！", "？", "；", ";", "\n"]);
 const CLAUSE_BOUNDARIES = new Set([",", ":", "，", "：", "、"]);
 
+/** Mirrors Rust's `is_cjk`. */
+export function isQwen3CjkCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  if (codePoint === undefined) return false;
+  return (codePoint >= 0x2e80 && codePoint <= 0x2fff)
+    || (codePoint >= 0x3040 && codePoint <= 0x30ff)
+    || (codePoint >= 0x3100 && codePoint <= 0x312f)
+    || (codePoint >= 0x31a0 && codePoint <= 0x31bf)
+    || (codePoint >= 0x31f0 && codePoint <= 0x31ff)
+    || (codePoint >= 0x3400 && codePoint <= 0x4dbf)
+    || (codePoint >= 0x4e00 && codePoint <= 0x9fff)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7af)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0x20000 && codePoint <= 0x2fa1f);
+}
+
+function isAsciiDigit(character: string | undefined): boolean {
+  return character !== undefined && character >= "0" && character <= "9" && character.length === 1;
+}
+
+/** Mirrors Rust's `is_boundary`: punctuation inside a number is not a pause. */
+function isBoundary(character: string, previous: string | undefined, next: string | undefined): boolean {
+  if (!SENTENCE_BOUNDARIES.has(character) && !CLAUSE_BOUNDARIES.has(character)) return false;
+  return !(isAsciiDigit(previous) && isAsciiDigit(next));
+}
+
 /** Mirrors Rust's split_text_units while retaining UTF-16 source offsets. */
 export function buildQwen3TextUnits(text: string): TextChunk[] {
   const trimmed = text.trim();
@@ -28,22 +57,26 @@ export function buildQwen3TextUnits(text: string): TextChunk[] {
   let start = 0;
 
   while (start < trimmed.length) {
-    let charCount = 0;
+    let weight = 0;
     let preferredEnd: number | null = null;
     let hardEnd = trimmed.length;
+    let previous: string | undefined;
 
+    const characters = Array.from(trimmed.slice(start));
     let relativeUtf16Offset = 0;
-    for (const character of trimmed.slice(start)) {
+    for (let index = 0; index < characters.length; index += 1) {
+      const character = characters[index];
       relativeUtf16Offset += character.length;
       const end = start + relativeUtf16Offset;
-      charCount += 1;
-      if (SENTENCE_BOUNDARIES.has(character) || CLAUSE_BOUNDARIES.has(character)) {
+      weight += isQwen3CjkCharacter(character) ? QWEN3_CJK_CHAR_WEIGHT : 1;
+      if (isBoundary(character, previous, characters[index + 1])) {
         preferredEnd = end;
       }
-      if (charCount === QWEN3_UNIT_MAX_CHARS) {
+      if (weight >= QWEN3_UNIT_MAX_CHARS) {
         hardEnd = end;
         break;
       }
+      previous = character;
     }
 
     const end = preferredEnd ?? hardEnd;

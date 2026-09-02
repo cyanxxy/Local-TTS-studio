@@ -147,6 +147,7 @@ impl NativeQwenHost {
         transcript: &str,
         language: &str,
         session_key: Option<&str>,
+        progress: &mut dyn FnMut(&str, &str) -> Result<()>,
     ) -> Result<PreparedReference> {
         let sample_rate = self.inference.config().speaker_encoder_config.sample_rate;
         let prepared =
@@ -181,14 +182,26 @@ impl NativeQwenHost {
             .audio_encoder
             .as_ref()
             .context("Qwen3 Base audio encoder was not loaded.")?;
+        // Each encoder is one opaque native call, so a cancel can only be
+        // observed between them; the progress callback polls for it.
+        progress(
+            "reference_encoding",
+            "Extracting the Qwen3 voice reference speaker embedding.",
+        )?;
+        let speaker_embedding = speaker_encoder
+            .extract_embedding(&prepared.samples)
+            .context("Failed to extract Qwen3 reference speaker embedding.")?;
+        progress(
+            "reference_encoding",
+            "Encoding the Qwen3 voice reference audio codes.",
+        )?;
+        let codes = audio_encoder
+            .encode(&prepared.samples)
+            .context("Failed to encode Qwen3 reference audio.")?;
         let prepared_reference = PreparedReference {
             features: ReferenceFeatures {
-                speaker_embedding: speaker_encoder
-                    .extract_embedding(&prepared.samples)
-                    .context("Failed to extract Qwen3 reference speaker embedding.")?,
-                codes: audio_encoder
-                    .encode(&prepared.samples)
-                    .context("Failed to encode Qwen3 reference audio.")?,
+                speaker_embedding,
+                codes,
             },
             reference_text: transcript.to_owned(),
             truncated: prepared.truncated,
@@ -266,6 +279,38 @@ impl VoiceDesignEngine for TTSInference {
             on_audio,
         )
         .context("Qwen3 VoiceDesign inference failed.")
+    }
+}
+
+/// Binds a loaded Base model to one prepared reference so the shared unit
+/// driver can stream voice-clone units without seeing tensors.
+struct VoiceCloneSession<'a> {
+    inference: &'a TTSInference,
+    reference: &'a PreparedReference,
+}
+
+impl VoiceCloneEngine for VoiceCloneSession<'_> {
+    fn generate_voice_clone_streaming(
+        &mut self,
+        text: &str,
+        language: &str,
+        controls: GenerationControls,
+        on_audio: StreamedAudio<'_>,
+    ) -> Result<()> {
+        self.inference
+            .generate_with_icl_streaming(
+                text,
+                &self.reference.reference_text,
+                &self.reference.features.codes,
+                &self.reference.features.speaker_embedding,
+                language,
+                controls.temperature,
+                controls.top_k,
+                controls.max_new_tokens,
+                VOICE_CLONE_STREAMING_CHUNK_SIZE,
+                on_audio,
+            )
+            .context("Qwen3 voice-clone inference failed.")
     }
 }
 
@@ -363,6 +408,7 @@ impl Qwen3Runtime {
                         reference_text,
                         &language,
                         session_key,
+                        &mut |phase, message| sink.progress(phase, message),
                     )
                 })?
             }
@@ -374,89 +420,14 @@ impl Qwen3Runtime {
                 host.cached_reference(session_key)?
             }
         };
-        let mut sample_rate = None;
-        let mut sample_count = 0usize;
-        let mut audio_chunk_count = 0usize;
-        let units = split_text_units(text, CUSTOM_VOICE_UNIT_CHARS)?;
-        let unit_total = units.len();
-        for (unit_index, unit) in units.iter().enumerate() {
-            sink.progress(
-                "inference",
-                &format!(
-                    "Running Qwen3 voice-clone section {} of {unit_total}.",
-                    unit_index + 1
-                ),
-            )?;
-            let mut sink_error = None;
-            let unit_controls =
-                controls.effective_for_text(unit, &language, MAX_TEXT_UNIT_GENERATION_TOKENS);
-            run_with_inference_cache_cleanup(&mut cleanup, || {
-                host.inference
-                    .generate_with_icl_streaming(
-                        unit,
-                        &prepared.reference_text,
-                        &prepared.features.codes,
-                        &prepared.features.speaker_embedding,
-                        &language,
-                        unit_controls.temperature,
-                        unit_controls.top_k,
-                        unit_controls.max_new_tokens,
-                        VOICE_CLONE_STREAMING_CHUNK_SIZE,
-                        |samples, current_sample_rate| {
-                            let cleaned = match clean_audio(samples.to_vec()) {
-                                Ok(cleaned) => cleaned,
-                                Err(error) => {
-                                    sink_error = Some(error);
-                                    return false;
-                                }
-                            };
-                            if current_sample_rate == 0
-                                || sample_rate
-                                    .is_some_and(|expected| expected != current_sample_rate)
-                            {
-                                sink_error = Some(anyhow::anyhow!(
-                                    "Qwen3 voice clone returned an invalid or inconsistent sample rate."
-                                ));
-                                return false;
-                            }
-                            sample_rate = Some(current_sample_rate);
-                            if let Err(error) = sink.audio_chunk(
-                                &cleaned,
-                                current_sample_rate,
-                                audio_chunk_count,
-                                0,
-                                0,
-                            ) {
-                                sink_error = Some(error);
-                                return false;
-                            }
-                            sample_count = sample_count.saturating_add(cleaned.len());
-                            audio_chunk_count += 1;
-                            true
-                        },
-                    )
-                    .map_err(anyhow::Error::from)
-            })
-            .with_context(|| {
-                format!(
-                    "Qwen3 voice-clone inference failed in section {} of {unit_total}.",
-                    unit_index + 1
-                )
-            })?;
-            if let Some(error) = sink_error {
-                return Err(error);
-            }
-        }
-        ensure!(
-            audio_chunk_count > 0,
-            "Qwen3 voice clone returned no audio."
-        );
-        Ok(GenerationSummary {
-            sample_rate: sample_rate.unwrap_or_default(),
-            sample_count,
-            audio_chunk_count,
-            reference_truncated: prepared.truncated,
-        })
+        let mut session = VoiceCloneSession {
+            inference: &host.inference,
+            reference: &prepared,
+        };
+        let mut summary =
+            generate_voice_clone_units(&mut session, text, &language, controls, sink)?;
+        summary.reference_truncated = prepared.truncated;
+        Ok(summary)
     }
 }
 
@@ -618,6 +589,17 @@ pub trait VoiceDesignEngine {
     ) -> Result<()>;
 }
 
+pub trait VoiceCloneEngine {
+    /// Streams one text unit conditioned on the engine's prepared reference.
+    fn generate_voice_clone_streaming(
+        &mut self,
+        text: &str,
+        language: &str,
+        controls: GenerationControls,
+        on_audio: StreamedAudio<'_>,
+    ) -> Result<()>;
+}
+
 pub trait AudioSink {
     fn progress(&mut self, phase: &str, message: &str) -> Result<()>;
 
@@ -768,63 +750,26 @@ fn generate_custom_voice_units_with_cleanup(
     sink: &mut dyn AudioSink,
     cleanup: &mut dyn FnMut(),
 ) -> Result<GenerationSummary> {
-    let units = split_text_units(request.text, CUSTOM_VOICE_UNIT_CHARS)?;
     let speaker = normalize_speaker(request.speaker)?;
     let language = normalize_language(request.language)?;
-    let total = units.len();
-    let mut streaming = StreamingUnitSink::new(sink, total);
-
-    for (index, unit) in units.iter().enumerate() {
-        streaming.sink.progress(
-            "inference",
-            &format!("Generating Qwen3 section {} of {total}.", index + 1),
-        )?;
-        streaming.begin_unit(index);
-        let controls =
-            request
-                .controls
-                .effective_for_text(unit, &language, MAX_TEXT_UNIT_GENERATION_TOKENS);
-        let streamed = run_with_inference_cache_cleanup(cleanup, || {
+    generate_units_with_cleanup(
+        "CustomVoice",
+        request.text,
+        &language,
+        request.controls,
+        sink,
+        cleanup,
+        &mut |unit, controls, on_audio| {
             engine.generate_custom_voice_streaming(
                 unit,
                 &speaker,
                 &language,
                 request.instruct,
                 controls,
-                &mut |samples, rate| streaming.push(samples, rate),
+                on_audio,
             )
-        });
-        // A sink failure stops the engine by returning false, which the engine
-        // reports as a clean Ok — so check the stored cause first. Then let the
-        // engine's own error through before flushing, so a failed unit never
-        // emits a trailing chunk and gap on its way out.
-        if let Some(error) = streaming.take_error() {
-            return Err(error);
-        }
-        streamed.with_context(|| {
-            format!(
-                "Qwen3 CustomVoice inference failed in section {} of {total}.",
-                index + 1
-            )
-        })?;
-        streaming.end_unit(inter_unit_silence(
-            index,
-            total,
-            streaming.sample_rate.unwrap_or_default(),
-        ))?;
-    }
-
-    let sample_rate = streaming.sample_rate;
-    let sample_count = streaming.sample_count;
-    let audio_chunk_count = streaming.chunk_count;
-    ensure!(audio_chunk_count > 0, "Qwen3 returned no audio.");
-
-    Ok(GenerationSummary {
-        sample_rate: sample_rate.unwrap_or_default(),
-        sample_count,
-        audio_chunk_count,
-        reference_truncated: false,
-    })
+        },
+    )
 }
 
 pub fn generate_voice_design_units(
@@ -842,8 +787,72 @@ fn generate_voice_design_units_with_cleanup(
     sink: &mut dyn AudioSink,
     cleanup: &mut dyn FnMut(),
 ) -> Result<GenerationSummary> {
-    let units = split_text_units(request.text, CUSTOM_VOICE_UNIT_CHARS)?;
     let language = normalize_language(request.language)?;
+    generate_units_with_cleanup(
+        "VoiceDesign",
+        request.text,
+        &language,
+        request.controls,
+        sink,
+        cleanup,
+        &mut |unit, controls, on_audio| {
+            engine.generate_voice_design_streaming(
+                unit,
+                &language,
+                request.instruct,
+                controls,
+                on_audio,
+            )
+        },
+    )
+}
+
+pub fn generate_voice_clone_units(
+    engine: &mut impl VoiceCloneEngine,
+    text: &str,
+    language: &str,
+    controls: GenerationControls,
+    sink: &mut dyn AudioSink,
+) -> Result<GenerationSummary> {
+    let mut cleanup = clear_inference_cache;
+    generate_voice_clone_units_with_cleanup(engine, text, language, controls, sink, &mut cleanup)
+}
+
+fn generate_voice_clone_units_with_cleanup(
+    engine: &mut impl VoiceCloneEngine,
+    text: &str,
+    language: &str,
+    controls: GenerationControls,
+    sink: &mut dyn AudioSink,
+    cleanup: &mut dyn FnMut(),
+) -> Result<GenerationSummary> {
+    let language = normalize_language(language)?;
+    generate_units_with_cleanup(
+        "voice-clone",
+        text,
+        &language,
+        controls,
+        sink,
+        cleanup,
+        &mut |unit, controls, on_audio| {
+            engine.generate_voice_clone_streaming(unit, &language, controls, on_audio)
+        },
+    )
+}
+
+/// Streams every mode the same way: split into bounded units, budget each
+/// unit, stream its chunks, and carry the inter-unit gap on each unit's final
+/// chunk. `generate_unit` is the only mode-specific step.
+fn generate_units_with_cleanup(
+    mode_label: &str,
+    text: &str,
+    language: &str,
+    controls: GenerationControls,
+    sink: &mut dyn AudioSink,
+    cleanup: &mut dyn FnMut(),
+    generate_unit: &mut dyn FnMut(&str, GenerationControls, StreamedAudio<'_>) -> Result<()>,
+) -> Result<GenerationSummary> {
+    let units = split_text_units(text, CUSTOM_VOICE_UNIT_CHARS)?;
     let total = units.len();
     let mut streaming = StreamingUnitSink::new(sink, total);
 
@@ -851,30 +860,28 @@ fn generate_voice_design_units_with_cleanup(
         streaming.sink.progress(
             "inference",
             &format!(
-                "Generating Qwen3 VoiceDesign section {} of {total}.",
+                "Generating Qwen3 {mode_label} section {} of {total}.",
                 index + 1
             ),
         )?;
         streaming.begin_unit(index);
-        let controls =
-            request
-                .controls
-                .effective_for_text(unit, &language, MAX_TEXT_UNIT_GENERATION_TOKENS);
+        let unit_controls =
+            controls.effective_for_text(unit, language, MAX_TEXT_UNIT_GENERATION_TOKENS);
         let streamed = run_with_inference_cache_cleanup(cleanup, || {
-            engine.generate_voice_design_streaming(
-                unit,
-                &language,
-                request.instruct,
-                controls,
-                &mut |samples, rate| streaming.push(samples, rate),
-            )
+            generate_unit(unit, unit_controls, &mut |samples, rate| {
+                streaming.push(samples, rate)
+            })
         });
+        // A sink failure stops the engine by returning false, which the engine
+        // reports as a clean Ok — so check the stored cause first. Then let the
+        // engine's own error through before flushing, so a failed unit never
+        // emits a trailing chunk and gap on its way out.
         if let Some(error) = streaming.take_error() {
             return Err(error);
         }
         streamed.with_context(|| {
             format!(
-                "Qwen3 VoiceDesign inference failed in section {} of {total}.",
+                "Qwen3 {mode_label} inference failed in section {} of {total}.",
                 index + 1
             )
         })?;
@@ -942,6 +949,27 @@ mod tests {
                 instruct: instruct.to_owned(),
                 controls,
             });
+            on_audio(&[0.25], 24_000);
+            Ok(())
+        }
+    }
+
+    impl VoiceCloneEngine for RecordingEngine {
+        fn generate_voice_clone_streaming(
+            &mut self,
+            text: &str,
+            language: &str,
+            controls: GenerationControls,
+            on_audio: StreamedAudio<'_>,
+        ) -> Result<()> {
+            self.calls.push(Call {
+                text: text.to_owned(),
+                speaker: String::new(),
+                language: language.to_owned(),
+                instruct: String::new(),
+                controls,
+            });
+            on_audio(&[0.5], 24_000);
             on_audio(&[0.25], 24_000);
             Ok(())
         }
@@ -1232,6 +1260,49 @@ mod tests {
         for (index, chunk) in sink.chunks.iter().enumerate() {
             let expected = if index + 1 == units { 0 } else { 4_800 };
             assert_eq!(chunk.4, expected, "silence at unit {index}");
+        }
+    }
+
+    #[test]
+    fn voice_clone_units_stream_with_text_unit_metadata_and_gaps() {
+        // Voice clone used to bypass the unit sink: no inter-unit gap, no
+        // textUnitIndex. It must now match CustomVoice chunk for chunk.
+        let text = format!("First sentence. {}", "你".repeat(450));
+        let controls = GenerationControls::new(0.7, 27, 300);
+        let mut engine = RecordingEngine::default();
+        let mut sink = RecordingSink::default();
+        let summary =
+            generate_voice_clone_units(&mut engine, &text, "Auto", controls, &mut sink).unwrap();
+
+        let units = engine.calls.len();
+        assert!(units >= 3);
+        assert_eq!(
+            engine
+                .calls
+                .iter()
+                .map(|call| call.text.as_str())
+                .collect::<String>(),
+            text
+        );
+        assert!(engine.calls.iter().all(|call| call.language == "auto"));
+        assert!(engine.calls.iter().all(|call| {
+            call.controls
+                == controls.effective_for_text(&call.text, "auto", MAX_TEXT_UNIT_GENERATION_TOKENS)
+        }));
+        assert_eq!(sink.chunks.len(), units * 2);
+        assert_eq!(summary.audio_chunk_count, units * 2);
+        assert!(!summary.reference_truncated);
+        assert!(sink.chunks.iter().all(|chunk| chunk.3 == units));
+        for (position, chunk) in sink.chunks.iter().enumerate() {
+            assert_eq!(chunk.2, position / 2);
+            let is_unit_end = position % 2 == 1;
+            let is_final_unit = position / 2 + 1 == units;
+            let expected = if is_unit_end && !is_final_unit {
+                4_800
+            } else {
+                0
+            };
+            assert_eq!(chunk.4, expected, "silence at chunk {position}");
         }
     }
 

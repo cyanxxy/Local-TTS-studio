@@ -205,7 +205,7 @@ describe("localTtsIpc request sanitizers", () => {
       instruct: "Warm narration.",
       temperature: 0.75,
       topK: 64,
-      maxNewTokens: 2304,
+      maxNewTokens: 320,
     }, "darwin", "arm64")).toEqual({
       text: "Hello from Qwen.",
       mode: "customVoice",
@@ -216,15 +216,15 @@ describe("localTtsIpc request sanitizers", () => {
       instruct: "Warm narration.",
       temperature: 0.75,
       topK: 64,
-      maxNewTokens: 2304,
+      maxNewTokens: 320,
     });
     expect(() => sanitizeGeneratePayload("qwen3", {
       text: "Reject an unsafe generation ceiling.",
       mode: "customVoice",
       modelRepo: customRepo,
       modelPath: "/models/qwen3-customvoice",
-      maxNewTokens: 4097,
-    }, "darwin", "arm64")).toThrow("between 64 and 4096");
+      maxNewTokens: 385,
+    }, "darwin", "arm64")).toThrow("between 64 and 384");
 
     expect(sanitizeGeneratePayload("qwen3", {
       text: "Built-in speaker.",
@@ -331,7 +331,7 @@ describe("localTtsIpc request sanitizers", () => {
         .toThrow(`Unknown Qwen3-TTS field: \`${removedField}\``);
     }
     expect(() => sanitizeGeneratePayload("qwen3", { ...valid, topK: 1001 }, "darwin", "arm64"))
-      .toThrow("between 0 and 1000");
+      .toThrow("between 1 and 1000");
     expect(() => sanitizeGeneratePayload("qwen3", { ...valid, mode: "voiceClone" }, "darwin", "arm64"))
       .toThrow("does not match");
     expect(() => sanitizeGeneratePayload("qwen3", {
@@ -419,7 +419,7 @@ describe("localTtsIpc request sanitizers", () => {
     }, "darwin", "arm64")).toEqual({
       model: "qwen3",
       modelRepo,
-      payload: { mode: "customVoice", modelPath: "/models/qwen3" },
+      payload: { mode: "customVoice", modelPath: "/models/qwen3", modelRepo },
     });
     expect(() => sanitizeWarmRequest({ model: "qwen3" })).toThrow("Unsupported Qwen3-TTS mode");
     expect(() => sanitizeWarmRequest({ model: "kani" })).toThrow("Unsupported local model");
