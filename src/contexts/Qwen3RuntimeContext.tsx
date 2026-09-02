@@ -24,7 +24,15 @@ import {
   type Qwen3Profile,
 } from "../../electron/qwen3Profiles";
 
-export const QWEN3_DEFAULT_MAX_NEW_TOKENS = 4_096;
+// Generation runs one bounded text unit at a time, so this is a per-unit
+// budget. Mirrors MAX_GENERATION_TOKENS in rust/local-tts-bridge/src/qwen3/config.rs.
+export const QWEN3_MIN_NEW_TOKENS = 64;
+export const QWEN3_MAX_NEW_TOKENS = 384;
+export const QWEN3_DEFAULT_MAX_NEW_TOKENS = QWEN3_MAX_NEW_TOKENS;
+export const QWEN3_MIN_TEMPERATURE = 0;
+export const QWEN3_MAX_TEMPERATURE = 2;
+export const QWEN3_MIN_TOP_K = 1;
+export const QWEN3_MAX_TOP_K = 1_000;
 
 export interface Qwen3RuntimeSettings {
   profile: Qwen3Profile;
@@ -248,10 +256,16 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const setLanguage = useCallback((nextLanguage: string) => {
     if (QWEN3_LANGUAGES.includes(nextLanguage as typeof QWEN3_LANGUAGES[number])) setLanguageState(nextLanguage);
   }, []);
-  const setTemperature = useCallback((value: number) => setTemperatureState((current) => clamp(value, current, 0.2, 2)), []);
-  const setTopK = useCallback((value: number) => setTopKState((current) => Math.round(clamp(value, current, 0, 1_000))), []);
+  const setTemperature = useCallback(
+    (value: number) => setTemperatureState((current) => clamp(value, current, QWEN3_MIN_TEMPERATURE, QWEN3_MAX_TEMPERATURE)),
+    [],
+  );
+  const setTopK = useCallback(
+    (value: number) => setTopKState((current) => Math.round(clamp(value, current, QWEN3_MIN_TOP_K, QWEN3_MAX_TOP_K))),
+    [],
+  );
   const setMaxNewTokens = useCallback(
-    (value: number) => setMaxNewTokensState((current) => Math.round(clamp(value, current, 64, 4_096))),
+    (value: number) => setMaxNewTokensState((current) => Math.round(clamp(value, current, QWEN3_MIN_NEW_TOKENS, QWEN3_MAX_NEW_TOKENS))),
     [],
   );
   const setReferenceAudio = useCallback((name: string, base64: string | null, signature = "") => {

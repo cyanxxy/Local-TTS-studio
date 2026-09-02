@@ -6,23 +6,42 @@ This directory is a source snapshot, not a live Git checkout or submodule.
   (crate version 0.2.2)
 - nested `badlogic/mlx-c`: `22a304206cbc77a5f74d0e0eb7363f2a6998d74f`
 
-Open TTS carries a small patch in `OPEN_TTS.patch`. It adds the low-level
-VoiceDesign prompt construction used by the resident bridge, keeps
-VoiceDesign request details off stdout, changes MLX build guidance to match
-this bundled source tree, and corrects the generation-config filename in
-`src/model.rs` to `generation_config.json` (upstream reads the nonexistent
-`generate_config.json`). It also aligns CLI/worker defaults with the model's
-8,192-token generation configuration and rejects budget exhaustion without an
-end-of-speech token instead of returning truncated audio as a successful
-completion. The instruct path also exposes a bounded streaming twin used by
-CustomVoice and VoiceDesign, sharing prompt construction with the buffered API
-and decoding completed code batches incrementally. Both streaming paths skip a
-batch that decodes to no samples — that is vocoder lookahead state rather than
-audio, and consumers reject an empty buffer as a failed generation — and the
-per-batch decode is silent, because it now runs many times per request against
-the bridge's bounded stdout buffer. The upstream high-level
-VoiceDesign API at the pinned revision returns placeholder silence; the rest of
-the low-level inference engine remains the native backend used by Open TTS.
+Open TTS carries a patch in `OPEN_TTS.patch`. It:
+
+- adds the low-level VoiceDesign prompt construction used by the resident
+  bridge, keeps VoiceDesign request details off stdout, changes MLX build
+  guidance to match this bundled source tree, and corrects the
+  generation-config filename in `src/model.rs` to `generation_config.json`
+  (upstream reads the nonexistent `generate_config.json`);
+- aligns CLI/worker defaults with the model's 8,192-token generation
+  configuration and rejects budget exhaustion without an end-of-speech token
+  instead of returning truncated audio as a successful completion;
+- exposes a bounded streaming twin of the instruct path used by CustomVoice
+  and VoiceDesign, sharing prompt construction with the buffered API and
+  decoding completed code batches incrementally. Both streaming paths skip a
+  batch that decodes to no samples — that is vocoder lookahead state rather
+  than audio — and the per-batch decode is silent, because it runs many times
+  per request against the bridge's bounded stdout buffer;
+- makes `build_input_embeddings` take an optional language id and emit the
+  no-think codec prefix when it is absent, so CustomVoice "Auto" matches the
+  reference implementation instead of placing raw codec code 0 in the prompt
+  (`generate_with_xvector` keeps upstream's fallback because Open TTS does not
+  call it);
+- rejects an unknown CustomVoice speaker as an error rather than silently
+  falling back to speaker id 0;
+- loads `generation_config.json` into `TTSInference` and passes its
+  repetition penalty to the streaming talker through
+  `generate_codes_streaming_with_penalty` (the upstream
+  `generate_codes_streaming` signature is preserved and delegates with the
+  default), and applies that penalty on the device instead of copying the
+  logits to the host every frame;
+- names the vocoder output rate once (`OUTPUT_SAMPLE_RATE`) for the streaming
+  paths.
+
+The upstream high-level VoiceDesign API at the pinned revision returns
+placeholder silence; the rest of the low-level inference engine remains the
+native backend used by Open TTS.
+
 The patch also refreshes the source-compatible `tokenizers`, `base64`, and
 `tower-http` dependency majors, and pins `base64` to `default-features = false`
 with only `std` so 0.23's default `simd-unsafe` engines stay out of the build;
@@ -50,9 +69,11 @@ unverified and must be re-checked against upstream on the next re-vendor.
    vendor root with `git apply --check OPEN_TTS.patch` followed by
    `git apply OPEN_TTS.patch`.
 5. Review the patch rather than resolving failures mechanically. In particular,
-   confirm `build_voice_design_input_embeddings`, the shared instruct prompt,
-   `generate_with_instruct_streaming`, and the bundled mlx-c error message still
-   match the new upstream APIs.
+   confirm `build_input_embeddings` (optional language), 
+   `build_voice_design_input_embeddings`, the shared instruct prompt,
+   `generate_with_instruct_streaming`, `generate_codes_streaming_with_penalty`,
+   the on-device repetition penalty in `predict_code_0`, and the bundled mlx-c
+   error message still match the new upstream APIs.
 6. Update both pinned revisions, refresh `OPEN_TTS.patch`, and update the
    expected vendor digest in `electron/qwen3Vendor.test.ts` in the same change.
 7. Run `npx vitest run electron/qwen3Vendor.test.ts`, then the Rust bridge tests

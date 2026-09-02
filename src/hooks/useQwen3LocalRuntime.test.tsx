@@ -39,7 +39,7 @@ function runtimeSettings() {
     instruct: "",
     temperature: 0.9,
     topK: 50,
-    maxNewTokens: 1_536,
+    maxNewTokens: 320,
     referenceAudioName: "",
     referenceAudioBase64: null,
     referenceAudioSignature: "",

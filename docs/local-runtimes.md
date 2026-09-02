@@ -80,13 +80,15 @@ Generation payloads are strict and reject unknown fields. Supported fields are:
   "instruct": "Speak warmly",
   "temperature": 0.9,
   "topK": 50,
-  "maxNewTokens": 8192
+  "maxNewTokens": 384
 }
 ```
 
+`temperature` accepts 0 to 2, where 0 selects greedy decoding. `topK` accepts 1 to 1,000. `maxNewTokens` accepts 64 to 384 and is a *per text unit* budget: every request is generated one bounded unit at a time, so at 12 codec frames per second the ceiling allows 32 seconds of speech per unit. The renderer, Electron, and Rust enforce the same bounds.
+
 Base mode replaces speaker/instruction with `referenceAudioBase64` and `referenceText`. A multi-section job also supplies a renderer-generated `referenceCacheKey`: the first section uploads the WAV and transcript, while later sections send only that key. If the resident worker is replaced, the renderer re-seeds the new session once and retries the affected section. Backend-internal controls are intentionally absent.
 
-Warm-up uses only `{mode, modelRepo, modelPath}` and never downloads weights. The resident Qwen host is keyed by the canonical model directory and model type. Switching profiles replaces the loaded host; repeated generations reuse it.
+Warm-up uses only `{mode, modelRepo, modelPath}` and never downloads weights. Electron checks the repository against the mode's profile, and Rust checks it again against the requested mode when it is supplied. The resident Qwen host is keyed by the canonical model directory and model type. Switching profiles replaces the loaded host; repeated generations reuse it.
 
 ## Native Qwen inference
 
@@ -94,9 +96,11 @@ The Rust dependency is pinned by Git revision in `rust/local-tts-bridge/Cargo.to
 
 The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; a CUDA-enabled custom build selects CUDA when LibTorch reports it available and otherwise selects CPU. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
 
-CustomVoice splits accepted text at Unicode-scalar-safe sentence or clause boundaries. It never slices arbitrary UTF-8 byte positions. Each completed text unit is streamed through one or more bounded Float32 transport chunks; repeated `textUnitIndex`/`textUnitTotal` metadata keeps those chunks associated with the source unit, and 0.2 seconds of inter-unit silence is declared only on that unit's final transport chunk.
+All three modes split accepted text at Unicode-scalar-safe sentence or clause boundaries into units of at most 200 weighted characters, where a CJK ideograph or syllable weighs 2 and everything else weighs 1, so a unit's spoken length stays inside the per-unit token budget in every script. Punctuation between two digits (`3.14`, `1,000`, `10:30`) is never a boundary. The splitter never slices arbitrary UTF-8 byte positions, and `buildQwen3TextUnits` in `src/lib/qwenChunking.ts` mirrors it exactly, because the renderer maps Rust's `textUnitIndex` onto units it computed itself. Each completed text unit is streamed through one or more bounded Float32 transport chunks; repeated `textUnitIndex`/`textUnitTotal` metadata keeps those chunks associated with the source unit, and 0.2 seconds of inter-unit silence is declared only on that unit's final transport chunk.
 
-Base mode decodes, downmixes, resamples, and caps the reference WAV at 20 seconds, then caches encoded reference features by model, normalized WAV digest, transcript, and language. A bounded per-host cache can additionally bind those prepared features to a session key, avoiding repeated base64 IPC/WebSocket uploads and repeated native reference validation across one long job. When a longer clip is supplied, generation continues with the first 20 seconds and returns a truncation warning. Its native streaming callback emits open-ended chunks (`total: 0`) until the final result reports `audioChunkCount`.
+A CustomVoice request with language `Auto` uses the model's no-think codec prefix, as the reference implementation does; an unknown speaker is rejected rather than mapped to speaker id 0. The repetition penalty comes from the model's `generation_config.json` when present.
+
+Base mode decodes, downmixes, resamples, and caps the reference WAV at 20 seconds, then caches encoded reference features by model, normalized WAV digest, transcript, and language. A bounded per-host cache can additionally bind those prepared features to a session key, avoiding repeated base64 IPC/WebSocket uploads and repeated native reference validation across one long job. When a longer clip is supplied, generation continues with the first 20 seconds and returns a truncation warning. Reference encoding polls for cancellation between the speaker-embedding and codec-encoding steps. Voice-clone audio then streams through the same unit driver as CustomVoice and VoiceDesign, with the same `textUnitIndex`/`textUnitTotal` metadata and inter-unit gaps; transport `total` is always 0 while streaming, and the final result reports the authoritative `audioChunkCount`.
 
 Rust replaces NaN/Inf samples with zero but does not peak-normalize. Renderer WAV conversion owns normalization.
 
