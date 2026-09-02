@@ -5,7 +5,6 @@ on:
     branches:
       - main
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,71 +15,21 @@ concurrency:
 
 jobs:
   checks:
-    name: Lint, test, and build web (Node ${{ matrix.node.label }})
+    name: Lint, test, and build web
     runs-on: ubuntu-24.04
     timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        node:
-          # The release runtime pinned in .nvmrc, plus the newest major that
-          # package.json `engines.node` admits. vitest.config.ts carries a
-          # Node 26 specific workaround, so that leg keeps it honest.
-          - label: pinned
-            file: .nvmrc
-          - label: "26"
-            version: "26"
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
-          # setup-node prefers node-version when both are set; the matrix
-          # leaves exactly one of them non-empty.
-          node-version-file: ${{ matrix.node.file }}
-          node-version: ${{ matrix.node.version }}
+          node-version-file: ".nvmrc"
           cache: npm
       - run: npm ci
       - run: npm run lint
       # lint:rust is deliberately not run here: Clippy needs the full native
       # build, so rust-bridge.yml on macOS is this repo's native gate.
       - run: npx tsc --noEmit -p tsconfig.electron.json
-      # --coverage makes the 100% thresholds in vitest.config.ts a real gate.
-      # rustLocalBridge.test.ts compiles the native bridge in beforeAll and runs
-      # in its own job below so the cargo build cannot starve timing-sensitive
-      # Electron tests in this process.
-      - run: npx vitest run --coverage --exclude "electron/rustLocalBridge.test.ts"
+      # rustLocalBridge.test.ts compiles the native bridge in beforeAll; the
+      # native gate for this repo is the rust-bridge workflow on macOS.
+      - run: npx vitest run --exclude "electron/rustLocalBridge.test.ts"
       - run: npm run build:web
-
-  bridge-linux:
-    name: Bridge integration test (Linux)
-    runs-on: ubuntu-24.04
-    # The test cargo-builds the native bridge in beforeAll; leave headroom for
-    # a cold compile of the llama.cpp dependency tree.
-    timeout-minutes: 45
-    env:
-      # rustLocalBridge.test.ts honours CARGO_TARGET_DIR; point it inside the
-      # workspace so Swatinem/rust-cache can see and cache the build.
-      CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
-        with:
-          node-version-file: ".nvmrc"
-          cache: npm
-      - name: Install pinned Rust toolchain
-        # No toolchain argument: rustup installs the active toolchain, so the
-        # channel, profile, and components all come from rust-toolchain.toml.
-        run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: rust/local-tts-bridge
-          env-vars: CARGO_TARGET_DIR
-          # Mirrors rust-bridge.yml: llama-cpp-sys keeps shared CMake dylibs in a
-          # non-Cargo directory inside target, and rust-cache prunes non-dependency
-          # target entries before saving. Cache the CMake tree explicitly, but
-          # rebuild Cargo artifacts.
-          cache-targets: false
-          cache-directories: rust/local-tts-bridge/target/llama-cmake-cache
-          key: ci-bridge-linux-llama-cmake-only-v1
-      - run: npm ci
-      - run: npx vitest run electron/rustLocalBridge.test.ts

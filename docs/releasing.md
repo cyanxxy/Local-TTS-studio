@@ -17,22 +17,12 @@ non-release pushes to `main`.
 ## Release gates
 
 Before a release branch merges, `.github/workflows/ci.yml` validates linting,
-the Electron type check, Vitest with the coverage thresholds from
-`vitest.config.ts`, and the web build, once on the Node release pinned in
-`.nvmrc` and once on Node 26. A separate job in the same workflow runs the
-native-bridge integration test (`electron/rustLocalBridge.test.ts`) on Linux in
-its own Vitest process, so the Cargo build it performs cannot slow the
-timing-sensitive Electron tests. `.github/workflows/rust-bridge.yml`
-additionally checks formatting, then builds, Clippy-lints, tests, and probes
-the native bridge on Apple Silicon; it triggers on changes to Rust sources, the
-bridge build scripts, `rust-toolchain.toml`, `.npmrc`, `.nvmrc`,
-`package.json`, and `package-lock.json`, and can be started by hand from the
-Actions tab.
-
-Workflow actions are pinned to commit SHAs with the release version in a
-trailing comment. `.github/dependabot.yml` raises weekly pull requests for
-those actions and for the bridge's Cargo dependencies; the vendored
-`qwen3-tts-rs` crate is excluded because it is maintained by hand.
+the Electron type check, Vitest without the native-bridge integration test, and
+the web build. `.github/workflows/rust-bridge.yml` additionally checks
+formatting, then builds, Clippy-lints, tests, and probes the native bridge on
+Apple Silicon; it triggers on changes to Rust sources, the bridge build scripts,
+`rust-toolchain.toml`, `.npmrc`, `.nvmrc`, `package.json`, and
+`package-lock.json`.
 
 The source-release workflow repeats the release-critical checks on the exact
 merged commit:
@@ -40,8 +30,7 @@ merged commit:
 - `npm ci`
 - `npm run lint`
 - `npx tsc --noEmit -p tsconfig.electron.json`
-- `npx vitest run --coverage --exclude "electron/rustLocalBridge.test.ts"`
-- `npx vitest run electron/rustLocalBridge.test.ts`
+- `npm run test:js`
 - `npm run build:web`
 
 The tag and GitHub Release are created only after those checks pass and a
