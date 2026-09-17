@@ -130,6 +130,8 @@ describe("readerDocument", () => {
     const base = { text: "hello", model: "kokoro", voice: "heart", quality: 5 };
     expect(buildAudioSignature(base)).toMatch(/^5-/);
     expect(buildAudioSignature(base)).toBe(buildAudioSignature(base));
+    expect(buildAudioSignature({ ...base, tuning: { speed: 1, quality: 5, language: "en" } }))
+      .not.toBe(buildAudioSignature({ ...base, tuning: { speed: 1, quality: 5, language: "fr" } }));
     expect(buildAudioSignature(base)).not.toBe(buildAudioSignature({ ...base, voice: "bella" }));
     expect(buildAudioSignature(base)).not.toBe(buildAudioSignature({ ...base, text: "hello!" }));
     expect(buildAudioSignature({ ...base, tuning: { speed: 1, quality: 5 } }))

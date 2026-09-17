@@ -53,6 +53,15 @@ with the bridge suite. `tower-http` has no consumer outside
 so nothing in this repository builds that binary — the `tower-http` bump is
 unverified and must be re-checked against upstream on the next re-vendor.
 
+## Inference compatibility fixes
+
+The local inference patch now applies Qwen's reserved-code mask and minimum
+EOS length, applies repetition penalties once per distinct token, and uses the
+upstream language/speaker prefix for Auto and explicit languages. Instruction
+prefixes use projected text without codec padding; 0.6B CustomVoice ignores
+instructions as the official wrapper does. Regression tests cover codec logits,
+prefix token layouts, and the small-model instruction capability.
+
 ## Re-vendor checklist
 
 1. Start from a clean Open TTS worktree and create a temporary checkout outside

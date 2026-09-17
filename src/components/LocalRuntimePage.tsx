@@ -704,7 +704,8 @@ export function LocalRuntimePage({
           payload.referenceText = qwen3.referenceText.trim();
         } else {
           if (!qwen3VoiceDesign) payload.speaker = qwen3.speaker;
-          payload.instruct = qwen3.instruct.trim() || undefined;
+          payload.instruct = qwen3VoiceDesign || qwen3.profile.parameters !== "0.6B"
+            ? qwen3.instruct.trim() || undefined : undefined;
         }
         payload.language = qwen3.language;
         payload.temperature = qwen3.temperature;

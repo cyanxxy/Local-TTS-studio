@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { EventEmitter } from "node:events";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as ort from "onnxruntime-node";
 import {
   createSeededRandom,
@@ -292,5 +292,42 @@ describe("readTrailingValues", () => {
     const tensor = new ort.Tensor("float16", Uint16Array.from([0x3c00, 0xc000, 0x0000]), [1, 1, 3]);
 
     expect([...readTrailingValues(tensor, 2)]).toEqual([-2, 0]);
+  });
+});
+
+describe("Audio8 generation completion", () => {
+  async function setup(endAfter: number | null, maxSeqLen = 4) {
+    const { Audio8Runtime } = await import("./audio8NativeWorker");
+    let steps = 0;
+    const slow = {
+      outputNames: ["logits", "hidden"],
+      run: async () => ({
+        logits: new ort.Tensor("float32", new Float32Array(endAfter !== null && steps++ >= endAfter ? [-1000, 1000] : [1000, -1000]), [1, 2]),
+        hidden: new ort.Tensor("float16", new Uint16Array([0]), [1, 1, 1]),
+      }),
+    } as unknown as ort.InferenceSession;
+    const fast = { outputNames: ["logits"], run: async () => ({ logits: new ort.Tensor("float32", new Float32Array([1]), [1, 1]) }) } as unknown as ort.InferenceSession;
+    const decode = vi.fn(async () => ({ audio: new ort.Tensor("float32", new Float32Array([0.25]), [1]) }));
+    const decoder = { outputNames: ["audio"], run: decode } as unknown as ort.InferenceSession;
+    const runtime = new Audio8Runtime({ sampleRate: 44100, slowLogitsSize: 2, codebookSize: 1, maxSeqLen, numLayers: 0, numFastLayers: 0, numCodebooks: 1, localHeads: 1, fastLocalHeads: 1, headDim: 1, fastHeadDim: 1, fastDim: 1, semanticBeginId: 100, imEndId: 101 }, () => ({ input_ids: [] }), slow, fast, decoder);
+    return { runtime, decode, voice: { codes: new Uint16Array([0]), frames: 1, referenceText: "reference" } };
+  }
+
+  it("rejects budget exhaustion instead of decoding partial speech", async () => {
+    const { runtime, decode, voice } = await setup(null);
+    await expect(runtime.synthesize("Hello.", voice)).rejects.toThrow("before end-of-speech");
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it("decodes when the model emits its end token", async () => {
+    const { runtime, decode, voice } = await setup(1);
+    await expect(runtime.synthesize("Hello.", voice)).resolves.toEqual(new Float32Array([0.25]));
+    expect(decode).toHaveBeenCalledOnce();
+  });
+
+  it("rejects prompts that leave no generation context", async () => {
+    const { runtime, decode, voice } = await setup(null, 1);
+    await expect(runtime.synthesize("Hello.", voice)).rejects.toThrow("context window");
+    expect(decode).not.toHaveBeenCalled();
   });
 });

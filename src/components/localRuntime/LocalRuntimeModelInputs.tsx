@@ -265,7 +265,7 @@ export function LocalRuntimeModelInputs(props: Props) {
             className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
           />
           <span className="text-sm font-normal normal-case text-text-muted">
-            {props.referenceAudioName || "Upload a WAV clip or pre-encoded .npy codes"}
+            {props.referenceAudioName || "Upload a WAV clip (up to 20 seconds) or pre-encoded .npy codes"}
           </span>
           {props.referenceAudioGuidance && (
             <span className={`text-sm font-normal normal-case ${statusClass(props.referenceAudioGuidance.tone)}`}>
@@ -313,7 +313,7 @@ export function LocalRuntimeModelInputs(props: Props) {
               onChange={(event) => props.onQwen3ReferenceAudioChange(event.target.files?.[0] ?? null)}
               className="px-3 py-2 rounded-lg border border-black/10 bg-white/55 backdrop-blur-sm text-sm normal-case text-text-primary"
             />
-            <span className="text-sm font-normal normal-case text-text-muted">{props.qwen3ReferenceAudioName || "Upload a WAV reference clip"}</span>
+            <span className="text-sm font-normal normal-case text-text-muted">{props.qwen3ReferenceAudioName || "Upload a WAV clip up to 20 seconds, with its exact transcript"}</span>
             {props.qwen3ReferenceAudioGuidance && (
               <span className={`text-sm font-normal normal-case ${statusClass(props.qwen3ReferenceAudioGuidance.tone)}`}>
                 {props.qwen3ReferenceAudioGuidance.text}
@@ -342,7 +342,7 @@ export function LocalRuntimeModelInputs(props: Props) {
         </select>
       </label>
 
-      {!voiceClone && (
+      {!voiceClone && (voiceDesign || props.qwen3Profile.parameters !== "0.6B") && (
         <label className="flex flex-col gap-1 text-xs font-medium text-text-secondary">
           {voiceDesign ? "Voice description" : "Instruction (optional)"}
           <textarea

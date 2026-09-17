@@ -1839,9 +1839,7 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "Aiden" }));
     fireEvent.change(screen.getByLabelText("Qwen language"), { target: { value: "English" } });
     fireEvent.click(screen.getByText("Advanced voice controls"));
-    fireEvent.change(screen.getByLabelText("Qwen voice instruction"), {
-      target: { value: "Warm and unhurried" },
-    });
+    expect(screen.queryByLabelText("Qwen voice instruction")).not.toBeInTheDocument();
     expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Aiden");
     fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
 
@@ -1856,7 +1854,7 @@ describe("SynthesisApp", () => {
           mode: "customVoice",
           speaker: "Aiden",
           language: "English",
-          instruct: "Warm and unhurried",
+          instruct: "",
         }),
       }));
     });

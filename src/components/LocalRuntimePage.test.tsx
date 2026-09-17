@@ -326,7 +326,7 @@ describe("LocalRuntimePage", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
     fireEvent.change(screen.getByLabelText("Speaker"), { target: { value: "Ryan" } });
     fireEvent.change(screen.getByLabelText("Language"), { target: { value: "Italian" } });
-    fireEvent.change(screen.getByLabelText(/Instruction/), { target: { value: "Speak warmly" } });
+    expect(screen.queryByLabelText(/Instruction/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
     await waitFor(() => expect(generate).toHaveBeenCalledOnce());
     expect(generate.mock.calls[0][0].payload).toEqual(expect.objectContaining({
@@ -335,7 +335,7 @@ describe("LocalRuntimePage", () => {
       modelPath: CUSTOM_PATH,
       speaker: "Ryan",
       language: "Italian",
-      instruct: "Speak warmly",
+      instruct: undefined,
       temperature: 0.9,
       topK: 50,
       maxNewTokens: 384,
