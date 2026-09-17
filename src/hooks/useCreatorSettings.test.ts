@@ -18,6 +18,13 @@ const INITIAL_STATE: CreatorState = {
 };
 
 describe("useCreatorSettings", () => {
+  it("updates inference language when the selection changes", () => {
+    const { result, rerender } = renderHook(({ language }) => useCreatorSettings({ initialState: INITIAL_STATE, quality: 5, language }), { initialProps: { language: "en" } });
+    expect(result.current.generationSettings.language).toBe("en");
+    rerender({ language: "fr" });
+    expect(result.current.generationSettings.language).toBe("fr");
+  });
+
   it("derives generation and export settings from state", () => {
     const { result } = renderHook(() => useCreatorSettings({ initialState: INITIAL_STATE, quality: 7 }));
 

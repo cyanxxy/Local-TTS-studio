@@ -595,3 +595,16 @@ describe("supertonic.worker", () => {
     }));
   });
 });
+
+describe("Supertonic 2 language conditioning", () => {
+  it.each(["ko", "es", "pt", "fr"])("passes %s language tags to inference", async (language) => {
+    const calls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const instance = createPipelineInstance([createRawAudio(), createRawAudio()], calls);
+    const { dispatch, postedMessages } = await loadWorkerModule({ chunkTexts: ["Bonjour."], pipelineInstances: [instance] });
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+    dispatch({ type: "GENERATE", text: "Bonjour.", voice: "Female", speed: 1, quality: 5, language });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "GENERATION_COMPLETE")).toBe(true));
+    expect(calls.at(-1)?.text).toBe(`<${language}>Bonjour.</${language}>`);
+  });
+});

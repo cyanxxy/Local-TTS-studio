@@ -6,6 +6,7 @@ interface MockKokoroInstance {
   list_voices: ReturnType<typeof vi.fn>;
   generate: ReturnType<typeof vi.fn>;
   dispose?: ReturnType<typeof vi.fn>;
+  model?: { dispose: ReturnType<typeof vi.fn> };
 }
 
 interface LoadOptions {
@@ -365,5 +366,30 @@ describe("kokoro.worker", () => {
       message: "No Kokoro voices are available.",
       scope: "generate",
     }));
+  });
+});
+
+describe("Kokoro load timeout cleanup", () => {
+  it("disposes a GPU model that arrives after fallback has started", async () => {
+    const late = deferred<MockKokoroInstance>();
+    const gpu = createInstance([], { af_heart: {} });
+    gpu.model = { dispose: vi.fn(async () => undefined) };
+    const wasm = createInstance([], { af_heart: {} });
+    wasm.dispose = vi.fn(async () => undefined);
+    const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ canUseWebGPU: true, instances: [wasm] });
+    fromPretrained.mockImplementationOnce(() => late.promise);
+    vi.useFakeTimers();
+    try {
+      dispatch({ type: "LOAD" });
+      await vi.advanceTimersByTimeAsync(120_001);
+      expect(postedMessages).toContainEqual(expect.objectContaining({ type: "READY", backend: "wasm" }));
+      late.resolve(gpu);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(gpu.model.dispose).toHaveBeenCalledOnce();
+      expect(wasm.dispose).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
   });
 });

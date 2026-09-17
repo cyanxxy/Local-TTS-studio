@@ -223,6 +223,7 @@ export function useGenerationControl({
         voice,
         speed: generationSettings.speed,
         quality: generationSettings.quality,
+        language: generationSettings.language,
         finalPauseSec: segment.pauseAfterSec,
         pauseOverridesSec: generationSettings.pauseOverridesSec,
         sentenceSpeedVariance: generationSettings.sentenceSpeedVariance,

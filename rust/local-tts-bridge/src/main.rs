@@ -1,3 +1,8 @@
+// Exercise the vendored sampler/prompt policy in the bridge's normal test suite.
+#[cfg(test)]
+#[path = "../../vendor/qwen3-tts-rs/src/generation_policy.rs"]
+mod qwen_generation_policy;
+
 mod neucodec_encoder;
 mod qwen3;
 mod reference_audio;
@@ -1350,6 +1355,10 @@ fn prepare_neutts_reference_samples(encoded: &str) -> Result<(Vec<f32>, bool)> {
         NEUTTS_REFERENCE_MAX_DURATION_SECONDS,
     )?;
     ensure!(
+        !decoded.truncated,
+        "NeuTTS reference audio exceeds 20 seconds. Provide a shorter clip and its exact transcript; audio cannot be trimmed independently."
+    );
+    ensure!(
         !decoded.samples.is_empty(),
         "NeuTTS reference WAV contains no audio."
     );
@@ -1877,11 +1886,10 @@ mod tests {
     }
 
     #[test]
-    fn prepare_neutts_reference_samples_truncates_to_encoder_window() {
+    fn prepare_neutts_reference_samples_rejects_overlong_audio() {
         let encoded = wav_base64(16_000, &vec![1_000_i16; 16_000 * 25]);
-        let (samples, truncated) = prepare_neutts_reference_samples(&encoded).unwrap();
-        assert!(truncated);
-        assert_eq!(samples.len(), neucodec_encoder::ENCODER_WINDOW_SAMPLES);
+        let error = prepare_neutts_reference_samples(&encoded).unwrap_err();
+        assert!(error.to_string().contains("exact transcript"));
     }
 
     #[test]

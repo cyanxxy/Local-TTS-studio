@@ -16,6 +16,7 @@ import type {
 interface UseCreatorSettingsOptions {
   initialState: CreatorState;
   quality: number;
+  language?: string;
 }
 
 interface UseCreatorSettingsReturn {
@@ -43,6 +44,7 @@ interface UseCreatorSettingsReturn {
 export function useCreatorSettings({
   initialState,
   quality,
+  language,
 }: UseCreatorSettingsOptions): UseCreatorSettingsReturn {
   const [creatorPreset, setCreatorPreset] = useState<CreatorPresetId>(initialState.preset);
   const [speed, setSpeed] = useState(initialState.speed);
@@ -63,6 +65,7 @@ export function useCreatorSettings({
   const generationSettings = useMemo<GenerationTuningSettings>(() => ({
     speed,
     quality,
+    language,
     pauseOverridesSec: {
       comma: pauseCommaSec,
       sentence: pauseSentenceSec,
@@ -76,6 +79,7 @@ export function useCreatorSettings({
     pauseSentenceSec,
     pronunciationRules,
     quality,
+    language,
     speed,
   ]);
 

@@ -506,7 +506,7 @@ export function useQwen3LocalRuntime({
     };
     if (settings.profile.mode === "customVoice") {
       basePayload.speaker = settings.speaker;
-      basePayload.instruct = settings.instruct;
+      basePayload.instruct = settings.profile.parameters === "0.6B" ? "" : settings.instruct;
     } else if (settings.profile.mode === "voiceDesign") {
       basePayload.instruct = settings.instruct;
     }

@@ -107,7 +107,7 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
       <details className="group">
         <summary className="cursor-pointer text-xs font-semibold text-text-secondary">Advanced voice controls</summary>
         <div className="mt-3 space-y-3">
-          {!voiceClone && !voiceDesign && (
+          {!voiceClone && !voiceDesign && qwen.profile.parameters !== "0.6B" && (
             <label className="block text-xs font-medium text-text-secondary">
               Voice instruction
               <textarea aria-label="Qwen voice instruction" value={qwen.instruct} onChange={(event) => qwen.setInstruct(event.target.value)} className={`mt-1 min-h-16 ${inputClass}`} placeholder="Warm, calm, conversational…" />
