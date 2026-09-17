@@ -391,9 +391,13 @@ export class Audio8Runtime {
     const promptLength = prompt.dims[2];
     const maxTokens = Math.min(
       MAX_GENERATED_TOKENS,
-      Math.max(MIN_GENERATED_TOKENS, [...text].length * TOKENS_PER_CHARACTER),
+      Math.max(MIN_GENERATED_TOKENS, Math.ceil([...text].length * TOKENS_PER_CHARACTER)),
       manifest.maxSeqLen - promptLength,
     );
+    if (maxTokens <= 0) {
+      prompt.dispose();
+      throw new Error("Audio8 prompt fills the context window. Shorten the text or voice reference.");
+    }
     const caches = this.#createCaches(
       manifest.numLayers,
       manifest.localHeads,
@@ -404,6 +408,7 @@ export class Audio8Runtime {
     const frames: number[][] = [];
     let step: SlowStep | null = null;
     let recentSemantics: number[] = [];
+    let reachedEnd = false;
 
     try {
       throwIfSynthesisCancelled(signal);
@@ -416,7 +421,10 @@ export class Audio8Runtime {
       for (let token = 0; token < maxTokens; token += 1) {
         throwIfSynthesisCancelled(signal);
         const semantic = this.#chooseSemanticToken(step.logits, recentSemantics, random);
-        if (semantic === manifest.imEndId) break;
+        if (semantic === manifest.imEndId) {
+          reachedEnd = true;
+          break;
+        }
         recentSemantics = [...recentSemantics, semantic].slice(-RECENT_SEMANTIC_WINDOW);
         frames.push(await this.#expandFrame(semantic, step.hidden, random, signal));
         if (token % PROGRESS_TOKEN_INTERVAL === 0) onProgress?.((token / maxTokens) * 100);
@@ -433,6 +441,7 @@ export class Audio8Runtime {
           column.dispose();
         }
       }
+      if (!reachedEnd) throw new Error(`Audio8 reached the ${maxTokens}-token generation limit before end-of-speech. Split the text into smaller sections.`);
       if (frames.length === 0) throw new Error("Audio8 produced no audio frames.");
       throwIfSynthesisCancelled(signal);
       return await this.#decodeFrames(frames, signal);

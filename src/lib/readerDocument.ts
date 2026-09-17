@@ -579,6 +579,7 @@ export function buildAudioSignature(parts: {
     ? JSON.stringify({
         speed: tuning.speed,
         quality: tuning.quality,
+        language: tuning.language ?? "en",
         pauseOverridesSec: {
           none: tuning.pauseOverridesSec?.none ?? null,
           comma: tuning.pauseOverridesSec?.comma ?? null,

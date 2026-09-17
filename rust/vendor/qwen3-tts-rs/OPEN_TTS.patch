@@ -101,13 +101,23 @@ index 954f379..d70073d 100644
  const FRAME_HEADER_BYTES: usize = 9;
  const STDOUT_FILENO: i32 = 1;
 diff --git a/src/inference.rs b/src/inference.rs
-index e908a86..6bd7c44 100644
 --- a/src/inference.rs
 +++ b/src/inference.rs
-@@ -22,6 +22,15 @@ use std::time::{Duration, Instant};
+@@ -11,6 +11,9 @@
+ 
+ use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
+ use crate::error::{Qwen3TTSError, Result};
++use crate::generation_policy::{
++    codec_prompt_prefix, custom_voice_instruction, process_codec_logits,
++};
+ use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
+ use crate::tensor::{DType, Device, Tensor};
+ use crate::trace::TraceWriter;
+@@ -21,6 +24,15 @@
+ use std::time::{Duration, Instant};
  use tokenizers::pre_tokenizers::byte_level::ByteLevel;
  use tokenizers::Tokenizer;
- 
++
 +fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
 +    if max_codes > 0 && generated_frames >= max_codes as usize {
 +        return Err(Qwen3TTSError::Generation(format!(
@@ -116,14 +126,75 @@ index e908a86..6bd7c44 100644
 +    }
 +    Ok(())
 +}
-+
+ 
  fn round_f32_to_bf16_value(value: f32) -> f32 {
      let bits = value.to_bits();
-     let rounding_bias = 0x7fff + ((bits >> 16) & 1);
-@@ -667,6 +676,70 @@ impl TalkerModel {
-         input_embeddings
-     }
- 
+@@ -404,6 +416,7 @@
+     layers: Vec<TransformerLayer>,
+     /// Final layer norm
+     norm: RMSNorm,
++    codec_eos_id: i64,
+     /// Main codec head for predicting code 0
+     codec_head: Linear,
+     /// Code predictor sub-transformer for codes 1-15
+@@ -528,6 +541,7 @@
+             layers,
+             norm,
+             codec_head,
++            codec_eos_id: config.codec_eos_token_id as i64,
+             code_predictor,
+             rotary_emb,
+             hidden_size,
+@@ -596,75 +610,85 @@
+         codec_pad_id: i64,
+         codec_bos_id: i64,
+     ) -> Tensor {
+-        // Phase 1: Role prefix (3 text-only positions)
+-        // Tokenize "<|im_start|>assistant\n" → these are the first 3 tokens of input_id
+-        // We need the actual token IDs for the role prefix
+-        let role_embed = self.embed_text(&text_token_ids[..3]); // [1, 3, 1024]
+-
+-        // Phase 2: Codec prefix (6 positions for custom_voice)
+-        // Text side: tts_pad * 5 + tts_bos
+-        let tts_pad_embed = self.embed_text(&[tts_pad_id]); // [1, 1, 1024]
+-        let tts_bos_embed = self.embed_text(&[tts_bos_id]); // [1, 1, 1024]
+-        let tts_eos_embed = self.embed_text(&[tts_eos_id]); // [1, 1, 1024]
+-
+-        // Codec prefix tokens: [think_id, think_bos_id, language_id, think_eos_id, speaker_id, codec_pad_id, codec_bos_id]
+-        let codec_prefix = self.embed_codec(&[
++        self.build_voice_design_input_embeddings(
++            text_token_ids,
++            Some(language_id),
++            Some(speaker_id),
++            tts_pad_id,
++            tts_bos_id,
++            tts_eos_id,
++            codec_think_id,
+             codec_think_id,
+             codec_think_bos_id,
+-            language_id,
+             codec_think_eos_id,
+-            speaker_id,
+             codec_pad_id,
+             codec_bos_id,
+-        ]); // [1, 7, 1024]
+-
+-        // Text side for codec prefix: tts_pad repeated 5 times + tts_bos
+-        let tts_pad_5 = tts_pad_embed.expand(&[1, 5, self.hidden_size], false); // [1, 5, 1024]
+-        let text_for_codec = Tensor::cat(&[tts_pad_5, tts_bos_embed.shallow_clone()], 1); // [1, 6, 1024]
+-
+-        // Sum text + codec (first 6 of 7 codec prefix positions)
+-        let codec_prefix_6 = codec_prefix.narrow(1, 0, 6); // [1, 6, 1024]
+-        let phase2 = &text_for_codec + &codec_prefix_6; // [1, 6, 1024]
+-
+-        // Phase 3: Text content (N positions + tts_eos)
+-        // text_token_ids[3..] contains the text content + tail tokens
+-        // In the full token sequence: token[3..N+3] = text, token[N+3..] = tail
+-        // We need text_token_ids[3..(len-5)] for content
+-        let text_start = 3;
++        )
++    }
++
 +    /// Build the dual-stream prompt used by VoiceDesign models.
 +    ///
 +    /// VoiceDesign is conditioned by instruction text and intentionally omits
@@ -133,6 +204,7 @@ index e908a86..6bd7c44 100644
 +        &self,
 +        text_token_ids: &[i64],
 +        language_id: Option<i64>,
++        speaker_id: Option<i64>,
 +        tts_pad_id: i64,
 +        tts_bos_id: i64,
 +        tts_eos_id: i64,
@@ -149,16 +221,16 @@ index e908a86..6bd7c44 100644
 +        let tts_bos_embed = special_text.narrow(1, 1, 1);
 +        let tts_eos_embed = special_text.narrow(1, 2, 1);
 +
-+        let mut codec_prefill = match language_id {
-+            Some(language_id) => vec![
-+                codec_think_id,
-+                codec_think_bos_id,
-+                language_id,
-+                codec_think_eos_id,
-+            ],
-+            None => vec![codec_nothink_id, codec_think_bos_id, codec_think_eos_id],
-+        };
-+        codec_prefill.extend_from_slice(&[codec_pad_id, codec_bos_id]);
++        let codec_prefill = codec_prompt_prefix(
++            language_id,
++            speaker_id,
++            codec_think_id,
++            codec_nothink_id,
++            codec_think_bos_id,
++            codec_think_eos_id,
++            codec_pad_id,
++            codec_bos_id,
++        );
 +        let codec_prefix = self.embed_codec(&codec_prefill);
 +        let prefix_without_bos_len = codec_prefix.size()[1] - 1;
 +        let pad_count = prefix_without_bos_len - 1;
@@ -171,13 +243,44 @@ index e908a86..6bd7c44 100644
 +        );
 +        let phase2 = &text_for_codec + &codec_prefix.narrow(1, 0, prefix_without_bos_len);
 +
-+        let text_end = text_token_ids.len().saturating_sub(5);
+         let text_end = text_token_ids.len().saturating_sub(5);
+-        let text_content_ids = &text_token_ids[text_start..text_end];
+-        let num_text_tokens = text_content_ids.len();
+-
+-        let text_content_embed = if num_text_tokens > 0 {
+-            self.embed_text(text_content_ids) // [1, N, 1024]
 +        let text_content_ids = &text_token_ids[3..text_end];
 +        let text_content_embed = if text_content_ids.is_empty() {
 +            Tensor::zeros(&[1, 0, self.hidden_size], DType::Float32, self.device)
-+        } else {
+         } else {
+-            Tensor::zeros(&[1, 0, self.hidden_size], DType::Float32, self.device)
 +            self.embed_text(text_content_ids)
-+        };
+         };
+-
+-        // Concatenate text content + tts_eos
+-        let text_with_eos = Tensor::cat(&[text_content_embed, tts_eos_embed.shallow_clone()], 1); // [1, N+1, 1024]
+-
+-        // Codec side: codec_pad repeated (N+1) times
+-        let codec_pad_embed = self.embed_codec(&[codec_pad_id]); // [1, 1, 1024]
+-        let codec_pad_repeated =
+-            codec_pad_embed.expand(&[1, (num_text_tokens + 1) as i64, self.hidden_size], false);
+-
+-        let phase3 = &text_with_eos + &codec_pad_repeated; // [1, N+1, 1024]
+-
+-        // Phase 4: Final codec_bos
+-        let codec_bos_embed = codec_prefix.narrow(1, 6, 1); // Last position of codec prefix [1, 1, 1024]
+-        let phase4 = &tts_pad_embed + &codec_bos_embed; // [1, 1, 1024]
+-
+-        // Concatenate all phases
+-        let input_embeddings = Tensor::cat(&[role_embed, phase2, phase3, phase4], 1);
+-
+-        println!(
+-            "  Built input embeddings: {} positions (3 role + 6 codec_prefix + {} text + 1 eos + 1 bos)",
+-            input_embeddings.size()[1],
+-            num_text_tokens
+-        );
+-
+-        input_embeddings
 +        let text_with_eos = Tensor::cat(&[text_content_embed, tts_eos_embed], 1);
 +        let codec_pad_repeated = self
 +            .embed_codec(&[codec_pad_id])
@@ -186,12 +289,50 @@ index e908a86..6bd7c44 100644
 +        let phase4 = &tts_pad_embed + &codec_prefix.narrow(1, prefix_without_bos_len, 1);
 +
 +        Tensor::cat(&[role_embed, phase2, phase3, phase4], 1)
-+    }
-+
+     }
+ 
      /// Build dual-stream input embeddings using a speaker embedding (x-vector)
-     /// instead of a speaker ID. Used for voice cloning with the Base model.
-     #[allow(clippy::too_many_arguments)]
-@@ -1394,6 +1467,16 @@ pub struct TTSInference {
+@@ -1037,29 +1061,16 @@
+         let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
+         let mut logits = self.codec_head.forward(&last_hidden);
+ 
+-        // Apply repetition penalty to previously generated codes
+-        if repetition_penalty != 1.0 && !past_codes.is_empty() {
+-            let logits_data = logits.to_vec_f32();
+-            let vocab_size = logits.size()[logits.dim() - 1] as usize;
+-            let mut modified = logits_data.clone();
+-
+-            for &code in past_codes {
+-                let idx = code as usize;
+-                if idx < vocab_size {
+-                    let score = modified[idx];
+-                    // Penalize: divide positive logits, multiply negative logits
+-                    modified[idx] = if score > 0.0 {
+-                        score / repetition_penalty as f32
+-                    } else {
+-                        score * repetition_penalty as f32
+-                    };
+-                }
+-            }
+-
+-            logits = Tensor::from_slice_f32(&modified)
+-                .reshape(&logits.size())
+-                .to_device(self.device);
+-        }
++        let mut scores = logits.to_vec_f32();
++        process_codec_logits(
++            &mut scores,
++            past_codes,
++            repetition_penalty,
++            self.codec_eos_id,
++        );
++        logits = Tensor::from_slice_f32(&scores)
++            .reshape(&logits.size())
++            .to_device(self.device);
+ 
+         if temperature <= 0.0 {
+             logits.argmax(-1, false).int64_value(&[0])
+@@ -1394,6 +1405,16 @@
      device: Device,
  }
  
@@ -208,7 +349,7 @@ index e908a86..6bd7c44 100644
  impl TTSInference {
      /// Create a new TTS inference engine.
      pub fn new(model_path: &Path, device: Device) -> Result<Self> {
-@@ -1541,9 +1624,11 @@ impl TTSInference {
+@@ -1541,9 +1562,11 @@
  
          let vocoder = self.vocoder.as_ref()?;
          let codes_tensor = self.codes_to_vocoder_tensor(codes, 2048);
@@ -222,7 +363,7 @@ index e908a86..6bd7c44 100644
          let audio_len = audio_tensor.numel();
          Some(audio_tensor.view(&[audio_len]).to_vec_f32())
      }
-@@ -1703,6 +1788,7 @@ impl TTSInference {
+@@ -1703,6 +1726,7 @@
              codec_eos_id,
              &tts_pad_embed,
          );
@@ -230,53 +371,46 @@ index e908a86..6bd7c44 100644
          println!("Generated {} code frames", codes.len());
  
          // Convert codes to audio using vocoder
-@@ -1769,17 +1855,16 @@ impl TTSInference {
+@@ -1769,6 +1793,159 @@
      ///     2048,
      /// )?;
      /// ```
--    #[allow(clippy::too_many_arguments)]
--    pub fn generate_with_instruct(
 +    /// Build the conditioning for an instruct-style request (CustomVoice and
 +    /// VoiceDesign). Shared by the buffered and streaming entry points so the
 +    /// two can never drift in how they prompt the talker.
 +    fn build_instruct_prompt(
-         &self,
-         text: &str,
-         speaker: &str,
-         language: &str,
-         instruct: &str,
--        temperature: f64,
--        top_k: i64,
--        max_codes: i64,
--    ) -> Result<(Vec<f32>, u32)> {
++        &self,
++        text: &str,
++        speaker: &str,
++        language: &str,
++        instruct: &str,
 +    ) -> Result<InstructPrompt> {
-         // Get speaker ID
-         let speaker_id = self
-             .config
-@@ -1790,7 +1875,8 @@ impl TTSInference {
-             .copied()
-             .unwrap_or(0) as i64;
- 
--        // Get language ID
-+        // VoiceDesign supports Auto language (no language token); CustomVoice
-+        // keeps the historical fallback for compatibility.
-         let language_id = self
-             .config
-             .talker_config
-@@ -1798,19 +1884,28 @@ impl TTSInference {
-             .as_ref()
-             .and_then(|map| map.get(&language.to_lowercase()))
-             .copied()
--            .unwrap_or(0) as i64;
++        // Get speaker ID
++        let speaker_id = self
++            .config
++            .talker_config
++            .spk_id
++            .as_ref()
++            .and_then(|map| map.get(&speaker.to_lowercase()))
++            .copied()
++            .unwrap_or(0) as i64;
++
++        // Auto omits the language token for both prompt variants.
++        let language_id = self
++            .config
++            .talker_config
++            .codec_language_id
++            .as_ref()
++            .and_then(|map| map.get(&language.to_lowercase()))
++            .copied()
 +            .map(|value| value as i64);
 +        let voice_design = self.config.tts_model_type.as_deref() == Some("voice_design");
- 
--        println!(
--            "Speaker: {} (id={}), Language: {} (id={})",
--            speaker, speaker_id, language, language_id
--        );
--        if !instruct.is_empty() {
--            println!("Instruction: \"{}\"", instruct);
++        let instruct = if voice_design {
++            instruct
++        } else {
++            custom_voice_instruction(self.config.tts_model_size.as_deref(), instruct)
++        };
++
 +        // Preserve upstream CLI diagnostics for CustomVoice, but keep the
 +        // resident VoiceDesign bridge from writing request details to stdout.
 +        if !voice_design {
@@ -290,19 +424,215 @@ index e908a86..6bd7c44 100644
 +            if !instruct.is_empty() {
 +                println!("Instruction: \"{}\"", instruct);
 +            }
-         }
- 
-         // Get special token IDs
-         let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
-         let codec_think_id = self.config.talker_config.codec_think_id as i64;
++        }
++
++        // Get special token IDs
++        let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
++        let codec_think_id = self.config.talker_config.codec_think_id as i64;
 +        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
-         let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
-         let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
-         let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
-@@ -1878,19 +1973,35 @@ impl TTSInference {
- 
-         // Build dual-stream input embeddings for main text
-         println!("Building input embeddings...");
++        let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
++        let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
++        let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
++        let codec_bos_id = self.config.talker_config.codec_bos_id as i64;
++        let tts_pad_id = self.config.tts_pad_token_id as i64;
++        let tts_bos_id = self.config.tts_bos_token_id as i64;
++        let tts_eos_id = self.config.tts_eos_token_id as i64;
++
++        // Build token sequence
++        let im_start = self.config.im_start_token_id as i64;
++        let im_end = self.config.im_end_token_id as i64;
++        let assistant_id = self.config.assistant_token_id as i64;
++
++        // Tokenize text content
++        let text_tokens = self.tokenize(text)?;
++        let text_ids: Vec<i64> = text_tokens.iter().map(|&id| id as i64).collect();
++
++        // Tokenize special strings
++        let newline_tokens = self.tokenize("\n")?;
++        let newline_id = newline_tokens.first().copied().unwrap_or(198) as i64;
++        let user_tokens = self.tokenize("user")?;
++        let user_id = user_tokens.first().copied().unwrap_or(882) as i64;
++
++        // Build instruction prefix embeddings (text + codec_pad for each position)
++        // The instruction is conditioning context, not synthesized speech
++        let instruct_embeddings = if !instruct.is_empty() {
++            // Tokenize instruction: <|im_start|>user\n{instruct}<|im_end|>\n
++            let instruct_tokens = self.tokenize(instruct)?;
++            let instruct_ids: Vec<i64> = instruct_tokens.iter().map(|&id| id as i64).collect();
++
++            let mut instruct_token_ids = vec![im_start, user_id, newline_id];
++            instruct_token_ids.extend_from_slice(&instruct_ids);
++            instruct_token_ids.extend_from_slice(&[im_end, newline_id]);
++
++            // Embed instruction tokens (text side)
++            let instruct_text_embed = self.talker.embed_text(&instruct_token_ids);
++
++            // Upstream instruction prefixes contain projected text only.
++            Some(instruct_text_embed)
++        } else {
++            None
++        };
++
++        // Build main text token sequence (without instruction)
++        // Format: [<|im_start|>, assistant, \n] + text + [<|im_end|>, \n, <|im_start|>, assistant, \n]
++        let mut main_token_ids = vec![im_start, assistant_id, newline_id];
++        main_token_ids.extend_from_slice(&text_ids);
++        main_token_ids.extend_from_slice(&[im_end, newline_id, im_start, assistant_id, newline_id]);
++
++        println!(
++            "Token sequence: {} instruction + {} main tokens, text = {} tokens",
++            instruct_embeddings
++                .as_ref()
++                .map(|e| e.size()[1])
++                .unwrap_or(0),
++            main_token_ids.len(),
++            text_ids.len(),
++        );
++
++        // Build dual-stream input embeddings for main text
++        println!("Building input embeddings...");
++        let main_embeddings = self.talker.build_voice_design_input_embeddings(
++            &main_token_ids,
++            language_id,
++            if voice_design { None } else { Some(speaker_id) },
++            tts_pad_id,
++            tts_bos_id,
++            tts_eos_id,
++            codec_think_id,
++            codec_nothink_id,
++            codec_think_bos_id,
++            codec_think_eos_id,
++            codec_pad_id,
++            codec_bos_id,
++        );
++
++        // Concatenate instruction prefix (if any) with main embeddings
++        let input_embeddings = if let Some(inst_emb) = instruct_embeddings {
++            Tensor::cat(&[inst_emb, main_embeddings], 1)
++        } else {
++            main_embeddings
++        };
++
++        // Pre-compute tts_pad embedding
++        let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
++
++        Ok(InstructPrompt {
++            input_embeddings,
++            tts_pad_embed,
++            codec_eos_id,
++            voice_design,
++        })
++    }
++
++    /// Generate a complete CustomVoice or VoiceDesign waveform in one call.
++    ///
++    /// Prefer [`Self::generate_with_instruct_streaming`] when audio should be
++    /// delivered incrementally.
+     #[allow(clippy::too_many_arguments)]
+     pub fn generate_with_instruct(
+         &self,
+@@ -1780,127 +1957,7 @@
+         top_k: i64,
+         max_codes: i64,
+     ) -> Result<(Vec<f32>, u32)> {
+-        // Get speaker ID
+-        let speaker_id = self
+-            .config
+-            .talker_config
+-            .spk_id
+-            .as_ref()
+-            .and_then(|map| map.get(&speaker.to_lowercase()))
+-            .copied()
+-            .unwrap_or(0) as i64;
+-
+-        // Get language ID
+-        let language_id = self
+-            .config
+-            .talker_config
+-            .codec_language_id
+-            .as_ref()
+-            .and_then(|map| map.get(&language.to_lowercase()))
+-            .copied()
+-            .unwrap_or(0) as i64;
+-
+-        println!(
+-            "Speaker: {} (id={}), Language: {} (id={})",
+-            speaker, speaker_id, language, language_id
+-        );
+-        if !instruct.is_empty() {
+-            println!("Instruction: \"{}\"", instruct);
+-        }
+-
+-        // Get special token IDs
+-        let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
+-        let codec_think_id = self.config.talker_config.codec_think_id as i64;
+-        let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
+-        let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
+-        let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
+-        let codec_bos_id = self.config.talker_config.codec_bos_id as i64;
+-        let tts_pad_id = self.config.tts_pad_token_id as i64;
+-        let tts_bos_id = self.config.tts_bos_token_id as i64;
+-        let tts_eos_id = self.config.tts_eos_token_id as i64;
+-
+-        // Build token sequence
+-        let im_start = self.config.im_start_token_id as i64;
+-        let im_end = self.config.im_end_token_id as i64;
+-        let assistant_id = self.config.assistant_token_id as i64;
+-
+-        // Tokenize text content
+-        let text_tokens = self.tokenize(text)?;
+-        let text_ids: Vec<i64> = text_tokens.iter().map(|&id| id as i64).collect();
+-
+-        // Tokenize special strings
+-        let newline_tokens = self.tokenize("\n")?;
+-        let newline_id = newline_tokens.first().copied().unwrap_or(198) as i64;
+-        let user_tokens = self.tokenize("user")?;
+-        let user_id = user_tokens.first().copied().unwrap_or(882) as i64;
+-
+-        // Build instruction prefix embeddings (text + codec_pad for each position)
+-        // The instruction is conditioning context, not synthesized speech
+-        let instruct_embeddings = if !instruct.is_empty() {
+-            // Tokenize instruction: <|im_start|>user\n{instruct}<|im_end|>\n
+-            let instruct_tokens = self.tokenize(instruct)?;
+-            let instruct_ids: Vec<i64> = instruct_tokens.iter().map(|&id| id as i64).collect();
+-
+-            let mut instruct_token_ids = vec![im_start, user_id, newline_id];
+-            instruct_token_ids.extend_from_slice(&instruct_ids);
+-            instruct_token_ids.extend_from_slice(&[im_end, newline_id]);
+-
+-            // Embed instruction tokens (text side)
+-            let instruct_text_embed = self.talker.embed_text(&instruct_token_ids);
+-
+-            // Codec side: codec_pad for all instruction positions
+-            let codec_pad_embed = self.talker.embed_codec(&[codec_pad_id]);
+-            let num_instruct = instruct_token_ids.len() as i64;
+-            let codec_pad_repeated =
+-                codec_pad_embed.expand(&[1, num_instruct, self.talker.hidden_size], false);
+-
+-            // Sum text + codec_pad for instruction
+-            Some(&instruct_text_embed + &codec_pad_repeated)
+-        } else {
+-            None
+-        };
+-
+-        // Build main text token sequence (without instruction)
+-        // Format: [<|im_start|>, assistant, \n] + text + [<|im_end|>, \n, <|im_start|>, assistant, \n]
+-        let mut main_token_ids = vec![im_start, assistant_id, newline_id];
+-        main_token_ids.extend_from_slice(&text_ids);
+-        main_token_ids.extend_from_slice(&[im_end, newline_id, im_start, assistant_id, newline_id]);
+-
+-        println!(
+-            "Token sequence: {} instruction + {} main tokens, text = {} tokens",
+-            instruct_embeddings
+-                .as_ref()
+-                .map(|e| e.size()[1])
+-                .unwrap_or(0),
+-            main_token_ids.len(),
+-            text_ids.len(),
+-        );
+-
+-        // Build dual-stream input embeddings for main text
+-        println!("Building input embeddings...");
 -        let main_embeddings = self.talker.build_input_embeddings(
 -            &main_token_ids,
 -            speaker_id,
@@ -316,70 +646,21 @@ index e908a86..6bd7c44 100644
 -            codec_pad_id,
 -            codec_bos_id,
 -        );
-+        let main_embeddings = if voice_design {
-+            self.talker.build_voice_design_input_embeddings(
-+                &main_token_ids,
-+                language_id,
-+                tts_pad_id,
-+                tts_bos_id,
-+                tts_eos_id,
-+                codec_think_id,
-+                codec_nothink_id,
-+                codec_think_bos_id,
-+                codec_think_eos_id,
-+                codec_pad_id,
-+                codec_bos_id,
-+            )
-+        } else {
-+            self.talker.build_input_embeddings(
-+                &main_token_ids,
-+                speaker_id,
-+                language_id.unwrap_or(0),
-+                tts_pad_id,
-+                tts_bos_id,
-+                tts_eos_id,
-+                codec_think_id,
-+                codec_think_bos_id,
-+                codec_think_eos_id,
-+                codec_pad_id,
-+                codec_bos_id,
-+            )
-+        };
- 
-         // Concatenate instruction prefix (if any) with main embeddings
-         let input_embeddings = if let Some(inst_emb) = instruct_embeddings {
-@@ -1902,19 +2013,45 @@ impl TTSInference {
-         // Pre-compute tts_pad embedding
-         let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
- 
-+        Ok(InstructPrompt {
-+            input_embeddings,
-+            tts_pad_embed,
-+            codec_eos_id,
-+            voice_design,
-+        })
-+    }
-+
-+    /// Generate a complete CustomVoice or VoiceDesign waveform in one call.
-+    ///
-+    /// Prefer [`Self::generate_with_instruct_streaming`] when audio should be
-+    /// delivered incrementally.
-+    #[allow(clippy::too_many_arguments)]
-+    pub fn generate_with_instruct(
-+        &self,
-+        text: &str,
-+        speaker: &str,
-+        language: &str,
-+        instruct: &str,
-+        temperature: f64,
-+        top_k: i64,
-+        max_codes: i64,
-+    ) -> Result<(Vec<f32>, u32)> {
+-
+-        // Concatenate instruction prefix (if any) with main embeddings
+-        let input_embeddings = if let Some(inst_emb) = instruct_embeddings {
+-            Tensor::cat(&[inst_emb, main_embeddings], 1)
+-        } else {
+-            main_embeddings
+-        };
+-
+-        // Pre-compute tts_pad embedding
+-        let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
 +        let prompt = self.build_instruct_prompt(text, speaker, language, instruct)?;
-+
+ 
          // Generate codes
          println!(
-             "Generating audio codes (temp={}, top_k={}, max={})...",
+@@ -1908,13 +1965,14 @@
              temperature, top_k, max_codes
          );
          let codes = self.talker.generate_codes(
@@ -390,17 +671,20 @@ index e908a86..6bd7c44 100644
              top_k,
 -            codec_eos_id,
 -            &tts_pad_embed,
+-        );
 +            prompt.codec_eos_id,
 +            &prompt.tts_pad_embed,
-         );
++        );
 +        ensure_generation_reached_eos(codes.len(), max_codes)?;
          println!("Generated {} code frames", codes.len());
  
          // Decode with vocoder
-@@ -1932,6 +2069,86 @@ impl TTSInference {
-         Ok((waveform, sample_rate))
-     }
+@@ -1930,6 +1988,86 @@
+         );
  
+         Ok((waveform, sample_rate))
++    }
++
 +    /// Streaming twin of [`Self::generate_with_instruct`]: decodes each batch of
 +    /// `chunk_size` code frames as it is generated and hands the samples to
 +    /// `on_audio`, so playback can start long before the utterance finishes.
@@ -479,12 +763,10 @@ index e908a86..6bd7c44 100644
 +        }
 +
 +        Ok(())
-+    }
-+
+     }
+ 
      /// Get a reference to the loaded model weights.
-     pub fn weights(&self) -> &HashMap<String, Tensor> {
-         &self.weights
-@@ -2757,21 +2974,25 @@ impl TTSInference {
+@@ -2757,21 +2895,25 @@
                      return should_continue;
                  }
                  generated += code_chunk.len();
@@ -515,7 +797,7 @@ index e908a86..6bd7c44 100644
          println!("Generated {} streamed code frames", generated);
          Ok(())
      }
-@@ -2779,8 +3000,12 @@ impl TTSInference {
+@@ -2779,8 +2921,12 @@
  
  #[cfg(test)]
  mod tests {
@@ -543,3 +825,118 @@ index a6cd70d..e1b722e 100644
          let generate_defaults = if gen_config_path.exists() {
              GenerationConfig::from_file(&gen_config_path)?
          } else {
+diff --git a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -94,6 +94,7 @@
+ pub mod audio_encoder;
+ pub mod config;
+ pub mod error;
++mod generation_policy;
+ pub mod inference;
+ pub mod layers;
+ pub mod model;
+diff --git a/src/generation_policy.rs b/src/generation_policy.rs
+new file mode 100644
+--- /dev/null
++++ b/src/generation_policy.rs
+@@ -0,0 +1,99 @@
++// Qwen generation policy, kept independent of tensor backends so the bridge
++// regression suite can verify parity without loading model weights.
++// Match Transformers' repetition processor and Qwen's reserved-token mask.
++pub(crate) fn process_codec_logits(logits: &mut [f32], past_codes: &[i64], penalty: f64, eos: i64) {
++    let mut seen = vec![false; logits.len()];
++    for &code in past_codes {
++        let Ok(index) = usize::try_from(code) else {
++            continue;
++        };
++        if index < logits.len() && !seen[index] {
++            seen[index] = true;
++            logits[index] = if logits[index] > 0.0 {
++                logits[index] / penalty as f32
++            } else {
++                logits[index] * penalty as f32
++            };
++        }
++    }
++    let reserved_start = logits.len().saturating_sub(1024);
++    for (index, score) in logits.iter_mut().enumerate() {
++        if (index >= reserved_start && index as i64 != eos)
++            || (index as i64 == eos && past_codes.len() < 2)
++        {
++            *score = f32::NEG_INFINITY;
++        }
++    }
++}
++
++#[allow(clippy::too_many_arguments)]
++pub(crate) fn codec_prompt_prefix(
++    language_id: Option<i64>,
++    speaker_id: Option<i64>,
++    think: i64,
++    nothink: i64,
++    think_bos: i64,
++    think_eos: i64,
++    pad: i64,
++    bos: i64,
++) -> Vec<i64> {
++    let mut tokens = match language_id {
++        Some(language) => vec![think, think_bos, language, think_eos],
++        None => vec![nothink, think_bos, think_eos],
++    };
++    if let Some(speaker) = speaker_id {
++        tokens.push(speaker);
++    }
++    tokens.extend_from_slice(&[pad, bos]);
++    tokens
++}
++
++pub(crate) fn custom_voice_instruction<'a>(model_size: Option<&str>, instruct: &'a str) -> &'a str {
++    if model_size == Some("0b6") {
++        ""
++    } else {
++        instruct
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn codec_prompts_match_upstream_language_and_speaker_layouts() {
++        use super::codec_prompt_prefix;
++        assert_eq!(
++            codec_prompt_prefix(None, Some(9), 1, 2, 3, 4, 5, 6),
++            vec![2, 3, 4, 9, 5, 6]
++        );
++        assert_eq!(
++            codec_prompt_prefix(Some(8), Some(9), 1, 2, 3, 4, 5, 6),
++            vec![1, 3, 8, 4, 9, 5, 6]
++        );
++        assert_eq!(
++            codec_prompt_prefix(None, None, 1, 2, 3, 4, 5, 6),
++            vec![2, 3, 4, 5, 6]
++        );
++    }
++
++    #[test]
++    fn codec_sampling_matches_reserved_mask_and_unique_penalties() {
++        let mut scores = vec![2.0; 3072];
++        scores[7] = -2.0;
++        process_codec_logits(&mut scores, &[5, 5, 7, 7], 2.0, 2150);
++        assert_eq!(scores[5], 1.0);
++        assert_eq!(scores[7], -4.0);
++        assert_eq!(scores[2047], 2.0);
++        assert_eq!(scores[2048], f32::NEG_INFINITY);
++        assert_eq!(scores[2150], 2.0);
++        assert_eq!(scores[3071], f32::NEG_INFINITY);
++        process_codec_logits(&mut scores, &[], 1.0, 2150);
++        assert_eq!(scores[2150], f32::NEG_INFINITY);
++    }
++
++    #[test]
++    fn small_custom_voice_does_not_accept_instruction_conditioning() {
++        assert_eq!(custom_voice_instruction(Some("0b6"), "happy"), "");
++        assert_eq!(custom_voice_instruction(Some("1b7"), "happy"), "happy");
++    }
++}

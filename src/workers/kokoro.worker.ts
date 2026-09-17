@@ -168,21 +168,31 @@ function buildInferenceUnits(text: string): KokoroChunkUnit[] {
   }));
 }
 
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string, disposeLate: (value: T) => Promise<void>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
+    let expired = false;
     const timeoutHandle = setTimeout(() => {
+      expired = true;
       reject(new Error(`${label} timed out after ${timeoutMs / 1000}s`));
     }, timeoutMs);
 
     promise
-      .then((value) => resolve(value))
+      .then(async (value) => {
+        if (expired) await disposeLate(value);
+        else resolve(value);
+      })
       .catch((err: unknown) => reject(err))
       .finally(() => clearTimeout(timeoutHandle));
   });
 }
 
 async function disposeKokoroModel(instance: KokoroTTSInstance | null): Promise<void> {
-  const disposable = instance as unknown as { dispose?: () => void | Promise<void> } | null;
+  // kokoro-js 1.2.1 exposes the Transformers model, not a wrapper dispose().
+  const wrapper = instance as unknown as {
+    dispose?: () => void | Promise<void>;
+    model?: { dispose?: () => void | Promise<unknown> };
+  } | null;
+  const disposable = typeof wrapper?.dispose === "function" ? wrapper : wrapper?.model;
   if (typeof disposable?.dispose !== "function") return;
   try {
     await disposable.dispose();
@@ -257,6 +267,7 @@ async function loadModel(forceReload: boolean = false) {
           }),
           KOKORO_LOAD_TIMEOUT_MS,
           `Kokoro ${backend} load`,
+          disposeKokoroModel,
         );
         const candidateVoices = listVoices(candidate);
         if (backend === "webgpu") {

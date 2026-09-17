@@ -76,6 +76,7 @@ function createTtsMock(
 }
 
 const BASE_SETTINGS: GenerationTuningSettings = {
+  language: "fr",
   speed: 1,
   quality: 5,
   sentenceSpeedVariance: 0.15,
@@ -180,6 +181,7 @@ describe("useGenerationControl", () => {
       voice: "af_heart",
       speed: BASE_SETTINGS.speed,
       quality: BASE_SETTINGS.quality,
+      language: BASE_SETTINGS.language,
       sentenceSpeedVariance: BASE_SETTINGS.sentenceSpeedVariance,
       emphasisStrength: BASE_SETTINGS.emphasisStrength,
       finalPauseSec: segment.pauseAfterSec,

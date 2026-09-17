@@ -37,6 +37,10 @@ pub fn decode_reference_wav(
         !decoded.samples.is_empty(),
         "Qwen3 reference WAV contains no audio."
     );
+    ensure!(
+        !decoded.truncated,
+        "Qwen3 reference audio exceeds {max_duration_seconds} seconds. Provide a shorter clip and its exact transcript; audio cannot be trimmed independently."
+    );
     Ok(DecodedReferenceWav {
         samples: decoded.samples,
         sample_rate: decoded.sample_rate,
@@ -163,10 +167,11 @@ mod tests {
     }
 
     #[test]
-    fn truncates_to_the_configured_duration() {
+    fn rejects_overlong_references_without_mismatching_the_transcript() {
         let bytes = wav_bytes(1, 8_000, &vec![1_000; 8_001]);
-        let prepared = prepare_reference_wav(&bytes, 16_000, 1).unwrap();
-        assert_eq!(prepared.samples.len(), 16_000);
-        assert!(prepared.truncated);
+        let error = prepare_reference_wav(&bytes, 16_000, 1).unwrap_err();
+        assert!(error.to_string().contains("exact transcript"));
+        let exact = wav_bytes(1, 8_000, &vec![1_000; 8_000]);
+        assert!(prepare_reference_wav(&exact, 16_000, 1).is_ok());
     }
 }

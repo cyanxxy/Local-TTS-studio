@@ -7,6 +7,7 @@ import {
   SUPERTONIC3_MODEL_REVISION,
   SUPERTONIC3_VOICES,
 } from "../constants";
+import { concatFloat32Arrays, createSilence } from "../lib/audio";
 import { chunkWithConstraintsDetailed } from "../lib/chunking";
 import { resolvePauseSeconds, resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
 import { canInitializeWebGPU } from "../lib/webgpu";
@@ -282,19 +283,20 @@ async function generate(message: Extract<WorkerInMessage, { type: "GENERATE" }>)
       speed,
     );
     if (epoch !== activeGenerationEpoch) return;
+    const pauseSec = index + 1 === chunks.length
+      ? Math.max(0, Math.min(5, message.finalPauseSec ?? 0))
+      : resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec, message.pauseOverridesSec);
     post({
       type: "AUDIO_CHUNK",
       generationId: message.generationId,
-      audio,
+      audio: pauseSec > 0 ? concatFloat32Arrays([audio, createSilence(pauseSec, runtime.sampleRate)]) : audio,
       samplingRate: runtime.sampleRate,
       text: chunk.text,
       index: index + 1,
       total: chunks.length,
       textStart: chunk.start,
       textEnd: chunk.end,
-      pauseAfterSec: index + 1 === chunks.length
-        ? Math.max(0, Math.min(5, message.finalPauseSec ?? 0))
-        : resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec, message.pauseOverridesSec),
+      pauseAfterSec: pauseSec,
       pauseKind: chunk.pauseKind,
     });
   }

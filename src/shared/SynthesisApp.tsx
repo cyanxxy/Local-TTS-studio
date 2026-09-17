@@ -27,6 +27,7 @@ import { ControlsProvider } from "../components/ControlsContext";
 import { AudioPlayer } from "../components/AudioPlayer";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
+import { SupertonicLanguageSettings } from "../components/SupertonicLanguageSettings";
 import { CreatorToolsPanel } from "../components/CreatorToolsPanel";
 import { getPagePath, type AppPage } from "../lib/appRouting";
 import {
@@ -326,6 +327,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const [studioDesktopModel, setStudioDesktopModel] = useState<InlineModelKey | null>(null);
   const [readerDesktopModel, setReaderDesktopModel] = useState<InlineModelKey | null>(null);
   const [supertonic3Voice, setSupertonic3Voice] = useState("M1");
+  const [supertonicLanguage, setSupertonicLanguage] = useState("en");
   const [supertonic3Language, setSupertonic3Language] = useState("en");
   const [audio8Voice, setAudio8Voice] = useState<string>(initialState.audio8Voice);
   const readerLibrary = useReaderLibrary(initialState.text);
@@ -535,6 +537,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const creator = useCreatorSettings({
     initialState: initialCreatorState,
     quality,
+    language: supertonicLanguage,
   });
   // The desktop entry owns this capability by supplying the worker factory.
   // Do not also gate it on the preload bridge: Supertonic 3 runs entirely in
@@ -1749,6 +1752,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     unavailableModels={unavailableModels}
                   />
 
+                  {!studioDesktopModel && activeModel === "supertonic" && (
+                    <SupertonicLanguageSettings language={supertonicLanguage} onChange={setSupertonicLanguage} />
+                  )}
                   {isStudioUsingQwen3 && (
                     <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />
                   )}
@@ -1928,7 +1934,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                       onLanguageChange={handleSupertonic3LanguageChange}
                     />
                   )
-                  : undefined}
+                  : activeModel === "supertonic"
+                    ? <SupertonicLanguageSettings language={supertonicLanguage} onChange={setSupertonicLanguage} />
+                    : undefined}
               kokoroState={kokoroState}
               supertonicState={supertonicState}
               visibleModels={browserSupport.supportedModels}

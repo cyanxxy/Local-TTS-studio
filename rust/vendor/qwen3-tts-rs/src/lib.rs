@@ -94,6 +94,7 @@ pub mod audio;
 pub mod audio_encoder;
 pub mod config;
 pub mod error;
+mod generation_policy;
 pub mod inference;
 pub mod layers;
 pub mod model;

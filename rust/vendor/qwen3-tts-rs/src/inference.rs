@@ -11,6 +11,9 @@
 
 use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
 use crate::error::{Qwen3TTSError, Result};
+use crate::generation_policy::{
+    codec_prompt_prefix, custom_voice_instruction, process_codec_logits,
+};
 use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
 use crate::tensor::{DType, Device, Tensor};
 use crate::trace::TraceWriter;
@@ -413,6 +416,7 @@ pub struct TalkerModel {
     layers: Vec<TransformerLayer>,
     /// Final layer norm
     norm: RMSNorm,
+    codec_eos_id: i64,
     /// Main codec head for predicting code 0
     codec_head: Linear,
     /// Code predictor sub-transformer for codes 1-15
@@ -537,6 +541,7 @@ impl TalkerModel {
             layers,
             norm,
             codec_head,
+            codec_eos_id: config.codec_eos_token_id as i64,
             code_predictor,
             rotary_emb,
             hidden_size,
@@ -605,75 +610,20 @@ impl TalkerModel {
         codec_pad_id: i64,
         codec_bos_id: i64,
     ) -> Tensor {
-        // Phase 1: Role prefix (3 text-only positions)
-        // Tokenize "<|im_start|>assistant\n" → these are the first 3 tokens of input_id
-        // We need the actual token IDs for the role prefix
-        let role_embed = self.embed_text(&text_token_ids[..3]); // [1, 3, 1024]
-
-        // Phase 2: Codec prefix (6 positions for custom_voice)
-        // Text side: tts_pad * 5 + tts_bos
-        let tts_pad_embed = self.embed_text(&[tts_pad_id]); // [1, 1, 1024]
-        let tts_bos_embed = self.embed_text(&[tts_bos_id]); // [1, 1, 1024]
-        let tts_eos_embed = self.embed_text(&[tts_eos_id]); // [1, 1, 1024]
-
-        // Codec prefix tokens: [think_id, think_bos_id, language_id, think_eos_id, speaker_id, codec_pad_id, codec_bos_id]
-        let codec_prefix = self.embed_codec(&[
+        self.build_voice_design_input_embeddings(
+            text_token_ids,
+            Some(language_id),
+            Some(speaker_id),
+            tts_pad_id,
+            tts_bos_id,
+            tts_eos_id,
+            codec_think_id,
             codec_think_id,
             codec_think_bos_id,
-            language_id,
             codec_think_eos_id,
-            speaker_id,
             codec_pad_id,
             codec_bos_id,
-        ]); // [1, 7, 1024]
-
-        // Text side for codec prefix: tts_pad repeated 5 times + tts_bos
-        let tts_pad_5 = tts_pad_embed.expand(&[1, 5, self.hidden_size], false); // [1, 5, 1024]
-        let text_for_codec = Tensor::cat(&[tts_pad_5, tts_bos_embed.shallow_clone()], 1); // [1, 6, 1024]
-
-        // Sum text + codec (first 6 of 7 codec prefix positions)
-        let codec_prefix_6 = codec_prefix.narrow(1, 0, 6); // [1, 6, 1024]
-        let phase2 = &text_for_codec + &codec_prefix_6; // [1, 6, 1024]
-
-        // Phase 3: Text content (N positions + tts_eos)
-        // text_token_ids[3..] contains the text content + tail tokens
-        // In the full token sequence: token[3..N+3] = text, token[N+3..] = tail
-        // We need text_token_ids[3..(len-5)] for content
-        let text_start = 3;
-        let text_end = text_token_ids.len().saturating_sub(5);
-        let text_content_ids = &text_token_ids[text_start..text_end];
-        let num_text_tokens = text_content_ids.len();
-
-        let text_content_embed = if num_text_tokens > 0 {
-            self.embed_text(text_content_ids) // [1, N, 1024]
-        } else {
-            Tensor::zeros(&[1, 0, self.hidden_size], DType::Float32, self.device)
-        };
-
-        // Concatenate text content + tts_eos
-        let text_with_eos = Tensor::cat(&[text_content_embed, tts_eos_embed.shallow_clone()], 1); // [1, N+1, 1024]
-
-        // Codec side: codec_pad repeated (N+1) times
-        let codec_pad_embed = self.embed_codec(&[codec_pad_id]); // [1, 1, 1024]
-        let codec_pad_repeated =
-            codec_pad_embed.expand(&[1, (num_text_tokens + 1) as i64, self.hidden_size], false);
-
-        let phase3 = &text_with_eos + &codec_pad_repeated; // [1, N+1, 1024]
-
-        // Phase 4: Final codec_bos
-        let codec_bos_embed = codec_prefix.narrow(1, 6, 1); // Last position of codec prefix [1, 1, 1024]
-        let phase4 = &tts_pad_embed + &codec_bos_embed; // [1, 1, 1024]
-
-        // Concatenate all phases
-        let input_embeddings = Tensor::cat(&[role_embed, phase2, phase3, phase4], 1);
-
-        println!(
-            "  Built input embeddings: {} positions (3 role + 6 codec_prefix + {} text + 1 eos + 1 bos)",
-            input_embeddings.size()[1],
-            num_text_tokens
-        );
-
-        input_embeddings
+        )
     }
 
     /// Build the dual-stream prompt used by VoiceDesign models.
@@ -685,6 +635,7 @@ impl TalkerModel {
         &self,
         text_token_ids: &[i64],
         language_id: Option<i64>,
+        speaker_id: Option<i64>,
         tts_pad_id: i64,
         tts_bos_id: i64,
         tts_eos_id: i64,
@@ -701,16 +652,16 @@ impl TalkerModel {
         let tts_bos_embed = special_text.narrow(1, 1, 1);
         let tts_eos_embed = special_text.narrow(1, 2, 1);
 
-        let mut codec_prefill = match language_id {
-            Some(language_id) => vec![
-                codec_think_id,
-                codec_think_bos_id,
-                language_id,
-                codec_think_eos_id,
-            ],
-            None => vec![codec_nothink_id, codec_think_bos_id, codec_think_eos_id],
-        };
-        codec_prefill.extend_from_slice(&[codec_pad_id, codec_bos_id]);
+        let codec_prefill = codec_prompt_prefix(
+            language_id,
+            speaker_id,
+            codec_think_id,
+            codec_nothink_id,
+            codec_think_bos_id,
+            codec_think_eos_id,
+            codec_pad_id,
+            codec_bos_id,
+        );
         let codec_prefix = self.embed_codec(&codec_prefill);
         let prefix_without_bos_len = codec_prefix.size()[1] - 1;
         let pad_count = prefix_without_bos_len - 1;
@@ -1110,29 +1061,16 @@ impl TalkerModel {
         let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
         let mut logits = self.codec_head.forward(&last_hidden);
 
-        // Apply repetition penalty to previously generated codes
-        if repetition_penalty != 1.0 && !past_codes.is_empty() {
-            let logits_data = logits.to_vec_f32();
-            let vocab_size = logits.size()[logits.dim() - 1] as usize;
-            let mut modified = logits_data.clone();
-
-            for &code in past_codes {
-                let idx = code as usize;
-                if idx < vocab_size {
-                    let score = modified[idx];
-                    // Penalize: divide positive logits, multiply negative logits
-                    modified[idx] = if score > 0.0 {
-                        score / repetition_penalty as f32
-                    } else {
-                        score * repetition_penalty as f32
-                    };
-                }
-            }
-
-            logits = Tensor::from_slice_f32(&modified)
-                .reshape(&logits.size())
-                .to_device(self.device);
-        }
+        let mut scores = logits.to_vec_f32();
+        process_codec_logits(
+            &mut scores,
+            past_codes,
+            repetition_penalty,
+            self.codec_eos_id,
+        );
+        logits = Tensor::from_slice_f32(&scores)
+            .reshape(&logits.size())
+            .to_device(self.device);
 
         if temperature <= 0.0 {
             logits.argmax(-1, false).int64_value(&[0])
@@ -1875,8 +1813,7 @@ impl TTSInference {
             .copied()
             .unwrap_or(0) as i64;
 
-        // VoiceDesign supports Auto language (no language token); CustomVoice
-        // keeps the historical fallback for compatibility.
+        // Auto omits the language token for both prompt variants.
         let language_id = self
             .config
             .talker_config
@@ -1886,6 +1823,11 @@ impl TTSInference {
             .copied()
             .map(|value| value as i64);
         let voice_design = self.config.tts_model_type.as_deref() == Some("voice_design");
+        let instruct = if voice_design {
+            instruct
+        } else {
+            custom_voice_instruction(self.config.tts_model_size.as_deref(), instruct)
+        };
 
         // Preserve upstream CLI diagnostics for CustomVoice, but keep the
         // resident VoiceDesign bridge from writing request details to stdout.
@@ -1943,14 +1885,8 @@ impl TTSInference {
             // Embed instruction tokens (text side)
             let instruct_text_embed = self.talker.embed_text(&instruct_token_ids);
 
-            // Codec side: codec_pad for all instruction positions
-            let codec_pad_embed = self.talker.embed_codec(&[codec_pad_id]);
-            let num_instruct = instruct_token_ids.len() as i64;
-            let codec_pad_repeated =
-                codec_pad_embed.expand(&[1, num_instruct, self.talker.hidden_size], false);
-
-            // Sum text + codec_pad for instruction
-            Some(&instruct_text_embed + &codec_pad_repeated)
+            // Upstream instruction prefixes contain projected text only.
+            Some(instruct_text_embed)
         } else {
             None
         };
@@ -1973,35 +1909,20 @@ impl TTSInference {
 
         // Build dual-stream input embeddings for main text
         println!("Building input embeddings...");
-        let main_embeddings = if voice_design {
-            self.talker.build_voice_design_input_embeddings(
-                &main_token_ids,
-                language_id,
-                tts_pad_id,
-                tts_bos_id,
-                tts_eos_id,
-                codec_think_id,
-                codec_nothink_id,
-                codec_think_bos_id,
-                codec_think_eos_id,
-                codec_pad_id,
-                codec_bos_id,
-            )
-        } else {
-            self.talker.build_input_embeddings(
-                &main_token_ids,
-                speaker_id,
-                language_id.unwrap_or(0),
-                tts_pad_id,
-                tts_bos_id,
-                tts_eos_id,
-                codec_think_id,
-                codec_think_bos_id,
-                codec_think_eos_id,
-                codec_pad_id,
-                codec_bos_id,
-            )
-        };
+        let main_embeddings = self.talker.build_voice_design_input_embeddings(
+            &main_token_ids,
+            language_id,
+            if voice_design { None } else { Some(speaker_id) },
+            tts_pad_id,
+            tts_bos_id,
+            tts_eos_id,
+            codec_think_id,
+            codec_nothink_id,
+            codec_think_bos_id,
+            codec_think_eos_id,
+            codec_pad_id,
+            codec_bos_id,
+        );
 
         // Concatenate instruction prefix (if any) with main embeddings
         let input_embeddings = if let Some(inst_emb) = instruct_embeddings {

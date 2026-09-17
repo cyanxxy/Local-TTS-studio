@@ -356,8 +356,11 @@ async function createPipelineWithFallback(
     : new Error(lastError ? String(lastError) : "Failed to load Supertonic model");
 }
 
-function getTaggedText(text: string): string {
-  return `<en>${text}</en>`;
+function getTaggedText(text: string, language = "en"): string {
+  if (!["en", "ko", "es", "pt", "fr"].includes(language)) {
+    throw new Error(`Unsupported Supertonic 2 language: ${language}`);
+  }
+  return `<${language}>${text}</${language}>`;
 }
 
 async function warmUpPipeline(
@@ -536,6 +539,7 @@ async function generate(
   sentenceSpeedVariance: number = 0,
   pronunciationRules: PronunciationRule[] = [],
   emphasisStrength: number = 0,
+  language: string = "en",
 ) {
   const ttsInstance = tts;
   if (!ttsInstance) {
@@ -546,6 +550,7 @@ async function generate(
   const generationEpoch = beginGeneration();
 
   try {
+    getTaggedText("", language); // Validate before loading voice data or running inference.
     const perf = createPerfTrace("generate", {
       backend: activeBackend,
       quality,
@@ -604,6 +609,7 @@ async function generate(
         try {
           const taggedTexts = selectedBatch.map(({ chunk }) => getTaggedText(
             tuneChunkText(chunk.text, pronunciationRules, emphasisStrength),
+            language,
           ));
           const output = await ttsInstance(taggedTexts, {
             speaker_embeddings: speakerEmbeddingsTensor,
@@ -653,7 +659,7 @@ async function generate(
       try {
         const tunedText = tuneChunkText(chunk.text, pronunciationRules, emphasisStrength);
         const chunkSpeed = clampSpeed(resolveSentenceSpeed(normalizedSpeed, sentenceSpeedVariance, tunedText));
-        const output = (await ttsInstance(getTaggedText(tunedText), {
+        const output = (await ttsInstance(getTaggedText(tunedText, language), {
           speaker_embeddings: speakerEmbeddingsTensor,
           num_inference_steps: quality,
           speed: chunkSpeed,
@@ -737,6 +743,7 @@ self.onmessage = (e: MessageEvent<WorkerInMessage>) => {
         msg.sentenceSpeedVariance ?? 0,
         msg.pronunciationRules ?? [],
         msg.emphasisStrength ?? 0,
+        msg.language ?? "en",
       );
       break;
     case "CANCEL":
