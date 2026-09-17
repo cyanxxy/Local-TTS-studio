@@ -4,7 +4,18 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.8.3] - 2026-09-17
+
 ### Fixed
+
+- Masked Qwen reserved codec tokens and premature end-of-speech tokens, corrected
+  instruction embeddings, and disabled unsupported 0.6B instruction controls.
+- Reject oversized Qwen and NeuTTS reference clips instead of silently truncating
+  audio while retaining the full reference transcript.
+- Reject incomplete Audio8 output when generation or context budgets run out.
+- Forward Supertonic 2 language selections through generation, retakes, and Reader
+  caching; render Supertonic 3 pauses as actual silence in generated audio.
+- Dispose late Kokoro model loads after timeout and release the underlying model.
 
 - Fixed Qwen3 sentence highlighting drifting on long passages: the renderer
   split text into 400-character units while the Rust bridge used 200, so
@@ -33,12 +44,6 @@ All notable changes to Open TTS are documented here.
 - Qwen3 warm-up forwards the model repository to the Rust bridge so it can
   reject a repository that does not match the requested mode, and a Stop during
   voice-reference encoding is now observed between its two encoding steps.
-- CI now runs the native-bridge integration test on Linux before merge, in its
-  own job and vitest process, enforces the coverage thresholds declared in
-  `vitest.config.ts`, and tests the pinned Node release alongside Node 26. The
-  macOS Rust job reports build, Clippy, and test as separate steps and can be
-  dispatched manually. Workflow actions are SHA-pinned and Dependabot keeps
-  them and the Cargo dependencies current.
 
 ## [1.8.2] - 2026-08-12
 
