@@ -4,6 +4,8 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.8.4] - 2026-09-25
+
 ### Added
 
 - Added Reader page tones (paper, sepia, night) that apply to the reading page
@@ -64,10 +66,8 @@ All notable changes to Open TTS are documented here.
   "Fig. 2".
 - Word highlight timing allows for the pause after commas and full stops, so
   the marker no longer runs ahead of the voice after each sentence.
-- Qwen3 now cuts Chinese, Japanese, and Korean text into passages of about 100 characters (instead of 200), so each passage fits the 384-token limit without using more memory. Latin-script passages stay at 200 characters.
 - The Qwen "Max tokens" control is now "Max tokens per passage". It is limited to 64-384, the most the bridge ever generates for one passage, and it defaults to 384. Electron's IPC validation uses the same range.
 - VoiceDesign's voice description and CustomVoice's style instruction are now kept separately, so switching profiles no longer carries one into the other.
-- The 0.6B CustomVoice model ignores instructions, so Qwen no longer offers the instruction field for it on any screen.
 
 ### Fixed
 
@@ -90,7 +90,54 @@ All notable changes to Open TTS are documented here.
   system suspends audio output mid-playback, the player resumes it, or shows
   itself paused so Play recovers it, instead of silently stalling.
 - Dialect speakers (Dylan, Eric) now use their Beijing and Sichuan dialect tokens when the language is Chinese or Auto, matching upstream Qwen.
-- Highlighting stays on the right sentence during long Qwen jobs. The renderer now splits text with the same 200-character limit as the bridge (it was 400), and it re-splits each request the way Electron and Rust trim it.
+- Highlighting stays on the right sentence during long Qwen jobs by re-splitting each request the way Electron and Rust trim it.
+
+### Maintenance
+
+- Enforced the existing coverage thresholds in CI, added Node 26 and isolated
+  Linux bridge checks, pinned workflow actions, and configured weekly dependency
+  update pull requests.
+
+## [1.8.3] - 2026-09-17
+
+### Fixed
+
+- Masked Qwen reserved codec tokens and premature end-of-speech tokens, corrected
+  instruction embeddings, and disabled unsupported 0.6B instruction controls.
+- Reject oversized Qwen and NeuTTS reference clips instead of silently truncating
+  audio while retaining the full reference transcript.
+- Reject incomplete Audio8 output when generation or context budgets run out.
+- Forward Supertonic 2 language selections through generation, retakes, and Reader
+  caching; render Supertonic 3 pauses as actual silence in generated audio.
+- Dispose late Kokoro model loads after timeout and release the underlying model.
+
+- Fixed Qwen3 sentence highlighting drifting on long passages: the renderer
+  split text into 400-character units while the Rust bridge used 200, so
+  streamed `textUnitIndex` values were mapped onto the wrong sentences.
+- Fixed Qwen3 CustomVoice with language `Auto` placing raw codec code 0 in the
+  prompt instead of the model's no-think prefix, and made an unknown speaker an
+  error instead of a silent fallback to speaker id 0.
+- Fixed long Chinese, Japanese, and Korean Qwen3 passages failing with a
+  generation-limit error: CJK characters now weigh double toward the text-unit
+  budget, so a unit's spoken length fits the per-unit token ceiling.
+- Fixed Qwen3 voice cloning running sentences together within one request. It
+  now streams through the same unit driver as CustomVoice and VoiceDesign,
+  with per-sentence metadata and 0.2-second inter-unit gaps.
+- Fixed Qwen3 text units splitting inside numbers such as `3.14`, `1,000`, or
+  `10:30`.
+
+### Changed
+
+- The Qwen3 "Max tokens" control is now "Max tokens per section" with a 64 to
+  384 range that matches what the bridge actually enforces; the previous 4,096
+  ceiling was never reachable. Temperature accepts 0 for greedy decoding, and
+  top-k no longer accepts 0.
+- The Qwen3 sampler applies its repetition penalty on the device instead of
+  copying the logits to the host every frame, and reads the penalty from the
+  model's `generation_config.json`.
+- Qwen3 warm-up forwards the model repository to the Rust bridge so it can
+  reject a repository that does not match the requested mode, and a Stop during
+  voice-reference encoding is now observed between its two encoding steps.
 
 ## [1.8.2] - 2026-08-12
 

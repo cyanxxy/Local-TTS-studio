@@ -433,8 +433,8 @@ export function sanitizeQwen3Payload(
     }
   }
 
-  const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0.2, max: 2.0 });
-  const topK = parseOptionalInteger(payload.topK, "topK", { min: 0, max: 1000 });
+  const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0, max: 2.0 });
+  const topK = parseOptionalInteger(payload.topK, "topK", { min: 1, max: 1000 });
   const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", {
     min: QWEN3_MIN_NEW_TOKENS,
     max: QWEN3_MAX_NEW_TOKENS_PER_PASSAGE,
@@ -496,7 +496,7 @@ export function sanitizeWarmRequest(
   return {
     model,
     modelRepo,
-    payload: { mode, modelPath },
+    payload: { mode, modelPath, modelRepo },
   };
 }
 

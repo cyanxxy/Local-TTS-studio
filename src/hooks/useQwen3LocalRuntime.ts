@@ -489,15 +489,8 @@ export function useQwen3LocalRuntime({
     const requestSections = requestPlan.sections;
     if (requestSections.length === 0) return;
     clearGeneratedResult();
-    activeTextUnitsRef.current = settings.profile.mode !== "voiceClone"
-      ? requestPlan.units
-      : requestSections.map((section) => ({
-        text: section.text,
-        start: section.start,
-        end: section.end,
-        pauseAfterSec: section.pauseAfterSec,
-        pauseKind: section.pauseKind,
-      }));
+    // Every mode uses the units re-split from the exact IPC request text.
+    activeTextUnitsRef.current = requestPlan.units;
     setShowPlayer(true);
     beginStream();
     setGenerateBusy(true);
@@ -533,12 +526,8 @@ export function useQwen3LocalRuntime({
           if (!mountedRef.current || generationVersionRef.current !== version) return;
           const section = requestSections[sectionIndex];
           let id = requestId("generate");
-          activeRequestUnitOffsetRef.current = settings.profile.mode !== "voiceClone"
-            ? section.unitStart
-            : sectionIndex;
-          activeRequestUnitCountRef.current = settings.profile.mode !== "voiceClone"
-            ? section.unitEnd - section.unitStart
-            : 1;
+          activeRequestUnitOffsetRef.current = section.unitStart;
+          activeRequestUnitCountRef.current = section.unitEnd - section.unitStart;
           activeSectionChunkCheckpoint = getAudioChunkCount();
 
           const activateRequest = (nextId: string, progressMessage: string) => {
@@ -622,12 +611,9 @@ export function useQwen3LocalRuntime({
 
           // Rust only knows whether a unit is final within one IPC request.
           // The renderer owns the multi-request job, so it restores the natural
-          // inter-unit pause between non-final request sections for both
-          // CustomVoice and voice-clone streaming.
+          // inter-unit pause between non-final request sections.
           if (sectionIndex < requestSections.length - 1) {
-            const textUnitIndex = settings.profile.mode !== "voiceClone"
-              ? Math.max(section.unitStart, section.unitEnd - 1)
-              : sectionIndex;
+            const textUnitIndex = Math.max(section.unitStart, section.unitEnd - 1);
             const textUnit = activeTextUnitsRef.current[textUnitIndex];
             const pauseSamples = Math.max(
               1,

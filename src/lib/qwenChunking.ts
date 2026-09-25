@@ -7,7 +7,7 @@ import {
 // Keep this in sync with CUSTOM_VOICE_UNIT_CHARS in
 // rust/local-tts-bridge/src/qwen3/runtime.rs.
 export const QWEN3_UNIT_MAX_CHARS = 200;
-// Keep this in sync with CJK_CHARACTER_WEIGHT in
+// Keep this in sync with CJK_CHAR_WEIGHT in
 // rust/local-tts-bridge/src/qwen3/text.rs. CJK text speaks about twice as long
 // per character, so CJK-heavy units are cut at about half the characters.
 export const QWEN3_CJK_CHARACTER_WEIGHT = 2;
@@ -28,8 +28,10 @@ export interface Qwen3RequestPlan {
 const SENTENCE_BOUNDARIES = new Set([".", "!", "?", "。", "！", "？", "；", ";", "\n"]);
 const CLAUSE_BOUNDARIES = new Set([",", ":", "，", "：", "、"]);
 
-/** Mirrors `is_cjk` in rust/local-tts-bridge/src/qwen3/config.rs. */
-function isCjk(codePoint: number): boolean {
+/** Mirrors Rust's `is_cjk`. */
+export function isQwen3CjkCharacter(character: string): boolean {
+  const codePoint = character.codePointAt(0);
+  if (codePoint === undefined) return false;
   return (codePoint >= 0x2e80 && codePoint <= 0x2fff)
     || (codePoint >= 0x3040 && codePoint <= 0x30ff)
     || (codePoint >= 0x3100 && codePoint <= 0x312f)
@@ -40,6 +42,16 @@ function isCjk(codePoint: number): boolean {
     || (codePoint >= 0xac00 && codePoint <= 0xd7af)
     || (codePoint >= 0xf900 && codePoint <= 0xfaff)
     || (codePoint >= 0x20000 && codePoint <= 0x2fa1f);
+}
+
+function isAsciiDigit(character: string | undefined): boolean {
+  return character !== undefined && character >= "0" && character <= "9" && character.length === 1;
+}
+
+/** Mirrors Rust's `is_boundary`: punctuation inside a number is not a pause. */
+function isBoundary(character: string, previous: string | undefined, next: string | undefined): boolean {
+  if (!SENTENCE_BOUNDARIES.has(character) && !CLAUSE_BOUNDARIES.has(character)) return false;
+  return !(isAsciiDigit(previous) && isAsciiDigit(next));
 }
 
 /** Rust's `char::is_whitespace` (Unicode White_Space), which `str::trim` uses. */
@@ -81,20 +93,22 @@ function splitTextUnits(text: string, rangeStart: number, rangeEnd: number): Tex
     let weight = 0;
     let preferredEnd: number | null = null;
     let hardEnd = rangeEnd;
+    let previous: string | undefined;
 
     let end = start;
     while (end < rangeEnd) {
       const codePoint = text.codePointAt(end)!;
       const character = String.fromCodePoint(codePoint);
       end += character.length;
-      weight += isCjk(codePoint) ? QWEN3_CJK_CHARACTER_WEIGHT : 1;
-      if (SENTENCE_BOUNDARIES.has(character) || CLAUSE_BOUNDARIES.has(character)) {
+      weight += isQwen3CjkCharacter(character) ? QWEN3_CJK_CHARACTER_WEIGHT : 1;
+      if (isBoundary(character, previous, end < rangeEnd ? text[end] : undefined)) {
         preferredEnd = end;
       }
       if (weight >= QWEN3_UNIT_MAX_CHARS) {
         hardEnd = end;
         break;
       }
+      previous = character;
     }
 
     const unitEnd = preferredEnd ?? hardEnd;

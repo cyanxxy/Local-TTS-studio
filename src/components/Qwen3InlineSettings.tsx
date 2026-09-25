@@ -1,4 +1,4 @@
-import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
+import { QWEN3_MIN_TEMPERATURE, QWEN3_MAX_TEMPERATURE, QWEN3_MIN_TOP_K, QWEN3_MAX_TOP_K, useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { QWEN3_MAX_NEW_TOKENS_PER_PASSAGE, QWEN3_MAX_SEED, QWEN3_MIN_NEW_TOKENS } from "../../electron/localTtsLimits";
 import {
   QWEN3_LANGUAGE_OPTIONS,
@@ -116,8 +116,8 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
             </label>
           )}
           <div className="grid grid-cols-3 gap-2">
-            <label className="text-xs text-text-secondary">Temperature<input aria-label="Qwen temperature" type="number" min={0.2} max={2} step={0.05} value={qwen.temperature} onChange={(event) => qwen.setTemperature(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
-            <label className="text-xs text-text-secondary">Top-k<input aria-label="Qwen top-k" type="number" min={0} max={1000} step={1} value={qwen.topK} onChange={(event) => qwen.setTopK(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary">Temperature<input aria-label="Qwen temperature" type="number" min={QWEN3_MIN_TEMPERATURE} max={QWEN3_MAX_TEMPERATURE} step={0.05} value={qwen.temperature} onChange={(event) => qwen.setTemperature(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary">Top-k<input aria-label="Qwen top-k" type="number" min={QWEN3_MIN_TOP_K} max={QWEN3_MAX_TOP_K} step={1} value={qwen.topK} onChange={(event) => qwen.setTopK(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
             <label className="text-xs text-text-secondary">Max tokens per passage<input aria-label="Qwen max tokens per passage" type="number" min={QWEN3_MIN_NEW_TOKENS} max={QWEN3_MAX_NEW_TOKENS_PER_PASSAGE} step={32} value={qwen.maxNewTokens} onChange={(event) => qwen.setMaxNewTokens(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
           </div>
           <p className="text-2xs leading-4 text-text-muted">

@@ -344,7 +344,7 @@ describe("localTtsIpc request sanitizers", () => {
         .toThrow(`Unknown Qwen3-TTS field: \`${removedField}\``);
     }
     expect(() => sanitizeGeneratePayload("qwen3", { ...valid, topK: 1001 }, "darwin", "arm64"))
-      .toThrow("between 0 and 1000");
+      .toThrow("between 1 and 1000");
     expect(() => sanitizeGeneratePayload("qwen3", { ...valid, mode: "voiceClone" }, "darwin", "arm64"))
       .toThrow("does not match");
     expect(() => sanitizeGeneratePayload("qwen3", {
@@ -432,7 +432,7 @@ describe("localTtsIpc request sanitizers", () => {
     }, "darwin", "arm64")).toEqual({
       model: "qwen3",
       modelRepo,
-      payload: { mode: "customVoice", modelPath: "/models/qwen3" },
+      payload: { mode: "customVoice", modelPath: "/models/qwen3", modelRepo },
     });
     expect(() => sanitizeWarmRequest({ model: "qwen3" })).toThrow("Unsupported Qwen3-TTS mode");
     expect(() => sanitizeWarmRequest({ model: "kani" })).toThrow("Unsupported local model");

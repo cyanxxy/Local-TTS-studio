@@ -43,6 +43,11 @@ function instructMode(mode: Qwen3Mode): Qwen3InstructMode | null {
   return mode === "customVoice" || mode === "voiceDesign" ? mode : null;
 }
 
+export const QWEN3_MIN_TEMPERATURE = 0;
+export const QWEN3_MAX_TEMPERATURE = 2;
+export const QWEN3_MIN_TOP_K = 1;
+export const QWEN3_MAX_TOP_K = 1_000;
+
 export interface Qwen3RuntimeSettings {
   profile: Qwen3Profile;
   modelPath: string;
@@ -283,8 +288,14 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const setLanguage = useCallback((nextLanguage: string) => {
     if (QWEN3_LANGUAGES.includes(nextLanguage as typeof QWEN3_LANGUAGES[number])) setLanguageState(nextLanguage);
   }, []);
-  const setTemperature = useCallback((value: number) => setTemperatureState((current) => clamp(value, current, 0.2, 2)), []);
-  const setTopK = useCallback((value: number) => setTopKState((current) => Math.round(clamp(value, current, 0, 1_000))), []);
+  const setTemperature = useCallback(
+    (value: number) => setTemperatureState((current) => clamp(value, current, QWEN3_MIN_TEMPERATURE, QWEN3_MAX_TEMPERATURE)),
+    [],
+  );
+  const setTopK = useCallback(
+    (value: number) => setTopKState((current) => Math.round(clamp(value, current, QWEN3_MIN_TOP_K, QWEN3_MAX_TOP_K))),
+    [],
+  );
   const setMaxNewTokens = useCallback(
     (value: number) => setMaxNewTokensState((current) => Math.round(
       clamp(value, current, QWEN3_MIN_NEW_TOKENS, QWEN3_MAX_NEW_TOKENS_PER_PASSAGE),

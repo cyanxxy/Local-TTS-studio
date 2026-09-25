@@ -15,6 +15,7 @@ import {
   NEUTTS_OPTIONS,
   qwen3SupportsInstruct,
 } from "./modelOptions";
+import { QWEN3_MIN_TEMPERATURE, QWEN3_MAX_TEMPERATURE, QWEN3_MIN_TOP_K, QWEN3_MAX_TOP_K } from "../../contexts/Qwen3RuntimeContext";
 import type { StatusTone } from "./utils";
 
 type StatusMessage = { tone: StatusTone; text: string } | null;
@@ -368,10 +369,10 @@ export function LocalRuntimeModelInputs(props: Props) {
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4 text-xs font-medium text-text-secondary">
         <label className="flex flex-col gap-1">Temperature
-          <input type="number" min={0.2} max={2} step={0.05} value={props.qwen3Temperature} onChange={(event) => props.onQwen3TemperatureChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
+          <input type="number" min={QWEN3_MIN_TEMPERATURE} max={QWEN3_MAX_TEMPERATURE} step={0.05} value={props.qwen3Temperature} onChange={(event) => props.onQwen3TemperatureChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
         </label>
         <label className="flex flex-col gap-1">Top-k
-          <input type="number" min={0} max={1000} value={props.qwen3TopK} onChange={(event) => props.onQwen3TopKChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
+          <input type="number" min={QWEN3_MIN_TOP_K} max={QWEN3_MAX_TOP_K} value={props.qwen3TopK} onChange={(event) => props.onQwen3TopKChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
         </label>
         <label className="flex flex-col gap-1">Max tokens per passage
           <input type="number" min={QWEN3_MIN_NEW_TOKENS} max={QWEN3_MAX_NEW_TOKENS_PER_PASSAGE} step={32} value={props.qwen3MaxNewTokens} onChange={(event) => props.onQwen3MaxNewTokensChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />

@@ -9,7 +9,7 @@
 //! - CodePredictor: 5-layer sub-transformer for generating codes 1-15
 //! - Input format: text embeddings (projected 2048→1024) summed with codec embeddings (1024)
 
-use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
+use crate::config::{GenerationConfig, Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
 use crate::error::{Qwen3TTSError, Result};
 use crate::generation_policy::{
     codec_language_id, codec_prompt_prefix, custom_voice_instruction, process_codec_logits,
@@ -24,6 +24,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tokenizers::pre_tokenizers::byte_level::ByteLevel;
 use tokenizers::Tokenizer;
+
+/// Output rate of the 12 Hz speech tokenizer's vocoder.
+const OUTPUT_SAMPLE_RATE: u32 = 24000;
 
 fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
     if max_codes > 0 && generated_frames >= max_codes as usize {
@@ -600,11 +603,12 @@ impl TalkerModel {
         &self,
         text_token_ids: &[i64],
         speaker_id: i64,
-        language_id: i64,
+        language_id: Option<i64>,
         tts_pad_id: i64,
         tts_bos_id: i64,
         tts_eos_id: i64,
         codec_think_id: i64,
+        codec_nothink_id: i64,
         codec_think_bos_id: i64,
         codec_think_eos_id: i64,
         codec_pad_id: i64,
@@ -612,13 +616,13 @@ impl TalkerModel {
     ) -> Tensor {
         self.build_voice_design_input_embeddings(
             text_token_ids,
-            Some(language_id),
+            language_id,
             Some(speaker_id),
             tts_pad_id,
             tts_bos_id,
             tts_eos_id,
             codec_think_id,
-            codec_think_id,
+            codec_nothink_id,
             codec_think_bos_id,
             codec_think_eos_id,
             codec_pad_id,
@@ -1061,16 +1065,40 @@ impl TalkerModel {
         let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
         let mut logits = self.codec_head.forward(&last_hidden);
 
-        let mut scores = logits.to_vec_f32();
-        process_codec_logits(
-            &mut scores,
-            past_codes,
-            repetition_penalty,
-            self.codec_eos_id,
-        );
-        logits = Tensor::from_slice_f32(&scores)
-            .reshape(&logits.size())
+        // Apply repetition penalty to previously generated codes. This stays
+        // on the device: reading the logits back to the host would force a
+        // full pipeline sync every frame, on top of the one sampling needs.
+        // Only a small one-hot mask of the seen codes is uploaded.
+        if repetition_penalty != 1.0 && !past_codes.is_empty() {
+            let shape = logits.size();
+            let vocab_size = shape[shape.len() - 1] as usize;
+            let mut seen = vec![0.0f32; vocab_size];
+            for &code in past_codes {
+                if let Ok(idx) = usize::try_from(code) {
+                    if idx < vocab_size {
+                        seen[idx] = 1.0;
+                    }
+                }
+            }
+            let seen = Tensor::from_slice_f32(&seen)
+                .reshape(&shape)
+                .to_device(self.device);
+            // Penalize: divide positive logits, multiply negative logits.
+            let negative = logits.lt_tensor(&Tensor::zeros(&shape, logits.kind(), self.device));
+            let scale = Tensor::full(&shape, 1.0 / repetition_penalty, DType::Float32, self.device)
+                .masked_fill(&negative, repetition_penalty);
+            // Blend the scale in only where a code has already been used.
+            let blend = (scale + (-1.0)) * seen + 1.0;
+            logits = &logits * &blend;
+        }
+        // Upload only a mask; keep logits and repetition penalties on device.
+        let shape = logits.size();
+        let mut mask = vec![0.0f32; shape[shape.len() - 1] as usize];
+        process_codec_logits(&mut mask, past_codes, 1.0, self.codec_eos_id);
+        let mask = Tensor::from_slice_f32(&mask)
+            .reshape(&shape)
             .to_device(self.device);
+        logits = &logits + &mask;
 
         if temperature <= 0.0 {
             logits.argmax(-1, false).int64_value(&[0])
@@ -1239,12 +1267,42 @@ impl TalkerModel {
         eos_code: i64,
         tts_pad_embed: &Tensor,
         chunk_size: usize,
+        on_chunk: F,
+    ) -> Vec<Vec<i64>>
+    where
+        F: FnMut(&[Vec<i64>]) -> bool,
+    {
+        self.generate_codes_streaming_with_penalty(
+            input_embeddings,
+            max_codes,
+            temperature,
+            top_k,
+            eos_code,
+            tts_pad_embed,
+            chunk_size,
+            GenerationConfig::default().repetition_penalty,
+            on_chunk,
+        )
+    }
+
+    /// [`Self::generate_codes_streaming`] with the repetition penalty taken
+    /// from the model's `generation_config.json` instead of a fixed value.
+    #[allow(clippy::too_many_arguments)]
+    pub fn generate_codes_streaming_with_penalty<F>(
+        &self,
+        input_embeddings: &Tensor,
+        max_codes: i64,
+        temperature: f64,
+        top_k: i64,
+        eos_code: i64,
+        tts_pad_embed: &Tensor,
+        chunk_size: usize,
+        repetition_penalty: f64,
         mut on_chunk: F,
     ) -> Vec<Vec<i64>>
     where
         F: FnMut(&[Vec<i64>]) -> bool,
     {
-        let repetition_penalty = 1.05; // From generation_config.json
         let mut all_codes = Vec::new();
         let mut pending_codes = Vec::new();
         let mut past_code_0s: Vec<i64> = Vec::new();
@@ -1401,6 +1459,8 @@ pub struct TTSInference {
     vocoder: Option<Vocoder>,
     /// Model configuration
     config: Qwen3TTSConfig,
+    /// Sampling defaults from `generation_config.json`, when the model ships one.
+    generation_defaults: GenerationConfig,
     /// Device
     device: Device,
 }
@@ -1448,6 +1508,14 @@ impl TTSInference {
         // Load model config
         let config_path = model_path.join("config.json");
         let config = Qwen3TTSConfig::from_file(&config_path)?;
+
+        // Load generation defaults if the model ships them
+        let generation_config_path = model_path.join("generation_config.json");
+        let generation_defaults = if generation_config_path.exists() {
+            GenerationConfig::from_file(&generation_config_path)?
+        } else {
+            GenerationConfig::default()
+        };
 
         // Load weights
         let weights_path = model_path.join("model.safetensors");
@@ -1503,6 +1571,7 @@ impl TTSInference {
             talker,
             vocoder,
             config,
+            generation_defaults,
             device,
         })
     }
@@ -1627,11 +1696,12 @@ impl TTSInference {
             .unwrap_or(0) as i64;
 
         // Get language ID (dialect speakers swap in their dialect token)
-        let language_id = self.codec_language_id(language, speaker).unwrap_or(0);
+        let language_id = self.codec_language_id(language, speaker);
 
         // Get codec special token IDs from config
         let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
         let codec_think_id = self.config.talker_config.codec_think_id as i64;
+        let codec_nothink_id = self.config.talker_config.codec_nothink_id as i64;
         let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
         let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
         let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
@@ -1641,7 +1711,7 @@ impl TTSInference {
         let tts_eos_id = self.config.tts_eos_token_id as i64;
 
         println!(
-            "Speaker: {} (id={}), Language: {} (id={})",
+            "Speaker: {} (id={}), Language: {} (id={:?})",
             speaker, speaker_id, language, language_id
         );
         println!(
@@ -1697,6 +1767,7 @@ impl TTSInference {
             tts_bos_id,
             tts_eos_id,
             codec_think_id,
+            codec_nothink_id,
             codec_think_bos_id,
             codec_think_eos_id,
             codec_pad_id,
@@ -1814,20 +1885,30 @@ impl TTSInference {
         language: &str,
         instruct: &str,
     ) -> Result<InstructPrompt> {
-        // Get speaker ID
-        let speaker_id = self
-            .config
-            .talker_config
-            .spk_id
-            .as_ref()
-            .and_then(|map| map.get(&speaker.to_lowercase()))
-            .copied()
-            .unwrap_or(0) as i64;
-
-        // Auto omits the language token for both prompt variants, unless a
-        // dialect speaker supplies its dialect token.
-        let language_id = self.codec_language_id(language, speaker);
         let voice_design = self.config.tts_model_type.as_deref() == Some("voice_design");
+
+        // Get speaker ID. VoiceDesign has no predefined speakers; CustomVoice
+        // must name one the model knows, because codec token 0 is a real
+        // acoustic code, not a neutral fallback.
+        let speaker_id = if voice_design {
+            0
+        } else {
+            self.config
+                .talker_config
+                .spk_id
+                .as_ref()
+                .and_then(|map| map.get(&speaker.to_lowercase()))
+                .copied()
+                .map(|value| value as i64)
+                .ok_or_else(|| {
+                    Qwen3TTSError::Generation(format!(
+                        "Unknown speaker '{speaker}' for this model."
+                    ))
+                })?
+        };
+
+        // Auto omits the language token unless a dialect speaker supplies one.
+        let language_id = self.codec_language_id(language, speaker);
         let instruct = if voice_design {
             instruct
         } else {
@@ -1876,7 +1957,7 @@ impl TTSInference {
         let user_tokens = self.tokenize("user")?;
         let user_id = user_tokens.first().copied().unwrap_or(882) as i64;
 
-        // Build instruction prefix embeddings (text + codec_pad for each position)
+        // Build instruction prefix embeddings (projected text only)
         // The instruction is conditioning context, not synthesized speech
         let instruct_embeddings = if !instruct.is_empty() {
             // Tokenize instruction: <|im_start|>user\n{instruct}<|im_end|>\n
@@ -2019,7 +2100,7 @@ impl TTSInference {
         F: FnMut(&[f32], u32) -> bool,
     {
         let prompt = self.build_instruct_prompt(text, speaker, language, instruct)?;
-        let sample_rate = 24000u32;
+        let sample_rate = OUTPUT_SAMPLE_RATE;
 
         if !prompt.voice_design {
             println!(
@@ -2037,7 +2118,7 @@ impl TTSInference {
             .as_ref()
             .map(|vocoder| vocoder.streaming_state());
 
-        self.talker.generate_codes_streaming(
+        self.talker.generate_codes_streaming_with_penalty(
             &prompt.input_embeddings,
             max_codes,
             temperature,
@@ -2045,6 +2126,7 @@ impl TTSInference {
             prompt.codec_eos_id,
             &prompt.tts_pad_embed,
             chunk_size,
+            self.generation_defaults.repetition_penalty,
             |code_chunk| {
                 // generate_codes_streaming flushes its pending buffer after a
                 // stop without clearing it, so the final chunk can arrive twice.
@@ -2880,14 +2962,14 @@ impl TTSInference {
             max_codes,
             chunk_size.max(1)
         );
-        let sample_rate = 24000u32;
+        let sample_rate = OUTPUT_SAMPLE_RATE;
         let mut generated = 0usize;
         let mut should_continue = true;
         let mut vocoder_state = self
             .vocoder
             .as_ref()
             .map(|vocoder| vocoder.streaming_state());
-        self.talker.generate_codes_streaming(
+        self.talker.generate_codes_streaming_with_penalty(
             &input_embeddings,
             max_codes,
             temperature,
@@ -2895,6 +2977,7 @@ impl TTSInference {
             codec_eos_id,
             &tts_pad_embed,
             chunk_size,
+            self.generation_defaults.repetition_penalty,
             |code_chunk| {
                 if !should_continue || code_chunk.is_empty() {
                     return should_continue;

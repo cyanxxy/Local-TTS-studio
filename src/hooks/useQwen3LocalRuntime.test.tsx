@@ -40,7 +40,7 @@ function runtimeSettings() {
     instruct: "",
     temperature: 0.9,
     topK: 50,
-    maxNewTokens: 384,
+    maxNewTokens: 320,
     seed: null as number | null,
     referenceAudioName: "",
     referenceAudioDurationSec: null,

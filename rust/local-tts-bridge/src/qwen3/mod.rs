@@ -16,6 +16,7 @@ pub const UPSTREAM_REVISION: &str = "288a716ce38a91c826dd67968c75d1dd4b0f07bc";
 
 pub(super) use config::{
     DEFAULT_CUSTOM_VOICE_LANGUAGE, DEFAULT_CUSTOM_VOICE_SPEAKER, GenerationControls,
+    MAX_GENERATION_TOKENS,
 };
 pub(super) use model_files::ExpectedModelType;
 #[cfg(any(
