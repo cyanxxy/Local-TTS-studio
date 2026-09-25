@@ -11,7 +11,7 @@ import {
   X,
 } from "lucide-react";
 import type { PlaybackClock } from "../lib/playbackClock";
-import type { ReaderChapter, ReaderDocumentRecord } from "../lib/readerDocument";
+import { chapterAtOffset, type ReaderChapter, type ReaderDocumentRecord } from "../lib/readerDocument";
 import { findDocumentMatches } from "../lib/readerSearch";
 
 export type ReaderSidebarTab = "library" | "contents" | "search" | "bookmarks" | "notes";
@@ -69,6 +69,18 @@ const TABS: Array<{ key: ReaderSidebarTab; label: string; icon: typeof Library }
   { key: "notes", label: "Notes", icon: NotebookPen },
 ];
 
+/** Roughly 150 spoken words a minute at 1× — only for a "time left" estimate. */
+const SPOKEN_CHARS_PER_SECOND = 14;
+
+function formatListeningTimeLeft(remainingChars: number): string | null {
+  if (remainingChars <= 0) return null;
+  const minutes = Math.max(1, Math.round(remainingChars / SPOKEN_CHARS_PER_SECOND / 60));
+  if (minutes < 60) return `≈${minutes}m left`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `≈${hours}h ${rest}m left` : `≈${hours}h left`;
+}
+
 function formatRelativeTime(timestamp: number, now: number): string {
   const elapsed = Math.max(0, now - timestamp);
   if (elapsed < 60_000) return "Just now";
@@ -118,12 +130,16 @@ const DocumentCard = memo(function DocumentCard({
   onCancelDelete,
   onConfirmDelete,
 }: DocumentCardProps) {
+  const chapter = record.chapters.length > 1
+    ? chapterAtOffset(record.chapters, record.progress.textOffset)
+    : null;
+  const timeLeft = formatListeningTimeLeft(record.text.length - record.progress.textOffset);
   return (
     <div
       className={`group rounded-2xl border p-3 transition-all ${
         active
           ? "border-accent/30 bg-accent/[0.08] shadow-accent-sm"
-          : "border-white/45 bg-white/30 hover:bg-white/50"
+          : "border-border bg-text-primary/[0.03] hover:bg-text-primary/[0.07]"
       }`}
     >
       <button
@@ -145,7 +161,12 @@ const DocumentCard = memo(function DocumentCard({
         <div className="mt-2 h-1 overflow-hidden rounded-full bg-border">
           <div className="h-full rounded-full bg-accent" style={{ width: `${record.progress.percent}%` }} />
         </div>
-        <p className="mt-2 text-2xs text-text-muted">Opened {openedLabel}</p>
+        {chapter && (
+          <p className="mt-2 truncate text-2xs font-medium text-text-secondary">{chapter.title}</p>
+        )}
+        <p className={`${chapter ? "mt-0.5" : "mt-2"} text-2xs text-text-muted`}>
+          {[timeLeft, `Opened ${openedLabel}`].filter(Boolean).join(" · ")}
+        </p>
       </button>
       {confirmingDelete ? (
         <div className="mt-2 flex items-center gap-2 text-2xs">
@@ -170,7 +191,7 @@ const DocumentCard = memo(function DocumentCard({
           type="button"
           aria-label={`Delete ${record.title}`}
           onClick={() => onRequestDelete(record.id)}
-          className="mt-2 flex items-center gap-1 text-2xs text-text-muted opacity-0 transition-opacity hover:text-danger group-hover:opacity-100 focus-visible:opacity-100"
+          className="mt-2 flex items-center gap-1 text-2xs text-text-muted opacity-0 transition-opacity hover:text-danger group-hover:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100"
         >
           <Trash2 size={11} />
           Delete
@@ -467,7 +488,7 @@ export function ReaderLibrarySidebar({
             type="button"
             onClick={handleClose}
             aria-label="Close Reader library"
-            className="flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-white/55 hover:text-text-primary active:scale-[0.98]"
+            className="flex h-9 w-9 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary active:scale-[0.98]"
           >
             <X size={17} />
           </button>
@@ -495,7 +516,7 @@ export function ReaderLibrarySidebar({
                 className={`flex min-w-0 flex-col items-center gap-1 rounded-xl px-1 py-2 text-2xs font-medium transition-all active:scale-[0.98] ${
                   selected
                     ? "bg-accent-light text-accent shadow-glass-sm"
-                    : "text-text-muted hover:bg-white/45 hover:text-text-secondary"
+                    : "text-text-muted hover:bg-text-primary/[0.07] hover:text-text-secondary"
                 }`}
               >
                 <Icon size={14} />
@@ -526,7 +547,7 @@ export function ReaderLibrarySidebar({
               <button
                 type="button"
                 onClick={onNewDocument}
-                className="flex w-full items-center justify-center gap-2 rounded-xl border border-accent/25 bg-accent-light px-3 py-2.5 text-sm font-semibold text-accent transition-all hover:-translate-y-px active:translate-y-0 active:scale-[0.98]"
+                className="flex w-full items-center justify-center gap-2 rounded-xl border border-accent/25 bg-accent-light px-3 py-2.5 text-sm font-semibold text-accent transition-all active:scale-[0.98]"
               >
                 <FilePlus2 size={15} />
                 New document
@@ -535,7 +556,7 @@ export function ReaderLibrarySidebar({
               {loading ? (
                 <div className="space-y-2" aria-label="Loading documents">
                   {[0, 1, 2].map((item) => (
-                    <div key={item} className="h-20 animate-pulse rounded-2xl bg-white/35" />
+                    <div key={item} className="h-20 animate-pulse rounded-2xl bg-text-primary/[0.03]" />
                   ))}
                 </div>
               ) : documents.length === 0 ? (
@@ -567,29 +588,29 @@ export function ReaderLibrarySidebar({
           {tab === "contents" && activeDocument && (
             <div>
               <div className="mb-4 space-y-2">
-                <label className="block text-2xs font-semibold uppercase tracking-widest text-text-muted">
+                <label className="block text-xs font-semibold text-text-secondary">
                   Title
                   <input
                     value={titleDraft ?? activeTitle}
                     onChange={(event) => setTitleDraft(event.target.value)}
                     onBlur={commitTitle}
-                    className="mt-1.5 w-full rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm normal-case tracking-normal text-text-primary outline-none focus:border-accent/40"
+                    className="mt-1.5 w-full rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2 text-sm normal-case tracking-normal text-text-primary outline-none focus:border-accent/40"
                   />
                 </label>
-                <label className="block text-2xs font-semibold uppercase tracking-widest text-text-muted">
+                <label className="block text-xs font-semibold text-text-secondary">
                   Author
                   <input
                     value={authorDraft ?? activeAuthor}
                     placeholder="Unknown author"
                     onChange={(event) => setAuthorDraft(event.target.value)}
                     onBlur={commitAuthor}
-                    className="mt-1.5 w-full rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm normal-case tracking-normal text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
+                    className="mt-1.5 w-full rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2 text-sm normal-case tracking-normal text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
                   />
                 </label>
               </div>
-              <p className="mb-2 text-2xs font-semibold uppercase tracking-widest text-text-muted">Table of contents</p>
+              <p className="mb-2 text-xs font-semibold text-text-secondary">Table of contents</p>
               {activeDocument.chapters.length > 8 && (
-                <label className="mb-2 flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-text-muted focus-within:border-accent/40">
+                <label className="mb-2 flex items-center gap-2 rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2 text-text-muted focus-within:border-accent/40">
                   <Search size={13} aria-hidden />
                   <span className="sr-only">Search chapters</span>
                   <input
@@ -611,7 +632,7 @@ export function ReaderLibrarySidebar({
                     className={`flex w-full items-center gap-2 rounded-xl py-2 pr-2 text-left text-sm transition-all active:scale-[0.99] ${
                       chapter.id === currentChapter?.id
                         ? "bg-accent-light font-semibold text-accent"
-                        : "text-text-secondary hover:bg-white/45 hover:text-text-primary"
+                        : "text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
                     }`}
                     style={{ paddingLeft: `${8 + Math.min(3, chapter.level - 1) * 12}px` }}
                   >
@@ -630,7 +651,7 @@ export function ReaderLibrarySidebar({
 
           {tab === "search" && activeDocument && (
             <div className="space-y-3">
-              <label className="flex items-center gap-2 rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-text-muted focus-within:border-accent/40">
+              <label className="flex items-center gap-2 rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2 text-text-muted focus-within:border-accent/40">
                 <Search size={13} aria-hidden />
                 <span className="sr-only">Search this document</span>
                 <input
@@ -661,7 +682,7 @@ export function ReaderLibrarySidebar({
                         key={result.offset}
                         type="button"
                         onClick={() => onJumpToOffset(result.offset)}
-                        className="w-full rounded-xl px-3 py-2 text-left transition-all hover:bg-white/45 active:scale-[0.99]"
+                        className="w-full rounded-xl px-3 py-2 text-left transition-all hover:bg-text-primary/[0.07] active:scale-[0.99]"
                       >
                         {chapter && (
                           <p className="truncate text-2xs font-medium text-text-muted">{chapter.title}</p>
@@ -717,7 +738,7 @@ export function ReaderLibrarySidebar({
                   ? Math.round((bookmark.textOffset / activeDocument.text.length) * 100)
                   : 0;
                 return (
-                  <div key={bookmark.id} className="rounded-2xl border border-white/45 bg-white/30 p-3">
+                  <div key={bookmark.id} className="rounded-2xl border border-border bg-text-primary/[0.03] p-3">
                     <button
                       type="button"
                       onClick={() => onJumpToOffset(bookmark.textOffset, bookmark.positionSec)}
@@ -749,7 +770,7 @@ export function ReaderLibrarySidebar({
 
           {tab === "notes" && activeDocument && (
             <div className="space-y-3">
-              <label className="block text-2xs font-semibold uppercase tracking-widest text-text-muted">
+              <label className="block text-xs font-semibold text-text-secondary">
                 {selectedPassage ? "New note for selected passage" : "New note at current position"}
                 {selectedPassage && (
                   <span className="mt-1.5 block rounded-xl border-l-2 border-accent/40 bg-accent/[0.06] px-3 py-2 text-xs font-normal normal-case leading-5 tracking-normal text-text-secondary">
@@ -760,7 +781,7 @@ export function ReaderLibrarySidebar({
                   value={noteText}
                   onChange={(event) => setNoteText(event.target.value)}
                   placeholder="Capture a thought about this passage…"
-                  className="mt-1.5 min-h-24 w-full resize-y rounded-xl border border-white/50 bg-white/40 px-3 py-2 text-sm normal-case tracking-normal text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
+                  className="mt-1.5 min-h-24 w-full resize-y rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2 text-sm normal-case tracking-normal text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
                 />
               </label>
               <button
@@ -784,7 +805,7 @@ export function ReaderLibrarySidebar({
                   Notes stay attached to this document.
                 </p>
               ) : activeDocument.notes.map((note) => (
-                <div key={note.id} className="rounded-2xl border border-white/45 bg-white/30 p-3">
+                <div key={note.id} className="rounded-2xl border border-border bg-text-primary/[0.03] p-3">
                   <button
                     type="button"
                     onClick={() => onJumpToOffset(note.textOffset)}
@@ -807,7 +828,7 @@ export function ReaderLibrarySidebar({
                       const value = event.target.value.trim();
                       if (value !== note.text) onUpdateNote(note.id, value);
                     }}
-                    className="min-h-16 w-full resize-y rounded-lg border border-transparent bg-transparent text-sm leading-5 text-text-primary outline-none focus:border-accent/30 focus:bg-white/30"
+                    className="min-h-16 w-full resize-y rounded-lg border border-transparent bg-transparent text-sm leading-5 text-text-primary outline-none focus:border-accent/30 focus:bg-text-primary/[0.05]"
                   />
                   <button
                     type="button"

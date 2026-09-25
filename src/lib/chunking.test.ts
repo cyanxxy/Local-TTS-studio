@@ -11,6 +11,26 @@ import {
   type TextChunk,
 } from "./chunking";
 
+describe("Kokoro chunk boundaries", () => {
+  const book = "Chapter 1: The Stairs\n\nThe keeper climbed the stairs. He counted each step, slowly.\nThe sea was grey.";
+
+  it("never merges across a line break, so headings get their own pause", () => {
+    const chunks = chunkTextForModelDetailed(book, "kokoro", { runtime: { backend: "webgpu" } });
+    expect(chunks.map((chunk) => [chunk.text, chunk.pauseKind])).toEqual([
+      ["Chapter 1: The Stairs", "paragraph"],
+      ["The keeper climbed the stairs. He counted each step, slowly.", "sentence"],
+      ["The sea was grey.", "none"],
+    ]);
+    expect(chunks[0].pauseAfterSec).toBeGreaterThan(chunks[1].pauseAfterSec);
+    for (const chunk of chunks) expect(book.slice(chunk.start, chunk.end)).toBe(chunk.text);
+  });
+
+  it("still merges sentences within one paragraph", () => {
+    const units = buildKokoroInferenceUnits("One. Two. Three.\nFour.", 520);
+    expect(units.map((unit) => unit.text)).toEqual(["One. Two. Three.", "Four."]);
+  });
+});
+
 describe("chunkWithConstraintsDetailed", () => {
   it("returns stable offsets that map exactly to source text slices", () => {
     const text = [

@@ -40,8 +40,32 @@ The local inference patch now applies Qwen's reserved-code mask and minimum
 EOS length, applies repetition penalties once per distinct token, and uses the
 upstream language/speaker prefix for Auto and explicit languages. Instruction
 prefixes use projected text without codec padding; 0.6B CustomVoice ignores
-instructions as the official wrapper does. Regression tests cover codec logits,
-prefix token layouts, and the small-model instruction capability.
+instructions as the official wrapper does. Speakers flagged in the config's
+`spk_is_dialect` (Dylan and Eric) use their dialect's codec language token
+when the request is Chinese or Auto, matching upstream; an unknown dialect
+falls back to the requested language. Regression tests cover codec logits,
+prefix token layouts, the dialect override, and the small-model instruction
+capability.
+
+## Seeded sampling
+
+`tensor::set_sampling_seed` makes sampling reproducible. On MLX, which upstream
+seeds from the clock on every categorical draw (its CLI accepts `--seed` but
+ignores it), a seed turns the per-draw PRNG key into the seed plus a draw
+counter; `None` restores clock seeding. On LibTorch it calls
+`tch::manual_seed`. The bridge reseeds before every text unit when a request
+carries a seed.
+
+## Regenerating the patch
+
+`rust/qwen3_tts_rs` (git-ignored) is a checkout of the pinned upstream
+revision; use its `HEAD`, not its working tree, which may hold local
+experiments. Export it with `git archive HEAD` into a temporary directory,
+commit that as a baseline in a throwaway repository, copy in the patched
+vendor files, and take `git diff` of each patched path. Keep the file order of
+the existing patch, and check the result with
+`npx vitest run electron/qwen3Vendor.test.ts`, which reverse- and
+forward-applies it.
 
 ## Re-vendor checklist
 

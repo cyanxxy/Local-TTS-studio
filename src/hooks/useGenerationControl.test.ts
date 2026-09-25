@@ -140,6 +140,33 @@ describe("useGenerationControl", () => {
     expect(hardRestartModel).toHaveBeenCalledWith("kokoro");
   });
 
+  it("stops playback without reloading the model when nothing is generating", () => {
+    const player = createPlayerMock();
+    const tts = createTtsMock({ isGenerating: false });
+    const hardRestartModel = vi.fn();
+    const { result } = renderHook(() =>
+      useGenerationControl({
+        activeModel: "kokoro",
+        canGenerate: true,
+        generationSettings: BASE_SETTINGS,
+        kokoroWorker: { current: null },
+        supertonicWorker: { current: null },
+        hardRestartModel,
+        player,
+        setShowPlayer: vi.fn(),
+        text: "Hello world",
+        tts,
+        voice: "af_heart",
+      }),
+    );
+
+    act(() => result.current.handleStop());
+
+    expect(player.stopAll).toHaveBeenCalledOnce();
+    expect(tts.cancel).not.toHaveBeenCalled();
+    expect(hardRestartModel).not.toHaveBeenCalled();
+  });
+
   it("retakes a segment and replaces it with merged audio on completion", () => {
     const worker = new MockWorker();
     const segment = makeSegment({ pauseAfterSec: 0.5 });

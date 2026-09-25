@@ -48,6 +48,25 @@ pub(crate) fn codec_prompt_prefix(
     tokens
 }
 
+/// Resolve the codec language token the way upstream Qwen does. A speaker
+/// flagged with a dialect in `spk_is_dialect` (Dylan → `beijing_dialect`, Eric
+/// → `sichuan_dialect`) speaks that dialect's token whenever the request is
+/// Chinese or Auto; any other language keeps its own token. A dialect with no
+/// entry in `codec_language_id` falls back to the requested language.
+pub(crate) fn codec_language_id(
+    language: &str,
+    speaker_dialect: Option<&str>,
+    language_ids: impl Fn(&str) -> Option<i64>,
+) -> Option<i64> {
+    let language = language.to_lowercase();
+    let dialect_id = if matches!(language.as_str(), "chinese" | "auto") {
+        speaker_dialect.and_then(&language_ids)
+    } else {
+        None
+    };
+    dialect_id.or_else(|| language_ids(&language))
+}
+
 pub(crate) fn custom_voice_instruction<'a>(model_size: Option<&str>, instruct: &'a str) -> &'a str {
     if model_size == Some("0b6") {
         ""
@@ -89,6 +108,36 @@ mod tests {
         assert_eq!(scores[3071], f32::NEG_INFINITY);
         process_codec_logits(&mut scores, &[], 1.0, 2150);
         assert_eq!(scores[2150], f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn dialect_speakers_use_their_dialect_token_for_chinese_and_auto() {
+        let ids = |language: &str| match language {
+            "chinese" => Some(2055),
+            "english" => Some(2050),
+            "beijing_dialect" => Some(2074),
+            _ => None,
+        };
+        assert_eq!(
+            codec_language_id("Chinese", Some("beijing_dialect"), ids),
+            Some(2074)
+        );
+        assert_eq!(
+            codec_language_id("auto", Some("beijing_dialect"), ids),
+            Some(2074)
+        );
+        assert_eq!(
+            codec_language_id("English", Some("beijing_dialect"), ids),
+            Some(2050)
+        );
+        assert_eq!(codec_language_id("Chinese", None, ids), Some(2055));
+        assert_eq!(codec_language_id("auto", None, ids), None);
+        // An unknown dialect keeps the requested language rather than dropping it.
+        assert_eq!(
+            codec_language_id("chinese", Some("wu_dialect"), ids),
+            Some(2055)
+        );
+        assert_eq!(codec_language_id("auto", Some("wu_dialect"), ids), None);
     }
 
     #[test]

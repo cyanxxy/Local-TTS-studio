@@ -43,6 +43,14 @@ function exposeKokoroWasmThreadConfig(code: string): string {
   );
 }
 
+function transformKokoroBrowserBuild(code: string): string {
+  return exposeKokoroWasmThreadConfig(suppressKokoroBundledJsepWasmWarning(code));
+}
+
+function resolveKokoroBrowserBuild(rootDir: string): string {
+  return resolve(rootDir, `.${KOKORO_BROWSER_BUILD_SUFFIX}`);
+}
+
 function resolveKokoroOnnxRuntimeAsset(rootDir: string, filename: string): string {
   for (const runtimeDist of KOKORO_ONNX_RUNTIME_DIST_CANDIDATES) {
     const assetPath = resolve(rootDir, runtimeDist, filename);
@@ -71,9 +79,7 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
     transform(code, id) {
       if (!isKokoroBrowserBuild(id)) return null;
 
-      const transformed = exposeKokoroWasmThreadConfig(
-        suppressKokoroBundledJsepWasmWarning(code),
-      );
+      const transformed = transformKokoroBrowserBuild(code);
       return transformed === code ? null : { code: transformed, map: null };
     },
     load(id) {
@@ -89,17 +95,32 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
           source: readFileSync(mjsPath),
         });
 
+        // Shipped byte-for-byte (after the two source fixes above) instead of
+        // being bundled: Rolldown's rewrite of the embedded espeak-ng runtime
+        // leaves it with an empty voice list, so every phonemization fails
+        // with `Invalid language identifier: "en-us"`.
+        const kokoroReferenceId = this.emitFile({
+          type: "asset",
+          name: "kokoro.web.js",
+          source: transformKokoroBrowserBuild(readFileSync(resolveKokoroBrowserBuild(rootDir), "utf8")),
+        });
+
         return [
           `import wasmUrl from ${JSON.stringify(`${wasmPath}?url`)};`,
           `const mjsUrl = import.meta.ROLLUP_FILE_URL_${mjsReferenceId};`,
           "export const KOKORO_ONNX_JSEP_ASSETS = { mjs: mjsUrl, wasm: wasmUrl };",
+          `export const KOKORO_WEB_MODULE_URL = import.meta.ROLLUP_FILE_URL_${kokoroReferenceId};`,
         ].join("\n");
       }
 
+      // Dev serves the file as its own module through `transform` above, which
+      // keeps it out of dependency pre-bundling for the same reason.
       return [
         `import mjsUrl from ${JSON.stringify(`${mjsPath}?url`)};`,
         `import wasmUrl from ${JSON.stringify(`${wasmPath}?url`)};`,
+        `import kokoroUrl from ${JSON.stringify(`${resolveKokoroBrowserBuild(rootDir)}?url`)};`,
         "export const KOKORO_ONNX_JSEP_ASSETS = { mjs: mjsUrl, wasm: wasmUrl };",
+        "export const KOKORO_WEB_MODULE_URL = kokoroUrl;",
       ].join("\n");
     },
   };

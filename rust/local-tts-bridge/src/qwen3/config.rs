@@ -20,8 +20,11 @@ pub const SPEAKERS: &[&str] = &[
 pub const DEFAULT_CUSTOM_VOICE_SPEAKER: &str = "Aiden";
 pub const DEFAULT_CUSTOM_VOICE_LANGUAGE: &str = "English";
 pub const MAX_GENERATION_TOKENS: i64 = 4_096;
-// At 12 codec frames/second this allows 32 seconds for each <=200-character
-// unit while preventing a single unit's KV cache from exhausting unified RAM.
+// At 12.5 codec frames/second this allows about 30 seconds for each text unit
+// while preventing a single unit's KV cache from exhausting unified RAM. A
+// 200-character Latin unit speaks in well under that; CJK text speaks roughly
+// twice as slowly per character, so `split_text_units` weighs CJK characters
+// double (at most ~100 per unit, ~25 s) rather than this cap being raised.
 pub const MAX_TEXT_UNIT_GENERATION_TOKENS: i64 = 384;
 
 const MIN_TEXT_GENERATION_TOKENS: i64 = 128;
@@ -32,6 +35,10 @@ pub struct GenerationControls {
     pub temperature: f64,
     pub top_k: i64,
     pub max_new_tokens: i64,
+    /// Reseeds sampling before every text unit, so each unit (and a repeat of
+    /// the same request) starts from the same random state. `None` samples
+    /// nondeterministically.
+    pub seed: Option<u64>,
 }
 
 impl GenerationControls {
@@ -40,7 +47,12 @@ impl GenerationControls {
             temperature: temperature.clamp(0.2, 2.0),
             top_k: top_k.clamp(0, 1_000),
             max_new_tokens: max_new_tokens.clamp(64, MAX_GENERATION_TOKENS),
+            seed: None,
         }
+    }
+
+    pub fn with_seed(self, seed: Option<u64>) -> Self {
+        Self { seed, ..self }
     }
 
     pub fn effective_for_text(self, text: &str, language: &str, hard_limit: i64) -> Self {
@@ -81,7 +93,7 @@ fn is_cjk_language(language: &str) -> bool {
     )
 }
 
-fn is_cjk(character: char) -> bool {
+pub(super) fn is_cjk(character: char) -> bool {
     matches!(
         character as u32,
         0x2E80..=0x2FFF
@@ -125,6 +137,18 @@ mod tests {
         assert_eq!(controls.temperature, 2.0);
         assert_eq!(controls.top_k, 1_000);
         assert_eq!(controls.max_new_tokens, MAX_GENERATION_TOKENS);
+    }
+
+    #[test]
+    fn a_seed_survives_the_per_unit_budget() {
+        let controls = GenerationControls::new(0.9, 50, 3_000).with_seed(Some(7));
+        assert_eq!(
+            controls
+                .effective_for_text("Hello.", "english", MAX_TEXT_UNIT_GENERATION_TOKENS)
+                .seed,
+            Some(7)
+        );
+        assert_eq!(GenerationControls::default().seed, None);
     }
 
     #[test]

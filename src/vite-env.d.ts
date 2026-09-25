@@ -5,4 +5,6 @@ declare module "virtual:kokoro-onnx-wasm-assets" {
     mjs: string;
     wasm: string;
   };
+  /** kokoro.web.js, served unbundled so its espeak-ng runtime stays intact. */
+  export const KOKORO_WEB_MODULE_URL: string;
 }

@@ -1,9 +1,12 @@
 export type ReaderColumnWidth = "narrow" | "comfortable" | "wide";
+/** Page colour of the reading panel, independent of the app's light/dark theme. */
+export type ReaderTone = "paper" | "sepia" | "night";
 
 export interface ReaderViewPreferences {
   fontSize: number;
   lineHeight: number;
   columnWidth: ReaderColumnWidth;
+  tone: ReaderTone;
   focusMode: boolean;
   autoAdvance: boolean;
 }
@@ -12,6 +15,7 @@ export const DEFAULT_READER_VIEW_PREFERENCES: ReaderViewPreferences = {
   fontSize: 19,
   lineHeight: 1.85,
   columnWidth: "comfortable",
+  tone: "paper",
   focusMode: false,
   autoAdvance: true,
 };
@@ -20,6 +24,10 @@ const STORAGE_KEY = "open-tts-reader-view-v1";
 
 function clamp(value: number, minimum: number, maximum: number): number {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function isReaderTone(value: unknown): value is ReaderTone {
+  return value === "paper" || value === "sepia" || value === "night";
 }
 
 function isColumnWidth(value: unknown): value is ReaderColumnWidth {
@@ -39,6 +47,9 @@ export function normalizeReaderViewPreferences(
     columnWidth: isColumnWidth(preferences?.columnWidth)
       ? preferences.columnWidth
       : DEFAULT_READER_VIEW_PREFERENCES.columnWidth,
+    tone: isReaderTone(preferences?.tone)
+      ? preferences.tone
+      : DEFAULT_READER_VIEW_PREFERENCES.tone,
     focusMode: typeof preferences?.focusMode === "boolean"
       ? preferences.focusMode
       : DEFAULT_READER_VIEW_PREFERENCES.focusMode,

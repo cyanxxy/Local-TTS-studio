@@ -1,6 +1,6 @@
 import ortAsyncifyMjsUrl from "onnxruntime-web/ort-wasm-simd-threaded.asyncify.mjs?url";
 import ortAsyncifyWasmUrl from "onnxruntime-web/ort-wasm-simd-threaded.asyncify.wasm?url";
-import { KOKORO_ONNX_JSEP_ASSETS } from "virtual:kokoro-onnx-wasm-assets";
+import { KOKORO_ONNX_JSEP_ASSETS, KOKORO_WEB_MODULE_URL } from "virtual:kokoro-onnx-wasm-assets";
 import type { KokoroOnnxWasmAssets, TransformersOnnxWasmAssets } from "./onnxRuntime";
 
 export const TRANSFORMERS_ONNX_WASM_ASSETS: TransformersOnnxWasmAssets = {
@@ -13,5 +13,7 @@ export const TRANSFORMERS_ONNX_WASM_ASSETS: TransformersOnnxWasmAssets = {
 export const KOKORO_ONNX_WASM_ASSETS: KokoroOnnxWasmAssets = {
   jsep: KOKORO_ONNX_JSEP_ASSETS,
 };
+
+export { KOKORO_WEB_MODULE_URL };
 
 export const ONNX_WASM_ASSETS = TRANSFORMERS_ONNX_WASM_ASSETS;

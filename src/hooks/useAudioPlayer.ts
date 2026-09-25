@@ -424,36 +424,45 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     interruptedRef.current = false;
   }, [failPlaybackStart, findChunkIndexAtTime, getContext, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
 
+  /**
+   * One step of playback: top up the schedule, publish the position, and
+   * notice the end. Returns whether playback is still running. Shared by the
+   * animation-frame loop and the background timer, so the position, saved
+   * progress, and auto-advance keep working while the window is hidden and
+   * animation frames stop.
+   */
+  const advancePlayback = useCallback((): boolean => {
+    const ctx = audioContextRef.current;
+    if (!isPlayingRef.current || !ctx) return false;
+    scheduleBufferedChunks(ctx);
+    const clamped = syncCurrentTime(getLiveTimelineTime());
+
+    if (
+      clamped >= totalDurationRef.current
+      && totalDurationRef.current > 0
+      && allChunksRef.current.length > 0
+    ) {
+      if (!streamCompleteRef.current) {
+        // Out of generated audio but the stream is still open: hold at the
+        // edge and pick up again when the next chunk arrives.
+        timelineAnchorRef.current = totalDurationRef.current;
+        contextAnchorRef.current = ctx.currentTime;
+        syncCurrentTime(totalDurationRef.current);
+        return true;
+      }
+
+      setIsPlaying(false);
+      isPlayingRef.current = false;
+      syncCurrentTime(totalDurationRef.current);
+      stopAllNodes();
+      return false;
+    }
+    return true;
+  }, [getLiveTimelineTime, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
+
   useEffect(() => {
     const update = () => {
-      if (isPlayingRef.current && audioContextRef.current) {
-        scheduleBufferedChunks(audioContextRef.current);
-        const live = getLiveTimelineTime();
-        const clamped = syncCurrentTime(live);
-
-        if (
-          clamped >= totalDurationRef.current
-          && totalDurationRef.current > 0
-          && allChunksRef.current.length > 0
-        ) {
-          if (!streamCompleteRef.current) {
-            timelineAnchorRef.current = totalDurationRef.current;
-            contextAnchorRef.current = audioContextRef.current.currentTime;
-            syncCurrentTime(totalDurationRef.current);
-            animFrameRef.current = requestAnimationFrame(update);
-            return;
-          }
-
-          setIsPlaying(false);
-          isPlayingRef.current = false;
-          syncCurrentTime(totalDurationRef.current);
-          stopAllNodes();
-          // Stop the loop — playback ended.
-          return;
-        }
-        // Continue updating while playing.
-        animFrameRef.current = requestAnimationFrame(update);
-      }
+      if (advancePlayback()) animFrameRef.current = requestAnimationFrame(update);
       // Not playing — don't reschedule. The loop restarts when playback begins.
     };
 
@@ -462,7 +471,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       animFrameRef.current = requestAnimationFrame(update);
     }
     return () => cancelAnimationFrame(animFrameRef.current);
-  }, [isPlaying, getLiveTimelineTime, scheduleBufferedChunks, stopAllNodes, syncCurrentTime]);
+  }, [isPlaying, advancePlayback]);
 
   // A second, timer-driven top-up of the schedule. The animation-frame loop
   // above is the primary one, but it stops entirely in a hidden browser tab —
@@ -473,12 +482,34 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   // reads from the AudioContext, so the position stays accurate either way.
   useEffect(() => {
     if (!isPlaying) return;
-    const timer = window.setInterval(() => {
-      const ctx = audioContextRef.current;
-      if (ctx && isPlayingRef.current) scheduleBufferedChunks(ctx);
-    }, SCHEDULE_TOPUP_INTERVAL_MS);
+    const timer = window.setInterval(advancePlayback, SCHEDULE_TOPUP_INTERVAL_MS);
     return () => window.clearInterval(timer);
-  }, [isPlaying, scheduleBufferedChunks]);
+  }, [isPlaying, advancePlayback]);
+
+  // The system can suspend or interrupt an AudioContext on its own (an audio
+  // device change, another app taking the output). Left alone, playback froze
+  // while the player still claimed to be playing. Try to carry on, and if the
+  // context will not resume, show the player as paused so Play recovers it.
+  useEffect(() => {
+    if (!isPlaying) return;
+    const ctx = audioContextRef.current;
+    if (!ctx) return;
+    const handleStateChange = () => {
+      if (!isPlayingRef.current || ctx.state === "running" || ctx.state === "closed") return;
+      const operation = playbackOperationRef.current;
+      ctx.resume().catch(() => {
+        if (operation !== playbackOperationRef.current || !isPlayingRef.current) return;
+        const snapshot = syncCurrentTime(getLiveTimelineTime());
+        timelineAnchorRef.current = snapshot;
+        contextAnchorRef.current = ctx.currentTime;
+        autoPlayOnChunkRef.current = false;
+        setIsPlaying(false);
+        isPlayingRef.current = false;
+      });
+    };
+    ctx.addEventListener("statechange", handleStateChange);
+    return () => ctx.removeEventListener("statechange", handleStateChange);
+  }, [getLiveTimelineTime, isPlaying, syncCurrentTime]);
 
   const scheduleChunk = useCallback(async (chunk: AudioChunkData) => {
     const ctx = getContext();

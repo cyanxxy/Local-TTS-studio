@@ -180,7 +180,7 @@ export function AppSettingsDialog({
 
   return (
     <div
-      className="app-settings-overlay no-drag fixed inset-0 z-[100] flex items-center justify-center bg-black/25 p-3 backdrop-blur-sm sm:p-6"
+      className="app-settings-overlay no-drag fixed inset-0 z-[100] flex items-center justify-center bg-black/25 p-3 sm:p-6"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -204,14 +204,14 @@ export function AppSettingsDialog({
             <button
               type="button"
               onClick={() => setSection("appearance")}
-              className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-base font-medium transition-colors ${section === "appearance" ? "bg-accent-light text-accent" : "text-text-secondary hover:bg-white/45"}`}
+              className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-base font-medium transition-colors ${section === "appearance" ? "bg-accent-light text-accent" : "text-text-secondary hover:bg-text-primary/[0.07]"}`}
             >
               <Palette size={15} /> Appearance
             </button>
             <button
               type="button"
               onClick={() => setSection("shortcuts")}
-              className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-base font-medium transition-colors ${section === "shortcuts" ? "bg-accent-light text-accent" : "text-text-secondary hover:bg-white/45"}`}
+              className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-base font-medium transition-colors ${section === "shortcuts" ? "bg-accent-light text-accent" : "text-text-secondary hover:bg-text-primary/[0.07]"}`}
             >
               <Keyboard size={15} /> Shortcuts
             </button>
@@ -219,7 +219,7 @@ export function AppSettingsDialog({
               <button
                 type="button"
                 onClick={() => setSection("models")}
-                className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-base font-medium transition-colors ${section === "models" ? "bg-accent-light text-accent" : "text-text-secondary hover:bg-white/45"}`}
+                className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-base font-medium transition-colors ${section === "models" ? "bg-accent-light text-accent" : "text-text-secondary hover:bg-text-primary/[0.07]"}`}
               >
                 <Sparkles size={15} /> Optional models
               </button>
@@ -236,7 +236,7 @@ export function AppSettingsDialog({
               type="button"
               onClick={onClose}
               aria-label="Close settings"
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-muted transition-colors hover:bg-white/50 hover:text-text-primary"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary"
             >
               <X size={18} />
             </button>
@@ -272,7 +272,7 @@ export function AppSettingsDialog({
             {section === "appearance" ? (
               <div className="space-y-7">
                 <section aria-labelledby={`${titleId}-theme`}>
-                  <h4 id={`${titleId}-theme`} className="text-xs font-semibold uppercase tracking-widest text-text-muted">Color theme</h4>
+                  <h4 id={`${titleId}-theme`} className="text-sm font-semibold text-text-secondary">Color theme</h4>
                   <div className="mt-3 grid grid-cols-3 gap-2">
                     {THEMES.map(({ value, label, icon: Icon }) => (
                       <button
@@ -290,7 +290,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-accent`}>
-                  <h4 id={`${titleId}-accent`} className="text-xs font-semibold uppercase tracking-widest text-text-muted">Accent color</h4>
+                  <h4 id={`${titleId}-accent`} className="text-sm font-semibold text-text-secondary">Accent color</h4>
                   <div className="mt-3 flex flex-wrap gap-3">
                     {ACCENTS.map(({ value, label, color }) => (
                       <button
@@ -309,7 +309,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-size`}>
-                  <h4 id={`${titleId}-size`} className="text-xs font-semibold uppercase tracking-widest text-text-muted">Interface size</h4>
+                  <h4 id={`${titleId}-size`} className="text-sm font-semibold text-text-secondary">Interface size</h4>
                   <div className="mt-3 grid grid-cols-3 gap-1 rounded-xl bg-surface/70 p-1">
                     {INTERFACE_SIZES.map(({ value, label }) => (
                       <button
@@ -326,7 +326,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-typography`}>
-                  <h4 id={`${titleId}-typography`} className="text-xs font-semibold uppercase tracking-widest text-text-muted">Typography</h4>
+                  <h4 id={`${titleId}-typography`} className="text-sm font-semibold text-text-secondary">Typography</h4>
 
                   <div className="mt-3">
                     <div className="flex items-baseline justify-between gap-3">
@@ -374,7 +374,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-effects`}>
-                  <h4 id={`${titleId}-effects`} className="mb-3 text-xs font-semibold uppercase tracking-widest text-text-muted">Visual effects</h4>
+                  <h4 id={`${titleId}-effects`} className="mb-3 text-sm font-semibold text-text-secondary">Visual effects</h4>
                   <div className="divide-y divide-border/70">
                     <SettingsCheckbox
                       checked={preferences.reduceTransparency}
@@ -396,7 +396,7 @@ export function AppSettingsDialog({
                 <p className="max-w-xl text-sm leading-5 text-text-muted">
                   Shortcuts work while Open TTS is active. macOS uses Command and Option; Windows and Linux use Ctrl and Alt.
                 </p>
-                <div className="mt-5 grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-3 border-b border-border/70 pb-2 text-2xs font-semibold uppercase tracking-widest text-text-muted sm:gap-x-5">
+                <div className="mt-5 grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-3 border-b border-border/70 pb-2 text-xs font-semibold text-text-secondary sm:gap-x-5">
                   <span>Action</span>
                   <span className="w-[7.5rem] text-right">macOS</span>
                   <span className="w-[7.5rem] text-right">Windows</span>
@@ -404,7 +404,7 @@ export function AppSettingsDialog({
                 <div className="divide-y divide-border/70">
                   {APP_SHORTCUT_GROUPS.map((group) => (
                     <section key={group.label} aria-labelledby={`${titleId}-shortcut-${group.label.toLowerCase()}`} className="py-4 first:pt-3">
-                      <h4 id={`${titleId}-shortcut-${group.label.toLowerCase()}`} className="mb-2 text-xs font-semibold uppercase tracking-widest text-text-muted">
+                      <h4 id={`${titleId}-shortcut-${group.label.toLowerCase()}`} className="mb-2 text-sm font-semibold text-text-secondary">
                         {group.label}
                       </h4>
                       <div className="space-y-1">
@@ -425,7 +425,7 @@ export function AppSettingsDialog({
               </div>
             ) : (
               <section aria-labelledby={`${titleId}-models`}>
-                <h4 id={`${titleId}-models`} className="text-xs font-semibold uppercase tracking-widest text-text-muted">Navigation and model access</h4>
+                <h4 id={`${titleId}-models`} className="text-sm font-semibold text-text-secondary">Navigation and model access</h4>
                 <p className="mt-2 max-w-lg text-sm leading-5 text-text-muted">
                   These local runtimes need additional model downloads. Keep them hidden until you want to set them up.
                 </p>
@@ -451,7 +451,7 @@ export function AppSettingsDialog({
             <button
               type="button"
               onClick={onReset}
-              className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-white/45 hover:text-text-primary"
+              className="flex items-center gap-2 rounded-xl px-3 py-2 text-sm font-medium text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary"
             >
               <RotateCcw size={14} /> Reset defaults
             </button>

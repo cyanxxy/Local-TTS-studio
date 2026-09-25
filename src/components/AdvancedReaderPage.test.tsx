@@ -856,10 +856,119 @@ describe("AdvancedReaderPage", () => {
     expect(screen.getByRole("tab", { name: "Contents" })).toHaveAttribute("aria-selected", "true");
   });
 
+  it("draws a chapter's own title line as its heading instead of repeating it", () => {
+    const book = createReaderDocument({
+      id: "heading-once",
+      title: "Two chapters",
+      text: "# Opening\nFirst text.\n\n# Ending\nFinal text.",
+    });
+    const sections = buildReaderSections(book.text, book.chapters);
+    renderReader({
+      text: getReaderSectionText(book.text, sections[0]),
+      documents: [book],
+      activeDocument: book,
+      activeChapter: book.chapters[0],
+      activeSection: sections[0],
+    });
+
+    const reading = screen.getByRole("document", { name: "Reading Text" });
+    expect(screen.getByRole("heading", { level: 3 })).toHaveTextContent("# Opening");
+    expect(reading.querySelectorAll("header")).toHaveLength(0);
+  });
+
+  it("gives a plain one-chapter document no chapter heading", () => {
+    const book = createReaderDocument({ id: "plain", text: "Just some prose to read aloud here." });
+    renderReader({ text: book.text, documents: [book], activeDocument: book });
+
+    expect(screen.queryByRole("heading", { level: 3 })).toBeNull();
+    expect(screen.getByRole("button", { name: /^Contents/ })).toHaveTextContent("Contents");
+  });
+
+  it("bookmarks a selected passage from the selection toolbar", () => {
+    const book = createReaderDocument({ id: "select-bookmark", text: "A memorable passage belongs with its note." });
+    const onAddBookmark = vi.fn();
+    const { container } = renderReader({
+      text: book.text,
+      documents: [book],
+      activeDocument: book,
+      onAddBookmark,
+    });
+    const textNode = container.querySelector("article span")?.firstChild;
+    const range = document.createRange();
+    range.setStart(textNode!, 2);
+    range.setEnd(textNode!, 19);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.mouseUp(container.querySelector("article")!);
+
+    expect(screen.getByRole("toolbar", { name: "Selected passage" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Bookmark" }));
+    expect(onAddBookmark).toHaveBeenCalledWith({ label: "memorable passage", textOffset: 2, positionSec: 0 });
+    expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+  });
+
+  it("reports a failed generation in the dock instead of reading as ready", () => {
+    renderReader({ generationError: "Invalid language identifier" });
+    const props = audioPlayerMock.mock.calls.at(-1)?.[0] as {
+      statusLabel: string;
+      primaryAction: { label: string; tone: string };
+    };
+    expect(props.statusLabel).toBe("Generation failed · try again");
+    expect(props.primaryAction).toMatchObject({ label: "Try generating again", tone: "danger" });
+  });
+
+  it("opens the shortcut list with ? and toggles the focus layout with F", () => {
+    const onImmersiveChange = vi.fn();
+    renderReader({ onImmersiveChange });
+
+    fireEvent.keyDown(document.body, { key: "?" });
+    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull();
+
+    fireEvent.keyDown(document.body, { key: "f" });
+    expect(onImmersiveChange).toHaveBeenCalledWith(true);
+    fireEvent.click(screen.getByRole("button", { name: "Focus layout" }));
+    expect(onImmersiveChange).toHaveBeenCalledTimes(2);
+  });
+
+  it("paints the reading panel in the chosen page tone", () => {
+    const onViewPreferencesChange = vi.fn();
+    const { container } = renderReader({
+      viewPreferences: { ...DEFAULT_READER_VIEW_PREFERENCES, tone: "sepia" },
+      onViewPreferencesChange,
+    });
+    expect(container.querySelector("section.reader-tone-sepia")).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Reading appearance" }));
+    fireEvent.click(screen.getByRole("button", { name: "Night" }));
+    expect(onViewPreferencesChange).toHaveBeenCalledWith({ tone: "night" });
+  });
+
+  it("pauses playback when the sleep timer runs out", () => {
+    vi.useFakeTimers();
+    try {
+      const onTogglePlay = vi.fn();
+      const book = createReaderDocument({ id: "sleepy", text: "Bedtime reading, one quiet page at a time." });
+      renderReader({ text: book.text, documents: [book], activeDocument: book, isPlaying: true, onTogglePlay });
+      fireEvent.click(screen.getByRole("button", { name: "Reading appearance" }));
+      fireEvent.click(screen.getByRole("button", { name: "15m" }));
+      expect(screen.getByRole("button", { name: "Sleep timer: 15m. Cancel" })).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(15 * 60_000);
+      });
+      expect(onTogglePlay).toHaveBeenCalledTimes(1);
+      expect(screen.queryByRole("button", { name: /^Sleep timer/ })).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("imports article URLs from the toolbar", async () => {
     const onImportUrl = vi.fn(async () => {});
     renderReader({ onImportUrl });
-    fireEvent.click(screen.getByRole("button", { name: "Import from URL" }));
+    fireEvent.click(screen.getByRole("button", { name: "Import document" }));
     fireEvent.change(screen.getByPlaceholderText("https://example.com/article"), {
       target: { value: "https://example.com/story" },
     });

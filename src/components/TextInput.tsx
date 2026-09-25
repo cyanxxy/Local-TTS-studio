@@ -34,7 +34,7 @@ export function TextInput({ text, onTextChange, onImportDocument, isImportingDoc
             disabled={isImportingDocument}
             aria-label="Import document"
             title="Import a document (PDF, text, Office, images)"
-            className="mr-auto flex items-center gap-1.5 rounded-lg border border-white/55 bg-white/40 px-2.5 py-1.5 text-sm text-text-secondary shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-px hover:bg-white/60 hover:text-text-primary active:translate-y-0 active:scale-[0.98] disabled:cursor-default disabled:opacity-60 disabled:hover:translate-y-0 disabled:hover:bg-white/40"
+            className="mr-auto flex items-center gap-1.5 rounded-lg border border-border bg-text-primary/[0.04] px-2.5 py-1.5 text-sm text-text-secondary transition-all duration-200 hover:bg-text-primary/[0.07] hover:text-text-primary active:scale-[0.98] disabled:cursor-default disabled:opacity-60 disabled:hover:bg-transparent"
           >
             {isImportingDocument
               ? <Loader2 size={12} className="animate-spin" />

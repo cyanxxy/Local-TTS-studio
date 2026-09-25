@@ -6,6 +6,14 @@ export const MAX_REFERENCE_CODES_FILE_BYTES = 64 * 1024;
 export const MAX_REFERENCE_CODES_BASE64_LENGTH = Math.ceil(MAX_REFERENCE_CODES_FILE_BYTES / 3) * 4;
 export const MAX_REFERENCE_AUDIO_BASE64_LENGTH = 60_000_000;
 export const MAX_LOCAL_TTS_TEXT_LENGTH = 6_000;
+// Qwen generates each ~200-character passage separately, and the Rust bridge
+// caps every passage at this many codec tokens (about 30 seconds at 12.5
+// frames per second) to bound its KV cache. Keep this in sync with
+// MAX_TEXT_UNIT_GENERATION_TOKENS in rust/local-tts-bridge/src/qwen3/config.rs.
+export const QWEN3_MAX_NEW_TOKENS_PER_PASSAGE = 384;
+export const QWEN3_MIN_NEW_TOKENS = 64;
+// Seeds travel as JSON numbers and are u64 in Rust; 32 bits keeps them exact.
+export const QWEN3_MAX_SEED = 0xFFFF_FFFF;
 
 export const MAX_REFERENCE_AUDIO_FILE_BYTES = Math.floor(MAX_REFERENCE_AUDIO_BASE64_LENGTH / 4) * 3;
 

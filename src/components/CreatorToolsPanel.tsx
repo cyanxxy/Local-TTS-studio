@@ -60,7 +60,7 @@ const BITRATE_OPTIONS = [128, 192, 256, 320] as const;
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="text-2xs font-semibold uppercase tracking-[0.15em] text-text-muted mb-2">
+    <div className="text-xs font-semibold text-text-secondary mb-2">
       {children}
     </div>
   );
@@ -122,9 +122,9 @@ export function CreatorToolsPanel({
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-controls={panelId}
-        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/40 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-text-primary/[0.07] transition-colors"
       >
-        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+        <span className="text-sm font-semibold text-text-secondary">
           Creator Toolkit
         </span>
         <ChevronDown
@@ -143,13 +143,13 @@ export function CreatorToolsPanel({
           <div className="pt-3">
             <label
               htmlFor={presetId}
-              className="text-xs font-semibold uppercase tracking-widest text-text-muted"
+              className="text-sm font-semibold text-text-secondary"
             >
               Platform Preset
             </label>
             <select
               id={presetId}
-              className="mt-2 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
+              className="mt-2 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
               value={preset}
               onChange={(event) => onPresetChange(event.target.value as CreatorPresetId)}
             >
@@ -266,7 +266,7 @@ export function CreatorToolsPanel({
             <div className="mb-2 flex items-center justify-between gap-3">
               <label
                 htmlFor={lexiconId}
-                className="text-2xs font-semibold uppercase tracking-[0.15em] text-text-muted"
+                className="text-xs font-semibold text-text-secondary"
               >
                 Pronunciation
               </label>
@@ -274,7 +274,7 @@ export function CreatorToolsPanel({
                 <button
                   type="button"
                   onClick={() => onPronunciationLexiconChange("")}
-                  className="flex items-center gap-1 rounded-md px-1.5 py-1 text-2xs font-medium text-text-muted transition-colors hover:bg-white/40 hover:text-text-primary active:scale-[0.98]"
+                  className="flex items-center gap-1 rounded-md px-1.5 py-1 text-2xs font-medium text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary active:scale-[0.98]"
                 >
                   <X size={11} aria-hidden="true" />
                   Clear rules
@@ -283,7 +283,7 @@ export function CreatorToolsPanel({
             </div>
             <textarea
               id={lexiconId}
-              className="w-full min-h-16 rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-sm text-text-primary resize-y placeholder:text-text-muted/50"
+              className="w-full min-h-16 rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary resize-y placeholder:text-text-muted/50"
               placeholder={`route=root\nGIF=jiff\nSQL=sequel`}
               value={pronunciationLexicon}
               aria-invalid={lexiconDiagnostics.issues.length > 0}
@@ -306,7 +306,7 @@ export function CreatorToolsPanel({
               )}
             </div>
 
-            <div className="mt-3 rounded-xl border border-white/45 bg-white/25 p-3 backdrop-blur-sm">
+            <div className="mt-3 rounded-xl border border-border bg-text-primary/[0.03] p-3">
               <label htmlFor={previewId} className="text-xs font-medium text-text-secondary">
                 Test pronunciation rules
               </label>
@@ -315,12 +315,12 @@ export function CreatorToolsPanel({
                 type="text"
                 value={pronunciationPreviewText}
                 onChange={(event) => setPronunciationPreviewText(event.target.value)}
-                className="mt-1.5 w-full rounded-lg border border-black/10 bg-white/60 px-2.5 py-2 text-sm text-text-primary placeholder:text-text-muted/50"
+                className="mt-1.5 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary placeholder:text-text-muted/50"
                 placeholder="Try a phrase before generating audio"
               />
               {pronunciationPreviewText.trim().length > 0 && (
                 <div className="mt-2" aria-live="polite">
-                  <div className="text-2xs font-semibold uppercase tracking-[0.12em] text-text-muted">
+                  <div className="text-xs font-semibold text-text-secondary">
                     Spoken as
                   </div>
                   <p className="mt-0.5 break-words text-sm text-text-primary">
@@ -342,7 +342,7 @@ export function CreatorToolsPanel({
                 </label>
                 <select
                   id={formatId}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
+                  className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
                   value={exportOptions.format}
                   onChange={(event) => onExportFormatChange(event.target.value as ExportAudioFormat)}
                 >
@@ -360,7 +360,7 @@ export function CreatorToolsPanel({
                 </label>
                 <select
                   id={sampleRateId}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
+                  className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
                   value={String(exportOptions.sampleRate)}
                   onChange={(event) => {
                     const raw = event.target.value;
@@ -384,7 +384,7 @@ export function CreatorToolsPanel({
                 </label>
                 <select
                   id={bitrateId}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-white/60 backdrop-blur-sm px-2.5 py-2 text-xs text-text-primary"
+                  className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
                   value={exportOptions.bitrateKbps}
                   onChange={(event) => onExportBitrateKbpsChange(parseInt(event.target.value, 10))}
                 >
@@ -433,7 +433,7 @@ export function CreatorToolsPanel({
                 aria-describedby={!hasAudio ? downloadStatusId : undefined}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
                   hasAudio
-                    ? "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
+                    ? "border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
                     : "border-border text-text-muted cursor-not-allowed"
                 }`}
               >
@@ -447,7 +447,7 @@ export function CreatorToolsPanel({
                 aria-describedby={!hasAudio ? downloadStatusId : undefined}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
                   hasAudio
-                    ? "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
+                    ? "border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
                     : "border-border text-text-muted cursor-not-allowed"
                 }`}
               >
@@ -461,7 +461,7 @@ export function CreatorToolsPanel({
                 aria-describedby={!hasAudio ? downloadStatusId : undefined}
                 className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
                   hasAudio
-                    ? "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
+                    ? "border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
                     : "border-border text-text-muted cursor-not-allowed"
                 }`}
               >

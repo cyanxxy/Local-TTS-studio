@@ -77,8 +77,9 @@ export default defineConfig({
       "src/workers/kokoro.worker.ts",
       "src/workers/supertonic.worker.ts",
     ],
+    // kokoro-js is deliberately absent: pre-bundling breaks its embedded
+    // espeak-ng runtime, so the worker imports it by URL instead.
     include: [
-      "kokoro-js",
       "@huggingface/transformers",
       "react",
       "react-dom/client",

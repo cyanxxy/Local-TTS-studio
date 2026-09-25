@@ -368,6 +368,11 @@ function resolvePauseKind(text: string, current: ChunkRange, next: ChunkRange | 
 
   const boundary = text.slice(current.end, next.start);
   if (PARAGRAPH_BREAK.test(boundary)) return "paragraph";
+  // The Reader renders every line as its own paragraph, and a line with no
+  // closing punctuation is a heading; both deserve more than a sentence gap.
+  if (boundary.includes("\n") && !/[.!?。？！…]["'”’)\]]*$/.test(text.slice(current.start, current.end))) {
+    return "paragraph";
+  }
 
   const currentText = text.slice(current.start, current.end);
   const punctuationMatch = currentText.match(/([,;:!?。？！.]?)(\s*)$/);
@@ -600,7 +605,14 @@ export function buildKokoroInferenceUnits(text: string, maxInferenceChars: numbe
       continue;
     }
 
-    const canMergeByRange: boolean = current.start !== undefined
+    // Every line in the Reader is its own paragraph (or a heading), so a unit
+    // never crosses a line break: the break becomes a real pause instead of
+    // the heading running straight into the text it introduces.
+    const crossesLineBreak = current.end !== undefined
+      && unit.start !== undefined
+      && text.slice(current.end, unit.start).includes("\n");
+    const canMergeByRange: boolean = !crossesLineBreak
+      && current.start !== undefined
       && unit.end !== undefined
       && unit.end > current.start
       && unit.end - current.start <= safeMaxInferenceChars;
@@ -625,20 +637,30 @@ export function buildKokoroInferenceUnits(text: string, maxInferenceChars: numbe
   return mergedUnits;
 }
 
-function chunkForKokoroDetailed(text: string, runtime?: ChunkingRuntimeProfile): TextChunk[] {
+/**
+ * Kokoro's generation units with the pause that follows each one. The worker
+ * generates exactly these, and the Reader draws the same boundaries, so the
+ * paragraph and comma pause settings apply to Kokoro as they do to Supertonic.
+ */
+export function chunkForKokoroDetailed(text: string, runtime?: ChunkingRuntimeProfile): TextChunk[] {
   const maxInferenceChars = getKokoroMaxInferenceChars(runtime?.backend);
   const units = buildKokoroInferenceUnits(text, maxInferenceChars);
 
   return units.map((unit, index, all) => {
     const start = unit.start ?? 0;
     const end = unit.end ?? text.length;
-    const hasFollowing = index < all.length - 1;
+    const next = all[index + 1];
+    const pauseKind: ChunkPauseKind = !next
+      ? "none"
+      : unit.end !== undefined && next.start !== undefined
+        ? resolvePauseKind(text, { start, end }, { start: next.start, end: next.end ?? text.length })
+        : "sentence";
     return {
       text: unit.start !== undefined && unit.end !== undefined ? text.slice(start, end) : unit.text,
       start,
       end,
-      pauseAfterSec: hasFollowing ? PAUSE_SECONDS.sentence : 0,
-      pauseKind: hasFollowing ? "sentence" : "none",
+      pauseAfterSec: next ? PAUSE_SECONDS[pauseKind] : 0,
+      pauseKind,
     };
   });
 }

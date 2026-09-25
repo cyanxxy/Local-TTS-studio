@@ -13,6 +13,12 @@ function makeAssetRoot(): string {
   mkdirSync(assetDir, { recursive: true });
   writeFileSync(join(assetDir, "ort-wasm-simd-threaded.jsep.mjs"), "");
   writeFileSync(join(assetDir, "ort-wasm-simd-threaded.jsep.wasm"), "");
+  const kokoroDir = join(root, "node_modules/kokoro-js/dist");
+  mkdirSync(kokoroDir, { recursive: true });
+  writeFileSync(
+    join(kokoroDir, "kokoro.web.js"),
+    'const fallbackUrl = new URL("ort-wasm-simd-threaded.jsep.wasm", import.meta.url).href;',
+  );
   return root;
 }
 
@@ -87,6 +93,28 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
     );
     expect(code).toContain("const mjsUrl = import.meta.ROLLUP_FILE_URL_assetRef;");
     expect(code).not.toContain("ort-wasm-simd-threaded.jsep.mjs?url");
+  });
+
+  it("ships kokoro.web.js as an unbundled asset so its espeak-ng runtime survives", () => {
+    const root = makeAssetRoot();
+    const plugin = kokoroOnnxWasmAssetPlugin(root);
+    const emitFile = vi.fn<(file: { name: string; source: string }) => string>(() => "kokoroRef");
+
+    pluginHook(plugin.configResolved, "configResolved").call({}, { command: "build" } as never);
+    const code = loadVirtualModule(plugin, { emitFile });
+    const kokoroAsset = emitFile.mock.calls
+      .map(([file]) => file)
+      .find((file) => file.name === "kokoro.web.js");
+
+    expect(kokoroAsset?.source).toContain("/* @vite-ignore */");
+    expect(code).toContain("export const KOKORO_WEB_MODULE_URL = import.meta.ROLLUP_FILE_URL_kokoroRef;");
+  });
+
+  it("serves kokoro.web.js by URL during dev", () => {
+    const root = makeAssetRoot();
+    const code = loadVirtualModule(kokoroOnnxWasmAssetPlugin(root));
+    expect(code).toContain("kokoro-js/dist/kokoro.web.js?url");
+    expect(code).toContain("export const KOKORO_WEB_MODULE_URL = kokoroUrl;");
   });
 
   it("suppresses Vite asset rewriting for Kokoro's bundled ONNX JSEP wasm fallback", () => {

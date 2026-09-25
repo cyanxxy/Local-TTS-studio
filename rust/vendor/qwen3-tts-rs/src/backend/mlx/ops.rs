@@ -767,9 +767,31 @@ pub fn random_categorical(logits: &MlxArray, axis: i32, _num_samples: i32) -> Ml
     res
 }
 
-/// Generate a pseudo-random seed from system entropy.
+/// Open TTS: seed and draw counter for reproducible sampling, or `None` to
+/// draw each key from the clock as upstream does.
+static SAMPLING_SEED: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
+
+/// Make subsequent categorical draws a fixed sequence derived from `seed`, or
+/// restore clock-seeded draws with `None`. MLX derives a fresh PRNG key per
+/// draw, so the sequence is the seed advanced by one per draw.
+pub fn set_sampling_seed(seed: Option<u64>) {
+    let mut state = SAMPLING_SEED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    *state = seed.map(|seed| (seed, 0));
+}
+
+/// Generate a pseudo-random seed from system entropy, or the next seeded draw.
 fn rand_seed() -> u64 {
     use std::time::SystemTime;
+    let mut state = SAMPLING_SEED
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    if let Some((seed, draws)) = state.as_mut() {
+        let key = seed.wrapping_add(*draws);
+        *draws = draws.wrapping_add(1);
+        return key;
+    }
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)

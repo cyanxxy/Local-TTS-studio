@@ -1,12 +1,14 @@
-import { useRef, useCallback, useEffect } from "react";
+import { useRef, useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   ChevronLeft,
   ChevronRight,
   Download,
+  Ellipsis,
   Loader2,
   Pause,
   Play,
   RefreshCw,
+  Repeat1,
   RotateCcw,
   RotateCw,
   Sparkles,
@@ -63,42 +65,61 @@ interface AudioPlayerProps {
   onStop?: () => void;
 }
 
-const PLAYBACK_RATES = [0.75, 1, 1.25, 1.5, 1.75, 2] as const;
-
-function nextPlaybackRate(current: number): number {
-  const index = PLAYBACK_RATES.findIndex((rate) => Math.abs(rate - current) < 0.001);
-  return PLAYBACK_RATES[(index + 1) % PLAYBACK_RATES.length] ?? 1;
-}
+const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 
 function formatPlaybackRate(rate: number): string {
   return `${rate.toFixed(2).replace(/\.?0+$/, "")}×`;
 }
 
+/** Listening time, not an editing timecode: m:ss, or h:mm:ss past an hour. */
 function formatTime(secs: number): string {
-  const totalTenths = Math.round(Math.max(0, Number.isFinite(secs) ? secs : 0) * 10);
-  const m = Math.floor(totalTenths / 600);
-  const s = ((totalTenths % 600) / 10).toFixed(1);
-  return `${m}:${s.padStart(4, "0")}`;
+  const total = Math.floor(Math.max(0, Number.isFinite(secs) ? secs : 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = String(total % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
 }
 
 /**
  * The playback position advances every animation frame. Only these two leaves
- * subscribe to it, so the rest of the player — transport buttons, stats chips,
- * status labels — re-renders when its own props change rather than 60 times a
- * second.
+ * subscribe to it, so the rest of the player — transport buttons, status
+ * labels — re-renders when its own props change rather than 60 times a second.
  */
-function selectElapsedTenths(timeSec: number): number {
-  return Math.round(Math.max(0, Number.isFinite(timeSec) ? timeSec : 0) * 10);
+function selectElapsedSeconds(timeSec: number): number {
+  return Math.floor(Math.max(0, Number.isFinite(timeSec) ? timeSec : 0));
 }
 
-function selectHasPosition(timeSec: number): boolean {
-  return timeSec > 0;
-}
-
-/** Tenth-of-a-second readout, so it settles at 10 Hz instead of the frame rate. */
+/** Whole-second readout, so it settles at 1 Hz instead of the frame rate. */
 function ElapsedTime({ clock, className }: { clock: PlaybackClock; className: string }) {
-  const tenths = usePlaybackSelector(clock, selectElapsedTenths);
-  return <span className={className}>{formatTime(tenths / 10)}</span>;
+  const seconds = usePlaybackSelector(clock, selectElapsedSeconds);
+  return <span className={className}>{formatTime(seconds)}</span>;
+}
+
+/** Any listed rate is one pick away, instead of cycling through all of them. */
+function PlaybackRateSelect({
+  rate,
+  onChange,
+  className = "",
+}: {
+  rate: number;
+  onChange: (rate: number) => void;
+  className?: string;
+}) {
+  const known = PLAYBACK_RATES.some((value) => Math.abs(value - rate) < 0.001);
+  return (
+    <select
+      aria-label="Playback speed"
+      title="Playback speed"
+      value={rate}
+      onChange={(event) => onChange(Number(event.target.value))}
+      className={`h-[44px] cursor-pointer appearance-none rounded-full bg-transparent px-2 text-center font-mono text-xs text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary tabular-nums ${className}`}
+    >
+      {!known && <option value={rate}>{formatPlaybackRate(rate)}</option>}
+      {PLAYBACK_RATES.map((value) => (
+        <option key={value} value={value}>{formatPlaybackRate(value)}</option>
+      ))}
+    </select>
+  );
 }
 
 interface SeekBarProps {
@@ -106,11 +127,10 @@ interface SeekBarProps {
   totalDuration: number;
   hasAudio: boolean;
   compact: boolean;
-  isDock: boolean;
   onSeek: (percentage: number) => void;
 }
 
-function SeekBar({ clock, totalDuration, hasAudio, compact, isDock, onSeek }: SeekBarProps) {
+function SeekBar({ clock, totalDuration, hasAudio, compact, onSeek }: SeekBarProps) {
   // The scrubber is the one element that genuinely wants frame-rate updates.
   const currentTime = usePlaybackTime(clock);
   const barRef = useRef<HTMLDivElement>(null);
@@ -186,7 +206,7 @@ function SeekBar({ clock, totalDuration, hasAudio, compact, isDock, onSeek }: Se
   return (
     <div
       ref={barRef}
-      className={`${isDock ? "h-8" : "order-last h-8 basis-full sm:order-none sm:basis-auto"} group relative min-w-0 flex-1 select-none rounded-full ${
+      className={`h-8 group relative min-w-0 flex-1 select-none rounded-full ${
         hasAudio ? "cursor-pointer" : ""
       }`}
       onPointerDown={handlePointerDown}
@@ -233,12 +253,12 @@ function sectionLabel(
 ): string {
   if (segmentCount > 0) {
     return activeSegmentNumber
-      ? `Section ${activeSegmentNumber} of ${segmentCount}`
-      : `${segmentCount} sections`;
+      ? `Passage ${activeSegmentNumber} of ${segmentCount}`
+      : `${segmentCount} passage${segmentCount !== 1 ? "s" : ""}`;
   }
 
   if (sectionPreviewCount && sectionPreviewCount > 0) {
-    return `${sectionPreviewCount} section${sectionPreviewCount !== 1 ? "s" : ""}`;
+    return `${sectionPreviewCount} passage${sectionPreviewCount !== 1 ? "s" : ""}`;
   }
 
   return "No audio loaded";
@@ -261,6 +281,97 @@ function renderPrimaryActionIcon(action: AudioPlayerPrimaryAction) {
   if (action.icon === "retry") return <RefreshCw size={18} />;
   if (action.icon === "loading") return <Loader2 size={18} className="animate-spin" />;
   return <Sparkles size={19} />;
+}
+
+interface OverflowAction {
+  key: string;
+  label: string;
+  icon: ReactNode;
+  onSelect: () => void;
+  disabled?: boolean;
+  tone?: "danger";
+}
+
+/**
+ * On phones the dock's secondary controls do not fit beside the transport, so
+ * they collapse into one menu instead of sliding underneath it.
+ */
+function OverflowMenu({
+  actions,
+  rate,
+  onRateChange,
+}: {
+  actions: OverflowAction[];
+  rate: number;
+  onRateChange?: (rate: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointer);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointer);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [open]);
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        aria-label="More playback options"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+        className="flex h-[44px] w-[44px] items-center justify-center rounded-full text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary"
+      >
+        <Ellipsis size={16} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Playback options"
+          className="glass-pop absolute right-0 bottom-full z-10 mb-2 w-52 rounded-2xl p-1.5"
+        >
+          {onRateChange && (
+            <label className="flex items-center justify-between gap-2 rounded-[10px] px-3 py-1 text-sm text-text-secondary">
+              Speed
+              <PlaybackRateSelect rate={rate} onChange={onRateChange} className="h-9" />
+            </label>
+          )}
+          {actions.map((action) => (
+            <button
+              key={action.key}
+              type="button"
+              role="menuitem"
+              disabled={action.disabled}
+              onClick={() => {
+                setOpen(false);
+                action.onSelect();
+              }}
+              className={`flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                action.tone === "danger"
+                  ? "text-danger hover:bg-danger-light"
+                  : "text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
+              }`}
+            >
+              {action.icon}
+              {action.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function AudioPlayer({
@@ -299,43 +410,49 @@ export function AudioPlayer({
   const isDock = variant === "dock";
   const hasAudio = totalDuration > 0;
   const canTogglePlayback = hasAudio && (!isGenerating || allowPlaybackDuringGeneration);
-  const hasPosition = usePlaybackSelector(clock, selectHasPosition);
-  const canStop = Boolean(onStop) && (isGenerating || hasAudio || isPlaying || hasPosition);
-  const statsVisible = hasGenerationStats(stats);
+  // Pause already holds the position, so Stop only exists to cancel a
+  // generation that is still running.
+  const canStop = Boolean(onStop) && isGenerating;
+  // Benchmark numbers belong to Studio; listeners in the Reader never see them.
+  const statsVisible = hasGenerationStats(stats) && !isDock;
   const sectionText = sectionLabel(segmentCount, activeSegmentNumber, sectionPreviewCount);
   const effectivePrimaryAction = hasAudio ? undefined : primaryAction;
 
+  // The player is itself glass (or sits on a surface), so its buttons are
+  // fills — never a second material — and they give on press, not lift.
   const transportButton = (enabled: boolean) =>
-    `flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full border transition-all duration-200 ${
+    `flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full ${
       enabled
-        ? "border-white/55 bg-white/40 text-text-secondary shadow-glass-sm backdrop-blur-md hover:-translate-y-0.5 hover:bg-white/60 hover:text-accent"
-        : "cursor-not-allowed border-border/70 text-text-muted/60"
+        ? "glass-fill text-text-secondary hover:text-text-primary"
+        : "cursor-not-allowed text-text-muted/50"
     }`;
 
   const utilityButton = (enabled: boolean) =>
     `flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full transition-all duration-200 ${
       enabled
-        ? "text-text-muted hover:bg-white/55 hover:text-accent"
+        ? "text-text-muted hover:bg-text-primary/[0.07] hover:text-text-primary"
         : "cursor-not-allowed text-text-muted/50"
     }`;
 
-  const centerButtonSize = isDock ? "h-13 w-13" : "h-[44px] w-[44px]";
+  const centerButtonSize = isDock ? "h-13 w-13" : "h-12 w-12";
   const centerLabel = effectivePrimaryAction?.label ?? (isPlaying ? "Pause" : "Play");
   const centerDisabled = effectivePrimaryAction
     ? Boolean(effectivePrimaryAction.disabled)
     : !canTogglePlayback;
   const centerTone = effectivePrimaryAction?.tone ?? "accent";
+  // Play is the action a paused player is waiting for, so it carries the
+  // accent; while playing, Pause steps back to an outlined control.
   const centerClass = effectivePrimaryAction
     ? centerTone === "danger"
-      ? "border border-danger/30 bg-danger-light text-danger shadow-glass-sm backdrop-blur-md hover:bg-danger hover:text-white"
+      ? "border border-danger/30 bg-danger-light text-danger shadow-glass-sm hover:bg-danger hover:text-white"
       : centerTone === "neutral" || effectivePrimaryAction.disabled
-        ? "border border-border/70 bg-white/35 text-text-muted/70 backdrop-blur-md"
+        ? "border border-border/70 bg-text-primary/[0.03] text-text-muted/70"
         : "glass-accent text-white"
     : centerDisabled
       ? "border border-border text-text-muted cursor-not-allowed"
       : isPlaying
-        ? "border border-accent bg-accent/10 text-accent shadow-accent-sm hover:bg-accent hover:text-white"
-        : "border border-white/55 bg-white/45 text-text-secondary shadow-glass-sm backdrop-blur-md hover:-translate-y-0.5 hover:bg-white/65 hover:text-accent";
+        ? "glass-fill text-accent"
+        : "glass-accent text-white";
 
   const handleCenterClick = () => {
     if (effectivePrimaryAction) {
@@ -351,19 +468,18 @@ export function AudioPlayer({
       totalDuration={totalDuration}
       hasAudio={hasAudio}
       compact={compact}
-      isDock={isDock}
       onSeek={onSeek}
     />
   );
 
-  const statsPanel = statsVisible && !isDock && (
+  const statsPanel = statsVisible && (
     <div className={`${compact ? "px-4 py-2 gap-4" : embedded ? "px-6 py-3 gap-6" : "px-5 py-3 gap-6"} flex flex-wrap items-center border-b border-black/5`}>
       {stats.firstLatency !== null && (
         <div className="flex flex-col">
           <span className="font-mono text-base font-semibold leading-none text-accent tabular-nums">
             {stats.firstLatency.toFixed(2)}s
           </span>
-          <span className="mt-1 text-2xs font-semibold uppercase tracking-widest text-text-muted">
+          <span className="mt-1 text-xs font-semibold text-text-secondary">
             First audio
           </span>
         </div>
@@ -373,7 +489,7 @@ export function AudioPlayer({
           <span className="font-mono text-base font-semibold leading-none text-accent tabular-nums">
             {stats.processingTime.toFixed(2)}s
           </span>
-          <span className="mt-1 text-2xs font-semibold uppercase tracking-widest text-text-muted">
+          <span className="mt-1 text-xs font-semibold text-text-secondary">
             Total time
           </span>
         </div>
@@ -383,7 +499,7 @@ export function AudioPlayer({
           <span className="font-mono text-base font-semibold leading-none text-accent tabular-nums">
             {stats.charsPerSec.toFixed(0)}
           </span>
-          <span className="mt-1 text-2xs font-semibold uppercase tracking-widest text-text-muted">
+          <span className="mt-1 text-xs font-semibold text-text-secondary">
             Chars/sec
           </span>
         </div>
@@ -394,40 +510,12 @@ export function AudioPlayer({
             {stats.rtf.toFixed(3)}×
           </span>
           <span
-            className="mt-1 text-2xs font-semibold uppercase tracking-widest text-text-muted"
+            className="mt-1 text-xs font-semibold text-text-secondary"
             title="Real-time factor — generation time ÷ audio duration (lower is faster)"
           >
             RTF
           </span>
         </div>
-      )}
-    </div>
-  );
-
-  const statsChips = statsVisible && isDock && (
-    <div className="mb-2 flex flex-wrap items-center justify-center gap-1.5">
-      {stats.firstLatency !== null && (
-        <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-md tabular-nums">
-          first audio {stats.firstLatency.toFixed(2)}s
-        </span>
-      )}
-      {stats.processingTime > 0 && (
-        <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-md tabular-nums">
-          total {stats.processingTime.toFixed(2)}s
-        </span>
-      )}
-      {stats.charsPerSec > 0 && (
-        <span className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-md tabular-nums">
-          {stats.charsPerSec.toFixed(0)} chars/s
-        </span>
-      )}
-      {stats.rtf > 0 && (
-        <span
-          title="Real-time factor — generation time ÷ audio duration (lower is faster)"
-          className="rounded-full border border-white/50 bg-white/45 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-md tabular-nums"
-        >
-          RTF {stats.rtf.toFixed(3)}×
-        </span>
       )}
     </div>
   );
@@ -444,154 +532,109 @@ export function AudioPlayer({
       {effectivePrimaryAction
         ? renderPrimaryActionIcon(effectivePrimaryAction)
         : isPlaying
-          ? <Pause size={isDock ? 19 : 14} fill="currentColor" />
-          : <Play size={isDock ? 19 : 14} fill="currentColor" className="translate-x-px" />}
+          ? <Pause size={isDock ? 19 : 17} fill="currentColor" />
+          : <Play size={isDock ? 19 : 17} fill="currentColor" className="translate-x-px" />}
     </button>
   );
 
-  const dockBody = (
-    <>
-      {statsChips}
-      <div className="glass-pop rounded-[26px] px-4 pt-3 pb-2.5 sm:px-5">
-        <div className="flex items-center gap-3">
-          <ElapsedTime
-            clock={clock}
-            className="w-11 shrink-0 text-right font-mono text-xs text-text-muted tabular-nums"
-          />
-          {seekControl}
-          <span className="w-11 shrink-0 font-mono text-xs text-text-muted tabular-nums">
-            {formatTime(totalDuration)}
-          </span>
-        </div>
-
-        <div className="mt-2 flex items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-1 basis-0 items-center gap-0.5">
-            {segmentCount > 0 ? (
-              <>
-                <button
-                  type="button"
-                  aria-label="Previous section"
-                  onClick={onPreviousSegment}
-                  disabled={!canPreviousSegment}
-                  className={utilityButton(canPreviousSegment)}
-                >
-                  <ChevronLeft size={14} />
-                </button>
-                <span className="min-w-9 text-center font-mono text-xs text-text-muted tabular-nums whitespace-nowrap">
-                  {activeSegmentNumber ?? "–"}/{segmentCount}
-                </span>
-                <button
-                  type="button"
-                  aria-label="Next section"
-                  onClick={onNextSegment}
-                  disabled={!canNextSegment}
-                  className={utilityButton(canNextSegment)}
-                >
-                  <ChevronRight size={14} />
-                </button>
-              </>
-            ) : (
-              <span className="font-mono text-2xs text-text-muted/70">
-                {sectionText}
-              </span>
-            )}
-          </div>
-
-          <div className="flex items-center gap-2.5 sm:gap-3">
-            <button
-              type="button"
-              onClick={onSkipBackward}
-              disabled={!hasAudio}
-              aria-label="Back 10 seconds"
-              className={transportButton(hasAudio)}
-            >
-              <RotateCcw size={14} />
-            </button>
-            {centerActionButton}
-            <button
-              type="button"
-              onClick={onSkipForward}
-              disabled={!hasAudio}
-              aria-label="Forward 10 seconds"
-              className={transportButton(hasAudio)}
-            >
-              <RotateCw size={14} />
-            </button>
-          </div>
-
-          <div className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-0.5">
-            {hasAudio && onPlaybackRateChange && (
-              <button
-                type="button"
-                onClick={() => onPlaybackRateChange(nextPlaybackRate(playbackRate))}
-                aria-label={`Playback speed ${formatPlaybackRate(playbackRate)}`}
-                title="Playback speed"
-                className="flex h-[44px] min-w-[44px] items-center justify-center rounded-full px-1 font-mono text-xs text-text-muted transition-all duration-200 hover:bg-white/55 hover:text-accent tabular-nums"
-              >
-                {formatPlaybackRate(playbackRate)}
-              </button>
-            )}
-            {onRegenerate && hasAudio && (
-              <button
-                type="button"
-                onClick={onRegenerate}
-                disabled={!canRegenerate}
-                aria-label="Regenerate speech"
-                title="Regenerate speech"
-                className={utilityButton(canRegenerate)}
-              >
-                <Sparkles size={14} />
-              </button>
-            )}
-            {onRetakeSegment && segmentCount > 0 && (
-              <button
-                type="button"
-                onClick={onRetakeSegment}
-                disabled={!canRetakeSegment || isRetaking}
-                aria-label={isRetaking ? "Retaking section" : "Retake section"}
-                title="Retake current section"
-                className={utilityButton(canRetakeSegment && !isRetaking)}
-              >
-                <RefreshCw size={14} className={isRetaking ? "animate-spin" : undefined} />
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={onDownload}
-              disabled={!hasAudio}
-              aria-label="Download audio"
-              title="Download audio"
-              className={utilityButton(hasAudio)}
-            >
-              <Download size={14} />
-            </button>
-            {canStop && onStop && (
-              <button
-                type="button"
-                onClick={onStop}
-                aria-label={isGenerating ? "Stop generation" : "Stop playback"}
-                title={isGenerating ? "Stop generation" : "Stop playback"}
-                className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger hover:text-white"
-              >
-                <Square size={12} />
-              </button>
-            )}
-          </div>
-        </div>
-        {statusLabel && (
-          <div className="mt-2 text-center font-mono text-2xs text-text-muted/70">
-            {statusLabel}
-          </div>
-        )}
-      </div>
-    </>
+  const stopButton = canStop && onStop && (
+    <button
+      type="button"
+      onClick={onStop}
+      aria-label="Stop generation"
+      title="Stop generation"
+      className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger hover:text-white"
+    >
+      <Square size={12} />
+    </button>
   );
 
-  const panelBody = (
-    <>
-      {statsPanel}
-      <div className={`${compact ? "px-4 py-3 gap-3" : embedded ? "px-6 py-4 gap-4" : "px-5 py-4 gap-4"} flex flex-col`}>
-        <div className="flex flex-wrap items-center gap-3">
+  const overflowActions: OverflowAction[] = [
+    ...(onRegenerate && hasAudio
+      ? [{
+          key: "regenerate",
+          label: "Regenerate speech",
+          icon: <Sparkles size={14} />,
+          onSelect: onRegenerate,
+          disabled: !canRegenerate,
+        }]
+      : []),
+    ...(onRetakeSegment && segmentCount > 0
+      ? [{
+          key: "retake",
+          label: isRetaking ? "Retaking passage" : "Retake passage",
+          icon: <Repeat1 size={14} />,
+          onSelect: onRetakeSegment,
+          disabled: !canRetakeSegment || isRetaking,
+        }]
+      : []),
+    {
+      key: "download",
+      label: "Download audio",
+      icon: <Download size={14} />,
+      onSelect: onDownload,
+      disabled: !hasAudio,
+    },
+    ...(canStop && onStop
+      ? [{
+          key: "stop",
+          label: "Stop generation",
+          icon: <Square size={12} />,
+          onSelect: onStop,
+          tone: "danger" as const,
+        }]
+      : []),
+  ];
+
+  const dockBody = (
+    <div className="glass rounded-[28px] px-3 pt-3 pb-2.5 sm:px-5">
+      <div className="flex items-center gap-3">
+        <ElapsedTime
+          clock={clock}
+          className="w-12 shrink-0 text-right font-mono text-xs text-text-muted tabular-nums"
+        />
+        {seekControl}
+        <span className="w-12 shrink-0 font-mono text-xs text-text-muted tabular-nums">
+          {formatTime(totalDuration)}
+        </span>
+      </div>
+
+      {/* Three columns: the outer two share the leftover width equally, so the
+          transport stays centred; everything secondary must fit its column. */}
+      <div className="mt-2 flex items-center justify-between gap-1 sm:gap-2">
+        <div className="flex min-w-0 flex-1 basis-0 items-center gap-0.5">
+          {segmentCount > 0 ? (
+            <>
+              <button
+                type="button"
+                aria-label="Previous passage"
+                onClick={onPreviousSegment}
+                disabled={!canPreviousSegment}
+                className={`max-sm:hidden ${utilityButton(canPreviousSegment)}`}
+              >
+                <ChevronLeft size={14} />
+              </button>
+              <span className="min-w-9 text-center font-mono text-xs text-text-muted tabular-nums whitespace-nowrap">
+                {activeSegmentNumber ?? "–"}/{segmentCount}
+              </span>
+              <button
+                type="button"
+                aria-label="Next passage"
+                onClick={onNextSegment}
+                disabled={!canNextSegment}
+                className={`max-sm:hidden ${utilityButton(canNextSegment)}`}
+              >
+                <ChevronRight size={14} />
+              </button>
+            </>
+          ) : (
+            <span className="truncate font-mono text-2xs text-text-muted/70">
+              {sectionText}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-1.5 sm:gap-3">
           <button
             type="button"
             onClick={onSkipBackward}
@@ -611,35 +654,106 @@ export function AudioPlayer({
           >
             <RotateCw size={14} />
           </button>
-          {canStop && onStop && (
-            <button
-              type="button"
-              onClick={onStop}
-              aria-label={isGenerating ? "Stop generation" : "Stop playback"}
-              title={isGenerating ? "Stop generation" : "Stop playback"}
-              className="h-[44px] w-[44px] shrink-0 rounded-full border border-danger/30 bg-danger-light text-danger shadow-glass-sm backdrop-blur-md transition-all duration-200 hover:-translate-y-0.5 hover:bg-danger hover:text-white"
-            >
-              <Square size={12} className="mx-auto" />
-            </button>
-          )}
         </div>
 
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 sm:flex-nowrap sm:gap-4">
-          <ElapsedTime
-            clock={clock}
-            className={`font-mono text-xs text-text-muted ${compact ? "w-11" : "w-12"} shrink-0 text-right tabular-nums`}
-          />
-          {seekControl}
-          <span className={`font-mono text-xs text-text-muted ${compact ? "w-11" : "w-12"} shrink-0 tabular-nums`}>
-            {formatTime(totalDuration)}
+        <div className="flex min-w-0 flex-1 basis-0 items-center justify-end gap-0.5">
+          <div className="flex items-center gap-0.5 max-sm:hidden">
+            {hasAudio && onPlaybackRateChange && (
+              <PlaybackRateSelect rate={playbackRate} onChange={onPlaybackRateChange} />
+            )}
+            {onRegenerate && hasAudio && (
+              <button
+                type="button"
+                onClick={onRegenerate}
+                disabled={!canRegenerate}
+                aria-label="Regenerate speech"
+                title="Regenerate speech"
+                className={utilityButton(canRegenerate)}
+              >
+                <Sparkles size={14} />
+              </button>
+            )}
+            {onRetakeSegment && segmentCount > 0 && (
+              <button
+                type="button"
+                onClick={onRetakeSegment}
+                disabled={!canRetakeSegment || isRetaking}
+                aria-label={isRetaking ? "Retaking passage" : "Retake passage"}
+                title="Retake current passage"
+                className={utilityButton(canRetakeSegment && !isRetaking)}
+              >
+                {isRetaking
+                  ? <RefreshCw size={14} className="animate-spin" />
+                  : <Repeat1 size={14} />}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onDownload}
+              disabled={!hasAudio}
+              aria-label="Download audio"
+              title="Download audio"
+              className={utilityButton(hasAudio)}
+            >
+              <Download size={14} />
+            </button>
+            {stopButton}
+          </div>
+          <div className="sm:hidden">
+            <OverflowMenu
+              actions={overflowActions}
+              rate={playbackRate}
+              onRateChange={hasAudio ? onPlaybackRateChange : undefined}
+            />
+          </div>
+        </div>
+      </div>
+      {statusLabel && (
+        <div className="mt-2 text-center font-mono text-2xs text-text-muted/70">
+          {statusLabel}
+        </div>
+      )}
+    </div>
+  );
+
+  const panelBody = (
+    <>
+      {statsPanel}
+      <div className={`${compact ? "px-4 py-3 gap-3" : embedded ? "px-6 py-4 gap-4" : "px-5 py-4 gap-4"} flex flex-col`}>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={onSkipBackward}
+            disabled={!hasAudio}
+            aria-label="Back 10 seconds"
+            className={transportButton(hasAudio)}
+          >
+            <RotateCcw size={14} />
+          </button>
+          {centerActionButton}
+          <button
+            type="button"
+            onClick={onSkipForward}
+            disabled={!hasAudio}
+            aria-label="Forward 10 seconds"
+            className={transportButton(hasAudio)}
+          >
+            <RotateCw size={14} />
+          </button>
+          {stopButton}
+          <span className={`ml-auto truncate ${compact ? "text-xs" : "text-sm"} text-text-muted`}>
+            {sectionText}
           </span>
+          {hasAudio && onPlaybackRateChange && (
+            <PlaybackRateSelect rate={playbackRate} onChange={onPlaybackRateChange} />
+          )}
           <button
             type="button"
             onClick={onDownload}
             disabled={!hasAudio}
             aria-label="Download audio"
             title="Download audio"
-            className={`ml-auto flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl transition-all sm:ml-0 ${
+            className={`flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl transition-all ${
               hasAudio
                 ? "text-text-muted hover:bg-accent-light hover:text-accent"
                 : "cursor-not-allowed text-text-muted"
@@ -649,8 +763,15 @@ export function AudioPlayer({
           </button>
         </div>
 
-        <div className={`flex items-center justify-start ${compact ? "text-xs" : "text-sm"} text-text-muted sm:justify-end`}>
-          <span>{sectionText}</span>
+        <div className="flex items-center gap-3 sm:gap-4">
+          <ElapsedTime
+            clock={clock}
+            className={`font-mono text-xs text-text-muted ${compact ? "w-11" : "w-12"} shrink-0 text-right tabular-nums`}
+          />
+          {seekControl}
+          <span className={`font-mono text-xs text-text-muted ${compact ? "w-11" : "w-12"} shrink-0 tabular-nums`}>
+            {formatTime(totalDuration)}
+          </span>
         </div>
       </div>
     </>
@@ -660,7 +781,7 @@ export function AudioPlayer({
     <div
       className={embedded || isDock
         ? ""
-        : `glass-panel ${compact ? "rounded-2xl" : "rounded-[22px]"} overflow-hidden`
+        : `surface ${compact ? "rounded-2xl" : "rounded-[22px]"} overflow-hidden`
       }
     >
       {isDock ? dockBody : panelBody}

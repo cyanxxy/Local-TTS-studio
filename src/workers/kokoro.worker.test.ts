@@ -85,6 +85,7 @@ async function loadWorkerModule({
   }));
   vi.doMock("../lib/onnxWasmAssets", () => ({
     KOKORO_ONNX_WASM_ASSETS: { mjs: "ort.mjs", wasm: "ort.wasm" },
+    KOKORO_WEB_MODULE_URL: "kokoro-js",
   }));
   vi.doMock("../lib/onnxRuntime", () => ({
     configureKokoroOnnxRuntime: vi.fn(),

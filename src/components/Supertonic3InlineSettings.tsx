@@ -16,11 +16,11 @@ interface Props {
 }
 
 export function Supertonic3InlineSettings({ voice, language, onVoiceChange, onLanguageChange }: Props) {
-  const inputClass = "w-full rounded-lg border border-black/10 bg-white/55 px-3 py-2 text-sm text-text-primary backdrop-blur-sm";
+  const inputClass = "w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-2 text-sm text-text-primary";
   return (
-    <section aria-label="Supertonic 3 voice settings" className="space-y-3 rounded-2xl border border-white/50 bg-white/25 p-3 shadow-glass-sm backdrop-blur-md">
+    <section aria-label="Supertonic 3 voice settings" className="space-y-3 rounded-2xl border border-border bg-text-primary/[0.03] p-3">
       <div>
-        <p className="text-xs font-semibold uppercase tracking-widest text-text-muted">Supertonic 3 voice</p>
+        <p className="text-sm font-semibold text-text-secondary">Supertonic 3 voice</p>
         <p className="mt-0.5 text-xs text-text-muted">31 languages, local ONNX inference, and expression tags such as &lt;laugh&gt;.</p>
       </div>
       <label className="block text-xs font-medium text-text-secondary">

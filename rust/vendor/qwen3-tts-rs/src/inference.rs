@@ -12,7 +12,7 @@
 use crate::config::{Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
 use crate::error::{Qwen3TTSError, Result};
 use crate::generation_policy::{
-    codec_prompt_prefix, custom_voice_instruction, process_codec_logits,
+    codec_language_id, codec_prompt_prefix, custom_voice_instruction, process_codec_logits,
 };
 use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
 use crate::tensor::{DType, Device, Tensor};
@@ -1626,15 +1626,8 @@ impl TTSInference {
             .copied()
             .unwrap_or(0) as i64;
 
-        // Get language ID
-        let language_id = self
-            .config
-            .talker_config
-            .codec_language_id
-            .as_ref()
-            .and_then(|map| map.get(&language.to_lowercase()))
-            .copied()
-            .unwrap_or(0) as i64;
+        // Get language ID (dialect speakers swap in their dialect token)
+        let language_id = self.codec_language_id(language, speaker).unwrap_or(0);
 
         // Get codec special token IDs from config
         let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
@@ -1766,6 +1759,24 @@ impl TTSInference {
         Ok((waveform, sample_rate))
     }
 
+    /// Codec language token for a request, applying upstream's dialect-speaker
+    /// override. VoiceDesign and voice cloning pass no named speaker.
+    fn codec_language_id(&self, language: &str, speaker: &str) -> Option<i64> {
+        let talker = &self.config.talker_config;
+        let speaker_dialect = talker
+            .spk_is_dialect
+            .as_ref()
+            .and_then(|map| map.get(&speaker.to_lowercase()))
+            .and_then(|dialect| dialect.dialect_name());
+        codec_language_id(language, speaker_dialect, |name| {
+            talker
+                .codec_language_id
+                .as_ref()
+                .and_then(|map| map.get(name))
+                .map(|&id| i64::from(id))
+        })
+    }
+
     /// Generate speech with instruction control.
     ///
     /// Instruction control allows modulating speech characteristics like tone,
@@ -1813,15 +1824,9 @@ impl TTSInference {
             .copied()
             .unwrap_or(0) as i64;
 
-        // Auto omits the language token for both prompt variants.
-        let language_id = self
-            .config
-            .talker_config
-            .codec_language_id
-            .as_ref()
-            .and_then(|map| map.get(&language.to_lowercase()))
-            .copied()
-            .map(|value| value as i64);
+        // Auto omits the language token for both prompt variants, unless a
+        // dialect speaker supplies its dialect token.
+        let language_id = self.codec_language_id(language, speaker);
         let voice_design = self.config.tts_model_type.as_deref() == Some("voice_design");
         let instruct = if voice_design {
             instruct

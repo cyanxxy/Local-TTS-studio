@@ -32,10 +32,10 @@ export function LocalRuntimeSidebar({
   status,
 }: LocalRuntimeSidebarProps) {
   return (
-    <aside className="flex flex-col gap-4 rounded-[22px] glass-panel p-4 transition-all duration-300 sm:p-6 lg:col-span-2">
+    <aside className="flex flex-col gap-4 rounded-[22px] surface p-4 transition-all duration-300 sm:p-6 lg:col-span-2">
       <div>
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">Runtime</h3>
+          <h3 className="text-sm font-semibold text-text-secondary">Runtime</h3>
           <span
             className={`h-1.5 w-1.5 shrink-0 rounded-full ${
               runtimeBusy ? "bg-text-muted animate-pulse" : runtimeReady ? "bg-success" : "bg-danger"
@@ -57,8 +57,8 @@ export function LocalRuntimeSidebar({
         )}
       </div>
 
-      <div className="border border-black/10 rounded-xl p-4 bg-surface/55 backdrop-blur-md">
-        <h3 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">Cache</h3>
+      <div className="border border-black/10 rounded-xl p-4 bg-surface/55">
+        <h3 className="text-sm font-semibold text-text-secondary">Cache</h3>
 
         <div className="mt-2 space-y-1 font-mono text-xs text-text-secondary">
           <p className="break-all">Path: {cacheInfo?.path ?? "-"}</p>
@@ -73,7 +73,7 @@ export function LocalRuntimeSidebar({
               px-3 py-2 rounded-lg text-xs font-semibold border transition-colors
               ${!electronAvailable || busy
                 ? "border-border text-text-muted cursor-not-allowed"
-                : "border-white/55 bg-white/45 backdrop-blur-md text-text-primary hover:bg-white/65"
+                : "border-border bg-text-primary/[0.04] text-text-primary hover:bg-text-primary/[0.07]"
               }
             `}
           >
@@ -99,7 +99,7 @@ export function LocalRuntimeSidebar({
       </div>
 
       <div>
-        <h3 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">Sources</h3>
+        <h3 className="text-sm font-semibold text-text-secondary">Sources</h3>
         <div className="mt-2 flex flex-wrap gap-2">
           {links.map((link) => (
             <a
@@ -107,7 +107,7 @@ export function LocalRuntimeSidebar({
               href={link.href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-xs px-2.5 py-1 rounded-full border border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary transition-colors"
+              className="text-xs px-2.5 py-1 rounded-full border border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary transition-colors"
             >
               {link.label}
             </a>

@@ -5,6 +5,7 @@ import {
   fetchRemoteDocument,
   parseEpubDocument,
   parseHtmlReaderDocument,
+  parseMarkdownReaderDocument,
 } from "./readerImport";
 
 function sampleEpub(): Uint8Array {
@@ -35,6 +36,43 @@ function sampleEpub(): Uint8Array {
 }
 
 describe("readerImport", () => {
+  it("turns Markdown headings into chapters without leaving syntax in the text", () => {
+    const document = parseMarkdownReaderDocument([
+      "# The Keeper",
+      "",
+      "## Chapter 1: The Stairs",
+      "",
+      "The **keeper** climbed the [stairs](https://example.com) with `care`.",
+      "",
+      "- a snake_case_name item",
+      "",
+      "Chapter Two",
+      "-----------",
+      "",
+      "> Quoted *line* here.",
+    ].join("\n"), "the-keeper.md");
+
+    expect(document.title).toBe("The Keeper");
+    expect(document.text).not.toMatch(/[#*`[\]>]/);
+    expect(document.text).toContain("The keeper climbed the stairs with care.");
+    expect(document.text).toContain("a snake_case_name item");
+    expect(document.chapters.map((chapter) => chapter.title)).toEqual([
+      "Chapter 1: The Stairs",
+      "Chapter Two",
+    ]);
+    for (const chapter of document.chapters) {
+      expect(document.text.slice(chapter.start).startsWith(chapter.title)).toBe(true);
+    }
+  });
+
+  it("keeps preamble before the first Markdown heading as an introduction", () => {
+    const document = parseMarkdownReaderDocument(
+      "Some opening words before any heading.\n\n## First\n\nBody text.",
+      "notes.md",
+    );
+    expect(document.chapters.map((chapter) => chapter.title)).toEqual(["Introduction", "First"]);
+  });
+
   it("preserves EPUB metadata, spine order, headings, and chapter offsets", () => {
     const document = parseEpubDocument(sampleEpub(), "local.epub");
     expect(document).toMatchObject({

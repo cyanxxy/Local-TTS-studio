@@ -24,6 +24,7 @@ import { LocalRuntimeRuntimeSettings } from "./localRuntime/LocalRuntimeRuntimeS
 import { LocalRuntimeSidebar } from "./localRuntime/LocalRuntimeSidebar";
 import {
   NEUTTS_OPTIONS,
+  qwen3SupportsInstruct,
   qwen3UsesVoiceClone,
   qwen3UsesVoiceDesign,
 } from "./localRuntime/modelOptions";
@@ -38,6 +39,7 @@ import {
   float32ChunksToWavUrl,
   formatBytes,
   sha256Hex,
+  wavDurationSeconds,
   type StatusTone,
 } from "./localRuntime/utils";
 
@@ -55,6 +57,28 @@ interface LocalRuntimePageProps {
 type StatusMessage = { tone: StatusTone; text: string } | null;
 
 const DEFAULT_LOCAL_RUNTIME_TEXT = "Everything you hear is generated right here on this machine.";
+// Mirrors the Rust bridge: it rejects Qwen references over 20 seconds (the
+// transcript must match the whole clip) and warns below 3 seconds.
+const QWEN3_REFERENCE_MAX_SECONDS = 20;
+const QWEN3_REFERENCE_RECOMMENDED_MIN_SECONDS = 3;
+
+function qwen3ReferenceGuidance(durationSec: number | null): StatusMessage {
+  if (durationSec === null) return { tone: "success", text: "Reference WAV loaded." };
+  const duration = `${durationSec.toFixed(1)} s`;
+  if (durationSec > QWEN3_REFERENCE_MAX_SECONDS) {
+    return {
+      tone: "error",
+      text: `This clip is ${duration}. Qwen3 accepts at most ${QWEN3_REFERENCE_MAX_SECONDS} seconds; trim the clip and its transcript together.`,
+    };
+  }
+  if (durationSec < QWEN3_REFERENCE_RECOMMENDED_MIN_SECONDS) {
+    return {
+      tone: "info",
+      text: `This clip is only ${duration}. Cloning works best with ${QWEN3_REFERENCE_RECOMMENDED_MIN_SECONDS}-${QWEN3_REFERENCE_MAX_SECONDS} seconds of clear speech.`,
+    };
+  }
+  return { tone: "success", text: `Reference WAV loaded (${duration}).` };
+}
 
 interface ReceivedAudioChunk {
   audio: ArrayBuffer;
@@ -99,7 +123,7 @@ function formatGenerationStatus(generated: LocalTtsGenerateResult): string {
     .filter((entry): entry is string => entry !== null);
   const suffix = timings.length > 0 ? ` (${timings.join(", ")})` : "";
   const device = generated.device ? ` on ${generated.device}` : "";
-  const warning = generated.warnings?.[0] ? ` ${generated.warnings[0]}` : "";
+  const warning = generated.warnings?.length ? ` ${generated.warnings.join(" ")}` : "";
   return `Generated ${generated.durationSec.toFixed(2)}s audio${device} in ${generated.elapsedSec.toFixed(2)}s${suffix}.${warning}`;
 }
 
@@ -580,6 +604,11 @@ export function LocalRuntimePage({
     qwen3.setMaxNewTokens(nextMaxNewTokens);
   }, [invalidateGeneration, qwen3]);
 
+  const handleQwen3SeedChange = useCallback((nextSeed: number | null) => {
+    invalidateGeneration();
+    qwen3.setSeed(nextSeed);
+  }, [invalidateGeneration, qwen3]);
+
   const handleReferenceAudioChange = useCallback(async (file: File | null) => {
     const pageVersion = pageVersionRef.current;
     invalidateGeneration();
@@ -652,8 +681,9 @@ export function LocalRuntimePage({
       const buffer = await file.arrayBuffer();
       const signature = await sha256Hex(buffer);
       if (!isCurrentPageVersion(pageVersion)) return;
-      qwen3.setReferenceAudio(file.name, arrayBufferToBase64(buffer), signature);
-      setQwen3ReferenceAudioGuidance({ tone: "success", text: "Reference WAV loaded." });
+      const durationSec = wavDurationSeconds(buffer);
+      qwen3.setReferenceAudio(file.name, arrayBufferToBase64(buffer), signature, durationSec);
+      setQwen3ReferenceAudioGuidance(qwen3ReferenceGuidance(durationSec));
       setStatus({ tone: "info", text: `Loaded Qwen3 reference WAV: ${file.name}. Enter its exact transcript before generating.` });
     } catch (err) {
       if (!isCurrentPageVersion(pageVersion)) return;
@@ -704,13 +734,14 @@ export function LocalRuntimePage({
           payload.referenceText = qwen3.referenceText.trim();
         } else {
           if (!qwen3VoiceDesign) payload.speaker = qwen3.speaker;
-          payload.instruct = qwen3VoiceDesign || qwen3.profile.parameters !== "0.6B"
+          payload.instruct = qwen3SupportsInstruct(qwen3.profile.repo)
             ? qwen3.instruct.trim() || undefined : undefined;
         }
         payload.language = qwen3.language;
         payload.temperature = qwen3.temperature;
         payload.topK = qwen3.topK;
         payload.maxNewTokens = qwen3.maxNewTokens;
+        if (qwen3.seed !== null) payload.seed = qwen3.seed;
       }
 
       const generated = await window.electron.localTts.generate({
@@ -908,14 +939,14 @@ export function LocalRuntimePage({
 
   return (
     <div className="mt-6 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-5">
-      <section className="flex flex-col gap-4 rounded-[22px] glass-panel p-4 transition-all duration-300 sm:p-6 lg:col-span-3">
+      <section className="flex flex-col gap-4 rounded-[22px] surface p-4 transition-all duration-300 sm:p-6 lg:col-span-3">
         <div>
           <h2 className="text-xl font-display font-semibold text-text-primary">{name}</h2>
           <div className="mt-2 flex flex-wrap gap-1.5">
-            <span className="rounded-full border border-white/50 bg-white/40 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-sm">
+            <span className="rounded-full border border-border bg-text-primary/[0.04] px-2.5 py-1 font-mono text-2xs text-text-muted">
               {releaseDate}
             </span>
-            <span className="rounded-full border border-white/50 bg-white/40 px-2.5 py-1 font-mono text-2xs text-text-muted shadow-glass-sm backdrop-blur-sm">
+            <span className="rounded-full border border-border bg-text-primary/[0.04] px-2.5 py-1 font-mono text-2xs text-text-muted">
               {params}
             </span>
           </div>
@@ -948,13 +979,13 @@ export function LocalRuntimePage({
         )}
 
         <div className="space-y-2">
-          <label className="block text-xs font-semibold uppercase tracking-wider text-text-secondary">
+          <label className="block text-sm font-semibold text-text-secondary">
             Text
           </label>
           <textarea
             value={text}
             onChange={(event) => handleTextChange(event.target.value)}
-            className="w-full min-h-32 px-3 py-2 rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
+            className="w-full min-h-32 px-3 py-2 rounded-xl border border-black/10 bg-surface/55 text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
             placeholder="Type or paste text to synthesize…"
           />
           {exceedsUnicodeScalarLimit(text, MAX_LOCAL_TTS_TEXT_LENGTH) && (
@@ -1011,13 +1042,15 @@ export function LocalRuntimePage({
           onQwen3TopKChange={handleQwen3TopKChange}
           qwen3MaxNewTokens={qwen3.maxNewTokens}
           onQwen3MaxNewTokensChange={handleQwen3MaxNewTokensChange}
+          qwen3Seed={qwen3.seed}
+          onQwen3SeedChange={handleQwen3SeedChange}
         />
 
         {generateBusy && generationProgress && (
-          <div className="flex flex-col gap-2 rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md p-3 text-sm text-text-primary">
+          <div className="flex flex-col gap-2 rounded-xl border border-black/10 bg-surface/55 p-3 text-sm text-text-primary">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-wider text-text-secondary">
+                <p className="text-sm font-semibold text-text-secondary">
                   {generationProgress.phase.replace(/_/g, " ")}
                 </p>
                 <p>{generationProgress.message}</p>
@@ -1036,7 +1069,7 @@ export function LocalRuntimePage({
             className={`
               w-full rounded-2xl px-6 py-2.5 text-sm font-semibold tracking-wide transition-all duration-300 sm:w-auto
               ${!electronAvailable || !runtimeReady || !canGenerate || busy
-                ? "bg-border/50 text-text-muted cursor-not-allowed backdrop-blur-sm"
+                ? "bg-border/50 text-text-muted cursor-not-allowed"
                 : "glass-accent text-white"
               }
             `}
@@ -1048,7 +1081,7 @@ export function LocalRuntimePage({
             <button
               type="button"
               onClick={() => { void cancelActiveGeneration(); }}
-              className="w-full rounded-2xl border border-white/55 bg-white/40 backdrop-blur-md px-5 py-2.5 text-sm font-semibold text-text-primary shadow-glass-sm transition-all duration-200 hover:bg-white/60 hover:-translate-y-0.5 sm:w-auto"
+              className="w-full rounded-2xl border border-border bg-text-primary/[0.04] px-5 py-2.5 text-sm font-semibold text-text-primary transition-all duration-200 hover:bg-text-primary/[0.07] sm:w-auto"
             >
               Cancel
             </button>
@@ -1056,8 +1089,8 @@ export function LocalRuntimePage({
         </div>
 
         {(audioUrl || audioPlayer.totalDuration > 0) && (
-          <div className="border border-black/10 rounded-xl p-3 bg-surface/55 backdrop-blur-md">
-            <p className="text-xs font-semibold uppercase tracking-widest text-text-secondary mb-2">Output</p>
+          <div className="border border-black/10 rounded-xl p-3 bg-surface/55">
+            <p className="text-sm font-semibold text-text-secondary mb-2">Output</p>
             <AudioPlayer
               embedded
               isPlaying={audioPlayer.isPlaying}

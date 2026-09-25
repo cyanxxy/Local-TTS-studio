@@ -205,7 +205,8 @@ describe("localTtsIpc request sanitizers", () => {
       instruct: "Warm narration.",
       temperature: 0.75,
       topK: 64,
-      maxNewTokens: 2304,
+      maxNewTokens: 320,
+      seed: 1234,
     }, "darwin", "arm64")).toEqual({
       text: "Hello from Qwen.",
       mode: "customVoice",
@@ -216,15 +217,27 @@ describe("localTtsIpc request sanitizers", () => {
       instruct: "Warm narration.",
       temperature: 0.75,
       topK: 64,
-      maxNewTokens: 2304,
+      maxNewTokens: 320,
+      seed: 1234,
     });
+    // The bridge caps every ~200-character passage at 384 tokens, so a larger
+    // value would promise more audio than any passage can produce.
     expect(() => sanitizeGeneratePayload("qwen3", {
-      text: "Reject an unsafe generation ceiling.",
+      text: "Reject a limit above the per-passage cap.",
       mode: "customVoice",
       modelRepo: customRepo,
       modelPath: "/models/qwen3-customvoice",
-      maxNewTokens: 4097,
-    }, "darwin", "arm64")).toThrow("between 64 and 4096");
+      maxNewTokens: 385,
+    }, "darwin", "arm64")).toThrow("between 64 and 384");
+    for (const seed of [-1, 1.5, 2 ** 32]) {
+      expect(() => sanitizeGeneratePayload("qwen3", {
+        text: "Reject a seed the bridge cannot represent.",
+        mode: "customVoice",
+        modelRepo: customRepo,
+        modelPath: "/models/qwen3-customvoice",
+        seed,
+      }, "darwin", "arm64")).toThrow("seed");
+    }
 
     expect(sanitizeGeneratePayload("qwen3", {
       text: "Built-in speaker.",

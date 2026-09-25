@@ -8,6 +8,7 @@ import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useQwen3LocalRuntime } from "./useQwen3LocalRuntime";
 import { PlaybackClock } from "../lib/playbackClock";
+import { buildQwen3RequestPlan, buildQwen3TextUnits } from "../lib/qwenChunking";
 
 vi.mock("../contexts/Qwen3RuntimeContext", () => ({
   useQwen3Runtime: vi.fn(),
@@ -39,8 +40,10 @@ function runtimeSettings() {
     instruct: "",
     temperature: 0.9,
     topK: 50,
-    maxNewTokens: 1_536,
+    maxNewTokens: 384,
+    seed: null as number | null,
     referenceAudioName: "",
+    referenceAudioDurationSec: null,
     referenceAudioBase64: null,
     referenceAudioSignature: "",
     referenceText: "",
@@ -60,6 +63,7 @@ function runtimeSettings() {
     setTemperature: vi.fn(),
     setTopK: vi.fn(),
     setMaxNewTokens: vi.fn(),
+    setSeed: vi.fn(),
     setReferenceAudio: vi.fn(),
     setReferenceText: vi.fn(),
     refreshSetup: vi.fn().mockResolvedValue(undefined),
@@ -183,6 +187,90 @@ describe("useQwen3LocalRuntime long-text batching", () => {
       chunk.pauseAfterSec === 0.2 && chunk.audio.every((sample) => sample === 0)
     ))).toBe(true);
     expect(result.current.generationProgress).toBe(100);
+    expect(result.current.error).toBeNull();
+  });
+
+  it("maps each request's streamed text units onto the bridge's own split", async () => {
+    vi.mocked(useQwen3Runtime).mockReturnValue({
+      ...runtimeSettings(),
+      instruct: "Whisper dramatically.",
+      seed: 1234,
+    } as never);
+    let emitAudioChunk: ((event: Record<string, unknown>) => void) | undefined;
+    const generate = vi.fn(async (request: GenerateRequest) => {
+      // Stand in for Rust: trim the request, split it, and stream one chunk per unit.
+      const units = buildQwen3TextUnits(String(request.payload?.text));
+      units.forEach((_, unitIndex) => {
+        const audio = new Float32Array([0.1, -0.1]);
+        emitAudioChunk?.({
+          requestId: request.requestId,
+          model: "qwen3",
+          index: unitIndex,
+          total: 0,
+          sampleRate: 24_000,
+          sampleCount: audio.length,
+          silenceAfterSamples: 0,
+          textUnitIndex: unitIndex,
+          textUnitTotal: units.length,
+          audio: audio.buffer,
+        });
+      });
+      return {
+        sampleRate: 24_000,
+        modelRepo: String(request.payload?.modelRepo),
+        durationSec: 0.1,
+        elapsedSec: 0.1,
+        audioTransport: "websocket-binary" as const,
+        audioChunkCount: units.length,
+        phaseTimingsSec: { inferenceSec: 0.1 },
+      };
+    });
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate,
+        cancel: vi.fn().mockResolvedValue({ cancelled: true }),
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn((listener) => {
+          emitAudioChunk = listener as (event: Record<string, unknown>) => void;
+          return () => undefined;
+        }),
+      },
+    } as never;
+    const { player, methods } = audioPlayer();
+    // The second request starts with a space that IPC trims, which moves the
+    // bridge's first window (see qwenChunking.test.ts).
+    const filler = `${"Filler sentence for the reader. ".repeat(6)}\n`;
+    const head = filler.repeat(Math.floor(MAX_LOCAL_TTS_TEXT_LENGTH / filler.length));
+    const text = `${head}Intro. ${"a".repeat(49)},${"b".repeat(149)}.${" More text here.".repeat(20)}`;
+    const setShowPlayer = vi.fn();
+    const { result } = renderHook(() => useQwen3LocalRuntime({
+      enabled: true,
+      text,
+      allowLongText: true,
+      player,
+      setShowPlayer,
+    }));
+
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+    act(() => result.current.handleGenerate());
+    await waitFor(() => expect(result.current.isGenerating).toBe(false));
+
+    expect(generate).toHaveBeenCalledTimes(2);
+    for (const [request] of generate.mock.calls) {
+      // 0.6B CustomVoice ignores instructions, so none is sent; the seed is.
+      expect(request.payload).toEqual(expect.objectContaining({ instruct: "", seed: 1234 }));
+    }
+    const { units } = buildQwen3RequestPlan(text);
+    const spoken = methods.scheduleChunk.mock.calls
+      .map(([chunk]) => chunk as { audio: Float32Array; text: string; textStart: number; textEnd: number })
+      .filter((chunk) => chunk.audio.length === 2);
+    expect(spoken.map((chunk) => chunk.text)).toEqual(units.map((unit) => unit.text));
+    expect(spoken.every((chunk) => text.slice(chunk.textStart, chunk.textEnd) === chunk.text)).toBe(true);
     expect(result.current.error).toBeNull();
   });
 

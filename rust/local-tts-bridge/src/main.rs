@@ -135,6 +135,7 @@ struct Qwen3Payload {
     temperature: Option<f64>,
     top_k: Option<i64>,
     max_new_tokens: Option<i64>,
+    seed: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -684,7 +685,8 @@ impl RuntimeState {
             payload.temperature.unwrap_or(0.9),
             payload.top_k.unwrap_or(50),
             payload.max_new_tokens.unwrap_or(4_096),
-        );
+        )
+        .with_seed(payload.seed);
         let started = Instant::now();
         let inference_started = Instant::now();
         let mut sink = WebSocketQwenSink {
@@ -957,17 +959,32 @@ fn qwen_generation_output(
         sample_rate: usize::try_from(summary.sample_rate).context("Invalid Qwen3 sample rate")?,
         model_repo,
         device: Some(target.device.to_string()),
-        warnings: if summary.reference_truncated {
-            vec!["Qwen3 used only the first 20 seconds of the reference WAV.".to_string()]
-        } else {
-            Vec::new()
-        },
+        warnings: qwen_reference_warnings(summary.reference_truncated, summary.reference_short),
         streamed_audio: Some(StreamedAudioSummary {
             sample_count: summary.sample_count,
             audio_chunk_count: summary.audio_chunk_count,
         }),
         phase_timings,
     })
+}
+
+#[cfg(any(
+    test,
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64")
+))]
+fn qwen_reference_warnings(truncated: bool, short: bool) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if truncated {
+        warnings.push("Qwen3 used only the first 20 seconds of the reference WAV.".to_string());
+    }
+    if short {
+        warnings.push(
+            "The reference WAV is shorter than 3 seconds, so the cloned voice may be inaccurate. Use a clear 3-20 second clip for best results."
+                .to_string(),
+        );
+    }
+    warnings
 }
 
 fn parse_model_type(mode: &str) -> Result<ExpectedModelType> {
@@ -1840,6 +1857,36 @@ mod tests {
             "deviceMap": "auto",
         });
         assert!(serde_json::from_value::<Qwen3Payload>(payload).is_err());
+    }
+
+    #[test]
+    fn qwen_reference_warnings_cover_trimmed_and_short_clips() {
+        assert!(qwen_reference_warnings(false, false).is_empty());
+        let warnings = qwen_reference_warnings(true, true);
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings[0].contains("first 20 seconds"));
+        assert!(warnings[1].contains("shorter than 3 seconds"));
+    }
+
+    #[test]
+    fn qwen_payload_accepts_an_optional_sampling_seed() {
+        let payload: Qwen3Payload = serde_json::from_value(json!({
+            "text": "Hello",
+            "modelRepo": QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
+            "modelPath": "/model",
+            "seed": 42,
+        }))
+        .unwrap();
+        assert_eq!(payload.seed, Some(42));
+        assert!(
+            serde_json::from_value::<Qwen3Payload>(json!({
+                "text": "Hello",
+                "modelRepo": QWEN3_MLX_CUSTOMVOICE_06B_MODEL,
+                "modelPath": "/model",
+                "seed": -1,
+            }))
+            .is_err()
+        );
     }
 
     #[test]

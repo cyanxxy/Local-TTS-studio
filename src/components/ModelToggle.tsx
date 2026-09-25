@@ -259,7 +259,7 @@ export function ModelToggle({
 
   return (
     <div ref={rootRef} className="relative z-30 flex flex-col gap-1.5">
-      <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+      <span className="text-sm font-semibold text-text-secondary">
         Model
       </span>
       <button
@@ -284,17 +284,17 @@ export function ModelToggle({
             closeAndMoveFocus(event.shiftKey);
           }
         }}
-        className={`group flex min-h-[4.75rem] w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left backdrop-blur-md transition-all duration-200 ${
+        className={`group flex min-h-[4.75rem] w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left transition-all duration-200 ${
           open
             ? "border-accent/45 bg-accent/[0.09] shadow-accent-sm ring-2 ring-accent/10"
-            : "border-white/60 bg-white/45 shadow-glass-sm hover:-translate-y-0.5 hover:border-accent/25 hover:bg-white/65"
+            : "border-border bg-text-primary/[0.04] hover:border-accent/25 hover:bg-text-primary/[0.07]"
         }`}
       >
         <span className="min-w-0">
           <span className="flex min-w-0 flex-wrap items-center gap-2">
             <span className="truncate text-base font-semibold text-text-primary">{selected.label}</span>
             {selected.badge && (
-              <span className="shrink-0 rounded-full border border-accent/25 bg-accent-light px-2 py-0.5 font-mono text-2xs uppercase tracking-[0.14em] text-accent">
+              <span className="shrink-0 rounded-full border border-accent/25 bg-accent-light px-2 py-0.5 font-mono text-xs text-accent">
                 {selected.badge}
               </span>
             )}
@@ -304,7 +304,7 @@ export function ModelToggle({
             <span className="truncate">{selected.unavailableReason ?? selected.detail}</span>
           </span>
         </span>
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/5 bg-white/50 text-text-muted transition-colors group-hover:text-accent">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/5 bg-text-primary/[0.04] text-text-muted transition-colors group-hover:text-accent">
           <ChevronDown aria-hidden="true" size={17} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
         </span>
       </button>
@@ -317,7 +317,7 @@ export function ModelToggle({
           aria-label="Select model"
           data-model-picker-menu
           data-testid="model-picker-menu"
-          className="glass-pop fixed z-[200] overflow-y-auto rounded-2xl border border-white/60 p-1.5 shadow-glass-lg animate-fade-up"
+          className="glass-pop fixed z-[200] overflow-y-auto rounded-2xl border border-border p-1.5 shadow-glass-lg animate-fade-up"
           style={{
             left: menuPosition?.left ?? 0,
             top: menuPosition?.top ?? 0,
@@ -368,13 +368,13 @@ export function ModelToggle({
                     ? "cursor-not-allowed opacity-50"
                     : choice.selected
                     ? "bg-accent/[0.11]"
-                    : "hover:bg-white/55"
+                    : "hover:bg-text-primary/[0.07]"
                 }`}
               >
                 <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${
                   choice.selected
                     ? "border-accent/30 bg-accent-light text-accent"
-                    : "border-black/5 bg-white/45 text-transparent"
+                    : "border-black/5 bg-text-primary/[0.04] text-transparent"
                 }`}>
                   <Check aria-hidden="true" size={15} strokeWidth={2.5} />
                 </span>
@@ -384,12 +384,12 @@ export function ModelToggle({
                       {choice.label}
                     </span>
                     {choice.badge && (
-                      <span className="shrink-0 rounded-full border border-accent/20 bg-accent-light px-2 py-0.5 font-mono text-2xs uppercase tracking-[0.12em] text-accent">
+                      <span className="shrink-0 rounded-full border border-accent/20 bg-accent-light px-2 py-0.5 font-mono text-xs text-accent">
                         {choice.badge}
                       </span>
                     )}
                     {unavailable && (
-                      <span className="rounded-full border border-border px-2 py-0.5 text-2xs uppercase tracking-[0.12em] text-text-muted">
+                      <span className="rounded-full border border-border px-2 py-0.5 text-xs text-text-secondary">
                         Unavailable
                       </span>
                     )}

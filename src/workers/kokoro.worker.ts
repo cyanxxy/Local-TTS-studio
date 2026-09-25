@@ -7,7 +7,7 @@
  */
 
 import type { KokoroTTS as KokoroTTSInstance } from "kokoro-js";
-import type { InferenceBackend, PronunciationRule, WorkerInMessage, WorkerOutMessage } from "../types";
+import type { ChunkPauseKind, InferenceBackend, PronunciationRule, WorkerInMessage, WorkerOutMessage } from "../types";
 import {
   KOKORO_FALLBACK_VOICES,
   KOKORO_MODEL_ID,
@@ -15,8 +15,8 @@ import {
 } from "../constants";
 import { concatFloat32Arrays, createSilence } from "../lib/audio";
 import { normalizeRawAudioOutput } from "../lib/audioOutput";
-import { buildKokoroInferenceUnits, getKokoroMaxInferenceChars } from "../lib/chunking";
-import { KOKORO_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
+import { chunkForKokoroDetailed } from "../lib/chunking";
+import { KOKORO_ONNX_WASM_ASSETS, KOKORO_WEB_MODULE_URL } from "../lib/onnxWasmAssets";
 import { configureKokoroOnnxRuntime } from "../lib/onnxRuntime";
 import { resolvePauseSeconds, resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
 import {
@@ -64,7 +64,7 @@ interface KokoroChunkUnit {
   start?: number;
   end?: number;
   pauseAfterSec: number;
-  pauseKind: "none" | "sentence" | "comma";
+  pauseKind: ChunkPauseKind;
   depth: number;
 }
 
@@ -89,7 +89,9 @@ function isGenerationCurrent(generationEpoch: number): boolean {
 
 async function loadKokoroModule(): Promise<KokoroModule> {
   if (!kokoroModulePromise) {
-    kokoroModulePromise = import("kokoro-js");
+    // Imported by URL rather than as "kokoro-js" so the bundler never rewrites
+    // it; see KOKORO_WEB_MODULE_URL in vite.kokoroAssets.ts.
+    kokoroModulePromise = import(/* @vite-ignore */ KOKORO_WEB_MODULE_URL) as Promise<KokoroModule>;
   }
   return kokoroModulePromise;
 }
@@ -156,14 +158,14 @@ function listVoices(instance: KokoroTTSInstance): string[] {
 }
 
 function buildInferenceUnits(text: string): KokoroChunkUnit[] {
-  const units = buildKokoroInferenceUnits(text, getKokoroMaxInferenceChars(activeBackend));
-
-  return units.map((unit, index) => ({
-    text: unit.text,
-    start: unit.start,
-    end: unit.end,
-    pauseAfterSec: index < units.length - 1 ? 0.2 : 0,
-    pauseKind: index < units.length - 1 ? "sentence" : "none",
+  // The same units and pauses the Reader previews, so highlighted boundaries
+  // and the Creator pause settings match what is actually generated.
+  return chunkForKokoroDetailed(text, { backend: activeBackend }).map((chunk) => ({
+    text: chunk.text,
+    start: chunk.start,
+    end: chunk.end,
+    pauseAfterSec: chunk.pauseAfterSec,
+    pauseKind: chunk.pauseKind,
     depth: 0,
   }));
 }

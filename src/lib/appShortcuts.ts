@@ -56,7 +56,7 @@ export const APP_SHORTCUT_GROUPS: readonly AppShortcutGroup[] = [
     shortcuts: [
       {
         action: "Play or pause",
-        description: "Toggle generated audio when focus is outside a text field.",
+        description: "Toggle generated audio when focus is not on a text field or another control.",
         mac: ["Space"],
         windows: ["Space"],
       },
@@ -65,6 +65,29 @@ export const APP_SHORTCUT_GROUPS: readonly AppShortcutGroup[] = [
         description: "Move backward or forward in generated audio.",
         mac: ["⌥", "← / →"],
         windows: ["Alt", "← / →"],
+      },
+    ],
+  },
+  {
+    label: "Reader",
+    shortcuts: [
+      {
+        action: "Previous or next page",
+        description: "Turn Reader pages when focus is on the reading text.",
+        mac: ["← / →"],
+        windows: ["← / →"],
+      },
+      {
+        action: "Focus layout",
+        description: "Hide or show the app header above the Reader.",
+        mac: ["F"],
+        windows: ["F"],
+      },
+      {
+        action: "Reader shortcuts",
+        description: "List the Reader's keyboard shortcuts.",
+        mac: ["?"],
+        windows: ["?"],
       },
     ],
   },
