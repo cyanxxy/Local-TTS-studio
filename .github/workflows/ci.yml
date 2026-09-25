@@ -84,3 +84,17 @@ jobs:
           key: ci-bridge-linux-llama-cmake-only-v1
       - run: npm ci
       - run: npx vitest run electron/rustLocalBridge.test.ts
+
+  checks-complete:
+    # Keep the branch-protection context stable as the underlying jobs expand.
+    name: Lint, test, and build web
+    needs: [checks, bridge-linux]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to pass
+        env:
+          WEB_RESULT: ${{ needs.checks.result }}
+          BRIDGE_RESULT: ${{ needs.bridge-linux.result }}
+        run: test "$WEB_RESULT" = success && test "$BRIDGE_RESULT" = success

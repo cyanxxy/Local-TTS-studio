@@ -29,6 +29,10 @@ bridge build scripts, `rust-toolchain.toml`, `.npmrc`, `.nvmrc`,
 `package.json`, and `package-lock.json`, and can be started by hand from the
 Actions tab.
 
+The final `Lint, test, and build web` check preserves the branch-protection
+context and succeeds only when both Node matrix entries and Linux bridge
+integration have passed.
+
 Workflow actions are pinned to commit SHAs with the release version in a
 trailing comment. `.github/dependabot.yml` raises weekly pull requests for
 those actions and for the bridge's Cargo dependencies; the vendored
