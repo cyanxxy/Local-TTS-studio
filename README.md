@@ -97,12 +97,12 @@ Fresh captures from the Electron desktop app on macOS, using the default light a
 |---|---|
 | **Local & private** | Every synthesis path runs on-device. Network access is used only to download model/runtime assets on first use. |
 | **Web models** | Web browsers expose Kokoro-82M and Supertonic 2 with WebGPU/WASM; Electron replaces Supertonic 2 with Supertonic 3. |
-| **Studio & Reader** | A focused synthesis workspace plus a long-book Reader with a searchable table of contents, full-text search, paragraph-block rendering, bounded section rendering/generation, stable whole-book progress, arrow-key section paging, double-click-to-listen seeking, bookmarks with text previews, quoted notes, and automatic continuation (on by default). |
+| **Studio & Reader** | A focused synthesis workspace plus a long-book Reader with a searchable table of contents, full-text search, paragraph-block rendering, bounded section rendering/generation, stable whole-book progress, arrow-key section paging, double-click-to-listen seeking, a selection toolbar (listen, bookmark, or note), bookmarks with text previews, quoted notes, a sleep timer, a focus layout that hides the app header, and automatic continuation (on by default). |
 | **Studio-grade export** | WAV (32-bit float, 24-bit, 16-bit PCM) and MP3, with optional loudness normalization, sample-peak limiting, and resampling. |
 | **Estimated captions** | Export estimated SRT, VTT, or JSON timings alongside the audio. |
 | **Creator presets** | One-click TikTok Voiceover, YouTube Shorts, and YouTube Long-form profiles. |
 | **Delivery tuning** | Adjustable speed, pause shaping, and pronunciation / emphasis rules. |
-| **Appearance & reading fonts** | System/light/dark themes, four accents, interface scaling, three interface fonts, four Reader fonts, and persistent Reader text size, line spacing, column width, and focus controls. |
+| **Appearance & reading fonts** | System/light/dark themes, four accents, interface scaling, three interface fonts, four Reader fonts, and persistent Reader page tone (paper, sepia, night), text size, line spacing, column width, and focus controls. |
 | **Desktop keyboard workflow** | Cross-platform navigation, generation, stop, playback, and seeking shortcuts, documented inside Settings. |
 | **Accessible motion and material** | Independent reduced-motion and reduced-transparency preferences with responsive controls and keyboard focus handling. |
 | **Offline reuse** | Model weights cache in-browser (IndexedDB + Cache API) for repeat use, subject to browser quota, persistence, and eviction behavior. |
@@ -240,7 +240,7 @@ Preferences persist locally and apply across Studio, Reader, and desktop runtime
 
 ## Keyboard Shortcuts
 
-Shortcuts work while Open TTS is the active application. Space remains normal text input whenever focus is inside a text field.
+Shortcuts work while Open TTS is the active application. Space keeps its normal behaviour whenever focus is inside a text field or on another control, such as a button.
 
 | Action | macOS | Windows / Linux |
 |---|---|---|
@@ -252,6 +252,8 @@ Shortcuts work while Open TTS is the active application. Space remains normal te
 | Play or pause | <kbd>Space</kbd> | <kbd>Space</kbd> |
 | Skip backward / forward 10 seconds | <kbd>⌥</kbd> <kbd>←</kbd> / <kbd>→</kbd> | <kbd>Alt</kbd> <kbd>←</kbd> / <kbd>→</kbd> |
 | Previous / next Reader section | <kbd>←</kbd> / <kbd>→</kbd> | <kbd>←</kbd> / <kbd>→</kbd> |
+| Toggle the Reader focus layout | <kbd>F</kbd> | <kbd>F</kbd> |
+| List Reader shortcuts | <kbd>?</kbd> | <kbd>?</kbd> |
 
 <div align="center">
 <img src="./docs/screenshots/settings-shortcuts.png" alt="Open TTS keyboard shortcuts for macOS, Windows, and Linux" width="900">
@@ -266,7 +268,7 @@ The desktop app adds an **Import** button to Studio and Reader. Electron's main 
 | Format | Extensions / source | Availability | Processing path |
 |---|---|---|---|
 | EPUB | `.epub` | Web Reader and desktop Reader | Unpacked and structured in the renderer; the desktop main process transfers the selected bytes without parsing them |
-| Plain text | `.txt` `.md` | Web Reader and desktop | Read directly; no document parser involved |
+| Plain text | `.txt` `.md` | Web Reader and desktop | Read directly; Markdown headings become chapters and inline syntax is stripped so it is never shown or spoken |
 | HTML | `.html` `.htm` | Web Reader local-file picker | Parsed in the renderer with article/heading extraction |
 | PDF | `.pdf` | Desktop | LiteParse, with OCR for scanned pages; some PDFs require a local Ghostscript install |
 | Office / OpenDocument | `.docx` `.pptx` `.odt` | Desktop, with LibreOffice | Converted through a local LibreOffice install before LiteParse extraction |

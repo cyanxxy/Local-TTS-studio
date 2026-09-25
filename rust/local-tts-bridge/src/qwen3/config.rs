@@ -39,6 +39,10 @@ pub struct GenerationControls {
     pub temperature: f64,
     pub top_k: i64,
     pub max_new_tokens: i64,
+    /// Reseeds sampling before every text unit, so each unit (and a repeat of
+    /// the same request) starts from the same random state. `None` samples
+    /// nondeterministically.
+    pub seed: Option<u64>,
 }
 
 impl GenerationControls {
@@ -49,7 +53,12 @@ impl GenerationControls {
             temperature: temperature.clamp(0.0, 2.0),
             top_k: top_k.clamp(1, 1_000),
             max_new_tokens: max_new_tokens.clamp(MIN_GENERATION_TOKENS, MAX_GENERATION_TOKENS),
+            seed: None,
         }
+    }
+
+    pub fn with_seed(self, seed: Option<u64>) -> Self {
+        Self { seed, ..self }
     }
 
     /// Bound the budget by what this unit can plausibly need, so a generation
@@ -127,6 +136,18 @@ mod tests {
         assert_eq!(controls.temperature, 0.0);
         assert_eq!(controls.top_k, 1);
         assert_eq!(controls.max_new_tokens, MIN_GENERATION_TOKENS);
+    }
+
+    #[test]
+    fn a_seed_survives_the_per_unit_budget() {
+        let controls = GenerationControls::new(0.9, 50, 3_000).with_seed(Some(7));
+        assert_eq!(
+            controls
+                .effective_for_text("Hello.", "english", MAX_TEXT_UNIT_GENERATION_TOKENS)
+                .seed,
+            Some(7)
+        );
+        assert_eq!(GenerationControls::default().seed, None);
     }
 
     #[test]

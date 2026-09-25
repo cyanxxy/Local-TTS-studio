@@ -23,7 +23,7 @@ export function Audio8InlineSettings({
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-col gap-1.5">
-        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">Voice</span>
+        <span className="text-sm font-semibold text-text-secondary">Voice</span>
         <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
           {AUDIO8_VOICES.map((item) => (
             <button
@@ -34,7 +34,7 @@ export function Audio8InlineSettings({
               className={`rounded-xl border px-3 py-2 text-left transition-all duration-200 ${
                 voice === item.id
                   ? "border-accent/40 bg-accent-light text-text-primary shadow-accent-sm"
-                  : "border-white/50 bg-white/35 text-text-muted shadow-glass-sm hover:-translate-y-0.5 hover:bg-white/55 hover:text-text-primary"
+                  : "border-border bg-text-primary/[0.03] text-text-muted hover:bg-text-primary/[0.07] hover:text-text-primary"
               }`}
             >
               <span className="block text-sm font-medium">{item.name}</span>
@@ -60,9 +60,9 @@ export function Audio8InlineSettings({
           model whose storage the user cannot see or reclaim. */}
       <section
         aria-label="Audio8 model cache"
-        className="rounded-xl border border-black/10 bg-surface/55 p-3 backdrop-blur-md"
+        className="rounded-xl border border-black/10 bg-surface/55 p-3"
       >
-        <h3 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">Cache</h3>
+        <h3 className="text-sm font-semibold text-text-secondary">Cache</h3>
         <div className="mt-2 space-y-1 font-mono text-2xs text-text-secondary">
           <p className="break-all">Path: {cacheInfo?.path ?? "-"}</p>
           <p>Size: {cacheInfo ? formatBytes(cacheInfo.sizeBytes) : "-"}</p>
@@ -74,7 +74,7 @@ export function Audio8InlineSettings({
           className={`mt-3 w-full rounded-lg border px-3 py-2 text-xs font-semibold transition-colors ${
             cacheBusy || !cacheInfo?.exists
               ? "cursor-not-allowed border-border text-text-muted"
-              : "border-white/55 bg-white/45 text-text-primary backdrop-blur-md hover:bg-white/65"
+              : "border-border bg-text-primary/[0.04] text-text-primary hover:bg-text-primary/[0.07]"
           }`}
         >
           Clear Local Cache

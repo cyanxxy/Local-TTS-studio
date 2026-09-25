@@ -10,6 +10,7 @@ import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
 import { MAX_REFERENCE_CODES_FILE_BYTES } from "../../electron/localTtsLimits";
 import { LocalRuntimePage } from "./LocalRuntimePage";
 import { PlaybackClock } from "../lib/playbackClock";
+import { float32ChunksToWavBytes } from "./localRuntime/utils";
 
 const CUSTOM_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const BASE_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
@@ -340,9 +341,25 @@ describe("LocalRuntimePage", () => {
       topK: 50,
       maxNewTokens: 384,
     }));
-    for (const removed of ["baseModelPath", "deviceMap", "dtype", "attnImplementation", "topP"]) {
+    for (const removed of ["baseModelPath", "deviceMap", "dtype", "attnImplementation", "topP", "seed"]) {
       expect(generate.mock.calls[0][0].payload).not.toHaveProperty(removed);
     }
+  });
+
+  it("offers per-passage token limits and forwards an optional seed", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    const maxTokens = screen.getByLabelText("Max tokens per passage");
+    expect(maxTokens).toHaveAttribute("max", "384");
+    fireEvent.change(maxTokens, { target: { value: "4096" } });
+    expect(maxTokens).toHaveValue(384);
+    fireEvent.change(screen.getByLabelText("Seed (optional)"), { target: { value: "1234" } });
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(generate.mock.calls[0][0].payload).toEqual(expect.objectContaining({
+      maxNewTokens: 384,
+      seed: 1234,
+    }));
   });
 
   it("requires a VoiceDesign description before generation", async () => {
@@ -395,6 +412,44 @@ describe("LocalRuntimePage", () => {
       referenceText: "Exact words",
     }));
     expect(generate.mock.calls[0][0].payload).not.toHaveProperty("referenceAudioName");
+  });
+
+  it("warns about a short voice-clone reference before and after generation", async () => {
+    generate.mockImplementation(({ requestId, model }: { requestId: string; model: "qwen3" }) => {
+      const samples = new Float32Array([0.1, -0.2]);
+      audioListener?.({
+        requestId,
+        model,
+        index: 0,
+        total: 1,
+        sampleRate: 24_000,
+        sampleCount: samples.length,
+        silenceAfterSamples: 0,
+        audio: samples.buffer,
+      });
+      return Promise.resolve({
+        ...generated,
+        modelRepo: BASE_REPO,
+        warnings: ["The reference WAV is shorter than 3 seconds.", "Second bridge warning."],
+      });
+    });
+    renderPage();
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    fireEvent.change(screen.getByLabelText("Model size and voice mode"), { target: { value: BASE_REPO } });
+    await waitFor(() => expect(screen.getByLabelText("Model size and voice mode")).toHaveValue(BASE_REPO));
+    const oneSecond = float32ChunksToWavBytes([
+      { audio: new Float32Array(24_000).buffer, sampleCount: 24_000, silenceAfterSamples: 0 },
+    ], 24_000);
+    const wav = new File([oneSecond.slice()], "short.wav", { type: "audio/wav" });
+    await act(async () => {
+      fireEvent.change(await screen.findByLabelText(/^Reference WAV/i), { target: { files: [wav] } });
+    });
+    expect(await screen.findByText(/This clip is only 1\.0 s/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Exact reference transcript"), { target: { value: "Hi" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+    expect(await screen.findByText(/shorter than 3 seconds\. Second bridge warning\./)).toBeInTheDocument();
   });
 
   it("uses generic choose and revision-verified download APIs", async () => {

@@ -28,9 +28,9 @@ export function SettingsPanel({
       {/* Toggle header */}
       <button
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-white/40 transition-colors"
+        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-text-primary/[0.07] transition-colors"
       >
-        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+        <span className="text-sm font-semibold text-text-secondary">
           Model storage
         </span>
         <ChevronDown
@@ -52,7 +52,7 @@ export function SettingsPanel({
             className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium border transition-colors ${
               busy
                 ? "border-border text-text-muted cursor-not-allowed"
-                : "border-white/55 bg-white/40 backdrop-blur-sm text-text-secondary hover:bg-white/60 hover:text-text-primary"
+                : "border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
             }`}
           >
             <Trash2 size={12} />
@@ -65,7 +65,7 @@ export function SettingsPanel({
             className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-colors ${
               busy
                 ? "bg-border text-text-muted cursor-not-allowed"
-                : "border border-white/55 bg-white/55 backdrop-blur-sm text-text-secondary hover:bg-white/70 hover:text-text-primary"
+                : "border border-border bg-text-primary/[0.06] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
             }`}
           >
             <RefreshCw size={12} />

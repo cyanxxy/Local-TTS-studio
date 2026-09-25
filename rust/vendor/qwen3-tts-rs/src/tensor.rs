@@ -135,6 +135,23 @@ impl From<tch::Device> for Device {
 // Tensor — unified tensor type
 // ---------------------------------------------------------------------------
 
+/// Open TTS: seed the sampling RNG so the same request draws the same tokens,
+/// or restore nondeterministic sampling with `None`.
+pub fn set_sampling_seed(seed: Option<u64>) {
+    #[cfg(feature = "tch-backend")]
+    {
+        let seed = seed.unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|elapsed| elapsed.as_nanos() as u64)
+                .unwrap_or(42)
+        });
+        tch::manual_seed(seed as i64);
+    }
+    #[cfg(feature = "mlx")]
+    crate::backend::mlx::ops::set_sampling_seed(seed);
+}
+
 /// Unified tensor type backed by either tch::Tensor or MLX array.
 pub struct Tensor {
     #[cfg(feature = "tch-backend")]

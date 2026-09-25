@@ -53,6 +53,40 @@ function SidebarHarness({
 }
 
 describe("ReaderLibrarySidebar", () => {
+  it("shows each book's current chapter and estimated listening time left", () => {
+    const book = createReaderDocument({
+      id: "long-book",
+      title: "Long book",
+      text: `# Opening\n${"Words to listen to. ".repeat(100)}\n\n# Ending\n${"More words to hear. ".repeat(100)}`,
+    });
+    const midway = { ...book, progress: { ...book.progress, textOffset: book.chapters[1].start + 5 } };
+    render(
+      <ReaderLibrarySidebar
+        open
+        documents={[midway]}
+        activeDocument={null}
+        currentTextOffset={0}
+        clock={new PlaybackClock()}
+        onClose={vi.fn()}
+        onOpenDocument={vi.fn()}
+        onNewDocument={vi.fn()}
+        onDeleteDocument={vi.fn()}
+        onUpdateMetadata={vi.fn()}
+        onJumpToOffset={vi.fn()}
+        onAddBookmark={vi.fn()}
+        onRemoveBookmark={vi.fn()}
+        onAddNote={vi.fn()}
+        onUpdateNote={vi.fn()}
+        onRemoveNote={vi.fn()}
+        tab="library"
+        onTabChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Ending")).toBeInTheDocument();
+    expect(screen.getByText(/^≈\d+m left · Opened/)).toBeInTheDocument();
+  });
+
   it("lays out all five tabs in one row", () => {
     render(<SidebarHarness />);
     fireEvent.click(screen.getByRole("button", { name: "Open library" }));

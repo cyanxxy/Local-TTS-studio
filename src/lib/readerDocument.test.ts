@@ -6,6 +6,7 @@ import {
   chapterAtOffset,
   createReaderDocument,
   estimateWordRanges,
+  unwrapHardLineBreaks,
   normalizeReaderDocumentRecord,
   normalizeReaderTextFragment,
   rebaseReaderChapters,
@@ -57,6 +58,30 @@ describe("readerDocument", () => {
     expect(words[0]).toMatchObject({ start: 20, end: 22, startSec: 5 });
     expect(words[1].endSec - words[1].startSec).toBeGreaterThan(words[0].endSec - words[0].startSec);
     expect(words.at(-1)?.endSec).toBe(9);
+  });
+
+  it("holds the marker on a word through the pause that follows its punctuation", () => {
+    const [plain] = estimateWordRanges("word word", 0, 0, 2);
+    const [stop] = estimateWordRanges("word. word", 0, 0, 2);
+    const [comma] = estimateWordRanges("word, word", 0, 0, 2);
+    const span = (range: { startSec: number; endSec: number }) => range.endSec - range.startSec;
+    expect(span(stop)).toBeGreaterThan(span(comma));
+    expect(span(comma)).toBeGreaterThan(span(plain));
+  });
+
+  it("rejoins lines a PDF layout wrapped mid-sentence", () => {
+    expect(unwrapHardLineBreaks(
+      "The committee met on Tuesday to discuss the\nproposal, which had been circulated\nearlier in the week. Members raised\nseveral concerns about compre-\nhensive reform.",
+    )).toBe(
+      "The committee met on Tuesday to discuss the proposal, which had been circulated earlier in the week. Members raised several concerns about comprehensive reform.",
+    );
+  });
+
+  it("keeps headings, list items, and paragraph breaks on their own lines", () => {
+    const text = "Introduction\nThis report covers\nthree areas:\n- budget\n- staffing\n\nSecond paragraph.";
+    expect(unwrapHardLineBreaks(text)).toBe(
+      "Introduction\nThis report covers three areas:\n- budget\n- staffing\n\nSecond paragraph.",
+    );
   });
 
   it("keeps book progress stable when only one section has generated audio", () => {

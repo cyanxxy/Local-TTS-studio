@@ -41,9 +41,9 @@ export function DownloadProgress({ kokoroState, supertonicState, supertonic3Stat
   if (!showKokoro && !showSupertonic && !showSupertonic3) return null;
 
   return (
-    <div className="px-5 py-4 rounded-[22px] glass-panel flex flex-col gap-4 animate-fade-up">
+    <div className="px-5 py-4 rounded-[22px] surface flex flex-col gap-4 animate-fade-up">
       <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+        <span className="text-sm font-semibold text-text-secondary">
           Preparing Model
         </span>
         <span className="text-xs text-text-muted">Downloads once</span>

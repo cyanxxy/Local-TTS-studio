@@ -56,6 +56,13 @@ export function qwen3UsesVoiceDesign(model: string): boolean {
   return model.includes("-VoiceDesign");
 }
 
+/**
+ * Whether the model is conditioned on an `instruct` prompt. VoiceDesign needs
+ * one; voice cloning has none; and upstream's 0.6B CustomVoice wrapper drops
+ * it, as the bundled engine does, so the UI must not offer an ignored control.
+ */
 export function qwen3SupportsInstruct(model: string): boolean {
-  return !qwen3UsesVoiceClone(model);
+  if (qwen3UsesVoiceClone(model)) return false;
+  if (qwen3UsesVoiceDesign(model)) return true;
+  return !model.includes("-0.6B-");
 }

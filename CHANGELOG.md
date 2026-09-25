@@ -4,6 +4,100 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.8.4] - 2026-09-25
+
+### Added
+
+- Added Reader page tones (paper, sepia, night) that apply to the reading page
+  and player dock under either app theme.
+- Added a Reader focus layout that hides the app header and page tabs
+  (toolbar button or <kbd>F</kbd>), a sleep timer (15, 30, or 60 minutes, or
+  the end of the chapter), and a keyboard shortcut list (<kbd>?</kbd>).
+- Added a selection toolbar in the Reader: listen from the selected passage,
+  bookmark it, or attach a note.
+- Library cards now show the current chapter and an estimated listening time
+  left.
+- Qwen3-TTS accepts an optional seed. Reusing a seed repeats the same take: the bridge reseeds sampling before every passage, on both MLX and LibTorch.
+- Qwen3 voice cloning warns when the reference clip is shorter than 3 seconds. The warning appears when you pick the file and again in the generation result.
+
+### Changed
+
+- Rebuilt the interface on Apple's Liquid Glass guidance. Glass is now
+  reserved for the controls layer that floats above content (page tabs, the
+  Reader's tool capsules, the player dock, popovers and menus), while the
+  script editor, the reading page, and settings cards are solid surfaces.
+  Controls on glass use fills instead of a second layer of glass, the accent
+  is a translucent tint on the one primary action per view, controls give on
+  press instead of lifting on hover, corners are concentric, popovers pop open
+  from their button, section labels use title case instead of all caps, and
+  Reader text fades under the floating player instead of showing through it.
+  The system Reduce Transparency and Increase Contrast settings are honoured.
+- Reorganized the Reader toolbar: the Library button sits beside the book
+  title on the side its drawer opens from, file and URL import share one
+  Import popover, and New document lives in the Library only. On wide windows
+  the open Library pushes the page aside instead of covering the text.
+- Chapters that open with their own title line show it once, as the heading,
+  and a plain one-chapter document no longer repeats its title on the page.
+- The player now counts speech chunks as "passages", so they are no longer
+  confused with Reader pages and chapter parts.
+- Generation status appears only in the player dock, which now reports a
+  failed generation instead of returning to "Ready to generate". The error
+  banner can be dismissed.
+- Reader switches are drawn as toggles, and Library Delete buttons stay
+  visible on touch screens.
+- Reworked the audio player: Play carries the accent while paused, times read
+  `m:ss` (or `h:mm:ss`), playback speed is a picker from 0.5× to 2×, Retake
+  has its own icon, and Stop appears only while a generation is running. On
+  phones the Reader dock's secondary controls collapse into a "More" menu
+  instead of sliding under the transport. Benchmark stats stay in Studio.
+- Studio audio can be paused while the rest is still generating, and Space no
+  longer toggles playback while another control has keyboard focus.
+- Reader auto-follow now leaves the page still while the spoken word stays in
+  a comfortable band and glides it back when it leaves, instead of snapping
+  the page on every new line. The spoken-passage wash no longer pulses, and the
+  word marker is a soft tint with an underline instead of a solid block.
+- Kokoro passages no longer merge across line breaks, so headings and
+  paragraphs get their own pauses and the Creator comma and paragraph pause
+  settings now apply to Kokoro. The Reader's passage preview matches the
+  generated passages exactly.
+- The sentence splitter understands typographic quotes (“ ” ‘ ’ and « »),
+  keeps lowercase dialogue tags with their quote ("“Really?” she asked."), and
+  no longer ends a sentence at numbered references such as "No. 5" or
+  "Fig. 2".
+- Word highlight timing allows for the pause after commas and full stops, so
+  the marker no longer runs ahead of the voice after each sentence.
+- The Qwen "Max tokens" control is now "Max tokens per passage". It is limited to 64-384, the most the bridge ever generates for one passage, and it defaults to 384. Electron's IPC validation uses the same range.
+- VoiceDesign's voice description and CustomVoice's style instruction are now kept separately, so switching profiles no longer carries one into the other.
+
+### Fixed
+
+- Fixed Kokoro failing every browser generation with
+  `Invalid language identifier: "en-us"`. Bundling `kokoro-js` left its
+  embedded espeak-ng phonemizer with no voices, which also made the WebGPU
+  warm-up fail and pushed Kokoro into CPU mode. The worker now loads the
+  `kokoro-js` browser build as an unbundled asset.
+- Fixed Markdown imports showing and speaking `#`, `**`, link, and code syntax.
+  Headings become chapters, and a single leading H1 becomes the title.
+- Fixed turning a Reader page reloading the browser speech model even when
+  nothing was generating. Stopping playback and editing text after listening
+  no longer reload it either.
+- Fixed PDF and scanned-image imports splitting sentences at every printed
+  line; wrapped lines are rejoined (including hyphenated breaks) while
+  headings and list items keep their own lines.
+- Fixed Reader listening while the window is hidden or in the background: the
+  position, word highlight, saved progress, duration, and auto-advance now
+  keep updating instead of freezing until the window is shown again. If the
+  system suspends audio output mid-playback, the player resumes it, or shows
+  itself paused so Play recovers it, instead of silently stalling.
+- Dialect speakers (Dylan, Eric) now use their Beijing and Sichuan dialect tokens when the language is Chinese or Auto, matching upstream Qwen.
+- Highlighting stays on the right sentence during long Qwen jobs by re-splitting each request the way Electron and Rust trim it.
+
+### Maintenance
+
+- Enforced the existing coverage thresholds in CI, added Node 26 and isolated
+  Linux bridge checks, pinned workflow actions, and configured weekly dependency
+  update pull requests.
+
 ## [1.8.3] - 2026-09-17
 
 ### Fixed

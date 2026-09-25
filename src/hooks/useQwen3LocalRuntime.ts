@@ -8,7 +8,8 @@ import type {
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { TextChunk } from "../lib/chunking";
-import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
+import { buildQwen3RequestPlan } from "../lib/qwenChunking";
+import { qwen3SupportsInstruct } from "../components/localRuntime/modelOptions";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import type { GenerationStats, ModelState } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
@@ -274,6 +275,7 @@ export function useQwen3LocalRuntime({
     settings.profile.repo,
     settings.referenceAudioBase64,
     settings.referenceText,
+    settings.seed,
     settings.speaker,
     settings.temperature,
     settings.topK,
@@ -483,12 +485,12 @@ export function useQwen3LocalRuntime({
   const handleGenerate = useCallback(() => {
     if (!canGenerate || !bridge) return;
     const version = generationVersionRef.current;
-    const requestSections = buildQwen3RequestSections(text);
+    const requestPlan = buildQwen3RequestPlan(text);
+    const requestSections = requestPlan.sections;
     if (requestSections.length === 0) return;
     clearGeneratedResult();
-    // Every Qwen mode streams per text unit with textUnitIndex metadata, so
-    // one unit list serves CustomVoice, VoiceDesign, and voice clone alike.
-    activeTextUnitsRef.current = buildQwen3TextUnits(text);
+    // Every mode uses the units re-split from the exact IPC request text.
+    activeTextUnitsRef.current = requestPlan.units;
     setShowPlayer(true);
     beginStream();
     setGenerateBusy(true);
@@ -503,10 +505,11 @@ export function useQwen3LocalRuntime({
       temperature: settings.temperature,
       topK: settings.topK,
       maxNewTokens: settings.maxNewTokens,
+      ...(settings.seed !== null ? { seed: settings.seed } : {}),
     };
     if (settings.profile.mode === "customVoice") {
       basePayload.speaker = settings.speaker;
-      basePayload.instruct = settings.profile.parameters === "0.6B" ? "" : settings.instruct;
+      basePayload.instruct = qwen3SupportsInstruct(settings.profile.repo) ? settings.instruct : "";
     } else if (settings.profile.mode === "voiceDesign") {
       basePayload.instruct = settings.instruct;
     }

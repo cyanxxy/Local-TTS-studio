@@ -59,7 +59,7 @@ export function Controls() {
       {activeModel === "supertonic" && (
         <div>
           <div className="flex items-baseline justify-between mb-2.5">
-            <label className="text-xs font-semibold uppercase tracking-widest text-text-muted">
+            <label className="text-sm font-semibold text-text-secondary">
               Quality
             </label>
             <span className="font-mono text-sm font-medium text-text-primary tabular-nums">
@@ -95,10 +95,10 @@ export function Controls() {
             ${isGenerating
               ? "bg-accent text-white cursor-wait"
               : showRetry
-              ? "bg-danger text-white shadow-accent-sm hover:bg-danger/90 hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]"
+              ? "bg-danger text-white shadow-accent-sm hover:bg-danger/90 active:scale-[0.98]"
               : !generateDisabled
               ? "glass-accent text-white"
-              : "bg-border/70 text-text-muted cursor-not-allowed backdrop-blur-sm"
+              : "bg-border/70 text-text-muted cursor-not-allowed"
             }
           `}
           style={
@@ -139,7 +139,7 @@ export function Controls() {
             onClick={onStop}
             aria-label="Stop generation"
             title="Stop generation"
-            className="flex h-11 w-full items-center justify-center rounded-2xl border border-danger/20 bg-danger-light text-danger backdrop-blur-md shadow-glass-sm transition-all duration-200 hover:bg-danger hover:text-white active:scale-[0.96] sm:w-11"
+            className="flex h-11 w-full items-center justify-center rounded-2xl border border-danger/20 bg-danger-light text-danger shadow-glass-sm transition-all duration-200 hover:bg-danger hover:text-white active:scale-[0.96] sm:w-11"
           >
             <Square size={14} />
           </button>

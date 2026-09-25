@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
-import { Settings2 } from "lucide-react";
+import { Settings2, X } from "lucide-react";
 import type { ChunkPauseKind, GenerationStats, ModelState, ModelType } from "../types";
 import { AUDIO8_VOICES, MIN_TEXT_LENGTH } from "../constants";
 import { useModelLoader } from "../hooks/useModelLoader";
@@ -60,6 +60,7 @@ import {
   getReaderSectionText,
   normalizeReaderTextFragment,
   readerSectionAtOffset,
+  unwrapHardLineBreaks,
   type ReaderDocumentRecord,
   type ReaderSection,
 } from "../lib/readerDocument";
@@ -244,6 +245,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const desktopRuntimesAvailable = enableDesktopRuntimes && isElectronRuntime;
   const { preferences, updatePreferences, resetPreferences } = useAppPreferences();
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  // Reader focus layout: hides the app header and page tabs for reading.
+  const [readerImmersive, setReaderImmersive] = useState(false);
+  // The error banner is dismissible; a new, different error shows again.
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
   const qwen3Settings = useQwen3Runtime();
   const qwenModeDetail = qwen3Settings.profile.mode === "customVoice"
     ? qwen3Settings.speaker
@@ -678,7 +683,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       || player.segments.length > 0
       || player.totalDuration > 0;
     if (hasActiveAudioState) {
-      cancelActiveGeneration(true);
+      // Unforced: finished audio only needs clearing, and a forced cancel
+      // would reload the model on the first keystroke after listening.
+      cancelActiveGeneration();
       audio8Runtime.cancelActiveGeneration();
       qwen3LocalRuntime.cancelActiveGeneration();
       supertonic3Runtime.cancelActiveGeneration();
@@ -791,16 +798,25 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           } else {
             handleTextChangeRef.current(document.text);
           }
-        } else if (isReaderPage) {
-          await readerLibrary.createDocument({
-            title: result.fileName.replace(/\.[^.]+$/, ""),
-            description: result.pageCount ? `${result.pageCount} pages` : "",
-            sourceType: "file",
-            sourceName: result.fileName,
-            text: result.text,
-          });
+        } else if (isReaderPage && /\.md$/i.test(result.fileName)) {
+          const { parseMarkdownReaderDocument } = await loadReaderImport();
+          await readerLibrary.createDocument(parseMarkdownReaderDocument(result.text, result.fileName));
         } else {
-          handleTextChangeRef.current(result.text);
+          // PDF and OCR text arrives hard-wrapped at the page's line width.
+          const text = /\.(pdf|png|jpe?g|tiff?|webp)$/i.test(result.fileName)
+            ? unwrapHardLineBreaks(result.text)
+            : result.text;
+          if (isReaderPage) {
+            await readerLibrary.createDocument({
+              title: result.fileName.replace(/\.[^.]+$/, ""),
+              description: result.pageCount ? `${result.pageCount} pages` : "",
+              sourceType: "file",
+              sourceName: result.fileName,
+              text,
+            });
+          } else {
+            handleTextChangeRef.current(text);
+          }
         }
       }
     } catch (err) {
@@ -1195,9 +1211,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
       if (isLocalRuntimePage(activePage) || isEditableShortcutTarget(event.target)) return;
 
-      const canTogglePlayback = player.totalDuration > 0
-        && (!isStudioPage || !studioRuntime.isGenerating);
-      if (!primaryModifier && !event.altKey && event.code === "Space" && canTogglePlayback) {
+      // A focused control keeps Space for itself: Space on Download should
+      // download, not toggle playback behind the user's back.
+      const onInteractiveControl = event.target instanceof Element
+        && event.target.closest("button, a[href], [role='button'], [role='slider'], [role='menuitem']") !== null;
+      const canTogglePlayback = player.totalDuration > 0;
+      if (!primaryModifier && !event.altKey && event.code === "Space" && canTogglePlayback && !onInteractiveControl) {
         event.preventDefault();
         void player.togglePlay();
         return;
@@ -1396,7 +1415,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     let cancelled = false;
     readerRestorePendingRef.current = true;
 
-    readerAudioActionsRef.current.cancel(true);
+    // Not forced: a forced cancel hard-restarts the browser model even when
+    // nothing is generating, which reloaded Kokoro/Supertonic on every page
+    // turn. An in-flight generation is still cancelled (and its worker
+    // restarted) because `cancel` checks the live generating state itself.
+    readerAudioActionsRef.current.cancel();
     desktopReaderControlsRef.current.cancel();
     readerAudioActionsRef.current.reset();
     desktopReaderControlsRef.current.reset();
@@ -1595,7 +1618,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const browserSupportPanel = browserSupport.message ? (
     <div className="rounded-[22px] border border-accent/20 bg-accent-light/50 backdrop-blur-xl shadow-glass-md">
       <div className="p-4 sm:p-6 md:p-8">
-        <div className="inline-flex items-center rounded-full border border-accent/20 bg-panel/80 backdrop-blur-sm px-3 py-1 text-sm font-semibold uppercase tracking-[0.14em] text-accent shadow-glass-sm">
+        <div className="inline-flex items-center rounded-full border border-accent/20 bg-panel/80 px-3 py-1 text-sm font-semibold text-accent shadow-glass-sm">
           iOS rollout
         </div>
         <h2 className="mt-4 text-2xl font-display font-bold tracking-tight text-text-primary sm:text-3xl">
@@ -1613,6 +1636,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       <div className={`app-page ${isReaderPage ? "w-full px-3 py-3 sm:px-4 sm:py-4 md:px-6 md:py-6" : "w-full px-4 py-6 sm:px-6 sm:py-8 md:px-8 md:py-6 lg:py-10"}`}>
 
         {/* Header */}
+        {isReaderPage && readerImmersive ? (
+          // Kept as an empty header so the macOS title-bar strip still reserves
+          // the traffic lights and stays draggable in the focus layout.
+          <header aria-hidden className="h-2" />
+        ) : (
         <header className={isReaderPage ? "mb-4" : "mb-8 lg:mb-10"}>
           <div className={`flex flex-nowrap justify-between gap-2 sm:gap-4 ${isReaderPage ? "items-center" : "items-start"}`}>
             <div className="min-w-0 flex-1">
@@ -1633,7 +1661,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
             <div className="mt-1 flex shrink-0 items-start gap-2">
               {showWasmBadge && (
                 <div className="flex flex-col items-end gap-1">
-                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-accent/25 bg-accent-light backdrop-blur-md text-accent text-base font-semibold shadow-glass-sm">
+                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-accent/25 bg-accent-light text-accent text-base font-semibold shadow-glass-sm">
                     <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse" />
                     CPU mode
                   </div>
@@ -1654,7 +1682,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                 onClick={() => setAppSettingsOpen(true)}
                 aria-label="Open app settings"
                 title={`Settings (${isMacPlatform(window.electron?.platform ?? navigator.platform) ? "⌘," : "Ctrl+,"})`}
-                className="glass-control no-drag flex h-10 w-10 items-center justify-center rounded-xl text-text-muted hover:text-accent"
+                className="glass-control no-drag flex h-11 w-11 items-center justify-center rounded-full text-text-secondary hover:text-text-primary"
               >
                 <Settings2 size={18} />
               </button>
@@ -1665,11 +1693,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               blinking out of one and into the next. */}
           <nav
             ref={pageTabsRef}
-            className={`${isReaderPage ? "mt-4" : "mt-6 lg:mt-8"} relative grid w-full grid-cols-2 gap-1 rounded-2xl glass p-1 sm:inline-flex sm:w-auto`}
+            className={`${isReaderPage ? "mt-4" : "mt-6 lg:mt-8"} relative grid w-full grid-cols-2 gap-1 rounded-full glass p-1 sm:inline-flex sm:w-auto`}
           >
             <span
               aria-hidden
-              className={`pointer-events-none absolute inset-y-1 left-0 rounded-xl bg-panel shadow-glass-sm ${
+              className={`pointer-events-none absolute inset-y-1 left-0 rounded-full bg-panel shadow-glass-sm ${
                 pageTabIndicator.animate
                   ? "transition-[transform,width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
                   : ""
@@ -1689,7 +1717,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                   event.preventDefault();
                   handlePageNavigation(tab.key);
                 }}
-                className={`relative z-10 rounded-xl px-5 py-2 text-center text-base font-semibold transition-colors duration-200 active:scale-[0.98] ${
+                className={`relative z-10 rounded-full px-5 py-2 text-center text-base font-semibold transition-colors duration-200 active:scale-[0.98] ${
                   activePage === tab.key
                     ? "text-text-primary"
                     : "text-text-muted hover:text-text-secondary"
@@ -1700,14 +1728,26 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
             ))}
           </nav>
         </header>
+        )}
 
         {(isStudioPage || isReaderPage) && browserSupportPanel && (
           <div className="mb-4">{browserSupportPanel}</div>
         )}
 
-        {localInferenceSupported && (isStudioPage || isReaderPage) && visibleError && (
-          <div className="mb-4 rounded-xl border border-danger/30 bg-danger-light backdrop-blur-md px-3.5 py-2.5 text-xs text-danger shadow-glass-sm">
-            {visibleError}
+        {localInferenceSupported && (isStudioPage || isReaderPage) && visibleError && visibleError !== dismissedError && (
+          <div
+            role="alert"
+            className="mb-4 flex items-start gap-3 rounded-xl border border-danger/30 bg-danger-light px-3.5 py-2.5 text-xs text-danger shadow-glass-sm"
+          >
+            <p className="min-w-0 flex-1 break-words">{visibleError}</p>
+            <button
+              type="button"
+              onClick={() => setDismissedError(visibleError)}
+              aria-label="Dismiss error"
+              className="-my-1 -mr-1.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-danger/80 transition-colors hover:bg-danger/10 hover:text-danger"
+            >
+              <X size={13} />
+            </button>
           </div>
         )}
 
@@ -1725,11 +1765,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               supertonic3State={isStudioUsingSupertonic3 ? supertonic3Runtime.modelState : undefined}
             />
 
-            <div className="mt-6 glass-panel rounded-[24px]">
+            <div className="mt-6 surface rounded-[24px]">
               <div className="grid grid-cols-1 md:grid-cols-5">
                 {/* Left: text input */}
                 <div className="flex min-h-[320px] flex-col border-border/40 p-4 sm:min-h-[360px] sm:p-6 md:col-span-3 md:border-r">
-                  <span className="text-xs font-semibold uppercase tracking-widest text-text-muted mb-3 flex-shrink-0">Script</span>
+                  <span className="text-sm font-semibold text-text-secondary mb-3 flex-shrink-0">Script</span>
                   <div className="flex-1 min-h-0">
                     <TextInput
                       text={text}
@@ -1829,6 +1869,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     activeSegmentNumber={activeSegmentNumber}
                     stats={studioRuntime.stats}
                     isGenerating={studioRuntime.isGenerating}
+                    allowPlaybackDuringGeneration
+                    playbackRate={player.playbackRate}
+                    onPlaybackRateChange={player.setPlaybackRate}
                     onTogglePlay={player.togglePlay}
                     onSeek={player.seek}
                     onSkipBackward={() => player.skip(-10)}
@@ -1972,6 +2015,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onRetakeSegment={handleRetakeSegment}
               canRetakeSegments={!isReaderUsingAudio8 && !isReaderUsingQwen3 && !isReaderUsingSupertonic3}
               onJumpToSegment={handleJumpToSegment}
+              generationError={readerRuntime.error}
+              immersive={readerImmersive}
+              onImmersiveChange={setReaderImmersive}
             />
             </Suspense>
           ) : browserSupportPanel
@@ -2015,12 +2061,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                 {["Kokoro", "Supertonic", "WebGPU · CPU", ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : [])].map((label) => (
                   <span
                     key={label}
-                    className="px-2.5 py-1 rounded-full border border-white/50 bg-white/40 backdrop-blur-sm font-mono text-xs text-text-muted/70"
+                    className="px-2.5 py-1 rounded-full border border-border bg-text-primary/[0.04] font-mono text-xs text-text-muted/70"
                   >
                     {label}
                   </span>
                 ))}
-                <span className="flex items-center gap-1.5 rounded-full border border-success/25 bg-success/[0.07] px-2.5 py-1 font-mono text-xs text-success/80 backdrop-blur-sm">
+                <span className="flex items-center gap-1.5 rounded-full border border-success/25 bg-success/[0.07] px-2.5 py-1 font-mono text-xs text-success/80">
                   <span
                     className="h-1 w-1 animate-pulse rounded-full bg-success opacity-80"
                     style={{ boxShadow: "0 0 5px var(--color-success)" }}

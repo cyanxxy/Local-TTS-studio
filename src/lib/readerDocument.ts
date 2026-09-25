@@ -143,6 +143,45 @@ export function normalizeReaderText(text: string): string {
     .trim();
 }
 
+/**
+ * Rejoins lines that a PDF or OCR layout broke mid-sentence. Every line is
+ * otherwise a paragraph in the Reader and a sentence boundary for speech, so
+ * "discuss the\nproposal" would be drawn and spoken as two fragments. A line
+ * is joined to the next only when it clearly continues: it lacks closing
+ * punctuation and the next line starts in lowercase, or it ends in a comma or
+ * a hyphenated word break. Headings and list items keep their own lines.
+ */
+export function unwrapHardLineBreaks(text: string): string {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .split(/(\n{2,})/)
+    .map((block) => {
+      if (block.startsWith("\n")) return block;
+      const lines = block.split("\n");
+      let result = lines[0] ?? "";
+      for (const line of lines.slice(1)) {
+        const previous = result.trimEnd();
+        const next = line.trimStart();
+        const nextIsListItem = /^([-*•]|\d+[.)])\s/.test(next);
+        const hyphenBreak = /\p{L}-$/u.test(previous) && /^\p{Ll}/u.test(next);
+        const continues = !nextIsListItem && next.length > 0 && (
+          hyphenBreak
+          || /[,;–—]$/.test(previous)
+          || (!/[.!?:…"'”’)\]]$/.test(previous) && /^[\p{Ll}\d(“"‘']/u.test(next))
+        );
+        if (!continues) {
+          result += `\n${line}`;
+        } else if (hyphenBreak) {
+          result = `${previous.slice(0, -1)}${next}`;
+        } else {
+          result = `${previous} ${next}`;
+        }
+      }
+      return result;
+    })
+    .join("");
+}
+
 /** Normalize only newly edited section content without touching its outer book. */
 export function normalizeReaderTextFragment(text: string): string {
   return text
@@ -525,6 +564,13 @@ export function calculateReaderProgress(
   return 0;
 }
 
+/** Extra letter-equivalents of time for the pause that follows a word. */
+function trailingPauseWeight(word: string): number {
+  if (/[.!?…。？！]["'”’)\]]*$/u.test(word)) return 6;
+  if (/[,;:—–，；：]["'”’)\]]*$/u.test(word)) return 3;
+  return 0;
+}
+
 export function estimateWordRanges(
   text: string,
   textStart: number,
@@ -534,7 +580,12 @@ export function estimateWordRanges(
   const matches = [...text.matchAll(/\S+/g)];
   if (matches.length === 0 || endSec <= startSec) return [];
 
-  const weights = matches.map((match) => Math.max(1, match[0].replace(/[^\p{L}\p{N}]/gu, "").length));
+  // Speech time tracks letters, plus the pause a voice takes after a comma or
+  // a full stop. Without the pause weight the marker ran ahead of the voice
+  // after every sentence break inside a multi-sentence passage.
+  const weights = matches.map((match) => (
+    Math.max(1, match[0].replace(/[^\p{L}\p{N}]/gu, "").length) + trailingPauseWeight(match[0])
+  ));
   const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
   const duration = endSec - startSec;
   let cursorSec = startSec;

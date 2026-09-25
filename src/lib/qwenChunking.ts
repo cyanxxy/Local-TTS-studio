@@ -4,18 +4,25 @@ import {
   countUnicodeScalars,
 } from "../../electron/localTtsLimits";
 
-// Keep these in sync with CUSTOM_VOICE_UNIT_CHARS and CJK_CHAR_WEIGHT in
-// rust/local-tts-bridge/src/qwen3/runtime.rs and .../qwen3/text.rs. Rust
-// reports textUnitIndex against the units it splits; the renderer maps those
-// onto the units built here, so both splitters must agree exactly.
+// Keep this in sync with CUSTOM_VOICE_UNIT_CHARS in
+// rust/local-tts-bridge/src/qwen3/runtime.rs.
 export const QWEN3_UNIT_MAX_CHARS = 200;
-export const QWEN3_CJK_CHAR_WEIGHT = 2;
+// Keep this in sync with CJK_CHAR_WEIGHT in
+// rust/local-tts-bridge/src/qwen3/text.rs. CJK text speaks about twice as long
+// per character, so CJK-heavy units are cut at about half the characters.
+export const QWEN3_CJK_CHARACTER_WEIGHT = 2;
 
 export interface Qwen3RequestSection extends TextChunk {
   /** Inclusive index of the first Qwen text unit in this request. */
   unitStart: number;
   /** Exclusive index of the final Qwen text unit in this request. */
   unitEnd: number;
+}
+
+export interface Qwen3RequestPlan {
+  sections: Qwen3RequestSection[];
+  /** Every request's units, in the order and ranges the bridge reports them. */
+  units: TextChunk[];
 }
 
 const SENTENCE_BOUNDARIES = new Set([".", "!", "?", "。", "！", "？", "；", ";", "\n"]);
@@ -47,29 +54,54 @@ function isBoundary(character: string, previous: string | undefined, next: strin
   return !(isAsciiDigit(previous) && isAsciiDigit(next));
 }
 
-/** Mirrors Rust's split_text_units while retaining UTF-16 source offsets. */
-export function buildQwen3TextUnits(text: string): TextChunk[] {
-  const trimmed = text.trim();
-  if (!trimmed) return [];
+/** Rust's `char::is_whitespace` (Unicode White_Space), which `str::trim` uses. */
+function isRustWhitespace(codeUnit: number): boolean {
+  return (codeUnit >= 0x09 && codeUnit <= 0x0d)
+    || codeUnit === 0x20
+    || codeUnit === 0x85
+    || codeUnit === 0xa0
+    || codeUnit === 0x1680
+    || (codeUnit >= 0x2000 && codeUnit <= 0x200a)
+    || codeUnit === 0x2028
+    || codeUnit === 0x2029
+    || codeUnit === 0x202f
+    || codeUnit === 0x205f
+    || codeUnit === 0x3000;
+}
 
-  const sourceStart = text.indexOf(trimmed);
+/**
+ * The UTF-16 range of `text` the bridge actually splits. Electron's IPC
+ * validation applies JavaScript `trim()`, then Rust trims again with its own
+ * whitespace set (which adds U+0085 and drops U+FEFF), so both are replayed.
+ */
+function bridgeTrimmedRange(text: string): { start: number; end: number } {
+  const jsTrimmed = text.trim();
+  let start = jsTrimmed ? text.indexOf(jsTrimmed) : 0;
+  let end = start + jsTrimmed.length;
+  // Every Rust whitespace character is in the BMP, so code-unit checks are exact.
+  while (start < end && isRustWhitespace(text.charCodeAt(start))) start += 1;
+  while (end > start && isRustWhitespace(text.charCodeAt(end - 1))) end -= 1;
+  return { start, end };
+}
+
+/** Mirrors Rust's split_text_units over `text[rangeStart, rangeEnd)`. */
+function splitTextUnits(text: string, rangeStart: number, rangeEnd: number): TextChunk[] {
   const units: TextChunk[] = [];
-  let start = 0;
+  let start = rangeStart;
 
-  while (start < trimmed.length) {
+  while (start < rangeEnd) {
     let weight = 0;
     let preferredEnd: number | null = null;
-    let hardEnd = trimmed.length;
+    let hardEnd = rangeEnd;
     let previous: string | undefined;
 
-    const characters = Array.from(trimmed.slice(start));
-    let relativeUtf16Offset = 0;
-    for (let index = 0; index < characters.length; index += 1) {
-      const character = characters[index];
-      relativeUtf16Offset += character.length;
-      const end = start + relativeUtf16Offset;
-      weight += isQwen3CjkCharacter(character) ? QWEN3_CJK_CHAR_WEIGHT : 1;
-      if (isBoundary(character, previous, characters[index + 1])) {
+    let end = start;
+    while (end < rangeEnd) {
+      const codePoint = text.codePointAt(end)!;
+      const character = String.fromCodePoint(codePoint);
+      end += character.length;
+      weight += isQwen3CjkCharacter(character) ? QWEN3_CJK_CHARACTER_WEIGHT : 1;
+      if (isBoundary(character, previous, end < rangeEnd ? text[end] : undefined)) {
         preferredEnd = end;
       }
       if (weight >= QWEN3_UNIT_MAX_CHARS) {
@@ -79,21 +111,28 @@ export function buildQwen3TextUnits(text: string): TextChunk[] {
       previous = character;
     }
 
-    const end = preferredEnd ?? hardEnd;
-    const unitStart = sourceStart + start;
-    const unitEnd = sourceStart + end;
+    const unitEnd = preferredEnd ?? hardEnd;
     units.push({
-      text: text.slice(unitStart, unitEnd),
-      start: unitStart,
+      text: text.slice(start, unitEnd),
+      start,
       end: unitEnd,
       pauseAfterSec: 0.2,
       pauseKind: "sentence",
     });
-    start = end;
+    start = unitEnd;
   }
 
-  units[units.length - 1].pauseAfterSec = 0;
+  if (units.length > 0) units[units.length - 1].pauseAfterSec = 0;
   return units;
+}
+
+/**
+ * Mirrors the bridge's trim-then-split_text_units for one request while
+ * retaining UTF-16 source offsets.
+ */
+export function buildQwen3TextUnits(text: string): TextChunk[] {
+  const { start, end } = bridgeTrimmedRange(text);
+  return splitTextUnits(text, start, end);
 }
 
 /**
@@ -101,41 +140,57 @@ export function buildQwen3TextUnits(text: string): TextChunk[] {
  * can be much longer than a single local-runtime request, so this preserves the
  * natural sentence/clause boundaries and exact source offsets while ensuring
  * every payload stays within the shared Electron/Rust character limit.
+ *
+ * The bridge trims and re-splits each request's own text, and trimming can
+ * move a window's boundaries relative to a whole-document split. The returned
+ * units therefore come from splitting each request exactly as the bridge
+ * will, so a streamed `textUnitIndex` indexes `units` from `unitStart`.
  */
-export function buildQwen3RequestSections(text: string): Qwen3RequestSection[] {
-  const units = buildQwen3TextUnits(text);
-  if (units.length === 0) return [];
+export function buildQwen3RequestPlan(text: string): Qwen3RequestPlan {
+  const groupingUnits = buildQwen3TextUnits(text);
+  if (groupingUnits.length === 0) return { sections: [], units: [] };
 
-  const sections: Qwen3RequestSection[] = [];
-  let unitStart = 0;
-  let sectionStart = units[0].start;
-  let sectionCharacterCount = countUnicodeScalars(units[0].text);
-
-  const pushSection = (unitEnd: number) => {
-    const end = units[unitEnd - 1].end;
-    sections.push({
-      text: text.slice(sectionStart, end),
-      start: sectionStart,
-      end,
-      pauseAfterSec: unitEnd < units.length ? 0.2 : 0,
-      pauseKind: unitEnd < units.length ? "sentence" : "none",
-      unitStart,
-      unitEnd,
-    });
-  };
-
-  for (let index = 1; index < units.length; index += 1) {
-    const unitCharacterCount = countUnicodeScalars(units[index].text);
+  const ranges: Array<{ start: number; end: number }> = [];
+  let sectionStart = groupingUnits[0].start;
+  let sectionCharacterCount = countUnicodeScalars(groupingUnits[0].text);
+  for (let index = 1; index < groupingUnits.length; index += 1) {
+    const unitCharacterCount = countUnicodeScalars(groupingUnits[index].text);
     if (sectionCharacterCount + unitCharacterCount <= MAX_LOCAL_TTS_TEXT_LENGTH) {
       sectionCharacterCount += unitCharacterCount;
       continue;
     }
-    pushSection(index);
-    unitStart = index;
-    sectionStart = units[index].start;
+    ranges.push({ start: sectionStart, end: groupingUnits[index - 1].end });
+    sectionStart = groupingUnits[index].start;
     sectionCharacterCount = unitCharacterCount;
   }
-  pushSection(units.length);
+  ranges.push({ start: sectionStart, end: groupingUnits[groupingUnits.length - 1].end });
 
-  return sections;
+  const sections: Qwen3RequestSection[] = [];
+  const units: TextChunk[] = [];
+  ranges.forEach((range, index) => {
+    const final = index === ranges.length - 1;
+    const sectionText = text.slice(range.start, range.end);
+    const unitStart = units.length;
+    for (const unit of buildQwen3TextUnits(sectionText)) {
+      units.push({ ...unit, start: unit.start + range.start, end: unit.end + range.start });
+    }
+    if (!final && units.length > unitStart) {
+      units[units.length - 1].pauseAfterSec = 0.2;
+    }
+    sections.push({
+      text: sectionText,
+      start: range.start,
+      end: range.end,
+      pauseAfterSec: final ? 0 : 0.2,
+      pauseKind: final ? "none" : "sentence",
+      unitStart,
+      unitEnd: units.length,
+    });
+  });
+
+  return { sections, units };
+}
+
+export function buildQwen3RequestSections(text: string): Qwen3RequestSection[] {
+  return buildQwen3RequestPlan(text).sections;
 }

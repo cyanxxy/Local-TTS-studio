@@ -797,7 +797,7 @@ describe("SynthesisApp", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "script" }), {
       target: { value: "Next script with enough text." },
     });
-    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalledWith(true);
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalledWith();
     expect(mock.generation.resetGeneratedAudio).toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "switch-supertonic" }));
@@ -1282,10 +1282,18 @@ describe("SynthesisApp", () => {
     fireEvent.keyDown(screen.getByRole("textbox", { name: "script" }), { key: " ", code: "Space" });
     expect(mock.player.togglePlay).toHaveBeenCalledTimes(1);
 
+    // Streamed audio stays pausable while the rest is still generating.
     mock.generation.isGenerationBusy = true;
     rerender(<WebApp />);
     fireEvent.keyDown(document, { key: " ", code: "Space" });
-    expect(mock.player.togglePlay).toHaveBeenCalledTimes(1);
+    expect(mock.player.togglePlay).toHaveBeenCalledTimes(2);
+
+    // A focused control keeps Space for its own activation.
+    const button = document.createElement("button");
+    document.body.append(button);
+    fireEvent.keyDown(button, { key: " ", code: "Space" });
+    expect(mock.player.togglePlay).toHaveBeenCalledTimes(2);
+    button.remove();
     fireEvent.keyDown(document, { key: ".", metaKey: true });
     expect(mock.generation.handleStop).toHaveBeenCalledTimes(1);
   });

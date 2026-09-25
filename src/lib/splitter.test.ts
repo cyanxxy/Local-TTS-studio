@@ -2,6 +2,23 @@ import { describe, it, expect } from "vitest";
 import { split, TextSplitterStream } from "./splitter";
 
 describe("split", () => {
+  it("ends sentences inside typographic quotes", () => {
+    expect(split("“Go home.” He went.")).toEqual(["“Go home.”", "He went."]);
+    expect(split("He said “Stop!” Then silence fell.")).toEqual(["He said “Stop!”", "Then silence fell."]);
+    expect(split("She whispered, ‘Not yet.’ Then she left.")).toEqual(["She whispered, ‘Not yet.’", "Then she left."]);
+  });
+
+  it("keeps curly apostrophes and lowercase dialogue tags inside the sentence", () => {
+    expect(split("‘I don’t know,’ she said. He nodded.")).toEqual(["‘I don’t know,’ she said.", "He nodded."]);
+    expect(split("“Really?” she asked. Then left.")).toEqual(["“Really?” she asked.", "Then left."]);
+    expect(split("The dogs’ bowls were empty. We filled them.")).toEqual(["The dogs’ bowls were empty.", "We filled them."]);
+  });
+
+  it("does not end a sentence at a numbered reference", () => {
+    expect(split("See No. 5 and Fig. 2 for data. Next.")).toEqual(["See No. 5 and Fig. 2 for data.", "Next."]);
+    expect(split("I said no. Then he left.")).toEqual(["I said no.", "Then he left."]);
+  });
+
   it("splits text on sentence boundaries", () => {
     const result = split("Hello world. How are you? I am fine!");
     expect(result).toEqual(["Hello world.", "How are you?", "I am fine!"]);

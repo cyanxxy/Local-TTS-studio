@@ -30,6 +30,12 @@ describe("readerPreferences", () => {
     })).toMatchObject({ fontSize: 26, lineHeight: 1.4, columnWidth: "wide", focusMode: false });
   });
 
+  it("defaults the page tone to paper and keeps only known tones", () => {
+    expect(DEFAULT_READER_VIEW_PREFERENCES.tone).toBe("paper");
+    expect(normalizeReaderViewPreferences({ tone: "sepia" }).tone).toBe("sepia");
+    expect(normalizeReaderViewPreferences({ tone: "neon" as never }).tone).toBe("paper");
+  });
+
   it("persists and restores Reader-only preferences", () => {
     persistReaderViewPreferences({ ...DEFAULT_READER_VIEW_PREFERENCES, fontSize: 22, autoAdvance: false });
     expect(getInitialReaderViewPreferences()).toMatchObject({ fontSize: 22, autoAdvance: false });

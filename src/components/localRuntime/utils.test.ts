@@ -1,7 +1,32 @@
 import { describe, expect, it } from "vitest";
-import { float32ChunksToWavBytes } from "./utils";
+import { float32ChunksToWavBytes, wavDurationSeconds } from "./utils";
 
 describe("localRuntime utils", () => {
+  it("reads a WAV duration past extra chunks and ignores non-WAV input", () => {
+    const wav = float32ChunksToWavBytes([
+      { audio: new Float32Array(48_000).buffer, sampleCount: 48_000, silenceAfterSamples: 24_000 },
+    ], 24_000);
+    const plain = new ArrayBuffer(wav.byteLength);
+    new Uint8Array(plain).set(wav);
+    expect(wavDurationSeconds(plain)).toBe(3);
+
+    // Insert an odd-sized LIST chunk (padded to even) between fmt and data.
+    const list = new Uint8Array([
+      ..."LIST".split("").map((character) => character.charCodeAt(0)),
+      3, 0, 0, 0, 1, 2, 3, 0,
+    ]);
+    const withList = new Uint8Array(wav.byteLength + list.byteLength);
+    withList.set(wav.subarray(0, 36));
+    withList.set(list, 36);
+    withList.set(wav.subarray(36), 36 + list.byteLength);
+    expect(wavDurationSeconds(withList.buffer)).toBe(3);
+
+    // A header that declares more data than the file holds reports what is there.
+    expect(wavDurationSeconds(plain.slice(0, 44 + 24_000))).toBe(0.5);
+    expect(wavDurationSeconds(new TextEncoder().encode("not a wav file").buffer)).toBeNull();
+    expect(wavDurationSeconds(new ArrayBuffer(4))).toBeNull();
+  });
+
   it("assembles streamed Float32 chunks into a WAV with inserted silence", () => {
     const first = new Float32Array([0.5, -0.5]).buffer;
     const second = new Float32Array([1]).buffer;

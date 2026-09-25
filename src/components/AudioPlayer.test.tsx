@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { AudioPlayer } from "./AudioPlayer";
 import type { GenerationStats } from "../types";
 import { PlaybackClock } from "../lib/playbackClock";
@@ -84,11 +84,11 @@ describe("AudioPlayer", () => {
     expect(pause).toBeEnabled();
     fireEvent.click(pause);
 
-    expect(screen.getByRole("button", { name: "Previous section" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "Next section" }));
-    fireEvent.click(screen.getByRole("button", { name: "Playback speed 1×" }));
+    expect(screen.getByRole("button", { name: "Previous passage" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Next passage" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Playback speed" }), { target: { value: "1.25" } });
     fireEvent.click(screen.getByRole("button", { name: "Regenerate speech" }));
-    fireEvent.click(screen.getByRole("button", { name: "Retake section" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retake passage" }));
 
     expect(onTogglePlay).toHaveBeenCalledOnce();
     expect(onNextSegment).toHaveBeenCalledOnce();
@@ -114,7 +114,7 @@ describe("AudioPlayer", () => {
     fireEvent.click(screen.getByRole("button", { name: "Generate speech" }));
 
     expect(onGenerate).toHaveBeenCalledOnce();
-    expect(screen.getByText("2 sections")).toBeInTheDocument();
+    expect(screen.getByText("2 passages")).toBeInTheDocument();
   });
 
   it("renders disabled empty state controls", () => {
@@ -162,23 +162,23 @@ describe("AudioPlayer", () => {
     expect(screen.getByText("3.20s")).toBeInTheDocument();
     expect(screen.getByText("123")).toBeInTheDocument();
     expect(screen.getByText("0.234×")).toBeInTheDocument();
-    expect(screen.getByText("Section 2 of 4")).toBeInTheDocument();
-    expect(screen.getByText("1:05.2")).toBeInTheDocument();
-    expect(screen.getByText("2:05.6")).toBeInTheDocument();
+    expect(screen.getByText("Passage 2 of 4")).toBeInTheDocument();
+    expect(screen.getByText("1:05")).toBeInTheDocument();
+    expect(screen.getByText("2:05")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Pause" })).toBeEnabled();
-    expect(screen.getByRole("button", { name: "Stop playback" })).toBeInTheDocument();
+    // Pause already holds the position; Stop only appears to cancel generation.
+    expect(screen.queryByRole("button", { name: /^Stop/ })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Pause" }));
     fireEvent.click(screen.getByRole("button", { name: "Back 10 seconds" }));
     fireEvent.click(screen.getByRole("button", { name: "Forward 10 seconds" }));
     fireEvent.click(screen.getByRole("button", { name: "Download audio" }));
-    fireEvent.click(screen.getByRole("button", { name: "Stop playback" }));
 
     expect(onTogglePlay).toHaveBeenCalledOnce();
     expect(onSkipBackward).toHaveBeenCalledOnce();
     expect(onSkipForward).toHaveBeenCalledOnce();
     expect(onDownload).toHaveBeenCalledOnce();
-    expect(onStop).toHaveBeenCalledOnce();
+    expect(onStop).not.toHaveBeenCalled();
   });
 
   it("labels stop as generation stop while generating without audio", () => {
@@ -261,7 +261,7 @@ describe("AudioPlayer", () => {
     });
 
     expect(screen.getByRole("slider", { name: "Seek" })).toHaveAttribute("aria-valuenow", "100");
-    expect(screen.getByText("3 sections")).toBeInTheDocument();
+    expect(screen.getByText("3 passages")).toBeInTheDocument();
   });
 
   it("carries rounded seconds into the next minute", () => {
@@ -271,8 +271,60 @@ describe("AudioPlayer", () => {
       segmentCount: 1,
     });
 
-    expect(screen.getByText("1:00.0")).toBeInTheDocument();
-    expect(screen.queryByText("0:60.0")).not.toBeInTheDocument();
+    expect(screen.getByText("0:59")).toBeInTheDocument();
+    expect(screen.queryByText("0:60")).not.toBeInTheDocument();
+  });
+
+  it("uses the singular for a single passage", () => {
+    renderPlayer({ totalDuration: 2, segmentCount: 1, activeSegmentNumber: null });
+    expect(screen.getByText("1 passage")).toBeInTheDocument();
+  });
+
+  it("formats long audio with hours", () => {
+    renderPlayer({ clock: clockAt(3725), totalDuration: 4500, segmentCount: 1 });
+    expect(screen.getByText("1:02:05")).toBeInTheDocument();
+    expect(screen.getByText("1:15:00")).toBeInTheDocument();
+  });
+
+  it("keeps benchmark stats out of the reader dock", () => {
+    renderPlayer({
+      variant: "dock",
+      totalDuration: 10,
+      segmentCount: 1,
+      stats: { firstLatency: 0.42, processingTime: 3.2, charsPerSec: 123, rtf: 0.2, totalDuration: 10, currentDuration: 0 },
+    });
+    expect(screen.queryByText(/first audio/i)).toBeNull();
+    expect(screen.queryByText(/RTF/)).toBeNull();
+  });
+
+  it("collects secondary dock actions in an overflow menu for small screens", () => {
+    const onDownload = vi.fn();
+    const onStop = vi.fn();
+    renderPlayer({
+      variant: "dock",
+      isGenerating: true,
+      allowPlaybackDuringGeneration: true,
+      totalDuration: 10,
+      segmentCount: 2,
+      activeSegmentNumber: 1,
+      onDownload,
+      onStop,
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "More playback options" }));
+    const menu = screen.getByRole("menu", { name: "Playback options" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "Download audio" }));
+    expect(onDownload).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("menu")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "More playback options" }));
+    fireEvent.click(screen.getByRole("menuitem", { name: "Stop generation" }));
+    expect(onStop).toHaveBeenCalledOnce();
+  });
+
+  it("gives Play the accent while paused", () => {
+    renderPlayer({ totalDuration: 10, segmentCount: 1, isPlaying: false });
+    expect(screen.getByRole("button", { name: "Play" })).toHaveClass("glass-accent");
   });
 
   it("seeks safely when a temporarily hidden slider has no width", () => {

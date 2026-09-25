@@ -118,6 +118,63 @@ mod tests {
     }
 
     #[test]
+    fn cjk_units_use_half_the_character_budget() {
+        let text = "你".repeat(250);
+        let units = split_text_units(&text, 200).unwrap();
+        assert_eq!(
+            units
+                .iter()
+                .map(|unit| unit.chars().count())
+                .collect::<Vec<_>>(),
+            vec![100, 100, 50]
+        );
+        assert_eq!(units.concat(), text);
+
+        // Mixed text spends one budget unit per Latin character and two per
+        // CJK character, so this 150-character window weighs exactly 200.
+        let mixed = format!("{}{}", "a".repeat(100), "你".repeat(100));
+        let units = split_text_units(&mixed, 200).unwrap();
+        assert_eq!(units[0].chars().count(), 150);
+        assert_eq!(units.concat(), mixed);
+    }
+
+    #[test]
+    fn a_cjk_unit_at_the_budget_fits_the_per_unit_token_cap() {
+        use super::super::config::{GenerationControls, MAX_TEXT_UNIT_GENERATION_TOKENS};
+
+        let text = "这是一个没有标点的很长的中文句子".repeat(20);
+        for unit in split_text_units(&text, 200).unwrap() {
+            // ~4-5 CJK characters per second at 12.5 codec frames per second
+            // is at most ~3.1 frames per character.
+            let expected_frames = unit.chars().count() * 25 / 8;
+            assert!(expected_frames <= MAX_TEXT_UNIT_GENERATION_TOKENS as usize);
+            let controls = GenerationControls::default().effective_for_text(
+                &unit,
+                "chinese",
+                MAX_TEXT_UNIT_GENERATION_TOKENS,
+            );
+            assert!(controls.max_new_tokens as usize >= expected_frames);
+        }
+    }
+
+    // `src/lib/qwenChunking.test.ts` pins the same inputs and outputs.
+    #[test]
+    fn parity_fixtures_shared_with_the_renderer() {
+        let split = |text: &str| split_text_units(text, 200).unwrap();
+        assert_eq!(split("Hello. World"), vec!["Hello.", " World"]);
+        assert_eq!(split("One, two; three."), vec!["One, two; three."]);
+        assert_eq!(split("Heading\nBody text"), vec!["Heading\n", "Body text"]);
+        assert_eq!(
+            split(&format!("{}。{}", "中".repeat(60), "文".repeat(60))),
+            vec![format!("{}。", "中".repeat(60)), "文".repeat(60)]
+        );
+        assert_eq!(
+            split(&"x".repeat(450)),
+            vec!["x".repeat(200), "x".repeat(200), "x".repeat(50)]
+        );
+    }
+
+    #[test]
     fn punctuation_inside_numbers_is_not_a_boundary() {
         let text = format!(
             "Pi is 3.14159 and the total is 1,000 at 10:30. {}",

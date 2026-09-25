@@ -143,7 +143,9 @@ export function useGenerationControl({
   ]);
 
   const handleStop = useCallback(() => {
-    cancelActiveGeneration(true);
+    // Only a running generation needs its worker torn down; forcing it here
+    // also reloaded the model every time Stop merely ended playback.
+    cancelActiveGeneration();
     player.stopAll();
   }, [cancelActiveGeneration, player]);
 

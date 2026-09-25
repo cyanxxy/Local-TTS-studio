@@ -13,6 +13,9 @@ import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
   MAX_REFERENCE_AUDIO_BASE64_LENGTH,
   MAX_REFERENCE_CODES_BASE64_LENGTH,
+  QWEN3_MAX_NEW_TOKENS_PER_PASSAGE,
+  QWEN3_MAX_SEED,
+  QWEN3_MIN_NEW_TOKENS,
   exceedsUnicodeScalarLimit,
 } from "./localTtsLimits";
 import { isAllowedAppUrl } from "./security";
@@ -56,6 +59,7 @@ const QWEN3_GENERATE_FIELDS = new Set([
   "temperature",
   "topK",
   "maxNewTokens",
+  "seed",
 ]);
 
 export type LocalModel = typeof LOCAL_MODELS[number];
@@ -429,12 +433,13 @@ export function sanitizeQwen3Payload(
     }
   }
 
-  // Bounds mirror GenerationControls in rust/local-tts-bridge/src/qwen3/config.rs:
-  // temperature 0 is greedy decoding, top-k never disables itself, and the
-  // token budget applies per generated text unit.
   const temperature = parseOptionalNumber(payload.temperature, "temperature", { min: 0, max: 2.0 });
   const topK = parseOptionalInteger(payload.topK, "topK", { min: 1, max: 1000 });
-  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", { min: 64, max: 384 });
+  const maxNewTokens = parseOptionalInteger(payload.maxNewTokens, "maxNewTokens", {
+    min: QWEN3_MIN_NEW_TOKENS,
+    max: QWEN3_MAX_NEW_TOKENS_PER_PASSAGE,
+  });
+  const seed = parseOptionalInteger(payload.seed, "seed", { min: 0, max: QWEN3_MAX_SEED });
   const resolvedSpeaker = mode === "customVoice" ? speaker ?? QWEN3_DEFAULT_SPEAKER : speaker;
   const resolvedLanguage = mode === "customVoice" ? language ?? QWEN3_DEFAULT_LANGUAGE : language;
 
@@ -452,6 +457,7 @@ export function sanitizeQwen3Payload(
     temperature,
     topK,
     maxNewTokens,
+    ...(seed !== undefined ? { seed } : {}),
   };
 }
 

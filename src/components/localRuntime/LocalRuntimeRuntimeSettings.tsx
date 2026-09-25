@@ -12,9 +12,9 @@ export function LocalRuntimeRuntimeSettings({
   runtimeBusy,
 }: LocalRuntimeRuntimeSettingsProps) {
   return (
-    <section className="rounded-xl border border-black/10 bg-surface/55 backdrop-blur-md p-4">
+    <section className="rounded-xl border border-black/10 bg-surface/55 p-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-        <h3 className="text-xs font-semibold uppercase tracking-widest text-text-secondary">Runtime</h3>
+        <h3 className="text-sm font-semibold text-text-secondary">Runtime</h3>
         <button
           type="button"
           onClick={onRecheckRuntime}
@@ -23,7 +23,7 @@ export function LocalRuntimeRuntimeSettings({
             rounded-lg border px-3 py-2 text-xs font-semibold transition-colors
             ${runtimeBusy
               ? "cursor-not-allowed border-border text-text-muted"
-              : "border-white/55 bg-white/40 backdrop-blur-md text-text-primary hover:bg-white/60"
+              : "border-border bg-text-primary/[0.04] text-text-primary hover:bg-text-primary/[0.07]"
             }
           `}
         >

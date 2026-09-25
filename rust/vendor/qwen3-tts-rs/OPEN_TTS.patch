@@ -101,7 +101,7 @@ index 954f379..d70073d 100644
  const FRAME_HEADER_BYTES: usize = 9;
  const STDOUT_FILENO: i32 = 1;
 diff --git a/src/inference.rs b/src/inference.rs
-index e908a86..7842e3f 100644
+index e908a86..8dc3234 100644
 --- a/src/inference.rs
 +++ b/src/inference.rs
 @@ -9,8 +9,11 @@
@@ -112,7 +112,7 @@ index e908a86..7842e3f 100644
 +use crate::config::{GenerationConfig, Qwen3TTSConfig, TalkerCodePredictorConfig, TalkerConfig};
  use crate::error::{Qwen3TTSError, Result};
 +use crate::generation_policy::{
-+    codec_prompt_prefix, custom_voice_instruction, process_codec_logits,
++    codec_language_id, codec_prompt_prefix, custom_voice_instruction, process_codec_logits,
 +};
  use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
  use crate::tensor::{DType, Device, Tensor};
@@ -469,21 +469,21 @@ index e908a86..7842e3f 100644
          let audio_len = audio_tensor.numel();
          Some(audio_tensor.view(&[audio_len]).to_vec_f32())
      }
-@@ -1603,7 +1695,7 @@ impl TTSInference {
+@@ -1603,19 +1695,13 @@ impl TTSInference {
              .copied()
              .unwrap_or(0) as i64;
  
 -        // Get language ID
-+        // Get language ID (None selects the no-think "Auto" prefix)
-         let language_id = self
-             .config
-             .talker_config
-@@ -1611,11 +1703,12 @@ impl TTSInference {
-             .as_ref()
-             .and_then(|map| map.get(&language.to_lowercase()))
-             .copied()
+-        let language_id = self
+-            .config
+-            .talker_config
+-            .codec_language_id
+-            .as_ref()
+-            .and_then(|map| map.get(&language.to_lowercase()))
+-            .copied()
 -            .unwrap_or(0) as i64;
-+            .map(|value| value as i64);
++        // Get language ID (dialect speakers swap in their dialect token)
++        let language_id = self.codec_language_id(language, speaker);
  
          // Get codec special token IDs from config
          let codec_eos_id = self.config.talker_config.codec_eos_token_id as i64;
@@ -492,7 +492,7 @@ index e908a86..7842e3f 100644
          let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
          let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
          let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
-@@ -1625,7 +1718,7 @@ impl TTSInference {
+@@ -1625,7 +1711,7 @@ impl TTSInference {
          let tts_eos_id = self.config.tts_eos_token_id as i64;
  
          println!(
@@ -501,7 +501,7 @@ index e908a86..7842e3f 100644
              speaker, speaker_id, language, language_id
          );
          println!(
-@@ -1681,6 +1774,7 @@ impl TTSInference {
+@@ -1681,6 +1767,7 @@ impl TTSInference {
              tts_bos_id,
              tts_eos_id,
              codec_think_id,
@@ -509,7 +509,7 @@ index e908a86..7842e3f 100644
              codec_think_bos_id,
              codec_think_eos_id,
              codec_pad_id,
-@@ -1703,6 +1797,7 @@ impl TTSInference {
+@@ -1703,6 +1790,7 @@ impl TTSInference {
              codec_eos_id,
              &tts_pad_embed,
          );
@@ -517,7 +517,32 @@ index e908a86..7842e3f 100644
          println!("Generated {} code frames", codes.len());
  
          // Convert codes to audio using vocoder
-@@ -1769,28 +1864,39 @@ impl TTSInference {
+@@ -1742,6 +1830,24 @@ impl TTSInference {
+         Ok((waveform, sample_rate))
+     }
+ 
++    /// Codec language token for a request, applying upstream's dialect-speaker
++    /// override. VoiceDesign and voice cloning pass no named speaker.
++    fn codec_language_id(&self, language: &str, speaker: &str) -> Option<i64> {
++        let talker = &self.config.talker_config;
++        let speaker_dialect = talker
++            .spk_is_dialect
++            .as_ref()
++            .and_then(|map| map.get(&speaker.to_lowercase()))
++            .and_then(|dialect| dialect.dialect_name());
++        codec_language_id(language, speaker_dialect, |name| {
++            talker
++                .codec_language_id
++                .as_ref()
++                .and_then(|map| map.get(name))
++                .map(|&id| i64::from(id))
++        })
++    }
++
+     /// Generate speech with instruction control.
+     ///
+     /// Instruction control allows modulating speech characteristics like tone,
+@@ -1769,48 +1875,65 @@ impl TTSInference {
      ///     2048,
      /// )?;
      /// ```
@@ -569,16 +594,16 @@ index e908a86..7842e3f 100644
 +        };
  
 -        // Get language ID
-+        // No language id ("Auto") selects the no-think prefix in every mode.
-         let language_id = self
-             .config
-             .talker_config
-@@ -1798,19 +1904,32 @@ impl TTSInference {
-             .as_ref()
-             .and_then(|map| map.get(&language.to_lowercase()))
-             .copied()
+-        let language_id = self
+-            .config
+-            .talker_config
+-            .codec_language_id
+-            .as_ref()
+-            .and_then(|map| map.get(&language.to_lowercase()))
+-            .copied()
 -            .unwrap_or(0) as i64;
-+            .map(|value| value as i64);
++        // Auto omits the language token unless a dialect speaker supplies one.
++        let language_id = self.codec_language_id(language, speaker);
 +        let instruct = if voice_design {
 +            instruct
 +        } else {
@@ -613,7 +638,7 @@ index e908a86..7842e3f 100644
          let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
          let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
          let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
-@@ -1834,7 +1953,7 @@ impl TTSInference {
+@@ -1834,7 +1957,7 @@ impl TTSInference {
          let user_tokens = self.tokenize("user")?;
          let user_id = user_tokens.first().copied().unwrap_or(882) as i64;
  
@@ -622,7 +647,7 @@ index e908a86..7842e3f 100644
          // The instruction is conditioning context, not synthesized speech
          let instruct_embeddings = if !instruct.is_empty() {
              // Tokenize instruction: <|im_start|>user\n{instruct}<|im_end|>\n
-@@ -1848,14 +1967,8 @@ impl TTSInference {
+@@ -1848,14 +1971,8 @@ impl TTSInference {
              // Embed instruction tokens (text side)
              let instruct_text_embed = self.talker.embed_text(&instruct_token_ids);
  
@@ -639,7 +664,7 @@ index e908a86..7842e3f 100644
          } else {
              None
          };
-@@ -1878,14 +1991,15 @@ impl TTSInference {
+@@ -1878,14 +1995,15 @@ impl TTSInference {
  
          // Build dual-stream input embeddings for main text
          println!("Building input embeddings...");
@@ -657,7 +682,7 @@ index e908a86..7842e3f 100644
              codec_think_bos_id,
              codec_think_eos_id,
              codec_pad_id,
-@@ -1902,19 +2016,45 @@ impl TTSInference {
+@@ -1902,19 +2020,45 @@ impl TTSInference {
          // Pre-compute tts_pad embedding
          let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
  
@@ -706,7 +731,7 @@ index e908a86..7842e3f 100644
          println!("Generated {} code frames", codes.len());
  
          // Decode with vocoder
-@@ -1932,6 +2072,87 @@ impl TTSInference {
+@@ -1932,6 +2076,87 @@ impl TTSInference {
          Ok((waveform, sample_rate))
      }
  
@@ -794,7 +819,7 @@ index e908a86..7842e3f 100644
      /// Get a reference to the loaded model weights.
      pub fn weights(&self) -> &HashMap<String, Tensor> {
          &self.weights
-@@ -2737,14 +2958,14 @@ impl TTSInference {
+@@ -2737,14 +2962,14 @@ impl TTSInference {
              max_codes,
              chunk_size.max(1)
          );
@@ -811,7 +836,7 @@ index e908a86..7842e3f 100644
              &input_embeddings,
              max_codes,
              temperature,
-@@ -2752,26 +2973,31 @@ impl TTSInference {
+@@ -2752,26 +2977,31 @@ impl TTSInference {
              codec_eos_id,
              &tts_pad_embed,
              chunk_size,
@@ -848,7 +873,7 @@ index e908a86..7842e3f 100644
          println!("Generated {} streamed code frames", generated);
          Ok(())
      }
-@@ -2779,8 +3005,12 @@ impl TTSInference {
+@@ -2779,8 +3009,12 @@ impl TTSInference {
  
  #[cfg(test)]
  mod tests {
@@ -890,10 +915,10 @@ index ba7872d..b956258 100644
  pub mod model;
 diff --git a/src/generation_policy.rs b/src/generation_policy.rs
 new file mode 100644
-index 0000000..37d7781
+index 0000000..c9a8e03
 --- /dev/null
 +++ b/src/generation_policy.rs
-@@ -0,0 +1,99 @@
+@@ -0,0 +1,148 @@
 +// Qwen generation policy, kept independent of tensor backends so the bridge
 +// regression suite can verify parity without loading model weights.
 +// Match Transformers' repetition processor and Qwen's reserved-token mask.
@@ -944,6 +969,25 @@ index 0000000..37d7781
 +    tokens
 +}
 +
++/// Resolve the codec language token the way upstream Qwen does. A speaker
++/// flagged with a dialect in `spk_is_dialect` (Dylan → `beijing_dialect`, Eric
++/// → `sichuan_dialect`) speaks that dialect's token whenever the request is
++/// Chinese or Auto; any other language keeps its own token. A dialect with no
++/// entry in `codec_language_id` falls back to the requested language.
++pub(crate) fn codec_language_id(
++    language: &str,
++    speaker_dialect: Option<&str>,
++    language_ids: impl Fn(&str) -> Option<i64>,
++) -> Option<i64> {
++    let language = language.to_lowercase();
++    let dialect_id = if matches!(language.as_str(), "chinese" | "auto") {
++        speaker_dialect.and_then(&language_ids)
++    } else {
++        None
++    };
++    dialect_id.or_else(|| language_ids(&language))
++}
++
 +pub(crate) fn custom_voice_instruction<'a>(model_size: Option<&str>, instruct: &'a str) -> &'a str {
 +    if model_size == Some("0b6") {
 +        ""
@@ -988,8 +1032,103 @@ index 0000000..37d7781
 +    }
 +
 +    #[test]
++    fn dialect_speakers_use_their_dialect_token_for_chinese_and_auto() {
++        let ids = |language: &str| match language {
++            "chinese" => Some(2055),
++            "english" => Some(2050),
++            "beijing_dialect" => Some(2074),
++            _ => None,
++        };
++        assert_eq!(
++            codec_language_id("Chinese", Some("beijing_dialect"), ids),
++            Some(2074)
++        );
++        assert_eq!(
++            codec_language_id("auto", Some("beijing_dialect"), ids),
++            Some(2074)
++        );
++        assert_eq!(
++            codec_language_id("English", Some("beijing_dialect"), ids),
++            Some(2050)
++        );
++        assert_eq!(codec_language_id("Chinese", None, ids), Some(2055));
++        assert_eq!(codec_language_id("auto", None, ids), None);
++        // An unknown dialect keeps the requested language rather than dropping it.
++        assert_eq!(
++            codec_language_id("chinese", Some("wu_dialect"), ids),
++            Some(2055)
++        );
++        assert_eq!(codec_language_id("auto", Some("wu_dialect"), ids), None);
++    }
++
++    #[test]
 +    fn small_custom_voice_does_not_accept_instruction_conditioning() {
 +        assert_eq!(custom_voice_instruction(Some("0b6"), "happy"), "");
 +        assert_eq!(custom_voice_instruction(Some("1b7"), "happy"), "happy");
 +    }
 +}
+diff --git a/src/tensor.rs b/src/tensor.rs
+index fc23924..e0a1e3e 100644
+--- a/src/tensor.rs
++++ b/src/tensor.rs
+@@ -135,6 +135,23 @@ impl From<tch::Device> for Device {
+ // Tensor — unified tensor type
+ // ---------------------------------------------------------------------------
+ 
++/// Open TTS: seed the sampling RNG so the same request draws the same tokens,
++/// or restore nondeterministic sampling with `None`.
++pub fn set_sampling_seed(seed: Option<u64>) {
++    #[cfg(feature = "tch-backend")]
++    {
++        let seed = seed.unwrap_or_else(|| {
++            std::time::SystemTime::now()
++                .duration_since(std::time::UNIX_EPOCH)
++                .map(|elapsed| elapsed.as_nanos() as u64)
++                .unwrap_or(42)
++        });
++        tch::manual_seed(seed as i64);
++    }
++    #[cfg(feature = "mlx")]
++    crate::backend::mlx::ops::set_sampling_seed(seed);
++}
++
+ /// Unified tensor type backed by either tch::Tensor or MLX array.
+ pub struct Tensor {
+     #[cfg(feature = "tch-backend")]
+diff --git a/src/backend/mlx/ops.rs b/src/backend/mlx/ops.rs
+index ff6f373..ad1f74a 100644
+--- a/src/backend/mlx/ops.rs
++++ b/src/backend/mlx/ops.rs
+@@ -767,9 +767,31 @@ pub fn random_categorical(logits: &MlxArray, axis: i32, _num_samples: i32) -> Ml
+     res
+ }
+ 
+-/// Generate a pseudo-random seed from system entropy.
++/// Open TTS: seed and draw counter for reproducible sampling, or `None` to
++/// draw each key from the clock as upstream does.
++static SAMPLING_SEED: std::sync::Mutex<Option<(u64, u64)>> = std::sync::Mutex::new(None);
++
++/// Make subsequent categorical draws a fixed sequence derived from `seed`, or
++/// restore clock-seeded draws with `None`. MLX derives a fresh PRNG key per
++/// draw, so the sequence is the seed advanced by one per draw.
++pub fn set_sampling_seed(seed: Option<u64>) {
++    let mut state = SAMPLING_SEED
++        .lock()
++        .unwrap_or_else(|poison| poison.into_inner());
++    *state = seed.map(|seed| (seed, 0));
++}
++
++/// Generate a pseudo-random seed from system entropy, or the next seeded draw.
+ fn rand_seed() -> u64 {
+     use std::time::SystemTime;
++    let mut state = SAMPLING_SEED
++        .lock()
++        .unwrap_or_else(|poison| poison.into_inner());
++    if let Some((seed, draws)) = state.as_mut() {
++        let key = seed.wrapping_add(*draws);
++        *draws = draws.wrapping_add(1);
++        return key;
++    }
+     SystemTime::now()
+         .duration_since(SystemTime::UNIX_EPOCH)
+         .map(|d| d.as_nanos() as u64)

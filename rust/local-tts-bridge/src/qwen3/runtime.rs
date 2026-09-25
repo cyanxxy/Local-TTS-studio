@@ -22,6 +22,10 @@ use super::text::split_text_units;
 const CUSTOM_VOICE_UNIT_CHARS: usize = 200;
 const REFERENCE_CACHE_ENTRIES: usize = 4;
 const REFERENCE_MAX_DURATION_SECONDS: u32 = 20;
+// Qwen markets 3-second cloning; shorter clips give the speaker encoder and the
+// in-context prompt too little voice to go on. Generation still runs, with a
+// warning, because a short clip is a quality problem rather than an invalid one.
+const REFERENCE_RECOMMENDED_MIN_SECONDS: u32 = 3;
 const VOICE_CLONE_STREAMING_CHUNK_SIZE: usize = 4;
 // CustomVoice and VoiceDesign stream on the same cadence as voice cloning, so
 // first audio arrives after a few code frames rather than after the whole text
@@ -89,6 +93,7 @@ struct PreparedReference {
     features: ReferenceFeatures,
     reference_text: String,
     truncated: bool,
+    short: bool,
 }
 
 struct ReferenceCacheEntry {
@@ -152,6 +157,7 @@ impl NativeQwenHost {
         let sample_rate = self.inference.config().speaker_encoder_config.sample_rate;
         let prepared =
             prepare_decoded_reference_wav(decoded, sample_rate, REFERENCE_MAX_DURATION_SECONDS)?;
+        let short = is_short_reference(prepared.samples.len(), prepared.sample_rate);
         let key = ReferenceCacheKey {
             digest: prepared.digest,
             transcript: transcript.to_owned(),
@@ -205,6 +211,7 @@ impl NativeQwenHost {
             },
             reference_text: transcript.to_owned(),
             truncated: prepared.truncated,
+            short,
         };
         self.reference_cache.push_back(ReferenceCacheEntry {
             identity: key,
@@ -243,6 +250,7 @@ impl CustomVoiceEngine for TTSInference {
         controls: GenerationControls,
         on_audio: StreamedAudio<'_>,
     ) -> Result<()> {
+        qwen3_tts_rs::tensor::set_sampling_seed(controls.seed);
         self.generate_with_instruct_streaming(
             text,
             speaker,
@@ -267,6 +275,7 @@ impl VoiceDesignEngine for TTSInference {
         controls: GenerationControls,
         on_audio: StreamedAudio<'_>,
     ) -> Result<()> {
+        qwen3_tts_rs::tensor::set_sampling_seed(controls.seed);
         self.generate_with_instruct_streaming(
             text,
             "",
@@ -297,6 +306,7 @@ impl VoiceCloneEngine for VoiceCloneSession<'_> {
         controls: GenerationControls,
         on_audio: StreamedAudio<'_>,
     ) -> Result<()> {
+        qwen3_tts_rs::tensor::set_sampling_seed(controls.seed);
         self.inference
             .generate_with_icl_streaming(
                 text,
@@ -427,6 +437,7 @@ impl Qwen3Runtime {
         let mut summary =
             generate_voice_clone_units(&mut session, text, &language, controls, sink)?;
         summary.reference_truncated = prepared.truncated;
+        summary.reference_short = prepared.short;
         Ok(summary)
     }
 }
@@ -558,6 +569,12 @@ pub struct GenerationSummary {
     pub sample_count: usize,
     pub audio_chunk_count: usize,
     pub reference_truncated: bool,
+    pub reference_short: bool,
+}
+
+fn is_short_reference(sample_count: usize, sample_rate: u32) -> bool {
+    let recommended = u64::from(sample_rate) * u64::from(REFERENCE_RECOMMENDED_MIN_SECONDS);
+    u64::try_from(sample_count).unwrap_or(u64::MAX) < recommended
 }
 
 /// Receives decoded audio as it is generated. Returning `false` stops
@@ -902,6 +919,7 @@ fn generate_units_with_cleanup(
         sample_count,
         audio_chunk_count,
         reference_truncated: false,
+        reference_short: false,
     })
 }
 
@@ -1335,6 +1353,14 @@ mod tests {
                 MAX_TEXT_UNIT_GENERATION_TOKENS,
             )
         );
+    }
+
+    #[test]
+    fn references_under_three_seconds_are_flagged_short() {
+        assert!(is_short_reference(0, 24_000));
+        assert!(is_short_reference(71_999, 24_000));
+        assert!(!is_short_reference(72_000, 24_000));
+        assert!(!is_short_reference(480_000, 24_000));
     }
 
     #[test]

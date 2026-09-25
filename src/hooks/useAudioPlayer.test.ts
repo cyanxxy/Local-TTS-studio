@@ -64,8 +64,25 @@ class MockAudioContext {
     this.state = "closed";
   });
 
+  private readonly listeners = new Map<string, Set<() => void>>();
+
   constructor() {
     MockAudioContext.instances.push(this);
+  }
+
+  addEventListener(type: string, listener: () => void): void {
+    if (!this.listeners.has(type)) this.listeners.set(type, new Set());
+    this.listeners.get(type)!.add(listener);
+  }
+
+  removeEventListener(type: string, listener: () => void): void {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  /** Simulates the system changing the context's state (e.g. an interruption). */
+  emitStateChange(state: "running" | "suspended"): void {
+    this.state = state;
+    this.listeners.get("statechange")?.forEach((listener) => listener());
   }
 
   createBuffer(_channels: number, length: number, sampleRate: number): MockAudioBuffer {
@@ -602,6 +619,57 @@ describe("useAudioPlayer", () => {
 
     expect(result.current.isPlaying).toBe(true);
     expect(result.current.getCurrentTime()).toBe(0);
+  });
+
+  it("keeps the position and end detection running on the timer when frames stop", async () => {
+    vi.useFakeTimers();
+    try {
+      const { result } = renderHook(() => useAudioPlayer());
+      await act(async () => {
+        await result.current.scheduleChunk(makeChunk("Only", 4, 4));
+      });
+      const ctx = MockAudioContext.instances[0];
+      expect(result.current.isPlaying).toBe(true);
+
+      // No animation frame is flushed here, as in a hidden window.
+      ctx.currentTime = 0.6;
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(result.current.getCurrentTime()).toBeGreaterThan(0.4);
+
+      ctx.currentTime = 2;
+      act(() => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(result.current.isPlaying).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resumes a context the system suspended mid-playback, or shows it paused", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Only", 40, 4));
+    });
+    const ctx = MockAudioContext.instances[0];
+    const resumeCalls = ctx.resume.mock.calls.length;
+
+    await act(async () => {
+      ctx.emitStateChange("suspended");
+      await Promise.resolve();
+    });
+    expect(ctx.resume.mock.calls.length).toBe(resumeCalls + 1);
+    expect(result.current.isPlaying).toBe(true);
+
+    MockAudioContext.resumeError = new Error("blocked");
+    await act(async () => {
+      ctx.emitStateChange("suspended");
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.isPlaying).toBe(false);
   });
 
   it("keeps playback open at the generated buffer edge until streaming completes", async () => {

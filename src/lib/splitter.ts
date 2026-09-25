@@ -6,7 +6,7 @@ function isSentenceTerminator(c: string, includeNewlines: boolean = true): boole
 }
 
 function isTrailingChar(c: string): boolean {
-  return "\"')]}」』".includes(c);
+  return "\"')]}」』”’»›〉》）".includes(c);
 }
 
 function getTokenFromBuffer(buffer: string, start: number): string {
@@ -26,6 +26,15 @@ const ABBREVIATIONS: Set<string> = new Set([
   "sun", "mon", "tue", "tues", "wed", "thu", "thur", "thurs", "fri", "sat",
 ]);
 
+/** Abbreviations that only stay mid-sentence before a number: "No. 5", "Fig. 2". */
+const NUMBER_PREFIXES: Set<string> = new Set([
+  "no", "nos", "fig", "figs", "vol", "vols", "ch", "p", "pp", "sec", "art", "eq", "op",
+]);
+
+function isNumberPrefix(token: string): boolean {
+  return NUMBER_PREFIXES.has(token.replace(/\.+$/, "").toLowerCase());
+}
+
 function isAbbreviation(token: string): boolean {
   token = token.replace(/['']s$/i, "").replace(/\.+$/, "");
   return ABBREVIATIONS.has(token.toLowerCase());
@@ -33,6 +42,8 @@ function isAbbreviation(token: string): boolean {
 
 const MATCHING: Map<string, string> = new Map([
   [")", "("], ["]", "["], ["}", "{"],
+  // Typographic quotes, which EPUB fiction uses for nearly all dialogue.
+  ["”", "“"], ["’", "‘"], ["）", "（"],
   ["》", "《"], ["〉", "〈"], ["›", "‹"], ["»", "«"],
   ["」", "「"], ["』", "『"], ["〕", "〔"], ["】", "【"],
 ]);
@@ -40,6 +51,8 @@ const MATCHING: Map<string, string> = new Map([
 const OPENING: Set<string> = new Set(MATCHING.values());
 
 function updateStack(c: string, stack: string[], i: number, buffer: string): void {
+  // A curly apostrophe inside a word ("don’t", "dogs’ ") is not a closing quote.
+  if (c === "’" && i > 0 && /\p{L}/u.test(buffer[i - 1]) && (i + 1 >= buffer.length || /\p{L}/u.test(buffer[i + 1]))) return;
   if (c === '"' || c === "'") {
     if (c === "'" && i > 0 && i < buffer.length - 1 && /[A-Za-z]/.test(buffer[i - 1]) && /[A-Za-z]/.test(buffer[i + 1])) return;
     if (c === "'" && i > 0 && /[A-Za-z]/.test(buffer[i - 1]) && (!stack.length || stack.at(-1) !== "'")) return;
@@ -169,12 +182,16 @@ export class TextSplitterStream implements AsyncIterable<string>, Iterable<strin
 
         if (isAbbreviation(token)) { ++i; continue; }
 
+        if (c === "." && isNumberPrefix(token) && nextNonSpace < len && /\d/.test(buffer[nextNonSpace])) { ++i; continue; }
+
         // Only suppress sentence breaks for single initials like "A. Lincoln".
         // Multi-letter initialisms such as "U.S." may end a sentence ("U.S. It is..."),
         // accepting that phrases like "U.S. Senator" can split conservatively.
         if (/^[A-Za-z]\.$/.test(token) && nextNonSpace < len && /[A-Z]/.test(buffer[nextNonSpace])) { ++i; continue; }
 
-        if (c === "." && nextNonSpace < len && /[a-z]/.test(buffer[nextNonSpace])) { ++i; continue; }
+        // A lowercase continuation is the same sentence: "e.g. this", or a
+        // dialogue tag after quoted speech ("“Really?” she asked.").
+        if (nextNonSpace < len && /\p{Ll}/u.test(buffer[nextNonSpace]) && c !== "\n") { ++i; continue; }
 
         const sentence = buffer.substring(sentenceStart, boundaryEnd + 1).trim();
         if (sentence === "..." || sentence === "…") { ++i; continue; }

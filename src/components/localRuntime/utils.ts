@@ -40,6 +40,39 @@ export async function sha256Hex(buffer: ArrayBuffer): Promise<string> {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * Duration of a RIFF/WAVE buffer from its `fmt ` byte rate and `data` size, or
+ * null when the header cannot be read. Used only for early guidance: the
+ * bridge still validates and decodes the clip itself.
+ */
+export function wavDurationSeconds(buffer: ArrayBuffer): number | null {
+  const view = new DataView(buffer);
+  const tag = (offset: number) => String.fromCharCode(
+    view.getUint8(offset),
+    view.getUint8(offset + 1),
+    view.getUint8(offset + 2),
+    view.getUint8(offset + 3),
+  );
+  if (view.byteLength < 12 || tag(0) !== "RIFF" || tag(8) !== "WAVE") return null;
+
+  let byteRate: number | null = null;
+  for (let offset = 12; offset + 8 <= view.byteLength;) {
+    const id = tag(offset);
+    const size = view.getUint32(offset + 4, true);
+    if (id === "fmt " && offset + 16 <= view.byteLength) {
+      byteRate = view.getUint32(offset + 16, true);
+    } else if (id === "data") {
+      if (!byteRate) return null;
+      // A streamed or truncated file can declare more data than it carries.
+      const available = Math.min(size, view.byteLength - offset - 8);
+      return available / byteRate;
+    }
+    // RIFF chunks are padded to an even size.
+    offset += 8 + size + (size % 2);
+  }
+  return null;
+}
+
 export interface Float32AudioChunk {
   audio: ArrayBuffer;
   sampleCount: number;

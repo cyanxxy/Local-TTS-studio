@@ -3,6 +3,7 @@ import { strFromU8, unzipSync, type UnzipFileInfo } from "fflate";
 import {
   createReaderDocument,
   deriveDocumentTitle,
+  normalizeReaderText,
   type ReaderChapter,
   type ReaderDocumentRecord,
 } from "./readerDocument";
@@ -368,6 +369,132 @@ export async function fetchRemoteDocument(
   }
 }
 
+/** Strips inline Markdown syntax so neither the page nor the voice sees it. */
+function stripInlineMarkdown(line: string): string {
+  return line
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
+    .replace(/\[([^\]]+)\]\[[^\]]*\]/g, "$1")
+    .replace(/<(https?:\/\/[^>\s]+)>/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, "$2")
+    .replace(/(^|[^\w*])\*(?=\S)([^*]+?)(?<=\S)\*(?!\w)/g, "$1$2")
+    .replace(/(^|[^\w_])_(?=\S)([^_]+?)(?<=\S)_(?!\w)/g, "$1$2")
+    .replace(/~~(?=\S)(.+?)(?<=\S)~~/g, "$1");
+}
+
+interface MarkdownHeading {
+  title: string;
+  level: number;
+}
+
+/**
+ * Turns Markdown into the plain reading text the Reader renders and speaks.
+ * Heading markers become chapter boundaries instead of `#` glyphs, and a lone
+ * leading H1 is lifted into the document title rather than becoming a
+ * one-line first page.
+ */
+export function parseMarkdownReaderDocument(raw: string, fileName: string): ReaderDocumentRecord {
+  const output: string[] = [];
+  const headings: MarkdownHeading[] = [];
+  // Output line index of each heading, parallel to `headings`.
+  const headingLines: number[] = [];
+  let fence: string | null = null;
+
+  for (const line of raw.replace(/\r\n?/g, "\n").split("\n")) {
+    const fenceMatch = line.match(/^\s{0,3}(`{3,}|~{3,})/);
+    if (fenceMatch) {
+      const marker = fenceMatch[1][0];
+      if (fence === null) fence = marker;
+      else if (fence === marker) fence = null;
+      continue;
+    }
+    if (fence !== null) {
+      output.push(line);
+      continue;
+    }
+
+    const atx = line.match(/^\s{0,3}(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/);
+    if (atx) {
+      const title = stripInlineMarkdown(atx[2]).trim();
+      if (title) {
+        headings.push({ title, level: atx[1].length });
+        headingLines.push(output.length);
+        output.push(title);
+      }
+      continue;
+    }
+
+    const previous = output.at(-1) ?? "";
+    const previousIsHeading = headingLines.at(-1) === output.length - 1;
+    const setext = line.match(/^\s{0,3}(=+|-+)\s*$/);
+    if (setext && previous.trim() && !previousIsHeading) {
+      headings.push({ title: previous.trim(), level: setext[1][0] === "=" ? 1 : 2 });
+      headingLines.push(output.length - 1);
+      output[output.length - 1] = previous.trim();
+      continue;
+    }
+    if (/^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) {
+      output.push("");
+      continue;
+    }
+    if (/^\s{0,3}\[[^\]]+\]:\s+\S+/.test(line)) continue;
+
+    const body = line
+      .replace(/^(\s{0,3}>\s?)+/, "")
+      .replace(/^(\s*)[-*+]\s+(?:\[[ xX]\]\s+)?/, "$1");
+    output.push(stripInlineMarkdown(body));
+  }
+
+  let title = "";
+  const levelOneCount = headings.filter((heading) => heading.level === 1).length;
+  const firstHeadingLine = headingLines[0];
+  if (
+    headings[0]?.level === 1
+    && levelOneCount === 1
+    && output.slice(0, firstHeadingLine).every((line) => !line.trim())
+  ) {
+    title = headings[0].title;
+    output.splice(firstHeadingLine, 1);
+    headings.shift();
+    headingLines.shift();
+  }
+
+  const plain = output.join("\n");
+  assertReaderTextLimit(plain);
+  const text = normalizeReaderText(plain);
+  const documentTitle = title || deriveDocumentTitle(text, fileStem(fileName));
+
+  // Offsets are only final after normalization, so headings are located in
+  // the normalized text, in order, one line at a time.
+  const chapters: ReaderChapter[] = [];
+  let cursor = 0;
+  let headingIndex = 0;
+  for (const line of text.split("\n")) {
+    const heading = headings[headingIndex];
+    if (heading && line.trim() === heading.title) {
+      chapters.push({ id: "", title: heading.title, order: chapters.length, start: cursor, end: cursor, level: heading.level });
+      headingIndex += 1;
+    }
+    cursor += line.length + 1;
+  }
+  if (chapters.length > 0 && text.slice(0, chapters[0].start).trim()) {
+    chapters.unshift({ id: "", title: "Introduction", order: 0, start: 0, end: 0, level: 1 });
+  }
+  chapters.forEach((chapter, index) => {
+    chapter.order = index;
+    chapter.end = chapters[index + 1]?.start ?? text.length;
+  });
+
+  return createReaderDocument({
+    title: documentTitle,
+    sourceType: "file",
+    sourceName: fileName,
+    text,
+    ...(chapters.length > 0 ? { chapters } : {}),
+  });
+}
+
 export async function importReaderFile(file: File): Promise<ReaderDocumentRecord> {
   if (file.size > MAX_READER_FILE_BYTES) {
     throw new ReaderImportLimitError(`"${file.name}" exceeds the 100 MB file limit.`);
@@ -381,6 +508,7 @@ export async function importReaderFile(file: File): Promise<ReaderDocumentRecord
   }
   const raw = await file.text();
   assertReaderTextLimit(raw);
+  if (extension === ".md") return parseMarkdownReaderDocument(raw, file.name);
   if (extension === ".html" || extension === ".htm") {
     return parseHtmlReaderDocument({
       requestedUrl: file.name,

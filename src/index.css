@@ -99,10 +99,19 @@
 :root {
   --glass-blur: 20px;
   --glass-saturate: 175%;
-  --glass-bg: color-mix(in srgb, var(--color-panel) 62%, transparent);
+  --glass-bg: color-mix(in srgb, var(--color-panel) 52%, transparent);
   --glass-bg-strong: color-mix(in srgb, var(--color-panel) 78%, transparent);
   --glass-border: color-mix(in srgb, #ffffff 58%, transparent);
   --glass-border-soft: color-mix(in srgb, #ffffff 36%, transparent);
+  /* Specular rim: a bright top edge and a faint lower one, as light catching
+     the curved edge of the material. */
+  --glass-specular:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.75),
+    inset 0 -1px 0 0 rgb(255 255 255 / 0.18),
+    inset 0 0 0 0.5px rgb(255 255 255 / 0.35);
+  /* Content-layer surface: solid, quiet, and never blurred. */
+  --surface-border: color-mix(in srgb, var(--color-border) 75%, transparent);
+  --surface-shadow: 0 1px 2px rgb(17 24 39 / 0.04), 0 6px 20px rgb(17 24 39 / 0.04);
 }
 
 /* ── App-wide appearance preferences ──────────────────────── */
@@ -119,10 +128,15 @@
   --color-success: #30d158;
   --color-warning: #ffd60a;
   --color-warning-light: rgba(255, 214, 10, 0.13);
-  --glass-bg: color-mix(in srgb, #24262c 72%, transparent);
+  --glass-bg: color-mix(in srgb, #24262c 64%, transparent);
   --glass-bg-strong: color-mix(in srgb, #24262c 86%, transparent);
   --glass-border: color-mix(in srgb, #ffffff 16%, transparent);
   --glass-border-soft: color-mix(in srgb, #ffffff 10%, transparent);
+  --glass-specular:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.16),
+    inset 0 -1px 0 0 rgb(255 255 255 / 0.05),
+    inset 0 0 0 0.5px rgb(255 255 255 / 0.1);
+  --surface-shadow: 0 1px 2px rgb(0 0 0 / 0.25), 0 8px 24px rgb(0 0 0 / 0.18);
   --shadow-glass-sm:
     0 1px 2px rgb(0 0 0 / 0.18),
     0 5px 16px rgb(0 0 0 / 0.2),
@@ -211,27 +225,12 @@
     radial-gradient(ellipse 90% 70% at 85% 100%, color-mix(in srgb, var(--color-accent) 7%, transparent), transparent 65%);
 }
 
-/* Existing glass controls use white tints. In dark mode those become subtle
-   highlights instead of opaque white blocks. */
-:root[data-theme="dark"] :is([class^="bg-white/"], [class*=" bg-white/"]) {
-  background-color: rgb(255 255 255 / 0.07) !important;
-}
-:root[data-theme="dark"] :is([class^="border-white/"], [class*=" border-white/"]) {
-  border-color: rgb(255 255 255 / 0.13) !important;
-}
-:root[data-theme="dark"] [class*="hover:bg-white/"]:hover {
-  background-color: rgb(255 255 255 / 0.12) !important;
-}
 
-:root[data-transparency="reduced"] :is(.glass, .glass-panel, .glass-pop, .glass-inset, .glass-control) {
+:root[data-transparency="reduced"] :is(.glass, .glass-pop, .glass-control, .glass-accent) {
   -webkit-backdrop-filter: none;
   backdrop-filter: none;
 }
-:root[data-transparency="reduced"] .glass,
-:root[data-transparency="reduced"] .glass-control { background-color: var(--color-panel); }
-:root[data-transparency="reduced"] .glass-panel,
-:root[data-transparency="reduced"] .glass-pop { background-color: var(--color-panel); }
-:root[data-transparency="reduced"] .glass-inset { background-color: var(--color-surface); }
+:root[data-transparency="reduced"] :is(.glass, .glass-pop, .glass-control) { background-color: var(--color-panel); }
 
 *,
 *::before,
@@ -308,109 +307,133 @@ body {
   outline-offset: 2px;
 }
 
-/* ── Liquid Glass surfaces ────────────────────────────────────
-   Translucent, blurred, saturated material with a bright specular
-   top edge and a soft floating shadow. */
+/* ── Materials ────────────────────────────────────────────────
+   Two layers, following Apple's Liquid Glass guidance:
+
+   • Content layer — the script editor, the reading page, settings cards.
+     A solid `.surface`: glass here would compete with the content and
+     muddy the hierarchy.
+   • Controls layer — page tabs, toolbars, the player dock, popovers.
+     Liquid Glass that floats above content: it blurs and brightens what is
+     behind it, carries a specular rim, and casts a soft shadow.
+
+   Glass never sits on glass. Controls inside a glass container use fills
+   (`.glass-fill`), not a second material. */
+
+.surface {
+  background-color: var(--color-panel);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--surface-shadow);
+}
+
+/* Regular glass — small floating controls and bars. */
 .glass {
   background-color: var(--glass-bg);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow-glass-md);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(1.04);
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate)) brightness(1.04);
+  border: 1px solid var(--glass-border-soft);
+  box-shadow: var(--glass-specular), var(--shadow-glass-md);
 }
 
-.glass-panel {
-  background-color: var(--glass-bg-strong);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow-glass-md);
-}
-
+/* Larger glass — popovers, menus, drawers, sheets. Apple describes bigger
+   glass as a thicker material: more opaque, deeper shadow, softer light. */
 .glass-pop {
-  background-color: color-mix(in srgb, var(--color-panel) 86%, transparent);
-  -webkit-backdrop-filter: blur(30px) saturate(190%);
-  backdrop-filter: blur(30px) saturate(190%);
-  border: 1px solid var(--glass-border);
-  box-shadow: var(--shadow-glass-lg);
-}
-
-.glass-inset {
-  background-color: color-mix(in srgb, var(--color-surface) 55%, transparent);
-  -webkit-backdrop-filter: blur(8px) saturate(140%);
-  backdrop-filter: blur(8px) saturate(140%);
+  background-color: color-mix(in srgb, var(--color-panel) 84%, transparent);
+  -webkit-backdrop-filter: blur(32px) saturate(190%);
+  backdrop-filter: blur(32px) saturate(190%);
   border: 1px solid var(--glass-border-soft);
-  box-shadow:
-    inset 0 1px 3px rgb(17 24 39 / 0.06),
-    inset 0 1px 0 0 rgb(255 255 255 / 0.4);
+  box-shadow: var(--glass-specular), var(--shadow-glass-lg);
 }
 
+/* A standalone glass button (e.g. Settings) floating on the page. */
 .glass-control {
-  background-color: color-mix(in srgb, var(--color-panel) 48%, transparent);
-  -webkit-backdrop-filter: blur(12px) saturate(160%);
-  backdrop-filter: blur(12px) saturate(160%);
+  background-color: var(--glass-bg);
+  -webkit-backdrop-filter: blur(12px) saturate(170%) brightness(1.04);
+  backdrop-filter: blur(12px) saturate(170%) brightness(1.04);
   border: 1px solid var(--glass-border-soft);
-  box-shadow: var(--shadow-glass-sm);
+  box-shadow: var(--glass-specular), var(--shadow-glass-sm);
   transition:
-    transform 0.22s cubic-bezier(0.4, 0, 0.2, 1),
-    box-shadow 0.22s ease,
+    transform 0.25s cubic-bezier(0.34, 1.4, 0.64, 1),
     background-color 0.2s ease,
-    border-color 0.2s ease,
     color 0.2s ease;
 }
 .glass-control:hover {
-  background-color: color-mix(in srgb, var(--color-panel) 66%, transparent);
-  border-color: var(--glass-border);
-  box-shadow: var(--shadow-glass-md);
-  transform: translateY(-1px);
+  background-color: color-mix(in srgb, var(--color-panel) 70%, transparent);
 }
-.glass-control:active {
-  transform: translateY(0) scale(0.985);
-  box-shadow: var(--shadow-glass-sm);
-}
-.glass-control:disabled {
-  transform: none;
-  box-shadow: var(--shadow-glass-sm);
+/* Pressing glass lights it from within and gives a little, rather than
+   lifting on hover. */
+.glass-control:active:not(:disabled) {
+  transform: scale(0.96);
+  background-color: color-mix(in srgb, var(--color-panel) 88%, transparent);
 }
 
-/* Primary action — vivid tinted glass with accent glow */
+/* Controls placed on glass: a fill, never a second layer of glass. */
+.glass-fill {
+  background-color: color-mix(in srgb, var(--color-text-primary) 5%, transparent);
+  transition: background-color 0.18s ease, color 0.18s ease, transform 0.25s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.glass-fill:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--color-text-primary) 9%, transparent);
+}
+.glass-fill:active:not(:disabled) {
+  transform: scale(0.95);
+  background-color: color-mix(in srgb, var(--color-text-primary) 13%, transparent);
+}
+
+/* Prominent (tinted) glass — the one or two primary actions on a view. The
+   accent is a translucent tint over the backdrop, not a solid or glossy
+   fill, and it glows from within when pressed instead of lifting. */
 .glass-accent {
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--color-accent) 88%, white) 0%,
-    var(--color-accent) 52%,
-    var(--color-accent-hover) 100%
-  );
+  background-color: color-mix(in srgb, var(--color-accent) 88%, transparent);
+  -webkit-backdrop-filter: blur(12px) saturate(180%);
+  backdrop-filter: blur(12px) saturate(180%);
   color: #fff;
-  border: 1px solid color-mix(in srgb, var(--color-accent) 55%, white 25%);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 60%, white 20%);
   box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.4),
-    0 2px 8px color-mix(in srgb, var(--color-accent) 32%, transparent),
-    0 10px 28px color-mix(in srgb, var(--color-accent) 26%, transparent);
+    inset 0 1px 0 rgb(255 255 255 / 0.35),
+    inset 0 0 0 0.5px rgb(255 255 255 / 0.2),
+    0 4px 14px color-mix(in srgb, var(--color-accent) 22%, transparent);
   transition:
-    transform 0.2s ease,
-    box-shadow 0.2s ease,
+    transform 0.25s cubic-bezier(0.34, 1.4, 0.64, 1),
+    background-color 0.2s ease,
     filter 0.2s ease;
 }
-.glass-accent:hover {
-  transform: translateY(-1px);
-  filter: saturate(1.05) brightness(1.02);
-  box-shadow:
-    inset 0 1px 0 rgb(255 255 255 / 0.5),
-    0 4px 12px color-mix(in srgb, var(--color-accent) 38%, transparent),
-    0 16px 38px color-mix(in srgb, var(--color-accent) 32%, transparent);
+.glass-accent:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--color-accent) 96%, transparent);
 }
-.glass-accent:active {
-  transform: translateY(0) scale(0.98);
+.glass-accent:active:not(:disabled) {
+  transform: scale(0.96);
+  filter: brightness(1.12);
 }
 
 /* Fallback when backdrop-filter is unavailable: lean opaque so text stays legible */
 @supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
   .glass { background-color: color-mix(in srgb, var(--color-panel) 92%, transparent); }
-  .glass-panel { background-color: color-mix(in srgb, var(--color-panel) 96%, transparent); }
   .glass-pop { background-color: var(--color-panel); }
-  .glass-inset { background-color: color-mix(in srgb, var(--color-surface) 92%, transparent); }
   .glass-control { background-color: color-mix(in srgb, var(--color-panel) 88%, transparent); }
+}
+
+/* ── Accessibility: the system settings Apple maps onto the material ──
+   Reduce Transparency makes glass frostier and near-opaque; Increase
+   Contrast makes it solid with a contrasting border. The in-app
+   "reduced transparency" preference behaves the same way. */
+@media (prefers-reduced-transparency: reduce) {
+  :is(.glass, .glass-pop, .glass-control) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--color-panel);
+  }
+}
+@media (prefers-contrast: more) {
+  :is(.glass, .glass-pop, .glass-control, .surface) {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    background-color: var(--color-panel);
+    border-color: var(--color-text-primary);
+    box-shadow: none;
+  }
+  .glass-fill { background-color: color-mix(in srgb, var(--color-text-primary) 12%, transparent); }
+  .glass-accent { background-color: var(--color-accent); border-color: var(--color-text-primary); }
 }
 
 /* ── Range inputs ─────────────────────────────────────────── */
@@ -562,38 +585,21 @@ input[type="range"]::-moz-range-thumb {
   background: color-mix(in srgb, var(--color-text-primary) 6%, transparent);
 }
 
-/* The breathing only reads as "this is being spoken now", so it is applied
-   from the reader only while audio is actually playing — a paused page with a
-   pulsing highlight looks like it is still going. */
-.reader-chunk-highlight-pulsing {
-  animation: reader-highlight-pulse 3.2s ease-in-out infinite;
-}
-
 /* Estimated word-follow marker — the one accent-coloured mark on the page.
-   The ring is drawn with a shadow spread rather than padding so the marker can
-   travel word to word without nudging the line's metrics. Panel-coloured ink
-   keeps it legible on every accent, light and dark. */
+   A soft tint with an accent underline rather than a solid block: it hops
+   several times a second, and a solid fill flashing that often tires the eye
+   over a long listen. The ring is drawn with a shadow spread rather than
+   padding so the marker can travel word to word without nudging the line's
+   metrics, and the text keeps its own ink so it reads on every page tone. */
 .reader-word-highlight-active {
-  color: var(--color-panel);
-  background: var(--color-accent);
-  border-radius: 0.28em;
+  color: inherit;
+  background: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  border-radius: 0.22em;
   box-shadow:
-    0 0 0 0.08em var(--color-accent),
-    0 1px 6px color-mix(in srgb, var(--color-accent) 32%, transparent);
+    0 0 0 0.06em color-mix(in srgb, var(--color-accent) 18%, transparent),
+    inset 0 -0.1em 0 color-mix(in srgb, var(--color-accent) 70%, transparent);
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
-}
-
-/* The word span carries its chunk's classes too, and an animated
-   `background-color` outranks any normal declaration — the breathing wash would
-   paint straight over the accent fill and leave the word unreadable. */
-.reader-word-highlight-active.reader-chunk-highlight-pulsing {
-  animation: none;
-}
-
-@keyframes reader-highlight-pulse {
-  0%, 100% { background-color: color-mix(in srgb, var(--color-text-primary) 4%, transparent); }
-  50%      { background-color: color-mix(in srgb, var(--color-text-primary) 9%, transparent); }
 }
 
 /* ── Reader paragraphs ────────────────────────────────────
@@ -610,6 +616,96 @@ input[type="range"]::-moz-range-thumb {
 
 .reader-article p.reader-paragraph-spaced {
   margin-top: 1.1em;
+}
+
+/* The chapter's own title line, drawn as the chapter heading. It stays a
+   paragraph block so offsets, highlighting, and double-click seeking keep
+   working on it like any other line. */
+.reader-article p.reader-chapter-heading {
+  margin-bottom: 1.2em;
+  padding-bottom: 0.7em;
+  border-bottom: 1px solid color-mix(in srgb, var(--color-border) 50%, transparent);
+  font-family: var(--font-display);
+  font-size: 1.45em;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: normal;
+}
+
+/* Scroll edge effect: text fades as it passes under the floating player
+   dock instead of showing through the glass as ghost text. Soft style, one
+   per view, and only where floating controls sit over the content. */
+.reader-scroll-edge {
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 9rem), rgb(0 0 0 / 0.15) calc(100% - 1.5rem), transparent);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 9rem), rgb(0 0 0 / 0.15) calc(100% - 1.5rem), transparent);
+}
+
+/* ── Reader page tones ────────────────────────────────────────
+   Scoped to the reading panel, so a sepia or night page works under
+   either app theme. Tokens are redefined rather than colours overridden,
+   so highlights and focus mode follow the page automatically. */
+.reader-tone-sepia {
+  --color-panel: #f6efe1;
+  --color-border: #e1d5bd;
+  --color-text-primary: #3b2f22;
+  --color-text-secondary: #5c4b39;
+  --color-text-muted: #85735d;
+  /* Glass tokens are resolved where they are declared (:root), so the tone
+     has to restate them for its own panel colour to reach glass surfaces. */
+  --glass-bg: color-mix(in srgb, #f6efe1 72%, transparent);
+  --glass-bg-strong: color-mix(in srgb, #f6efe1 86%, transparent);
+}
+.reader-tone-night {
+  --color-panel: #1b1c21;
+  --color-border: #2d2f36;
+  --color-border-strong: #474a53;
+  --color-text-primary: #d9d7d2;
+  --color-text-secondary: #aeaba4;
+  --color-text-muted: #8a8891;
+  --glass-bg: color-mix(in srgb, #1b1c21 78%, transparent);
+  --glass-bg-strong: color-mix(in srgb, #1b1c21 90%, transparent);
+  --glass-border: color-mix(in srgb, #ffffff 14%, transparent);
+  --glass-border-soft: color-mix(in srgb, #ffffff 9%, transparent);
+  color-scheme: dark;
+}
+/* Only the page itself takes the tone's paper colour; the player dock
+   carries the tokens but keeps its own glass shape. */
+section.reader-tone-sepia { background-color: #f4ecdc; }
+section.reader-tone-night { background-color: #121317; }
+
+/* ── Switch-styled checkbox ───────────────────────────────── */
+.reader-switch {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 2.1rem;
+  height: 1.25rem;
+  border-radius: 999px;
+  background: var(--color-border-strong);
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+}
+.reader-switch::after {
+  content: "";
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 0.95rem;
+  height: 0.95rem;
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 1px 3px rgb(0 0 0 / 0.25);
+  transition: transform 0.2s ease;
+}
+.reader-switch:checked {
+  background: var(--color-accent);
+}
+.reader-switch:checked::after {
+  transform: translateX(0.85rem);
+}
+.reader-switch:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 /* ── Reader document column ───────────────────────────────────
@@ -630,10 +726,10 @@ input[type="range"]::-moz-range-thumb {
   color: var(--color-text-primary);
 }
 /* The word marker can outlive its chunk span, and `.reader-focus span` outranks
-   the bare class, so it needs its own qualified rule to keep its ink on the
-   accent fill instead of fading with the rest of the page. */
+   the bare class, so it needs its own qualified rule to keep full ink instead
+   of fading with the rest of the page. */
 .reader-focus span.reader-word-highlight-active {
-  color: var(--color-panel);
+  color: var(--color-text-primary);
 }
 
 /* ── Respect reduced-motion ───────────────────────────────── */

@@ -21,14 +21,28 @@ import {
   QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
   QWEN3_SPEAKERS,
+  type Qwen3Mode,
   type Qwen3Profile,
 } from "../../electron/qwen3Profiles";
+import {
+  QWEN3_MAX_NEW_TOKENS_PER_PASSAGE,
+  QWEN3_MAX_SEED,
+  QWEN3_MIN_NEW_TOKENS,
+} from "../../electron/localTtsLimits";
 
-// Generation runs one bounded text unit at a time, so this is a per-unit
-// budget. Mirrors MAX_GENERATION_TOKENS in rust/local-tts-bridge/src/qwen3/config.rs.
-export const QWEN3_MIN_NEW_TOKENS = 64;
-export const QWEN3_MAX_NEW_TOKENS = 384;
-export const QWEN3_DEFAULT_MAX_NEW_TOKENS = QWEN3_MAX_NEW_TOKENS;
+export const QWEN3_DEFAULT_MAX_NEW_TOKENS = QWEN3_MAX_NEW_TOKENS_PER_PASSAGE;
+
+/**
+ * VoiceDesign's instruction describes the whole voice while CustomVoice's only
+ * styles a fixed speaker, so each mode keeps its own text: switching profiles
+ * never turns a voice description into a style hint or the reverse.
+ */
+type Qwen3InstructMode = Extract<Qwen3Mode, "customVoice" | "voiceDesign">;
+
+function instructMode(mode: Qwen3Mode): Qwen3InstructMode | null {
+  return mode === "customVoice" || mode === "voiceDesign" ? mode : null;
+}
+
 export const QWEN3_MIN_TEMPERATURE = 0;
 export const QWEN3_MAX_TEMPERATURE = 2;
 export const QWEN3_MIN_TOP_K = 1;
@@ -40,13 +54,19 @@ export interface Qwen3RuntimeSettings {
   readiness: "missing" | "structural" | "verified";
   speaker: string;
   language: string;
+  /** The selected profile's instruction; always empty for voice cloning. */
   instruct: string;
   temperature: number;
   topK: number;
+  /** Per-passage codec-token limit; the bridge never exceeds 384 per passage. */
   maxNewTokens: number;
+  /** Fixed sampling seed for repeatable output, or null for random sampling. */
+  seed: number | null;
   referenceAudioName: string;
   referenceAudioBase64: string | null;
   referenceAudioSignature: string;
+  /** Clip length read from the WAV header, or null when unknown. */
+  referenceAudioDurationSec: number | null;
   referenceText: string;
 }
 
@@ -67,7 +87,13 @@ interface Qwen3RuntimeContextValue extends Qwen3RuntimeSettings {
   setTemperature: (temperature: number) => void;
   setTopK: (topK: number) => void;
   setMaxNewTokens: (maxNewTokens: number) => void;
-  setReferenceAudio: (name: string, base64: string | null, signature?: string) => void;
+  setSeed: (seed: number | null) => void;
+  setReferenceAudio: (
+    name: string,
+    base64: string | null,
+    signature?: string,
+    durationSec?: number | null,
+  ) => void;
   setReferenceText: (text: string) => void;
   refreshSetup: () => Promise<void>;
   downloadModel: () => Promise<void>;
@@ -101,13 +127,18 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const [readiness, setReadiness] = useState<Qwen3RuntimeSettings["readiness"]>("missing");
   const [speaker, setSpeakerState] = useState<string>(QWEN3_DEFAULT_SPEAKER);
   const [language, setLanguageState] = useState<string>(QWEN3_DEFAULT_LANGUAGE);
-  const [instruct, setInstruct] = useState("");
+  const [instructByMode, setInstructByMode] = useState<Record<Qwen3InstructMode, string>>({
+    customVoice: "",
+    voiceDesign: "",
+  });
   const [temperature, setTemperatureState] = useState(0.9);
   const [topK, setTopKState] = useState(50);
   const [maxNewTokens, setMaxNewTokensState] = useState(QWEN3_DEFAULT_MAX_NEW_TOKENS);
+  const [seed, setSeedState] = useState<number | null>(null);
   const [referenceAudioName, setReferenceAudioName] = useState("");
   const [referenceAudioBase64, setReferenceAudioBase64] = useState<string | null>(null);
   const [referenceAudioSignature, setReferenceAudioSignature] = useState("");
+  const [referenceAudioDurationSec, setReferenceAudioDurationSec] = useState<number | null>(null);
   const [referenceText, setReferenceText] = useState("");
   const [setup, setSetup] = useState<LocalTtsQwen3Setup | null>(null);
   const [setupBusy, setSetupBusy] = useState(false);
@@ -182,6 +213,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     setReferenceAudioName("");
     setReferenceAudioBase64(null);
     setReferenceAudioSignature("");
+    setReferenceAudioDurationSec(null);
     setReferenceText("");
     const entry = setup?.profiles.find((candidate) => candidate.repo === repo);
     setModelPathState(entry?.modelDir ?? "");
@@ -265,13 +297,31 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     [],
   );
   const setMaxNewTokens = useCallback(
-    (value: number) => setMaxNewTokensState((current) => Math.round(clamp(value, current, QWEN3_MIN_NEW_TOKENS, QWEN3_MAX_NEW_TOKENS))),
+    (value: number) => setMaxNewTokensState((current) => Math.round(
+      clamp(value, current, QWEN3_MIN_NEW_TOKENS, QWEN3_MAX_NEW_TOKENS_PER_PASSAGE),
+    )),
     [],
   );
-  const setReferenceAudio = useCallback((name: string, base64: string | null, signature = "") => {
+  const setSeed = useCallback((value: number | null) => {
+    if (value === null) setSeedState(null);
+    else if (Number.isFinite(value)) setSeedState(Math.round(clamp(value, 0, 0, QWEN3_MAX_SEED)));
+  }, []);
+  const activeInstructMode = instructMode(profile.mode);
+  const instruct = activeInstructMode ? instructByMode[activeInstructMode] : "";
+  const setInstruct = useCallback((nextInstruct: string) => {
+    if (!activeInstructMode) return;
+    setInstructByMode((current) => ({ ...current, [activeInstructMode]: nextInstruct }));
+  }, [activeInstructMode]);
+  const setReferenceAudio = useCallback((
+    name: string,
+    base64: string | null,
+    signature = "",
+    durationSec: number | null = null,
+  ) => {
     setReferenceAudioName(name);
     setReferenceAudioBase64(base64);
     setReferenceAudioSignature(base64 ? signature : "");
+    setReferenceAudioDurationSec(base64 ? durationSec : null);
   }, []);
 
   const value = useMemo<Qwen3RuntimeContextValue>(() => ({
@@ -292,9 +342,11 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     temperature,
     topK,
     maxNewTokens,
+    seed,
     referenceAudioName,
     referenceAudioBase64,
     referenceAudioSignature,
+    referenceAudioDurationSec,
     referenceText,
     setProfileRepo,
     setModelPath,
@@ -304,6 +356,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     setTemperature,
     setTopK,
     setMaxNewTokens,
+    setSeed,
     setReferenceAudio,
     setReferenceText,
     refreshSetup,
@@ -313,9 +366,9 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   }), [
     available, chooseModelPath, downloadBusy, downloadModel, downloadProgress, error, instruct, language,
     maxNewTokens, modelPath, profile, profileSetup, profiles, readiness, referenceAudioBase64,
-    referenceAudioName, referenceAudioSignature, referenceText, refreshSetup, setLanguage, setMaxNewTokens, setModelPath,
-    setProfileRepo, setReferenceAudio, setSpeaker, setTemperature, setTopK, setup, setupBusy, speaker,
-    temperature, topK,
+    referenceAudioDurationSec, referenceAudioName, referenceAudioSignature, referenceText, refreshSetup, seed, setInstruct, setLanguage,
+    setMaxNewTokens, setModelPath, setProfileRepo, setReferenceAudio, setSeed, setSpeaker, setTemperature, setTopK,
+    setup, setupBusy, speaker, temperature, topK,
   ]);
 
   return <Qwen3RuntimeContext.Provider value={value}>{children}</Qwen3RuntimeContext.Provider>;

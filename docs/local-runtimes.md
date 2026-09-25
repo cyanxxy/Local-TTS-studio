@@ -80,11 +80,14 @@ Generation payloads are strict and reject unknown fields. Supported fields are:
   "instruct": "Speak warmly",
   "temperature": 0.9,
   "topK": 50,
-  "maxNewTokens": 384
+  "maxNewTokens": 384,
+  "seed": 1234
 }
 ```
 
-`temperature` accepts 0 to 2, where 0 selects greedy decoding. `topK` accepts 1 to 1,000. `maxNewTokens` accepts 64 to 384 and is a *per text unit* budget: every request is generated one bounded unit at a time, so at 12 codec frames per second the ceiling allows 32 seconds of speech per unit. The renderer, Electron, and Rust enforce the same bounds.
+`maxNewTokens` is a per-passage limit: Electron accepts 64-384 because the bridge caps every text unit at 384 codec tokens (32 seconds at 12 frames per second) to bound its KV cache. `seed` is optional (0 to 2^32-1); when present the bridge reseeds sampling before every text unit, so the same request repeats the same take. On MLX, whose upstream sampler seeds every draw from the clock, the vendored patch derives each draw's key from the seed and a draw counter; on LibTorch it calls `tch::manual_seed`.
+
+`temperature` accepts 0 to 2 (0 selects greedy decoding), and `topK` accepts 1 to 1,000.
 
 Base mode replaces speaker/instruction with `referenceAudioBase64` and `referenceText`. A multi-section job also supplies a renderer-generated `referenceCacheKey`: the first section uploads the WAV and transcript, while later sections send only that key. If the resident worker is replaced, the renderer re-seeds the new session once and retries the affected section. Backend-internal controls are intentionally absent.
 
@@ -100,7 +103,9 @@ All three modes split accepted text at Unicode-scalar-safe sentence or clause bo
 
 A CustomVoice request with language `Auto` uses the model's no-think codec prefix, as the reference implementation does; an unknown speaker is rejected rather than mapped to speaker id 0. The repetition penalty comes from the model's `generation_config.json` when present.
 
-Base mode decodes, downmixes, resamples, and caps the reference WAV at 20 seconds, then caches encoded reference features by model, normalized WAV digest, transcript, and language. A bounded per-host cache can additionally bind those prepared features to a session key, avoiding repeated base64 IPC/WebSocket uploads and repeated native reference validation across one long job. When a longer clip is supplied, generation continues with the first 20 seconds and returns a truncation warning. Reference encoding polls for cancellation between the speaker-embedding and codec-encoding steps. Voice-clone audio then streams through the same unit driver as CustomVoice and VoiceDesign, with the same `textUnitIndex`/`textUnitTotal` metadata and inter-unit gaps; transport `total` is always 0 while streaming, and the final result reports the authoritative `audioChunkCount`.
+Base mode decodes, downmixes, and resamples the reference WAV, then caches encoded reference features by model, normalized WAV digest, transcript, and language. A bounded per-host cache can additionally bind those prepared features to a session key, avoiding repeated base64 IPC/WebSocket uploads and repeated native reference validation across one long job. A clip longer than 20 seconds is rejected rather than trimmed, because in-context cloning pairs the reference codes with the transcript and a trimmed clip would no longer match it. A clip shorter than 3 seconds is accepted with a result warning; the Qwen page also reads the WAV header when the file is chosen and shows the same guidance before generating. Reference encoding polls for cancellation between the speaker-embedding and codec-encoding steps. Voice-clone audio streams through the same unit driver as CustomVoice and VoiceDesign, with the same text-unit metadata and inter-unit gaps; transport `total` is 0 until the final result reports `audioChunkCount`.
+
+CustomVoice dialect speakers (Dylan, Eric) use their dialect token when the language is Chinese or Auto. The renderer re-splits each request after Electron and Rust trimming, so streamed text-unit indexes match the source ranges.
 
 Rust replaces NaN/Inf samples with zero but does not peak-normalize. Renderer WAV conversion owns normalization.
 
