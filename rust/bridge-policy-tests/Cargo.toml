@@ -1,0 +1,9 @@
+[package]
+name = "open-tts-bridge-policy-tests"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[dev-dependencies]
+anyhow = "1.0"

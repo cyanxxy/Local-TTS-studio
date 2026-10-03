@@ -3,7 +3,6 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
-  Menu,
   net,
   protocol,
   session,
@@ -56,6 +55,8 @@ import {
   shouldGrantPermission,
 } from "./security";
 import { ReaderLibraryWorkerClient } from "./readerLibraryWorkerClient";
+import { configureApplicationMenu } from "./applicationMenu";
+import { LocalModelLifecycle } from "./localModelLifecycle";
 import { getDirectorySizeBytes } from "./directorySize";
 import {
   clearAudio8Cache,
@@ -221,8 +222,7 @@ const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
   rateWindowMs: GENERATE_RATE_WINDOW_MS,
 });
 let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
-const qwen3DownloadAbortController = new AbortController();
-const activeQwenModelDownloads = new Set<Promise<unknown>>();
+const localModelLifecycle = new LocalModelLifecycle<LocalModel>();
 let readerLibraryWorker: ReaderLibraryWorkerClient | null = null;
 let documentParser: DocumentParseWorkerClient | null = null;
 // Tracked apart from `bridgeShuttingDown`: the quit asks every renderer to
@@ -677,7 +677,7 @@ function getRequestedQwen3Profile(request: unknown): Qwen3Profile {
 }
 
 const qwen3ModelDownloads = createQwen3ModelDownloadCoordinator(
-  (profile, modelDir, onProgress) => downloadQwen3Model(
+  (profile, modelDir, onProgress, _request, _xetDownloader, signal) => downloadQwen3Model(
     profile,
     modelDir,
     onProgress,
@@ -691,7 +691,7 @@ const qwen3ModelDownloads = createQwen3ModelDownloadCoordinator(
       onProgress: reportFileProgress,
       signal,
     }),
-    qwen3DownloadAbortController.signal,
+    signal,
   ),
 );
 
@@ -701,18 +701,26 @@ async function handleQwen3Setup(request: unknown): Promise<{
   recommendedModelRepo: string;
   recommendedModelDir: string;
 }> {
+  return localModelLifecycle.run("qwen3", async (signal) => {
   const selected = getRequestedQwen3Profile(request);
-  const profiles = await Promise.all(getQwen3Profiles(process.platform, process.arch).map(async (profile) => {
+  // Adoption may rename a model directory. Join every branch before releasing
+  // the lifecycle lease, including when another profile fails or is cancelled.
+  const inspections = await Promise.allSettled(getQwen3Profiles(process.platform, process.arch).map(async (profile) => {
     const modelDir = await resolveQwen3ModelDir(profile);
-    const inspection = await inspectQwen3ModelDir(modelDir, profile);
+    const inspection = await inspectQwen3ModelDir(modelDir, profile, signal);
     return { ...profile, modelDir, ...inspection };
   }));
+  const profiles = inspections.map((inspection) => {
+    if (inspection.status === "rejected") throw inspection.reason;
+    return inspection.value;
+  });
   return {
     provider: selected.provider,
     profiles,
     recommendedModelRepo: selected.repo,
     recommendedModelDir: await resolveQwen3ModelDir(selected),
   };
+  });
 }
 
 async function handleDownloadQwen3Model(
@@ -721,19 +729,17 @@ async function handleDownloadQwen3Model(
 ): Promise<Qwen3ModelDownloadResult> {
   assertBridgeAcceptingRequests();
   assertTrustedIpcSender(event, { allowDevServer: isDev });
+  return localModelLifecycle.run("qwen3", async (signal) => {
   const profile = getRequestedQwen3Profile(request);
   const modelDir = await resolveQwen3ModelDir(profile);
   const download = qwen3ModelDownloads.download(
     profile,
     modelDir,
     createSafeProgressSender(event.sender, "local-tts:qwen3-download-progress"),
-  );
-  activeQwenModelDownloads.add(download);
-  void download.then(
-    () => activeQwenModelDownloads.delete(download),
-    () => activeQwenModelDownloads.delete(download),
+    signal,
   );
   return download;
+  });
 }
 
 async function handleChooseQwen3ModelDir(request: unknown): Promise<{
@@ -801,6 +807,13 @@ async function runRustBridge(
   const requestedModel = assertLocalModel(String(request.model));
   const requestedId = parseRequestId(request.requestId, { required: true })!;
   const owner = registerBridgeRequestOwner(requestedId, requestedModel, action, event);
+  try {
+  return await localModelLifecycle.run(requestedModel, async (signal) => {
+  const cancel = () => {
+    cancelledBridgeRequests.add(requestedId);
+    cancelBridgeRequestNow(requestedId);
+  };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
   const sanitized = await sanitizeLocalBridgeRequest(action, request);
   if (cancelledBridgeRequests.has(requestedId)) throw new Error("Generation cancelled.");
@@ -1041,6 +1054,10 @@ async function runRustBridge(
     ? generateRateLimiter.run(model, task, sanitized.continuation)
     : task());
   } finally {
+    signal.removeEventListener("abort", cancel);
+  }
+  });
+  } finally {
     releaseBridgeRequestOwner(requestedId, owner);
   }
 }
@@ -1065,9 +1082,11 @@ async function handleCacheInfo(request: unknown): Promise<LocalCacheInfo> {
 async function handleClearCache(request: unknown): Promise<{ path: string; cleared: boolean }> {
   const { model } = sanitizeCacheRequest(request);
   const cachePath = getCacheDir(model);
+  return localModelLifecycle.clear(model, async () => {
   await webSocketBridgeWorkers?.shutdown(model);
   await fs.rm(cachePath, { recursive: true, force: true });
   return { path: cachePath, cleared: true };
+  });
 }
 
 // Pre-load the selected Qwen model in the resident Rust worker so the model's
@@ -1080,6 +1099,7 @@ async function handleWarm(
 ): Promise<{ warmed: boolean; message?: string }> {
   assertBridgeAcceptingRequests();
   const { model, modelRepo, payload } = sanitizeWarmRequest(request, process.platform, process.arch);
+  return localModelLifecycle.run(model, async (signal) => {
   const targetKey = warmTargetKey(model, { ...payload, ...(modelRepo ? { modelRepo } : {}) });
   for (;;) {
     const pendingWarm = pendingWarmups.get(model);
@@ -1090,6 +1110,7 @@ async function handleWarm(
     cancelPendingWarmup(pendingWarm);
     await pendingWarm.promise;
   }
+  if (signal.aborted) return { warmed: false, message: "Warm-up cancelled." };
   const warmRequestId = `${model}-warm-${randomUUID()}`;
   let resolveWarmCompletion!: () => void;
   const warmCompletion = new Promise<void>((resolve) => {
@@ -1098,6 +1119,8 @@ async function handleWarm(
   const reservation = { requestId: warmRequestId, targetKey, promise: warmCompletion };
   pendingWarmups.set(model, reservation);
   const owner = registerBridgeRequestOwner(warmRequestId, model, "warm", event);
+  const cancel = () => cancelPendingWarmup(reservation);
+  signal.addEventListener("abort", cancel, { once: true });
   try {
     if (model === "qwen3") {
       const profile = modelRepo ? getQwen3Profile(modelRepo) : undefined;
@@ -1135,10 +1158,12 @@ async function handleWarm(
   } catch (err) {
     return { warmed: false, message: err instanceof Error ? err.message : String(err) };
   } finally {
+    signal.removeEventListener("abort", cancel);
     resolveWarmCompletion();
     if (pendingWarmups.get(model) === reservation) pendingWarmups.delete(model);
     releaseBridgeRequestOwner(warmRequestId, owner);
   }
+  });
 }
 
 async function handleCancel(
@@ -1165,9 +1190,7 @@ if (process.platform === "linux") {
 }
 
 app.whenReady().then(() => {
-  if (!isDev) {
-    Menu.setApplicationMenu(null);
-  }
+  configureApplicationMenu(process.platform, !isDev);
   registerProductionAppProtocol();
   registerRendererSecurityHeaders();
   registerNavigationSecurityHandlers();
@@ -1473,12 +1496,12 @@ app.on("before-quit", (event) => {
   }
   documentParser?.close();
   documentParser = null;
-  qwen3DownloadAbortController.abort();
+  const localModelsBusy = localModelLifecycle.busy;
+  const localModelsShutdown = localModelLifecycle.close();
   for (const requestId of activeBridgeRequestOwners.keys()) {
     cancelledBridgeRequests.add(requestId);
   }
   const probeChildren = [...activeBridgeProcesses.values()];
-  const modelDownloads = [...activeQwenModelDownloads];
   const audio8Shutdown = audio8NativeClient?.destroy() ?? null;
   audio8NativeClient = null;
   // Snapshot rather than drain: `bridgeShuttingDown` above already stops new
@@ -1497,7 +1520,7 @@ app.on("before-quit", (event) => {
   if (
     !webSocketBridgeWorkers
     && probeChildren.length === 0
-    && modelDownloads.length === 0
+    && !localModelsBusy
     && !readerLibraryShutdown
     && !audio8Shutdown
     && audio8CacheTasks.length === 0
@@ -1516,7 +1539,7 @@ app.on("before-quit", (event) => {
       webSocketBridgeWorkers?.shutdownAll() ?? Promise.resolve(),
       readerLibraryShutdown ?? Promise.resolve(),
       ...probeExits,
-      Promise.allSettled(modelDownloads).then(() => undefined),
+      localModelsShutdown,
       audio8Shutdown ?? Promise.resolve(),
       Promise.allSettled(audio8CacheTasks).then(() => undefined),
     ]),

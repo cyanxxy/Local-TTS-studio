@@ -45,6 +45,7 @@ merged commit:
 - `npm run lint`
 - `npx tsc --noEmit -p tsconfig.electron.json`
 - `npx vitest run --coverage --exclude "electron/rustLocalBridge.test.ts"`
+- `npm run test:rust:policy`
 - `npx vitest run electron/rustLocalBridge.test.ts`
 - `npm run build:web`
 

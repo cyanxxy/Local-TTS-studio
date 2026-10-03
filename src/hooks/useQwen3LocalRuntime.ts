@@ -640,7 +640,7 @@ export function useQwen3LocalRuntime({
 
         if (!combinedResult) throw new Error("Qwen3 did not return any generated audio.");
         setResult(combinedResult);
-        endStream();
+        endStream({ completed: true });
         setProgress(null);
       } catch (nextError: unknown) {
         if (!mountedRef.current || generationVersionRef.current !== version) return;

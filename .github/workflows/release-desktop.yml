@@ -121,6 +121,8 @@ jobs:
       - if: steps.release.outputs.should_verify == 'true'
         run: npx vitest run --coverage --exclude "electron/rustLocalBridge.test.ts"
       - if: steps.release.outputs.should_verify == 'true'
+        run: npm run test:rust:policy
+      - if: steps.release.outputs.should_verify == 'true'
         run: npx vitest run electron/rustLocalBridge.test.ts
       - if: steps.release.outputs.should_verify == 'true'
         run: npm run build:web

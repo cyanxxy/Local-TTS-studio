@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { AUDIO8_MAX_TEXT_CHARACTERS, AUDIO8_MODEL_REVISION } from "./audio8Model";
+import { getDefaultQwen3Profile } from "./qwen3Profiles";
 
 interface FakeWindow {
   webContents: { isDestroyed: () => boolean; send: ReturnType<typeof vi.fn> };
@@ -34,6 +35,13 @@ const mocks = vi.hoisted(() => ({
   audio8Destroy: null as Promise<void> | null,
   audio8AfterLoad: null as (() => void) | null,
   audio8Hold: null as Promise<void> | null,
+  localWsRun: vi.fn(),
+  localWsCancel: vi.fn(() => false),
+  localWsShutdown: vi.fn(async () => undefined),
+  localWsShutdownAll: vi.fn(async () => undefined),
+  qwenDownload: vi.fn(),
+  qwenResolve: vi.fn(),
+  qwenInspect: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
@@ -62,7 +70,7 @@ vi.mock("electron", () => ({
       mocks.ipcListeners.set(channel, listener);
     },
   },
-  Menu: { setApplicationMenu: vi.fn() },
+  Menu: { setApplicationMenu: vi.fn(), buildFromTemplate: vi.fn() },
   net: { fetch: vi.fn() },
   protocol: { registerSchemesAsPrivileged: vi.fn(), handle: vi.fn() },
   session: {
@@ -81,6 +89,22 @@ vi.mock("./readerLibraryWorkerClient", () => ({
     if (mocks.workerError) throw mocks.workerError;
     return { saveAudio: mocks.saveAudio, getAudio: mocks.getAudio, close: mocks.closeWorker };
   }),
+}));
+
+vi.mock("./webSocketBridgeWorker", () => ({
+  createWebSocketBridgeWorkerPool: () => ({
+    run: mocks.localWsRun,
+    cancel: mocks.localWsCancel,
+    shutdown: mocks.localWsShutdown,
+    shutdownAll: mocks.localWsShutdownAll,
+  }),
+}));
+
+vi.mock("./qwen3ModelDownload", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./qwen3ModelDownload")>(),
+  downloadQwen3Model: mocks.qwenDownload,
+  adoptLegacyQwen3ModelDir: mocks.qwenResolve,
+  inspectQwen3ModelDir: mocks.qwenInspect,
 }));
 
 // Stubbed against the client's behavioural contract only — construct with a
@@ -156,7 +180,10 @@ function createEvent(port: ReturnType<typeof createPort> | undefined, url = "app
   return {
     ports: port ? [port] : [],
     senderFrame: { url },
-    sender: { id: 1, getURL: () => url, isDestroyed: () => false, send: vi.fn() },
+    sender: {
+      id: 1, getURL: () => url, isDestroyed: () => false, send: vi.fn(),
+      on: vi.fn(), once: vi.fn(), removeListener: vi.fn(),
+    },
   };
 }
 
@@ -876,5 +903,180 @@ describe("Audio8 IPC", () => {
       expect(mocks.quit).toHaveBeenCalledTimes(1);
       expect(mocks.unhandledRejections).toEqual([]);
     });
+  });
+});
+
+describe("local model cache lifecycle IPC", () => {
+  // These IPC cases exercise a supported Qwen runtime even when CI itself runs
+  // on Linux, where the product deliberately exposes no Qwen model profiles.
+  const qwenProfile = getDefaultQwen3Profile("darwin", "arm64");
+  const hostPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const hostArch = Object.getOwnPropertyDescriptor(process, "arch")!;
+  const generateRequest = {
+    model: "neutts", requestId: "local-generate", payload: {
+      text: "hello", referenceText: "hello", referenceCodesBase64: "AAAA",
+    },
+  };
+
+  function invoke(channel: string, request: unknown): Promise<unknown> {
+    return Promise.resolve(mocks.invokeHandlers.get(channel)!(createEvent(undefined), request));
+  }
+
+  beforeEach(async () => {
+    Object.defineProperty(process, "platform", { ...hostPlatform, value: "darwin" });
+    Object.defineProperty(process, "arch", { ...hostArch, value: "arm64" });
+    vi.resetModules();
+    mocks.invokeHandlers.clear();
+    mocks.appListeners.clear();
+    mocks.windows = [];
+    mocks.quit.mockClear();
+    mocks.audio8Clients = [];
+    mocks.localWsCancel.mockReset().mockReturnValue(false);
+    mocks.localWsShutdown.mockReset().mockResolvedValue(undefined);
+    mocks.localWsShutdownAll.mockReset().mockResolvedValue(undefined);
+    mocks.localWsRun.mockReset().mockImplementation(async (_model, request: { command?: string }) => ({
+      response: { ok: true, result: request.command === "warm" ? { warmed: true } : {
+        sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+        audioTransport: "websocket-binary", audioChunkCount: 1, phaseTimingsSec: {},
+      } },
+    }));
+    mocks.qwenResolve.mockReset().mockImplementation(async (_profile, directory: string) => directory);
+    mocks.qwenInspect.mockReset().mockResolvedValue({ readiness: "missing" });
+    mocks.qwenDownload.mockReset().mockResolvedValue({ readiness: "verified" });
+    mocks.userDataPath = await fs.mkdtemp(path.join(os.tmpdir(), "open-tts-main-local-"));
+    (globalThis as { __dirname?: string }).__dirname = "/tmp";
+    await import("./main");
+    vi.spyOn(fs, "access").mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    Object.defineProperty(process, "platform", hostPlatform);
+    Object.defineProperty(process, "arch", hostArch);
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    await fs.rm(mocks.userDataPath, { recursive: true, force: true });
+    mocks.userDataPath = "/tmp";
+  });
+
+  function holdDeletion(model = "neutts") {
+    const cachePath = path.join(mocks.userDataPath, "local-model-cache", model);
+    const originalRm = fs.rm.bind(fs);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const removed = vi.fn();
+    vi.spyOn(fs, "rm").mockImplementation(async (target, options) => {
+      if (target === cachePath) {
+        removed();
+        await held;
+      }
+      return originalRm(target, options);
+    });
+    return { release, removed, cachePath };
+  }
+
+  it.each([
+    { channel: "local-tts:generate", request: generateRequest },
+    { channel: "local-tts:warm", request: { model: "neutts" } },
+  ])("holds $channel until cache deletion finishes", async ({ channel, request }) => {
+    const deletion = holdDeletion();
+    const clear = invoke("local-tts:clear-cache", { model: "neutts" });
+    await drainTurns();
+    expect(deletion.removed).toHaveBeenCalledOnce();
+    const operation = invoke(channel, request);
+    await drainTurns();
+    expect(mocks.localWsRun).not.toHaveBeenCalled();
+    deletion.release();
+    await Promise.all([clear, operation]);
+    expect(mocks.localWsRun).toHaveBeenCalledOnce();
+  });
+
+  it("cancels and joins generation before shutting down and deleting its model", async () => {
+    let rejectGeneration!: (error: Error) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    mocks.localWsRun.mockImplementationOnce(() => new Promise((_resolve, reject) => {
+      rejectGeneration = reject;
+      markStarted();
+    }));
+    mocks.localWsCancel.mockReturnValue(true);
+    const generated = invoke("local-tts:generate", generateRequest).catch(() => "cancelled");
+    await started;
+    const deletion = holdDeletion();
+    const clear = invoke("local-tts:clear-cache", { model: "neutts" });
+    await drainTurns();
+    expect(mocks.localWsCancel).toHaveBeenCalledWith("local-generate");
+    expect(mocks.localWsShutdown).not.toHaveBeenCalled();
+    expect(deletion.removed).not.toHaveBeenCalled();
+    rejectGeneration(new Error("Generation cancelled."));
+    await expect(generated).resolves.toBe("cancelled");
+    await drainTurns();
+    expect(mocks.localWsShutdown).toHaveBeenCalledWith("neutts");
+    expect(deletion.removed).toHaveBeenCalledOnce();
+    deletion.release();
+    await clear;
+  });
+
+  it("aborts and joins a Qwen download, then admits a fresh download after clearing", async () => {
+    let rejectDownload!: (error: Error) => void;
+    let downloadSignal!: AbortSignal;
+    mocks.qwenDownload.mockImplementationOnce((_profile, _dir, _progress, _request, _xet, signal: AbortSignal) => {
+      downloadSignal = signal;
+      return new Promise((_resolve, reject) => { rejectDownload = reject; });
+    });
+    const request = { modelRepo: qwenProfile.repo };
+    const first = invoke("local-tts:download-qwen3-model", request).catch(() => "cancelled");
+    await drainTurns();
+    const deletion = holdDeletion("qwen3");
+    const clear = invoke("local-tts:clear-cache", { model: "qwen3" });
+    const retry = invoke("local-tts:download-qwen3-model", request);
+    await drainTurns();
+    expect(downloadSignal.aborted).toBe(true);
+    expect(deletion.removed).not.toHaveBeenCalled();
+    expect(mocks.qwenDownload).toHaveBeenCalledOnce();
+    rejectDownload(new Error("Download cancelled."));
+    await expect(first).resolves.toBe("cancelled");
+    await drainTurns();
+    expect(deletion.removed).toHaveBeenCalledOnce();
+    expect(mocks.qwenDownload).toHaveBeenCalledOnce();
+    deletion.release();
+    await Promise.all([clear, retry]);
+    expect(mocks.qwenDownload).toHaveBeenCalledTimes(2);
+    expect((mocks.qwenDownload.mock.calls[1][5] as AbortSignal).aborted).toBe(false);
+  });
+
+  it("joins every setup branch before deletion when a sibling inspection fails", async () => {
+    let releaseAdoption!: (directory: string) => void;
+    mocks.qwenResolve.mockImplementationOnce(async () => { throw new Error("inspection failed"); });
+    mocks.qwenResolve.mockImplementationOnce(() => new Promise<string>((resolve) => { releaseAdoption = resolve; }));
+    const setup = invoke("local-tts:qwen3-setup", { modelRepo: qwenProfile.repo }).catch(() => "failed");
+    await drainTurns();
+    const deletion = holdDeletion("qwen3");
+    const clear = invoke("local-tts:clear-cache", { model: "qwen3" });
+    await drainTurns();
+    expect(deletion.removed).not.toHaveBeenCalled();
+    releaseAdoption("/finished-adoption");
+    await expect(setup).resolves.toBe("failed");
+    await drainTurns();
+    expect(deletion.removed).toHaveBeenCalledOnce();
+    deletion.release();
+    await clear;
+  });
+
+  it("holds quit for deletion and never starts the generation queued behind it", async () => {
+    const deletion = holdDeletion();
+    const clear = invoke("local-tts:clear-cache", { model: "neutts" });
+    const queued = invoke("local-tts:generate", generateRequest).catch((error: Error) => error.message);
+    await drainTurns();
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    const event = { preventDefault: vi.fn() };
+    mocks.appListeners.get("before-quit")!(event);
+    await drainTurns();
+    expect(event.preventDefault).toHaveBeenCalledOnce();
+    expect(mocks.quit).not.toHaveBeenCalled();
+    deletion.release();
+    await clear;
+    await expect(queued).resolves.toContain("shutting down");
+    await waitForQuit();
+    expect(mocks.localWsRun).not.toHaveBeenCalled();
   });
 });

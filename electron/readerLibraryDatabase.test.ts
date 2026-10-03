@@ -169,6 +169,15 @@ describe("ReaderLibraryDatabase", () => {
     expect(database.getAudio("audio-doc", "section-1")?.signature).toBe("equal-timestamp-latest");
   });
 
+  it("preserves explicit synthesis completion without assuming legacy audio is complete", () => {
+    database.saveAudio(createAudio("completion-doc", "legacy", 100));
+    database.saveAudio({ ...createAudio("completion-doc", "partial", 100), synthesisComplete: false });
+    database.saveAudio({ ...createAudio("completion-doc", "finished", 100), synthesisComplete: true });
+    expect(database.getAudio("completion-doc", "legacy")?.synthesisComplete).toBe(false);
+    expect(database.getAudio("completion-doc", "partial")?.synthesisComplete).toBe(false);
+    expect(database.getAudio("completion-doc", "finished")?.synthesisComplete).toBe(true);
+  });
+
   it("reports the original failure when a transaction cannot roll back", async () => {
     class RollbackFailureDatabase {
       exec(sql: string): void {

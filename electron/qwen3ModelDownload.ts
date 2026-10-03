@@ -605,6 +605,7 @@ export interface Qwen3ModelDownloadCoordinator {
     profile: Qwen3Profile,
     modelDir: string,
     onProgress: (progress: Qwen3ModelDownloadProgress) => void,
+    signal?: AbortSignal,
   ) => Promise<Qwen3ModelDownloadResult>;
 }
 
@@ -616,7 +617,7 @@ export function createQwen3ModelDownloadCoordinator(
     listeners: Set<(progress: Qwen3ModelDownloadProgress) => void>;
   }>();
   return {
-    download(profile, modelDir, onProgress) {
+    download(profile, modelDir, onProgress, signal) {
       const key = `${profile.repo}@${profile.revision}:${path.resolve(modelDir)}`;
       const existing = inFlight.get(key);
       if (existing) {
@@ -626,7 +627,7 @@ export function createQwen3ModelDownloadCoordinator(
       const listeners = new Set([onProgress]);
       const promise = download(profile, modelDir, (progress) => {
         for (const listener of listeners) listener(progress);
-      }).finally(() => inFlight.delete(key));
+      }, undefined, undefined, signal).finally(() => inFlight.delete(key));
       inFlight.set(key, { promise, listeners });
       return promise;
     },

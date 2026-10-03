@@ -235,7 +235,7 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
           activeRequest.current = null;
           generationAttempt.current = null;
           setIsGenerating(false);
-          player.endStream();
+          player.endStream({ completed: true });
         }
       } catch (cause) {
         if (version !== generationVersion.current) return;

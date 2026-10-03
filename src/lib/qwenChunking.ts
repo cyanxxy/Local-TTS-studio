@@ -92,6 +92,8 @@ function splitTextUnits(text: string, rangeStart: number, rangeEnd: number): Tex
   while (start < rangeEnd) {
     let weight = 0;
     let preferredEnd: number | null = null;
+    let wordEnd: number | null = null;
+    let hasContent = false;
     let hardEnd = rangeEnd;
     let previous: string | undefined;
 
@@ -104,6 +106,11 @@ function splitTextUnits(text: string, rangeStart: number, rangeEnd: number): Tex
       if (isBoundary(character, previous, end < rangeEnd ? text[end] : undefined)) {
         preferredEnd = end;
       }
+      if (isRustWhitespace(codePoint)) {
+        if (hasContent) wordEnd = end;
+      } else {
+        hasContent = true;
+      }
       if (weight >= QWEN3_UNIT_MAX_CHARS) {
         hardEnd = end;
         break;
@@ -111,7 +118,7 @@ function splitTextUnits(text: string, rangeStart: number, rangeEnd: number): Tex
       previous = character;
     }
 
-    const unitEnd = preferredEnd ?? hardEnd;
+    const unitEnd = preferredEnd ?? (hardEnd < rangeEnd ? wordEnd ?? hardEnd : hardEnd);
     units.push({
       text: text.slice(start, unitEnd),
       start,

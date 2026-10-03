@@ -1,7 +1,7 @@
 {
   "name": "offline-voice-studio",
   "private": true,
-  "version": "1.8.4",
+  "version": "1.8.5",
   "description": "A local-first text-to-speech studio for the web and desktop.",
   "author": "cyanxxy",
   "license": "Apache-2.0",
@@ -43,6 +43,7 @@
     "test": "npm run test:js && npm run test:rust",
     "test:js": "vitest run",
     "test:rust": "node scripts/test-rust-bridge.mjs",
+    "test:rust:policy": "node scripts/test-rust-policy.mjs",
     "test:audio8-smoke": "npm run build:electron:main && node scripts/smoke-audio8-native.cjs",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",

@@ -22,6 +22,8 @@ pub fn split_text_units(text: &str, max_chars: usize) -> Result<Vec<String>> {
     while start < text.len() {
         let mut weight = 0usize;
         let mut preferred_end = None;
+        let mut word_end = None;
+        let mut has_content = false;
         let mut hard_end = text.len();
         let mut previous = None;
 
@@ -33,6 +35,13 @@ pub fn split_text_units(text: &str, max_chars: usize) -> Result<Vec<String>> {
             if is_boundary(ch, previous, next) {
                 preferred_end = Some(end);
             }
+            if ch.is_whitespace() {
+                if has_content {
+                    word_end = Some(end);
+                }
+            } else {
+                has_content = true;
+            }
             if weight >= max_chars {
                 hard_end = end;
                 break;
@@ -40,7 +49,15 @@ pub fn split_text_units(text: &str, max_chars: usize) -> Result<Vec<String>> {
             previous = Some(ch);
         }
 
-        let end = preferred_end.unwrap_or(hard_end);
+        // Prefer punctuation, then a complete word when the budget would cut
+        // a longer clause. Short final units keep all their remaining text.
+        let end = preferred_end.unwrap_or_else(|| {
+            if hard_end < text.len() {
+                word_end.unwrap_or(hard_end)
+            } else {
+                hard_end
+            }
+        });
         ensure!(end > start, "Qwen3 text splitter made no progress.");
         units.push(text[start..end].to_owned());
         start = end;
@@ -106,6 +123,26 @@ mod tests {
                 .map(|unit| unit.chars().count())
                 .collect::<Vec<_>>(),
             vec![200, 100]
+        );
+    }
+
+    #[test]
+    fn long_clauses_preserve_words_and_unicode_whitespace() {
+        for separator in [" ", "\t", "\u{85}", "\u{a0}"] {
+            let first = format!("word{separator}").repeat(39);
+            let text = format!("{first}narration");
+            assert_eq!(
+                split_text_units(&text, 200).unwrap(),
+                vec![first, "narration".to_owned()]
+            );
+        }
+        assert_eq!(
+            split_text_units("A short final clause", 200).unwrap(),
+            vec!["A short final clause"]
+        );
+        assert_eq!(
+            split_text_units(&format!(" {}", "x".repeat(220)), 200).unwrap(),
+            vec![format!(" {}", "x".repeat(199)), "x".repeat(21)]
         );
     }
 

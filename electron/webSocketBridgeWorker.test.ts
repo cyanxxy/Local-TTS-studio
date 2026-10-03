@@ -1293,6 +1293,73 @@ describe("createWebSocketBridgeWorkerPool", () => {
     await waitFor(() => children[0].killed);
   });
 
+  it.each(["cancel", "model shutdown", "pool shutdown"] as const)(
+    "does not respawn a request waiting for a drain after %s",
+    async (action) => {
+      const { pool, spawn, children, servers } = makePool();
+      const first = pool.run("qwen3", {
+        ...RUN_DEFAULTS, requestId: "first", payload: {}, spawnConfig: SPAWN_CONFIG,
+      });
+      const firstCancelled = expect(first).rejects.toThrow(/cancelled/i);
+      await waitFor(() => servers[0]?.messages.length === 1);
+      pool.cancel("first");
+      await firstCancelled;
+
+      const waiting = pool.run("qwen3", {
+        ...RUN_DEFAULTS, requestId: "waiting", payload: {}, spawnConfig: SPAWN_CONFIG,
+      });
+      const waitingCancelled = expect(waiting).rejects.toThrow(/cancelled/i);
+      let shutdown: Promise<unknown> | undefined;
+      if (action === "cancel") expect(pool.cancel("waiting")).toBe(true);
+      else if (action === "model shutdown") shutdown = pool.shutdown("qwen3");
+      else shutdown = pool.shutdownAll();
+      children[0].exit();
+      await shutdown;
+      await waitingCancelled;
+      expect(spawn).toHaveBeenCalledTimes(1);
+      expect(children.every((child) => child.killed)).toBe(true);
+    },
+  );
+
+  it("blocks acquisition during model shutdown and allows a new worker after it exits", async () => {
+    const { pool, spawn, children, servers } = makePool((message, server) => {
+      if (message.command === "warm") {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: {} });
+      }
+    });
+    const warm = (requestId: string) => pool.run("qwen3", {
+      ...RUN_DEFAULTS, requestId, command: "warm", payload: {}, spawnConfig: SPAWN_CONFIG,
+    });
+    await warm("first");
+    const shutdown = pool.shutdown("qwen3");
+    await expect(warm("during-shutdown")).rejects.toThrow(/shutting down/i);
+    expect(spawn).toHaveBeenCalledTimes(1);
+    children[0].exit();
+    await shutdown;
+    await expect(warm("after-shutdown")).resolves.toMatchObject({ response: { ok: true } });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    servers[1].close();
+    children[1].exit();
+  });
+
+  it("keeps pool shutdown terminal and joins repeated shutdown calls", async () => {
+    const { pool, spawn, children, servers } = makePool();
+    const run = pool.run("qwen3", {
+      ...RUN_DEFAULTS, requestId: "first", payload: {}, spawnConfig: SPAWN_CONFIG,
+    });
+    const cancelled = expect(run).rejects.toThrow(/cancelled/i);
+    await waitFor(() => servers[0]?.messages.length === 1);
+    const shutdown = pool.shutdownAll();
+    expect(pool.shutdownAll()).toBe(shutdown);
+    children[0].exit();
+    await shutdown;
+    await cancelled;
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS, requestId: "after-shutdown", payload: {}, spawnConfig: SPAWN_CONFIG,
+    })).rejects.toThrow(/shutting down/i);
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a concurrent generate for a model whose worker is already mid-request", async () => {
     // No onMessage, so the first request never receives a result and stays the
     // worker's active request while the second generate arrives.

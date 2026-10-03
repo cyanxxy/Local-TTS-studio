@@ -6,6 +6,7 @@ mod qwen_generation_policy;
 mod neucodec_encoder;
 mod qwen3;
 mod reference_audio;
+mod resident_model;
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::Engine;
@@ -912,20 +913,18 @@ impl RuntimeState {
     }
 
     fn ensure_neutts_model(&mut self, model_repo: &str) -> Result<()> {
-        if self
-            .neutts
-            .as_ref()
-            .is_some_and(|host| host.model_repo == model_repo)
-        {
-            return Ok(());
-        }
-        let model = neutts::download::load_from_hub(model_repo)
-            .with_context(|| format!("Failed to load Rust NeuTTS model {model_repo}"))?;
-        self.neutts = Some(NeuttsHost {
-            model_repo: model_repo.to_string(),
-            model,
-        });
-        Ok(())
+        resident_model::ensure_resident_model(
+            &mut self.neutts,
+            |host| host.model_repo == model_repo,
+            || {
+                let model = neutts::download::load_from_hub(model_repo)
+                    .with_context(|| format!("Failed to load Rust NeuTTS model {model_repo}"))?;
+                Ok(NeuttsHost {
+                    model_repo: model_repo.to_string(),
+                    model,
+                })
+            },
+        )
     }
 }
 

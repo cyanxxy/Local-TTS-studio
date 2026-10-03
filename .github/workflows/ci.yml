@@ -83,6 +83,7 @@ jobs:
           cache-directories: rust/local-tts-bridge/target/llama-cmake-cache
           key: ci-bridge-linux-llama-cmake-only-v1
       - run: npm ci
+      - run: npm run test:rust:policy
       - run: npx vitest run electron/rustLocalBridge.test.ts
 
   checks-complete:

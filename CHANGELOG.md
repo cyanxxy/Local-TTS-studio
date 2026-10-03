@@ -4,6 +4,26 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.8.5] - 2026-10-03
+
+### Fixed
+
+- Reader advances only after a section finishes synthesizing. Interrupted and
+  legacy cached audio no longer mark unread text as complete.
+- Qwen Reader audio caches distinguish sampling seeds and model directories;
+  manually selected model folders survive setup refreshes and profile switches.
+- Local runtime shutdown cancels queued worker acquisition, and cache clearing
+  waits for downloads and inference to stop before deleting model files.
+- Switching NeuTTS models releases the previous native backend before loading
+  its replacement.
+- Packaged macOS builds retain the standard application and editing menus.
+- Long Qwen passages prefer whitespace boundaries instead of cutting words.
+
+### Added
+
+- A lightweight Rust policy test command that runs lifecycle, text splitting,
+  and sampling checks without native inference toolchains or model downloads.
+
 ## [1.8.4] - 2026-09-25
 
 ### Added
