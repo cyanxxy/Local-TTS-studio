@@ -43,6 +43,7 @@ interface CachedReaderAudio {
   currentTime: number;
   playbackRate: number;
   totalDuration: number;
+  synthesisComplete?: boolean;
   updatedAt: number;
 }
 
@@ -198,6 +199,7 @@ function parseCachedAudio(value: unknown): {
     currentTime: finiteNumber(value.currentTime, "Reader audio currentTime"),
     playbackRate: finiteNumber(value.playbackRate, "Reader audio playbackRate", 0.01),
     totalDuration: finiteNumber(value.totalDuration, "Reader audio totalDuration"),
+    synthesisComplete: value.synthesisComplete === true,
     updatedAt: finiteNumber(value.updatedAt, "Reader audio updatedAt"),
   };
   const { chunks: _chunks, ...metadata } = audio;

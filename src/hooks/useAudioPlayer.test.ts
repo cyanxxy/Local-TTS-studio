@@ -236,6 +236,36 @@ describe("useAudioPlayer", () => {
     expect(result.current.isPlaying).toBe(false);
   });
 
+  it("distinguishes a successfully synthesized result from an ended partial stream", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    act(() => result.current.beginStream());
+    await act(async () => result.current.scheduleChunk(makeChunk("Partial", 4, 4)));
+    act(() => result.current.endStream());
+    expect(result.current.isSynthesisComplete).toBe(false);
+
+    act(() => result.current.endStream({ completed: true }));
+    expect(result.current.isSynthesisComplete).toBe(true);
+    act(() => {
+      result.current.endStream();
+      result.current.stopAll();
+    });
+    expect(result.current.isSynthesisComplete).toBe(true);
+
+    const snapshot = result.current.getAudioCacheSnapshot();
+    act(() => result.current.restoreAudioCache(snapshot));
+    expect(result.current.isSynthesisComplete).toBe(false);
+    act(() => result.current.restoreAudioCache(snapshot, { synthesisComplete: true }));
+    expect(result.current.isSynthesisComplete).toBe(true);
+    act(() => result.current.beginStream());
+    expect(result.current.isSynthesisComplete).toBe(false);
+    act(() => result.current.endStream({ completed: true }));
+    act(() => result.current.truncateAudioChunks(0));
+    expect(result.current.isSynthesisComplete).toBe(false);
+    act(() => result.current.endStream({ completed: true }));
+    act(() => result.current.reset());
+    expect(result.current.isSynthesisComplete).toBe(false);
+  });
+
   it("keeps seeking paused when playback is not active", async () => {
     const { result } = renderHook(() => useAudioPlayer());
 

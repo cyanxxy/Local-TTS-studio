@@ -25,6 +25,8 @@ export type { AudioChunkData, AudioSegment } from "../lib/audioTimeline";
 
 export interface UseAudioPlayerReturn {
   isPlaying: boolean;
+  /** True only after the entire synthesis succeeds, not merely when transport ends. */
+  isSynthesisComplete: boolean;
   error: string | null;
   /**
    * Playback position. It ticks once per animation frame, so it is published
@@ -53,10 +55,10 @@ export interface UseAudioPlayerReturn {
   getAudioCacheSnapshot: () => CachedReaderAudioChunk[];
   restoreAudioCache: (
     chunks: readonly CachedReaderAudioChunk[],
-    options?: { currentTime?: number; playbackRate?: number },
+    options?: { currentTime?: number; playbackRate?: number; synthesisComplete?: boolean },
   ) => void;
   beginStream: () => void;
-  endStream: () => void;
+  endStream: (options?: { completed?: boolean }) => void;
   reset: () => void;
   stopAll: () => void;
 }
@@ -84,6 +86,7 @@ function publishAudioSegments(segments: readonly AudioSegment[]): AudioSegment[]
  */
 export function useAudioPlayer(): UseAudioPlayerReturn {
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isSynthesisComplete, setIsSynthesisComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [totalDuration, setTotalDuration] = useState(0);
   const [playbackRate, setPlaybackRateState] = useState(1);
@@ -807,6 +810,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const truncateAudioChunks = useCallback((count: number) => {
     const retainedCount = clamp(Math.floor(Number.isFinite(count) ? count : 0), 0, allChunksRef.current.length);
     if (retainedCount >= allChunksRef.current.length) return;
+    setIsSynthesisComplete(false);
 
     const wasPlaying = isPlayingRef.current;
     const playbackSnapshot = wasPlaying ? getLiveTimelineTime() : currentTimeRef.current;
@@ -833,7 +837,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const restoreAudioCache = useCallback((
     chunks: readonly CachedReaderAudioChunk[],
-    options: { currentTime?: number; playbackRate?: number } = {},
+    options: { currentTime?: number; playbackRate?: number; synthesisComplete?: boolean } = {},
   ) => {
     playbackOperationRef.current += 1;
     stopAllNodes();
@@ -882,6 +886,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     activeSegmentCursorRef.current = Math.max(0, scheduleCursorRef.current);
     autoPlayOnChunkRef.current = false;
     streamCompleteRef.current = true;
+    setIsSynthesisComplete(options.synthesisComplete === true);
     interruptedRef.current = false;
     isPlayingRef.current = false;
     setIsPlaying(false);
@@ -897,10 +902,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const beginStream = useCallback(() => {
     streamCompleteRef.current = false;
+    setIsSynthesisComplete(false);
   }, []);
 
-  const endStream = useCallback(() => {
+  const endStream = useCallback((options: { completed?: boolean } = {}) => {
     streamCompleteRef.current = true;
+    // Generic end calls also run after successful callbacks and when playback
+    // stops. Only a new stream/reset may clear a previously completed result.
+    if (options.completed) setIsSynthesisComplete(true);
 
     if (
       isPlayingRef.current
@@ -931,6 +940,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     interruptedRef.current = false;
     autoPlayOnChunkRef.current = true;
     streamCompleteRef.current = true;
+    setIsSynthesisComplete(false);
     setError(null);
 
     setSegments([]);
@@ -976,6 +986,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   return {
     isPlaying,
+    isSynthesisComplete,
     error,
     clock,
     getCurrentTime,

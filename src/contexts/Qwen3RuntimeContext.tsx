@@ -39,6 +39,11 @@ export const QWEN3_DEFAULT_MAX_NEW_TOKENS = QWEN3_MAX_NEW_TOKENS_PER_PASSAGE;
  */
 type Qwen3InstructMode = Extract<Qwen3Mode, "customVoice" | "voiceDesign">;
 
+interface ModelPathSelection {
+  path: string;
+  readiness: Qwen3RuntimeSettings["readiness"];
+}
+
 function instructMode(mode: Qwen3Mode): Qwen3InstructMode | null {
   return mode === "customVoice" || mode === "voiceDesign" ? mode : null;
 }
@@ -149,6 +154,9 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const setupVersionRef = useRef(0);
   const modelPathOperationVersionRef = useRef(0);
   const downloadVersionRef = useRef(0);
+  // A setup refresh describes managed downloads. Explicit external selections
+  // belong to the user and survive inventory refreshes and profile switches.
+  const modelPathOverridesRef = useRef(new Map<string, ModelPathSelection>());
 
   const available = !!window.electron?.localTts && profiles.length > 0;
   const profileSetup = useMemo(
@@ -162,6 +170,12 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const applyProfileSetup = useCallback((selected: Qwen3Profile, nextSetup: LocalTtsQwen3Setup) => {
+    const override = modelPathOverridesRef.current.get(selected.repo);
+    if (override) {
+      setModelPathState(override.path);
+      setReadiness(override.readiness);
+      return;
+    }
     const entry = nextSetup.profiles.find((candidate) => candidate.repo === selected.repo);
     if (!entry) {
       setModelPathState("");
@@ -206,6 +220,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     const next = getQwen3Profile(repo);
     if (!next || !profiles.some((candidate) => candidate.repo === repo)) return;
     setupVersionRef.current += 1;
+    setSetupBusy(false);
     modelPathOperationVersionRef.current += 1;
     downloadVersionRef.current += 1;
     setDownloadBusy(false);
@@ -216,18 +231,25 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     setReferenceAudioDurationSec(null);
     setReferenceText("");
     const entry = setup?.profiles.find((candidate) => candidate.repo === repo);
-    setModelPathState(entry?.modelDir ?? "");
-    setReadiness(entry?.readiness ?? "missing");
+    const override = modelPathOverridesRef.current.get(repo);
+    setModelPathState(override?.path ?? entry?.modelDir ?? "");
+    setReadiness(override?.readiness ?? entry?.readiness ?? "missing");
     setDownloadProgress(null);
     setError(null);
   }, [profiles, setup]);
 
   const setModelPath = useCallback((nextPath: string) => {
     setupVersionRef.current += 1;
+    setSetupBusy(false);
     modelPathOperationVersionRef.current += 1;
     setModelPathState(nextPath);
     const bundledPath = setup?.profiles.find((candidate) => candidate.repo === profile.repo)?.modelDir;
-    setReadiness(nextPath.trim() && nextPath !== bundledPath ? "structural" : profileSetup?.readiness ?? "missing");
+    const nextReadiness = !nextPath.trim()
+      ? "missing"
+      : nextPath.trim() === bundledPath ? profileSetup?.readiness ?? "missing" : "structural";
+    if (nextPath.trim() === bundledPath) modelPathOverridesRef.current.delete(profile.repo);
+    else modelPathOverridesRef.current.set(profile.repo, { path: nextPath, readiness: nextReadiness });
+    setReadiness(nextReadiness);
   }, [profile.repo, profileSetup?.readiness, setup]);
 
   const downloadModel = useCallback(async () => {
@@ -236,6 +258,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     const operationVersion = ++modelPathOperationVersionRef.current;
     const downloadVersion = ++downloadVersionRef.current;
     setupVersionRef.current += 1;
+    setSetupBusy(false);
     setDownloadBusy(true);
     setDownloadProgress(null);
     setError(null);
@@ -246,6 +269,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
         || operationVersion !== modelPathOperationVersionRef.current
         || downloadVersion !== downloadVersionRef.current
       ) return;
+      modelPathOverridesRef.current.delete(profile.repo);
       setModelPathState(result.modelDir);
       setReadiness(result.readiness);
       await refreshSetup();
@@ -265,6 +289,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     if (!bridge?.chooseQwen3ModelDir) return;
     const operationVersion = ++modelPathOperationVersionRef.current;
     setupVersionRef.current += 1;
+    setSetupBusy(false);
     try {
       const result = await bridge.chooseQwen3ModelDir({ modelRepo: profile.repo });
       if (
@@ -272,6 +297,12 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
         || operationVersion !== modelPathOperationVersionRef.current
         || !result.path
       ) return;
+      const bundledPath = setup?.profiles.find((candidate) => candidate.repo === profile.repo)?.modelDir;
+      if (result.path === bundledPath) modelPathOverridesRef.current.delete(profile.repo);
+      else modelPathOverridesRef.current.set(profile.repo, {
+        path: result.path,
+        readiness: result.readiness ?? "missing",
+      });
       setModelPathState(result.path);
       setReadiness(result.readiness ?? "missing");
       setError(result.readiness === "missing" ? result.reason ?? "The selected folder is not a compatible model." : null);
@@ -280,7 +311,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
         setError(errorMessage(nextError));
       }
     }
-  }, [profile.repo]);
+  }, [profile.repo, setup]);
 
   const setSpeaker = useCallback((nextSpeaker: string) => {
     if (QWEN3_SPEAKERS.includes(nextSpeaker as typeof QWEN3_SPEAKERS[number])) setSpeakerState(nextSpeaker);

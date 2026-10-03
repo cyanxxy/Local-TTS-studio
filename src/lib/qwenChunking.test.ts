@@ -47,6 +47,20 @@ describe("buildQwen3TextUnits", () => {
     expect(units.map((unit) => unit.text).join("")).toBe(text.trim());
   });
 
+  it("preserves whole words in long clauses using Rust's whitespace set", () => {
+    // Mirrored by long_clauses_preserve_words_and_unicode_whitespace in Rust.
+    for (const separator of [" ", "\t", "\u0085", "\u00a0"]) {
+      const first = `word${separator}`.repeat(39);
+      const text = `${first}narration`;
+      const units = buildQwen3TextUnits(text);
+      expect(units.map((unit) => unit.text)).toEqual([first, "narration"]);
+      expect(units.every((unit) => text.slice(unit.start, unit.end) === unit.text)).toBe(true);
+    }
+    expect(unitTexts("A short final clause")).toEqual(["A short final clause"]);
+    const text = `Intro. ${"x".repeat(220)}`;
+    expect(unitTexts(text)).toEqual(["Intro.", ` ${"x".repeat(199)}`, "x".repeat(21)]);
+  });
+
   // rust/local-tts-bridge/src/qwen3/text.rs pins the same fixtures in
   // parity_fixtures_shared_with_the_renderer and cjk_units_use_half_the_character_budget.
   it("matches the Rust splitter's fixtures", () => {

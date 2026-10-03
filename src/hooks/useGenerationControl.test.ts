@@ -35,6 +35,7 @@ class MockWorker {
 function createPlayerMock(overrides: Partial<UseAudioPlayerReturn> = {}): UseAudioPlayerReturn {
   return {
     isPlaying: false,
+    isSynthesisComplete: false,
     error: null,
     clock: new PlaybackClock(),
     getCurrentTime: () => 0,

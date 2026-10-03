@@ -52,11 +52,13 @@ export function useSupertonic3Runtime({
   const onAudioChunk = useCallback((chunk: Parameters<UseAudioPlayerReturn["scheduleChunk"]>[0]) => {
     void player.scheduleChunk(chunk);
   }, [player]);
+  const endStream = player.endStream;
+  const onComplete = useCallback(() => endStream({ completed: true }), [endStream]);
   const tts = useTTS({
     kokoroWorker: emptyWorkerRef,
     supertonicWorker: workerRef,
     onAudioChunk,
-    onComplete: () => undefined,
+    onComplete,
   });
   const cancelTts = tts.cancel;
 

@@ -225,6 +225,7 @@ describe("useAudio8Runtime generation", () => {
     expect(setShowPlayer).toHaveBeenCalledWith(true);
     expect(player.beginStream).toHaveBeenCalledTimes(1);
     expect(player.endStream).toHaveBeenCalledTimes(1);
+    expect(player.endStream).toHaveBeenCalledWith({ completed: true });
     const chunkCount = bridge.generate.mock.calls.length;
     expect(chunkCount).toBeGreaterThan(1);
     expect(player.scheduleChunk).toHaveBeenCalledTimes(chunkCount);

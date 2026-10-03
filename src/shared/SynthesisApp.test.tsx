@@ -96,6 +96,7 @@ const mock = vi.hoisted(() => {
     },
     player: {
       isPlaying: false,
+      isSynthesisComplete: false,
       error: null as string | null,
       clock: playerClock,
       getCurrentTime: () => playerClock.getTime(),
@@ -625,6 +626,7 @@ function resetMockState() {
   mock.player = {
     ...mock.player,
     isPlaying: false,
+    isSynthesisComplete: false,
     error: null,
     clock: mock.playerClock,
     getCurrentTime: () => mock.playerClock.getTime(),
@@ -1453,6 +1455,7 @@ describe("SynthesisApp", () => {
   });
 
   it("flushes a finished section before automatically continuing", async () => {
+    mock.player.isSynthesisComplete = true;
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     localStorage.setItem("open-tts-reader-view-v1", JSON.stringify({ autoAdvance: true }));
     mock.routing = {
@@ -1509,10 +1512,85 @@ describe("SynthesisApp", () => {
       sectionId: sections[0].id,
       chapterId: sections[0].chapterId,
       byteLength: cachedAudio.byteLength,
+      synthesisComplete: true,
     }));
   });
 
-  it("restores matching cached Reader audio once while progress records update", async () => {
+  it("keeps incomplete section playback from skipping unread text", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({
+      id: "interrupted-reader",
+      text: "A paragraph with enough words for bounded Reader sections. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    expect(sections.length).toBeGreaterThan(1);
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    mock.player.activeSegmentId = "partial";
+    mock.player.segments = [{
+      id: "partial", text: "Only the first part", startSec: 0, endSec: 4,
+      index: 1, total: 10, textStart: 0, textEnd: 100,
+    }];
+    mock.playerClock.set(3);
+    render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    mock.readerLibrary.updateProgress.mockClear();
+    // Move past the progress-write throttle, as if the user played the final
+    // second of a canceled generation or a restored partial cache.
+    vi.spyOn(Date, "now").mockReturnValue(Date.now() + 1_000);
+    act(() => mock.playerClock.set(4));
+    expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith({
+      positionSec: 4, totalDurationSec: 4, textOffset: 100,
+    });
+    expect(mock.readerLibrary.updateProgress).not.toHaveBeenCalledWith(expect.objectContaining({
+      textOffset: sections[1].start,
+    }));
+    vi.restoreAllMocks();
+  });
+
+  it("does not mark an incomplete final section as fully read", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({ id: "partial-final", text: "An interrupted final passage." });
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    mock.playerClock.set(3);
+    mock.player.segments = [{
+      id: "seg-1", text: document.text, startSec: 0, endSec: 4,
+      index: 1, total: 1, textStart: 0, textEnd: document.text.length,
+    }];
+    render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    act(() => mock.playerClock.set(4));
+    await waitFor(() => expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith(expect.objectContaining({
+      textOffset: document.text.length - 1,
+    })));
+  });
+
+  it("persists successful completion after the last audio chunk was already cached", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({ id: "completion-cache", text: "The final chunk can arrive before the success message." });
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    mock.player.getAudioCacheSnapshot.mockReturnValue([{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000, text: document.text, index: 1, total: 1,
+    }]);
+    const view = render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    fireEvent.click(screen.getByRole("link", { name: "Studio" }));
+    expect(mock.readerLibrary.saveAudio).toHaveBeenLastCalledWith(expect.objectContaining({ synthesisComplete: false }));
+    mock.readerLibrary.saveAudio.mockClear();
+    vi.useFakeTimers();
+    mock.player.isSynthesisComplete = true;
+    view.rerender(<WebApp />);
+    act(() => vi.advanceTimersByTime(800));
+    expect(mock.readerLibrary.saveAudio).toHaveBeenLastCalledWith(expect.objectContaining({ synthesisComplete: true }));
+  });
+
+  it.each([undefined, false, true])("restores cached Reader audio without losing completion %s", async (synthesisComplete) => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
       activePage: "reader",
@@ -1565,6 +1643,7 @@ describe("SynthesisApp", () => {
       currentTime: 2,
       playbackRate: 1,
       totalDuration: 4,
+      synthesisComplete,
       updatedAt: Date.now(),
     });
 
@@ -1573,6 +1652,10 @@ describe("SynthesisApp", () => {
     expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
       expect.any(Array),
       expect.objectContaining({ currentTime: 3 }),
+    );
+    expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ synthesisComplete: synthesisComplete === true }),
     );
 
     mock.readerLibrary.activeDocument = {
@@ -1792,6 +1875,44 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("checkbox", { name: /Show Qwen3-TTS/i }));
     expect(screen.queryByRole("link", { name: "Qwen3-TTS" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+  });
+
+  it.each(["seed", "model path"] as const)("changes Reader cache identity when the Qwen %s changes", async (setting) => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({ id: "qwen-cache-settings", text: "Reader speech depends on the exact Qwen settings." });
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-qwen3" }));
+    await waitFor(() => expect(screen.getByTestId("reader-can-generate")).toHaveTextContent("true"));
+    const chunks = [{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000, text: document.text, index: 1, total: 1,
+    }];
+    mock.player.getAudioCacheSnapshot.mockReturnValue(chunks);
+    fireEvent.click(screen.getByRole("link", { name: "Studio" }));
+    const originalSignature = (mock.readerLibrary.saveAudio.mock.calls.at(-1) as unknown as [CachedReaderAudio])[0].signature;
+
+    if (setting === "seed") {
+      fireEvent.change(screen.getByLabelText("Qwen seed"), { target: { value: "123" } });
+    } else {
+      const setup = await mock.localTts.getQwen3Setup.mock.results.at(-1)!.value;
+      mock.localTts.getQwen3Setup.mockResolvedValue({
+        ...setup,
+        profiles: setup.profiles.map((profile: { modelDir: string }) => ({ ...profile, modelDir: "/new/model/location" })),
+        recommendedModelDir: "/new/model/location",
+      });
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "reader-retry" })));
+    }
+
+    fireEvent.click(screen.getByRole("link", { name: "Studio" }));
+    const changedSignature = (mock.readerLibrary.saveAudio.mock.calls.at(-1) as unknown as [CachedReaderAudio])[0].signature;
+    expect(changedSignature).not.toBe(originalSignature);
   });
 
   it("runs Qwen3 from the reader model option without leaving the reader tab", async () => {

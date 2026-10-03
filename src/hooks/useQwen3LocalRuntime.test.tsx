@@ -178,6 +178,7 @@ describe("useQwen3LocalRuntime long-text batching", () => {
     expect(continuations.every((continuation) => continuation?.sectionCount === continuations.length)).toBe(true);
     expect(methods.beginStream).toHaveBeenCalledTimes(1);
     expect(methods.endStream).toHaveBeenCalledTimes(1);
+    expect(methods.endStream).toHaveBeenCalledWith({ completed: true });
     expect(methods.scheduleChunk).toHaveBeenCalledTimes((generate.mock.calls.length * 2) - 1);
     const boundaryPauses = methods.scheduleChunk.mock.calls
       .map(([chunk]) => chunk as { audio: Float32Array; pauseAfterSec?: number; pauseKind?: string })

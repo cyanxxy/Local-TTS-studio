@@ -186,6 +186,95 @@ describe("Qwen3RuntimeProvider", () => {
     expect(screen.getByRole("status")).toHaveTextContent("false");
   });
 
+  it("preserves an external model selection through inventory refreshes and profile switches", async () => {
+    const getQwen3Setup = vi.fn().mockResolvedValue(setupResult());
+    window.electron = {
+      isElectron: true, platform: "darwin", arch: "arm64",
+      localTts: {
+        getQwen3Setup,
+        chooseQwen3ModelDir: vi.fn().mockResolvedValue({ path: "/external/custom", readiness: "structural" }),
+      },
+    } as never;
+    function ModelConsumer() {
+      const state = useQwen3Runtime();
+      return <>
+        <output>{`${state.modelPath}|${state.readiness}|${state.setupBusy}`}</output>
+        <button onClick={() => void state.chooseModelPath()}>choose</button>
+        <button onClick={() => void state.refreshSetup()}>refresh</button>
+        <button onClick={() => state.setProfileRepo(BASE_REPO)}>base</button>
+        <button onClick={() => state.setProfileRepo(CUSTOM_REPO)}>custom</button>
+      </>;
+    }
+    render(<Qwen3RuntimeProvider><ModelConsumer /></Qwen3RuntimeProvider>);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("/models/custom|verified|false"));
+    fireEvent.click(screen.getByText("choose"));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("/external/custom|structural|false"));
+
+    // The managed copy may be missing; that says nothing about the selected external copy.
+    const missingManaged = setupResult();
+    getQwen3Setup.mockResolvedValue({ ...missingManaged, profiles: missingManaged.profiles.map((p) => ({ ...p, readiness: "missing" })) });
+    await act(async () => { fireEvent.click(screen.getByText("refresh")); });
+    expect(screen.getByRole("status")).toHaveTextContent("/external/custom|structural|false");
+    await act(async () => { fireEvent.click(screen.getByText("base")); });
+    expect(screen.getByRole("status")).toHaveTextContent("/models/base|missing|false");
+    await act(async () => { fireEvent.click(screen.getByText("custom")); });
+    expect(screen.getByRole("status")).toHaveTextContent("/external/custom|structural|false");
+  });
+
+  it("keeps a path edit authoritative over an in-flight inventory refresh", async () => {
+    let finishRefresh!: (setup: ReturnType<typeof setupResult>) => void;
+    const getQwen3Setup = vi.fn().mockResolvedValueOnce(setupResult()).mockImplementation(() => new Promise((resolve) => {
+      finishRefresh = resolve;
+    }));
+    window.electron = {
+      isElectron: true, platform: "darwin", arch: "arm64", localTts: { getQwen3Setup },
+    } as never;
+    function ModelConsumer() {
+      const state = useQwen3Runtime();
+      return <>
+        <output>{`${state.modelPath}|${state.readiness}|${state.setupBusy}`}</output>
+        <button onClick={() => void state.refreshSetup()}>refresh</button>
+        <button onClick={() => state.setModelPath("/typed/custom")}>edit</button>
+        <button onClick={() => state.setModelPath("")}>empty</button>
+      </>;
+    }
+    render(<Qwen3RuntimeProvider><ModelConsumer /></Qwen3RuntimeProvider>);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("/models/custom|verified|false"));
+    fireEvent.click(screen.getByText("refresh"));
+    expect(screen.getByRole("status")).toHaveTextContent("|true");
+    fireEvent.click(screen.getByText("edit"));
+    await act(async () => { finishRefresh(setupResult()); });
+    expect(screen.getByRole("status")).toHaveTextContent("/typed/custom|structural|false");
+    fireEvent.click(screen.getByText("empty"));
+    expect(screen.getByRole("status")).toHaveTextContent("|missing|false");
+  });
+
+  it("selects the managed model after an explicit successful download", async () => {
+    window.electron = {
+      isElectron: true, platform: "darwin", arch: "arm64",
+      localTts: {
+        getQwen3Setup: vi.fn().mockResolvedValue(setupResult()),
+        downloadQwen3Model: vi.fn().mockResolvedValue({ modelDir: "/models/custom", readiness: "verified" }),
+      },
+    } as never;
+    function ModelConsumer() {
+      const state = useQwen3Runtime();
+      return <>
+        <output>{`${state.modelPath}|${state.readiness}|${state.downloadBusy}`}</output>
+        <button onClick={() => state.setModelPath("/external/custom")}>edit</button>
+        <button onClick={() => void state.downloadModel()}>download</button>
+        <button onClick={() => void state.refreshSetup()}>refresh</button>
+      </>;
+    }
+    render(<Qwen3RuntimeProvider><ModelConsumer /></Qwen3RuntimeProvider>);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("/models/custom|verified|false"));
+    fireEvent.click(screen.getByText("edit"));
+    expect(screen.getByRole("status")).toHaveTextContent("/external/custom|structural|false");
+    await act(async () => { fireEvent.click(screen.getByText("download")); });
+    await act(async () => { fireEvent.click(screen.getByText("refresh")); });
+    expect(screen.getByRole("status")).toHaveTextContent("/models/custom|verified|false");
+  });
+
   it("does not apply an old profile download after the selected profile changes", async () => {
     let finishDownload!: (value: {
       modelRepo: string;

@@ -470,6 +470,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const qwenPlaybackSignature = useMemo(() => JSON.stringify({
     repo: qwen3Settings.profile.repo,
     revision: qwen3Settings.profile.revision,
+    modelPath: qwen3Settings.modelPath.trim(),
     mode: qwen3Settings.profile.mode,
     speaker: qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : null,
     language: qwen3Settings.language,
@@ -477,6 +478,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     temperature: qwen3Settings.temperature,
     topK: qwen3Settings.topK,
     maxNewTokens: qwen3Settings.maxNewTokens,
+    seed: qwen3Settings.seed,
     referenceAudio: qwenReferenceAudioSignature,
     referenceText: qwen3Settings.profile.mode === "voiceClone"
       ? qwen3Settings.referenceText.trim()
@@ -485,10 +487,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     qwen3Settings.instruct,
     qwen3Settings.language,
     qwen3Settings.maxNewTokens,
+    qwen3Settings.modelPath,
     qwen3Settings.profile.mode,
     qwen3Settings.profile.repo,
     qwen3Settings.profile.revision,
     qwen3Settings.referenceText,
+    qwen3Settings.seed,
     qwen3Settings.speaker,
     qwen3Settings.temperature,
     qwen3Settings.topK,
@@ -529,7 +533,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     [player],
   );
 
-  const onComplete = useCallback(() => {}, []);
+  const endStream = player.endStream;
+  const onComplete = useCallback(() => endStream({ completed: true }), [endStream]);
 
   const tts = useTTS({ kokoroWorker, supertonicWorker, onAudioChunk, onComplete });
   const currentModelState = activeModel === "kokoro" ? kokoroState : supertonicState;
@@ -1353,10 +1358,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const readerPlaybackSnapshotRef = useRef({
     playbackRate: player.playbackRate,
     totalDuration: player.totalDuration,
+    synthesisComplete: player.isSynthesisComplete,
   });
   readerPlaybackSnapshotRef.current = {
     playbackRate: player.playbackRate,
     totalDuration: player.totalDuration,
+    synthesisComplete: player.isSynthesisComplete,
   };
   const readerGenerateRef = useRef(handleReaderGenerate);
   readerGenerateRef.current = handleReaderGenerate;
@@ -1390,6 +1397,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       currentTime: getCurrentTime(),
       playbackRate: playback.playbackRate,
       totalDuration: playback.totalDuration,
+      synthesisComplete: playback.synthesisComplete,
       updatedAt,
     }).catch(reportReaderError);
   }, [
@@ -1448,6 +1456,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
             // A saved 0 is meaningful (the user stopped or rewound).
             currentTime: Math.max(0, Math.min(maximumTime, preferredTime)),
             playbackRate: cache.playbackRate,
+            synthesisComplete: cache.synthesisComplete === true,
           });
           setShowPlayer(cache.chunks.length > 0);
           if (continuation?.autoPlay && cache.chunks.length > 0) {
@@ -1493,9 +1502,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     if (readerRestorePendingRef.current || player.segments.length === 0 || player.totalDuration <= 0) return;
     const currentTime = getCurrentTime();
     const now = Date.now();
-    const atEnd = player.totalDuration > 0 && currentTime >= player.totalDuration;
+    const atEnd = player.isSynthesisComplete && player.totalDuration > 0 && currentTime >= player.totalDuration;
     const isLastSection = activeReaderSectionIndex === readerSections.length - 1;
-    const terminalTextOffset = isLastSection
+    const terminalTextOffset = isLastSection && player.isSynthesisComplete
       ? activeReaderDocument.text.length
       : Math.max(activeReaderSection.start, activeReaderSection.end - 1);
     if (atEnd && activeReaderDocument.progress.textOffset >= terminalTextOffset) return;
@@ -1521,6 +1530,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     getCurrentTime,
     isReaderPage,
     player.activeSegmentId,
+    player.isSynthesisComplete,
     player.segments,
     player.totalDuration,
     activeReaderDocument,
@@ -1551,6 +1561,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       || !nextReaderSection
       || readerRestorePendingRef.current
       || readerRuntime.isGenerating
+      || !player.isSynthesisComplete
       || player.isPlaying
       || player.segments.length === 0
       || player.totalDuration <= 0
@@ -1566,6 +1577,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     navigateReaderToOffset,
     nextReaderSection,
     player.isPlaying,
+    player.isSynthesisComplete,
     player.segments.length,
     player.totalDuration,
     readerRuntime.isGenerating,
@@ -1610,6 +1622,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     // Segment identity changes for appended transport chunks and same-count
     // retakes. Watching only length could persist a partial Reader stream.
     player.segments,
+    player.isSynthesisComplete,
   ]);
   const activeSegmentIndex = player.activeSegmentId
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)

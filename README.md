@@ -199,6 +199,7 @@ The allowlist pins exact versions (`esbuild@0.28.2`, `onnxruntime-node@1.27.0`, 
 | `npm run test` | Vitest + Rust bridge unit tests |
 | `npm run test:js` · `npm run test:watch` · `npm run test:coverage` | Vitest |
 | `npm run test:rust` | Rust bridge unit tests |
+| `npm run test:rust:policy` | Model-free Rust lifecycle, text, and sampling tests; no MLX, Metal, or LibTorch needed |
 | `npm run eval:inference` | Reproducible inference-speed benchmark (see [docs](./docs/performance.md)) |
 
 Packaged desktop builds bundle the Electron shell and the Rust local bridge. They do **not** ship model weights; first use downloads model assets into the app data cache. On macOS the Rust executables are made self-contained, so a packaged build runs without Homebrew. Tagged releases are source-only; macOS and Windows packages remain local build outputs. See [local runtime setup](./docs/local-runtimes.md).

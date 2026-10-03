@@ -114,6 +114,8 @@ export interface CachedReaderAudio {
   currentTime: number;
   playbackRate: number;
   totalDuration: number;
+  /** Legacy entries lack this flag and must be treated as potentially partial. */
+  synthesisComplete?: boolean;
   updatedAt: number;
 }
 

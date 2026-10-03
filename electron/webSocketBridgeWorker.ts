@@ -434,6 +434,9 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   const requestModel = new Map<string, TModel>();
   const cancelledRequests = new Set<string>();
   const startingModels = new Set<TModel>();
+  const stoppingModels = new Map<TModel, Promise<boolean>>();
+  let shuttingDown = false;
+  let shutdownPromise: Promise<void> | null = null;
   const idleEvictionDelay = (model: TModel): number => (
     typeof idleEvictMs === "function" ? idleEvictMs(model) : idleEvictMs
   );
@@ -1100,13 +1103,23 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     return worker;
   }
 
-  async function acquireWorker(model: TModel, spawnConfig: WebSocketWorkerSpawnConfig): Promise<Worker> {
+  async function acquireWorker(
+    model: TModel,
+    spawnConfig: WebSocketWorkerSpawnConfig,
+    requestId: string,
+  ): Promise<Worker> {
     const draining = workers.get(model)?.draining;
     if (draining) {
       // Let the previous cancel finish unwinding so this request can reuse the
       // still-loaded model. beginDrain's timer bounds the wait: if the bridge
       // never acknowledges, it is killed and this falls through to a respawn.
       await draining.promise;
+    }
+    // Shutdown and cancellation both release a drain. The request waiting on
+    // it must stop here, before it can create a replacement process that was
+    // absent from shutdown's worker snapshot.
+    if (cancelledRequests.has(requestId) || shuttingDown || stoppingModels.has(model)) {
+      throw new Error("Generation cancelled.");
     }
     const existing = workers.get(model);
     const wantedKey = spawnKeyOf(spawnConfig);
@@ -1119,6 +1132,9 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
 
   return {
     async run(model, options) {
+      if (shuttingDown || stoppingModels.has(model)) {
+        throw new Error("The local runtime is shutting down.");
+      }
       const existing = workers.get(model);
       if (existing?.active || startingModels.has(model)) {
         throw new Error(`A ${model} generation is already running.`);
@@ -1133,7 +1149,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       startingModels.add(model);
       let worker: Worker;
       try {
-        worker = await acquireWorker(model, options.spawnConfig);
+        worker = await acquireWorker(model, options.spawnConfig, options.requestId);
       } catch (err) {
         const cancelled = cancelledRequests.has(options.requestId);
         requestModel.delete(options.requestId);
@@ -1239,7 +1255,12 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       const model = requestModel.get(requestId);
       if (model === undefined) return false;
       const worker = workers.get(model);
-      if (!worker) return false;
+      if (!worker) {
+        // A dead worker may have released acquisition's drain wait before its
+        // continuation runs. The registered request still owns cancellation.
+        cancelledRequests.add(requestId);
+        return true;
+      }
       // A worker with no active request is still spawning for this request
       // (run registers the request before acquiring the worker). Killing it
       // rejects the pending run with a cancellation error.
@@ -1262,18 +1283,26 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     },
 
     shutdown(model) {
-      const worker = workers.get(model);
-      if (!worker) return Promise.resolve(false);
+      const stopping = stoppingModels.get(model);
+      if (stopping) return stopping;
       // shutdown(model) backs cache clearing as well as explicit teardown. Any
       // request already assigned to that model is deliberately cancelled, not
       // a startup failure or an unexplained bridge crash.
       for (const [requestId, requestModelName] of requestModel) {
         if (requestModelName === model) cancelledRequests.add(requestId);
       }
-      return killWorkerAndWait(model, worker).then(() => true);
+      const worker = workers.get(model);
+      if (!worker) return Promise.resolve(false);
+      const shutdown = killWorkerAndWait(model, worker).then(() => true).finally(() => {
+        stoppingModels.delete(model);
+      });
+      stoppingModels.set(model, shutdown);
+      return shutdown;
     },
 
-    async shutdownAll() {
+    shutdownAll() {
+      if (shutdownPromise) return shutdownPromise;
+      shuttingDown = true;
       // Mark every in-flight request cancelled before killing so a slow worker
       // that settles after the bounded wait (via handleWorkerExit) reports the
       // deliberate shutdown as a cancellation rather than a crash. The settle
@@ -1282,8 +1311,11 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       for (const requestId of requestModel.keys()) {
         cancelledRequests.add(requestId);
       }
-      await Promise.all([...workers.entries()].map(([model, worker]) => killWorkerAndWait(model, worker)));
-      startingModels.clear();
+      shutdownPromise = Promise.all([
+        ...stoppingModels.values(),
+        ...[...workers.entries()].map(([model, worker]) => killWorkerAndWait(model, worker)),
+      ]).then(() => undefined);
+      return shutdownPromise;
     },
 
     isRunning(requestId) {
