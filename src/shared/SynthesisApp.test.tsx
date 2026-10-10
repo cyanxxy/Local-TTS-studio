@@ -789,6 +789,17 @@ function kokoroReaderSignature(text: string, voice = "af_heart"): string {
   return buildAudioSignature({ text, model: "kokoro", ...parts });
 }
 
+/** The signature the Reader stores for Supertonic 2 audio made with the mocked Creator settings. */
+function supertonicReaderSignature(text: string, language: string): string {
+  const parts = engineSignatureParts("supertonic", {
+    settings: { voice: "Female", language },
+    tuning: mock.creator.generationSettings,
+    quality: 5,
+  });
+  if (!parts) throw new Error("Supertonic 2 always has a signature.");
+  return buildAudioSignature({ text, model: "supertonic", ...parts });
+}
+
 function showOptionalDesktopModels() {
   localStorage.setItem("open-tts-preferences-v1", JSON.stringify({
     showNeuTTS: true,
@@ -1696,6 +1707,57 @@ describe("SynthesisApp", () => {
     await Promise.resolve();
 
     expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves Supertonic 2 Reader audio under its own language before switching languages", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.initialAppState = { ...mock.initialAppState, model: "supertonic" };
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({
+      id: "supertonic-language",
+      text: "A paragraph with enough words for bounded Reader sections. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    expect(sections.length).toBeGreaterThan(1);
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    const sectionText = getReaderSectionText(document.text, sections[0]);
+    // A reset empties the player, as the real one does.
+    let playerAudio: CachedReaderAudio["chunks"] = [];
+    mock.player.getAudioCacheSnapshot.mockImplementation(() => playerAudio);
+    mock.generation.resetGeneratedAudio.mockImplementation(() => { playerAudio = []; });
+
+    render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
+    // English audio generated for the first section.
+    playerAudio = [{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000, text: sectionText, index: 1, total: 1,
+    }];
+    fireEvent.change(await screen.findByLabelText("Supertonic 2 language"), { target: { value: "ko" } });
+    fireEvent.click(screen.getByRole("button", { name: "reader-next-section" }));
+
+    const savedSignatures = mock.readerLibrary.saveAudio.mock.calls
+      .map((call) => (call as unknown as [CachedReaderAudio])[0].signature);
+    expect(savedSignatures.length).toBeGreaterThan(0);
+    for (const signature of savedSignatures) {
+      expect(signature).toBe(supertonicReaderSignature(sectionText, "en"));
+    }
+    expect(savedSignatures).not.toContain(supertonicReaderSignature(sectionText, "ko"));
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+  });
+
+  it("clears Studio audio made in another Supertonic 2 language", () => {
+    mock.initialAppState = { ...mock.initialAppState, model: "supertonic" };
+    render(<WebApp />);
+    mock.generation.resetGeneratedAudio.mockClear();
+
+    fireEvent.change(screen.getByLabelText("Supertonic 2 language"), { target: { value: "en" } });
+    expect(mock.generation.resetGeneratedAudio).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Supertonic 2 language"), { target: { value: "fr" } });
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+    expect(mock.generation.resetGeneratedAudio).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("Supertonic 2 language")).toHaveValue("fr");
   });
 
   it("restores a revisited section from its clamped cached time instead of another section's progress", async () => {

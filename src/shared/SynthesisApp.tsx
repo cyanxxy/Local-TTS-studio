@@ -835,6 +835,18 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setExportError(null);
   }, [isReaderPage, supertonic3Runtime, supertonic3Voice]);
 
+  // The language shapes Supertonic 2 audio like its voice does, so the audio
+  // made in the old language is saved under the old signature first and then
+  // cleared, rather than being presented (and cached) as the new language.
+  const handleSupertonicLanguageChange = useCallback((nextLanguage: string) => {
+    if (nextLanguage === supertonicLanguage) return;
+    if (isReaderPage) flushReaderAudioRef.current();
+    cancelActiveGeneration();
+    resetGeneratedAudio();
+    setSupertonicLanguage(nextLanguage);
+    setExportError(null);
+  }, [cancelActiveGeneration, isReaderPage, resetGeneratedAudio, supertonicLanguage]);
+
   const handleSupertonic3LanguageChange = useCallback((nextLanguage: string) => {
     if (nextLanguage === supertonic3Language) return;
     if (isReaderPage) flushReaderAudioRef.current();
@@ -1695,7 +1707,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                   />
 
                   {!studioDesktopModel && activeModel === "supertonic" && (
-                    <SupertonicLanguageSettings language={supertonicLanguage} onChange={setSupertonicLanguage} />
+                    <SupertonicLanguageSettings language={supertonicLanguage} onChange={handleSupertonicLanguageChange} />
                   )}
                   {isStudioUsingQwen3 && (
                     <Qwen3InlineSettings onOpenSetup={() => handlePageNavigation("qwen3")} />
@@ -1872,7 +1884,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     />
                   )
                   : activeModel === "supertonic"
-                    ? <SupertonicLanguageSettings language={supertonicLanguage} onChange={setSupertonicLanguage} />
+                    ? <SupertonicLanguageSettings language={supertonicLanguage} onChange={handleSupertonicLanguageChange} />
                     : undefined}
               kokoroState={kokoroState}
               supertonicState={supertonicState}
