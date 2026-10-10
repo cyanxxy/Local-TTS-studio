@@ -1,11 +1,12 @@
 /**
  * Work that several callers wait on without it running twice.
  *
- * The Audio8 worker is a process-wide singleton every window talks to, and the
- * renderer re-issues `load` on React StrictMode's double effect, on model
+ * A native model worker is a process-wide singleton every window talks to, and
+ * the renderer re-issues `load` on React StrictMode's double effect, on model
  * toggles, and from its retry button. Guarding only the *finished* state let
- * two loads run at once: both downloaded the same 572 MiB and both wrote to the
- * same `.partial` path, interleaving chunks into corrupt bytes.
+ * two Audio8 loads run at once: both downloaded the same 572 MiB and both wrote
+ * to the same `.partial` path, interleaving chunks into corrupt bytes. Model
+ * loads, per-file downloads and per-file verification all go through here.
  *
  * Progress fans out to every participant. The shared work is abandoned only
  * once the last participant has given up, so one window pressing Stop cannot

@@ -33,7 +33,7 @@ import {
   type Audio8VoiceId,
 } from "./audio8Model";
 import type { Audio8NativeResult, Audio8WorkerResponse } from "./audio8NativeClient";
-import { SerialTaskQueue, SharedTask, SharedTaskGroup, type SharedTaskContext } from "./audio8SharedTask";
+import { SerialTaskQueue, SharedTask, SharedTaskGroup, type SharedTaskContext } from "./nativeModels/sharedTask";
 import { selectAudio8InferenceThreads } from "./audio8Threading";
 
 /**

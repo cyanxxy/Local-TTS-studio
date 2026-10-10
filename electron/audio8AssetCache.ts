@@ -14,7 +14,7 @@ import type { IncomingMessage } from "http";
 import path from "path";
 import { audio8AssetUrl, type Audio8Asset, type Audio8Digest } from "./audio8Model";
 import { requestUrl, type UrlRequest } from "./qwen3ModelDownload";
-import { SharedTaskGroup } from "./audio8SharedTask";
+import { SharedTaskGroup } from "./nativeModels/sharedTask";
 
 /**
  * A transfer that has produced no bytes for this long is wedged rather than
