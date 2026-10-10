@@ -26,7 +26,11 @@ export interface BackendFallbackOptions<T> {
   warmUp?(instance: T, backend: InferenceBackend): Promise<void>;
   /** Releases an instance whose warm-up failed. Errors are ignored. */
   dispose(instance: T): Promise<void>;
-  /** Called after a failed attempt, before the next backend is tried. */
+  /**
+   * Called after an attempt that started loading failed, before the next
+   * backend is tried. A WebGPU attempt skipped because the device probe
+   * failed loaded nothing and does not call it.
+   */
   onFallback?(backend: InferenceBackend, error: unknown): void;
   /** Message for the error thrown when every attempt failed without an Error. */
   failureMessage: string;
@@ -49,11 +53,12 @@ export async function loadWithBackendFallback<T>({
 }: BackendFallbackOptions<T>): Promise<LoadedBackend<T>> {
   let lastError: unknown = null;
   for (const [index, backend] of backends.entries()) {
+    if (backend === "webgpu" && !(await probeWebGPU().catch(() => false))) {
+      lastError = new Error("WebGPU device initialization failed.");
+      continue;
+    }
     let loaded: { instance: T } | null = null;
     try {
-      if (backend === "webgpu" && !(await probeWebGPU())) {
-        throw new Error("WebGPU device initialization failed.");
-      }
       loaded = { instance: await load(backend) };
       await warmUp?.(loaded.instance, backend);
       return { instance: loaded.instance, backend };

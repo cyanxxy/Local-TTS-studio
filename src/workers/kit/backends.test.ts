@@ -35,14 +35,26 @@ describe("loadWithBackendFallback", () => {
     expect(options.onFallback).not.toHaveBeenCalled();
   });
 
-  it("skips WebGPU when the device probe fails", async () => {
+  it("skips WebGPU without a fallback reset when the device probe fails", async () => {
     const options = fallbackOptions({ probeWebGPU: vi.fn(async () => false) });
 
     await expect(loadWithBackendFallback(options)).resolves.toMatchObject({ backend: "wasm" });
     expect(options.load).toHaveBeenCalledExactlyOnceWith("wasm");
-    expect(options.onFallback).toHaveBeenCalledWith("webgpu", expect.objectContaining({
-      message: "WebGPU device initialization failed.",
-    }));
+    // Nothing was loaded, so there is no progress to reset.
+    expect(options.onFallback).not.toHaveBeenCalled();
+  });
+
+  it("reports an unavailable or broken WebGPU device when it was the only backend", async () => {
+    await expect(loadWithBackendFallback(fallbackOptions({
+      backends: ["webgpu"],
+      probeWebGPU: vi.fn(async () => false),
+    }))).rejects.toThrow("WebGPU device initialization failed.");
+    await expect(loadWithBackendFallback(fallbackOptions({
+      backends: ["webgpu"],
+      probeWebGPU: vi.fn(async () => {
+        throw new Error("adapter request crashed");
+      }),
+    }))).rejects.toThrow("WebGPU device initialization failed.");
   });
 
   it("disposes an instance whose warm-up failed and falls back", async () => {

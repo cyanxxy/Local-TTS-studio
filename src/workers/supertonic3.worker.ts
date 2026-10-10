@@ -9,11 +9,10 @@ import {
 } from "../constants";
 import { chunkWithConstraintsDetailed } from "../lib/chunking";
 import { resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
-import { canInitializeWebGPU } from "../lib/webgpu";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { getSafeWasmThreadCount } from "../lib/onnxRuntime";
 import { verifyPinnedAssetIntegrity, type PinnedAssetIntegrity } from "../lib/pinnedModelFetch";
-import { MAX_WASM_THREADS } from "./kit/backends";
+import { BackendIndependentLoadError, loadWithBackendFallback, MAX_WASM_THREADS } from "./kit/backends";
 import { emitAudioChunk, resolveChunkPauseSec } from "./kit/emit";
 import type { GenerationTicket } from "./kit/generation";
 import { createLoadProgress, type LoadProgress } from "./kit/progress";
@@ -194,6 +193,15 @@ async function loadStyle(voice: string, progress?: LoadProgress): Promise<Supert
   return style;
 }
 
+/**
+ * One single-step synthesis on WebGPU compiles every session's shaders before
+ * READY, so the first real chunk does not pay for it, and proves the device
+ * can run the graphs at all.
+ */
+async function warmUpRuntime(instance: Supertonic3Runtime, style: Supertonic3Style): Promise<void> {
+  await instance.synthesize("Hello.", "en", style, 1, 1);
+}
+
 async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
   if (runtime && !forceReload) {
     port.post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend: backend ?? undefined });
@@ -217,25 +225,31 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
     const indexerBuffer = await fetchAsset("onnx/unicode_indexer.json", progress);
     const config = parseJson<Supertonic3Config>(configBuffer, "onnx/tts.json");
     const indexer = parseJson<number[]>(indexerBuffer, "onnx/unicode_indexer.json");
-    const loadModelBuffer = (name: Supertonic3ModelName) => fetchAsset(MODEL_FILE_BY_NAME[name], progress);
-    const preferredBackend: InferenceBackend = await canInitializeWebGPU() ? "webgpu" : "wasm";
-    try {
-      runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, preferredBackend);
-      backend = preferredBackend;
-    } catch (error) {
-      if (preferredBackend === "wasm") throw error;
-      runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, "wasm");
-      backend = "wasm";
-    }
-    await loadStyle(DEFAULT_VOICE, progress);
+    const defaultStyle = await loadStyle(DEFAULT_VOICE, progress);
+    // A failed or corrupt download fails on every backend; retrying on WASM
+    // would only download it again.
+    const loadModelBuffer = (name: Supertonic3ModelName) => fetchAsset(MODEL_FILE_BY_NAME[name], progress)
+      .catch((error: unknown) => {
+        throw new BackendIndependentLoadError(error);
+      });
+    const loaded = await loadWithBackendFallback({
+      backends: ["webgpu", "wasm"],
+      load: (candidate) => createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, candidate),
+      warmUp: (instance, candidate) => (candidate === "webgpu" ? warmUpRuntime(instance, defaultStyle) : Promise.resolve()),
+      dispose: (instance) => instance.dispose(),
+      onFallback: () => {
+        // The WASM attempt re-reads the model files from the cache.
+        progress.reset();
+        for (const file of ["onnx/tts.json", "onnx/unicode_indexer.json", styleFile(DEFAULT_VOICE)]) progress.complete(file);
+      },
+      failureMessage: "Failed to load Supertonic 3.",
+    });
+    runtime = loaded.instance;
+    backend = loaded.backend;
     port.post({ type: "LOAD_PROGRESS", percent: 100 });
     port.post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend });
   } catch (error) {
-    const failedRuntime: Supertonic3Runtime | null = runtime;
-    runtime = null;
-    backend = null;
     clearStyles();
-    await disposeRuntime(failedRuntime);
     throw error;
   }
 }

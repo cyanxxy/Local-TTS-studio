@@ -72,6 +72,9 @@ interface HarnessOptions {
   cachedAssets?: Record<string, Uint8Array<ArrayBuffer>>;
   chunks?: TextChunk[];
   synthesize?: Synthesize;
+  canUseWebGPU?: boolean;
+  /** Makes WebGPU fail while its sessions are created or during the warm-up run. */
+  webgpuFailure?: "create" | "warm-up";
 }
 
 function deferred<T>() {
@@ -82,7 +85,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function loadSupertonic3Worker({ respond, cachedAssets = {}, chunks, synthesize }: HarnessOptions = {}) {
+async function loadSupertonic3Worker({
+  respond,
+  cachedAssets = {},
+  chunks,
+  synthesize,
+  canUseWebGPU = false,
+  webgpuFailure,
+}: HarnessOptions = {}) {
   vi.resetModules();
   const messages: WorkerOutMessage[] = [];
   const worker = {
@@ -114,21 +124,32 @@ async function loadSupertonic3Worker({ respond, cachedAssets = {}, chunks, synth
   const fetchMock = vi.fn(async (url: string) => (respond ?? ((file) => streamResponse(assetBytes(file))))(fileFromUrl(url)));
   vi.stubGlobal("fetch", fetchMock);
 
-  const runtime = {
+  const createFakeRuntime = (run: Synthesize) => ({
     sampleRate: 10,
-    synthesize: vi.fn<Synthesize>(synthesize ?? (async () => new Float32Array([0.5, 0.5]))),
+    synthesize: vi.fn<Synthesize>(run),
     dispose: vi.fn(async () => undefined),
+  });
+  const defaultSynthesize: Synthesize = synthesize ?? (async () => new Float32Array([0.5, 0.5]));
+  const runtimes = {
+    webgpu: createFakeRuntime(webgpuFailure === "warm-up"
+      ? async () => {
+        throw new Error("WebGPU shader compilation failed.");
+      }
+      : defaultSynthesize),
+    wasm: createFakeRuntime(defaultSynthesize),
   };
   const createRuntime = vi.fn(async (
     _config: unknown,
     _indexer: unknown,
     loadModel: (name: (typeof MODEL_NAMES)[number]) => Promise<ArrayBuffer>,
+    backend: "webgpu" | "wasm",
   ) => {
     for (const name of MODEL_NAMES) await loadModel(name);
-    return runtime;
+    if (backend === "webgpu" && webgpuFailure === "create") throw new Error("WebGPU session creation failed.");
+    return runtimes[backend];
   });
   vi.doMock("./manifests/supertonic3", () => ({ SUPERTONIC3_ASSETS: fakeManifest() }));
-  vi.doMock("../lib/webgpu", () => ({ canInitializeWebGPU: async () => false }));
+  vi.doMock("../lib/webgpu", () => ({ canInitializeWebGPU: async () => canUseWebGPU }));
   vi.doMock("../lib/supertonic3Runtime", () => ({
     createSupertonic3RuntimeStreaming: createRuntime,
     createSupertonic3Style: () => ({ ttl: { dispose() {} }, dp: { dispose() {} } }),
@@ -140,7 +161,7 @@ async function loadSupertonic3Worker({ respond, cachedAssets = {}, chunks, synth
 
   await import("./supertonic3.worker");
   const dispatch = (data: WorkerInMessage) => worker.onmessage?.({ data } as MessageEvent<WorkerInMessage>);
-  return { cache, cacheStore, createRuntime, dispatch, fetchMock, messages, runtime, worker };
+  return { cache, cacheStore, createRuntime, dispatch, fetchMock, messages, runtime: runtimes.wasm, runtimes, worker };
 }
 
 function loadProgress(messages: WorkerOutMessage[]): number[] {
@@ -355,5 +376,62 @@ describe("Supertonic 3 generation scheduling", () => {
       generationId: "early",
       message: "Supertonic 3 is not loaded.",
     }));
+  });
+});
+
+describe("Supertonic 3 backend selection", () => {
+  it("warms WebGPU up with a one-step synthesis before reporting READY", async () => {
+    const { dispatch, messages, runtimes } = await loadSupertonic3Worker({ canUseWebGPU: true });
+
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    expect(messages.at(-1)).toEqual({ type: "READY", voices: VOICES, backend: "webgpu" });
+    expect(runtimes.webgpu.synthesize).toHaveBeenCalledExactlyOnceWith("Hello.", "en", expect.anything(), 1, 1);
+  });
+
+  it("falls back to WASM when the WebGPU warm-up fails, re-reading models from the cache", async () => {
+    const { createRuntime, dispatch, fetchMock, messages, runtimes } = await loadSupertonic3Worker({
+      canUseWebGPU: true,
+      webgpuFailure: "warm-up",
+    });
+
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    expect(messages.at(-1)).toEqual({ type: "READY", voices: VOICES, backend: "wasm" });
+    expect(createRuntime.mock.calls.map((call) => call[3])).toEqual(["webgpu", "wasm"]);
+    expect(runtimes.webgpu.dispose).toHaveBeenCalledOnce();
+    expect(runtimes.wasm.synthesize).not.toHaveBeenCalled();
+    // Each asset was downloaded once; the WASM attempt verified cached copies.
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    const percents = loadProgress(messages);
+    expect(percents.filter((percent) => percent === 0)).toHaveLength(2);
+    expect(messages.some((message) => message.type === "ERROR")).toBe(false);
+  });
+
+  it("falls back to WASM when WebGPU sessions cannot be created", async () => {
+    const { dispatch, messages } = await loadSupertonic3Worker({ canUseWebGPU: true, webgpuFailure: "create" });
+
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    expect(messages.at(-1)).toEqual({ type: "READY", voices: VOICES, backend: "wasm" });
+  });
+
+  it("reports a failed download instead of downloading again for WASM", async () => {
+    const { createRuntime, dispatch, fetchMock, messages } = await loadSupertonic3Worker({
+      canUseWebGPU: true,
+      respond: (file) => (file === "onnx/vocoder.onnx" ? new Response(null, { status: 404 }) : streamResponse(assetBytes(file))),
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(messages.at(-1)).toEqual({
+      type: "ERROR",
+      scope: "load",
+      message: "Failed to download onnx/vocoder.onnx: HTTP 404.",
+    }));
+    expect(createRuntime).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls.filter(([url]) => fileFromUrl(url) === "onnx/vocoder.onnx")).toHaveLength(1);
   });
 });
