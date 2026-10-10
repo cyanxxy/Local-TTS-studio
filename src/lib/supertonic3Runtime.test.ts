@@ -70,6 +70,37 @@ describe("Supertonic 3 runtime resources", () => {
     style.dp.dispose();
   });
 
+  it("returns one standalone copy of the waveform trimmed to the predicted duration", async () => {
+    const style = {
+      ttl: new ort.Tensor("float32", new Float32Array([1]), [1]),
+      dp: new ort.Tensor("float32", new Float32Array([1]), [1]),
+    };
+    const waveforms: ArrayLike<number>[] = [
+      Float32Array.from({ length: 12 }, (_, index) => index / 16),
+      Array.from({ length: 12 }, (_, index) => index / 16),
+    ];
+    const runtime = new Supertonic3Runtime(
+      config,
+      new Array(256).fill(1),
+      session(async () => ({ duration: outputTensor(new Float32Array([1])) })),
+      session(async () => ({ text_emb: outputTensor(new Float32Array([1])) })),
+      session(async () => ({ denoised_latent: outputTensor(new Float32Array(4)) })),
+      session(async () => ({ wav_tts: outputTensor(waveforms.shift()!) })),
+    );
+    const expected = Array.from({ length: 8 }, (_, index) => index / 16);
+
+    // One second at 8 Hz keeps 8 of the vocoder's 12 samples.
+    for (let run = 0; run < 2; run += 1) {
+      const audio = await runtime.synthesize("hello", "en", style, 1, 1);
+      expect(audio).toBeInstanceOf(Float32Array);
+      expect(Array.from(audio)).toEqual(expected);
+      expect(audio.byteOffset).toBe(0);
+      expect(audio.buffer.byteLength).toBe(audio.byteLength);
+    }
+    style.ttl.dispose();
+    style.dp.dispose();
+  });
+
   it("attempts to release every session even when one release throws synchronously", async () => {
     const releases = [
       vi.fn(() => { throw new Error("release failed"); }),

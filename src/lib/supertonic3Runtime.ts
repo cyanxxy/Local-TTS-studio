@@ -261,8 +261,13 @@ export class Supertonic3Runtime {
       let vocoderOutput: ort.InferenceSession.ReturnType | null = null;
       try {
         vocoderOutput = await this.vocoder.run({ latent: latentTensor });
-        const waveform = Float32Array.from(vocoderOutput.wav_tts.data as ArrayLike<number>);
-        return waveform.slice(0, Math.min(waveform.length, Math.floor(this.sampleRate * duration)));
+        const waveform = vocoderOutput.wav_tts.data as ArrayLike<number>;
+        const sampleCount = Math.min(waveform.length, Math.floor(this.sampleRate * duration));
+        // One copy into a buffer the caller owns (and can transfer); the
+        // output tensor is disposed below.
+        return waveform instanceof Float32Array
+          ? waveform.slice(0, sampleCount)
+          : Float32Array.from({ length: sampleCount }, (_, index) => Number(waveform[index]));
       } finally {
         disposeOutputs(vocoderOutput);
       }
