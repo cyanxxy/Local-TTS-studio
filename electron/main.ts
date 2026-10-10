@@ -11,6 +11,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
+import { createShutdownCoordinator, type ShutdownParticipant } from "./appShutdown";
 import { createMainWindow, registerAppScheme, registerSessionSecurity } from "./appWindow";
 import { createTrustedIpc } from "./ipc/trusted";
 import {
@@ -1297,71 +1298,86 @@ app.whenReady().then(() => {
   });
 });
 
-app.on("before-quit", (event) => {
-  if (bridgeShuttingDown) return;
-  bridgeShuttingDown = true;
-  // The renderers are still alive here and the quit below holds them open, so
-  // collect their debounced Reader edits before the worker stops accepting
-  // work; closing it first is what silently dropped the last edit.
-  let readerLibraryShutdown: Promise<void> | null = null;
-  if (readerLibraryWorker || BrowserWindow.getAllWindows().length > 0) {
-    readerLibraryShutdown = requestReaderLibraryFlush()
-      .then(closeReaderLibraryWorker, closeReaderLibraryWorker);
-  } else {
+// The renderers are still alive when the quit starts and the barrier holds
+// them open, so collect their debounced Reader edits before the worker stops
+// accepting work; closing it first is what silently dropped the last edit.
+const readerLibraryShutdown: ShutdownParticipant = {
+  name: "reader-library",
+  beginShutdown() {
+    if (readerLibraryWorker || BrowserWindow.getAllWindows().length > 0) {
+      return requestReaderLibraryFlush().then(closeReaderLibraryWorker, closeReaderLibraryWorker);
+    }
     readerLibraryShuttingDown = true;
-  }
-  documentParser?.close();
-  documentParser = null;
-  const localModelsBusy = localModelLifecycle.busy;
-  const localModelsShutdown = localModelLifecycle.close();
-  for (const requestId of activeBridgeRequestOwners.keys()) {
-    cancelledBridgeRequests.add(requestId);
-  }
-  const probeChildren = [...activeBridgeProcesses.values()];
-  const audio8Shutdown = audio8NativeClient?.destroy() ?? null;
-  audio8NativeClient = null;
-  // Snapshot rather than drain: `bridgeShuttingDown` above already stops new
-  // prunes being scheduled, and a clear-cache invoked from a renderer that is
-  // about to close still has to finish its `rm`.
-  const audio8CacheTasks = [...activeAudio8CacheTasks];
-  for (const child of probeChildren) {
-    terminateBridgeChild(child);
-  }
-  activeBridgeProcesses.clear();
+    return null;
+  },
+};
 
-  // Hold the quit until the worker pool shutdown and any one-shot probe
-  // children (SIGTERM + SIGKILL escalation) have a bounded window to run;
-  // otherwise the unref'd kill timers die with the process and a
-  // SIGTERM-ignoring child survives.
-  if (
-    !webSocketBridgeWorkers
-    && probeChildren.length === 0
-    && !localModelsBusy
-    && !readerLibraryShutdown
-    && !audio8Shutdown
-    && audio8CacheTasks.length === 0
-  ) return;
-  event.preventDefault();
-  const probeExits = probeChildren.map((child) =>
-    child.exitCode !== null || child.signalCode !== null
-      ? Promise.resolve()
-      : new Promise<void>((resolve) => child.once("exit", () => resolve())),
-  );
-  const timeout = new Promise<void>((resolve) => {
-    setTimeout(resolve, RUST_CANCEL_KILL_AFTER_MS + 500);
-  });
-  void Promise.race([
-    Promise.all([
+const documentShutdown: ShutdownParticipant = {
+  name: "documents",
+  beginShutdown() {
+    documentParser?.close();
+    documentParser = null;
+    return null;
+  },
+};
+
+// Holds the quit for the worker pool shutdown and any one-shot probe children
+// (SIGTERM + SIGKILL escalation), and for every lifecycle activity to unwind.
+const localRuntimeShutdown: ShutdownParticipant = {
+  name: "local-tts",
+  beginShutdown() {
+    bridgeShuttingDown = true;
+    const localModelsBusy = localModelLifecycle.busy;
+    const localModelsShutdown = localModelLifecycle.close();
+    for (const requestId of activeBridgeRequestOwners.keys()) {
+      cancelledBridgeRequests.add(requestId);
+    }
+    const probeChildren = [...activeBridgeProcesses.values()];
+    for (const child of probeChildren) {
+      terminateBridgeChild(child);
+    }
+    activeBridgeProcesses.clear();
+    if (!webSocketBridgeWorkers && probeChildren.length === 0 && !localModelsBusy) return null;
+    const probeExits = probeChildren.map((child) =>
+      child.exitCode !== null || child.signalCode !== null
+        ? Promise.resolve()
+        : new Promise<void>((resolve) => child.once("exit", () => resolve())),
+    );
+    return Promise.all([
       webSocketBridgeWorkers?.shutdownAll() ?? Promise.resolve(),
-      readerLibraryShutdown ?? Promise.resolve(),
       ...probeExits,
       localModelsShutdown,
-      audio8Shutdown ?? Promise.resolve(),
-      Promise.allSettled(audio8CacheTasks).then(() => undefined),
-    ]),
-    timeout,
-  ]).then(() => app.quit(), () => app.quit());
+    ]);
+  },
+};
+
+const audio8Shutdown: ShutdownParticipant = {
+  name: "audio8",
+  beginShutdown() {
+    bridgeShuttingDown = true;
+    const destroyed = audio8NativeClient?.destroy() ?? null;
+    audio8NativeClient = null;
+    // Snapshot rather than drain: the latch above already stops new prunes
+    // being scheduled, and a clear-cache invoked from a renderer that is about
+    // to close still has to finish its `rm`.
+    const cacheTasks = [...activeAudio8CacheTasks];
+    if (!destroyed && cacheTasks.length === 0) return null;
+    return Promise.all([
+      destroyed,
+      Promise.allSettled(cacheTasks),
+    ]);
+  },
+};
+
+// The Reader flush is bounded by its own timeout, which this outer one caps.
+const shutdown = createShutdownCoordinator({
+  timeoutMs: RUST_CANCEL_KILL_AFTER_MS + 500,
+  quit: () => app.quit(),
 });
+for (const participant of [readerLibraryShutdown, documentShutdown, localRuntimeShutdown, audio8Shutdown]) {
+  shutdown.register(participant);
+}
+app.on("before-quit", (event) => shutdown.handleBeforeQuit(event));
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
