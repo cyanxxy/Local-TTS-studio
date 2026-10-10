@@ -75,6 +75,8 @@ interface HarnessOptions {
   canUseWebGPU?: boolean;
   /** Makes WebGPU fail while its sessions are created or during the warm-up run. */
   webgpuFailure?: "create" | "warm-up";
+  /** Stands in for ONNX session creation, after each model file was loaded. */
+  createSession?: (name: (typeof MODEL_NAMES)[number]) => Promise<void>;
 }
 
 function deferred<T>() {
@@ -92,6 +94,7 @@ async function loadSupertonic3Worker({
   synthesize,
   canUseWebGPU = false,
   webgpuFailure,
+  createSession,
 }: HarnessOptions = {}) {
   vi.resetModules();
   const messages: WorkerOutMessage[] = [];
@@ -144,7 +147,10 @@ async function loadSupertonic3Worker({
     loadModel: (name: (typeof MODEL_NAMES)[number]) => Promise<ArrayBuffer>,
     backend: "webgpu" | "wasm",
   ) => {
-    for (const name of MODEL_NAMES) await loadModel(name);
+    for (const name of MODEL_NAMES) {
+      await loadModel(name);
+      await createSession?.(name);
+    }
     if (backend === "webgpu" && webgpuFailure === "create") throw new Error("WebGPU session creation failed.");
     return runtimes[backend];
   });
@@ -475,5 +481,35 @@ describe("Supertonic 3 seeds", () => {
       message: "Supertonic 3 seed must be an integer from 0 to 4294967295.",
     }));
     expect(runtime.synthesize).not.toHaveBeenCalled();
+  });
+});
+
+describe("Supertonic 3 asset prefetch", () => {
+  it("downloads the next model file while the previous session is created", async () => {
+    const sessions = new Map(MODEL_NAMES.map((name) => [name, deferred<void>()]));
+    const { dispatch, fetchMock, messages } = await loadSupertonic3Worker({
+      createSession: (name) => sessions.get(name)!.promise,
+    });
+    const fetched = () => fetchMock.mock.calls.map(([url]) => fileFromUrl(url));
+
+    dispatch({ type: "LOAD" });
+    // The small JSON assets, the default voice, and the first model start together.
+    await vi.waitFor(() => expect(fetched()).toContain("onnx/text_encoder.onnx"));
+    expect(fetched().slice(0, 4)).toEqual(expect.arrayContaining([
+      "onnx/tts.json",
+      "onnx/unicode_indexer.json",
+      "voice_styles/M1.json",
+      "onnx/duration_predictor.onnx",
+    ]));
+    // One file ahead at most: the vector estimator waits for the next session.
+    expect(fetched()).not.toContain("onnx/vector_estimator.onnx");
+
+    sessions.get("duration_predictor")!.resolve();
+    await vi.waitFor(() => expect(fetched()).toContain("onnx/vector_estimator.onnx"));
+    expect(fetched()).not.toContain("onnx/vocoder.onnx");
+
+    for (const name of MODEL_NAMES) sessions.get(name)!.resolve();
+    await waitForReady(messages);
+    expect(fetched()).toHaveLength(7);
   });
 });

@@ -15,6 +15,7 @@ import { verifyPinnedAssetIntegrity, type PinnedAssetIntegrity } from "../lib/pi
 import { BackendIndependentLoadError, loadWithBackendFallback, MAX_WASM_THREADS } from "./kit/backends";
 import { emitAudioChunk, resolveChunkPauseSec } from "./kit/emit";
 import type { GenerationTicket } from "./kit/generation";
+import { createPrefetcher } from "./kit/prefetch";
 import { createLoadProgress, type LoadProgress } from "./kit/progress";
 import { generationMeta } from "./kit/protocol";
 import { createWorkerRuntime, type GenerateMessage, type LoadMessage } from "./kit/runtime";
@@ -53,6 +54,19 @@ const DEFAULT_VOICE = "M1";
 const ASSET_INTEGRITY: Readonly<Record<string, PinnedAssetIntegrity>> = SUPERTONIC3_ASSETS.files;
 // Downloads fill the bar up to here; session creation takes the rest.
 const DOWNLOAD_PROGRESS_MAX = 94;
+// Sessions are created in this order, one buffer at a time.
+const SESSION_FILES = [
+  MODEL_FILE_BY_NAME.duration_predictor,
+  MODEL_FILE_BY_NAME.text_encoder,
+  MODEL_FILE_BY_NAME.vector_estimator,
+  MODEL_FILE_BY_NAME.vocoder,
+];
+// While one session is created, the next model file downloads (or is read
+// back from the cache and verified) unless it is larger than this. The 256 MB
+// vector estimator is therefore only fetched when its turn comes, and at most
+// one buffer of up to 128 MB is held ahead: the vocoder, which downloads
+// while the vector estimator's session is created.
+const PREFETCH_AHEAD_MAX_BYTES = 128 * 1024 * 1024;
 
 let runtime: Supertonic3Runtime | null = null;
 let backend: InferenceBackend | null = null;
@@ -224,14 +238,24 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
     progress.reset();
     ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;
     ort.env.wasm.numThreads = getSafeWasmThreadCount(MAX_WASM_THREADS);
-    const configBuffer = await fetchAsset("onnx/tts.json", progress);
-    const indexerBuffer = await fetchAsset("onnx/unicode_indexer.json", progress);
+    const models = createPrefetcher({
+      order: SESSION_FILES,
+      fetch: (file) => fetchAsset(file, progress),
+      sizeOf: (file) => ASSET_INTEGRITY[file].byteLength,
+      maxAheadBytes: PREFETCH_AHEAD_MAX_BYTES,
+    });
+    // The small JSON assets and the first model file download together.
+    models.prefetch(SESSION_FILES[0]);
+    const [configBuffer, indexerBuffer, defaultStyle] = await Promise.all([
+      fetchAsset("onnx/tts.json", progress),
+      fetchAsset("onnx/unicode_indexer.json", progress),
+      loadStyle(DEFAULT_VOICE, progress),
+    ]);
     const config = parseJson<Supertonic3Config>(configBuffer, "onnx/tts.json");
     const indexer = parseJson<number[]>(indexerBuffer, "onnx/unicode_indexer.json");
-    const defaultStyle = await loadStyle(DEFAULT_VOICE, progress);
     // A failed or corrupt download fails on every backend; retrying on WASM
     // would only download it again.
-    const loadModelBuffer = (name: Supertonic3ModelName) => fetchAsset(MODEL_FILE_BY_NAME[name], progress)
+    const loadModelBuffer = (name: Supertonic3ModelName) => models.take(MODEL_FILE_BY_NAME[name])
       .catch((error: unknown) => {
         throw new BackendIndependentLoadError(error);
       });
