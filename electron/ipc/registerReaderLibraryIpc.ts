@@ -1,7 +1,8 @@
 import { BrowserWindow, type MessagePortMain } from "electron";
 import { randomUUID } from "crypto";
 import type { ShutdownParticipant } from "../appShutdown";
-import { isRecord } from "../localTtsIpc";
+import { errorMessage } from "../errors";
+import { isRecord } from "../guards";
 import { ReaderLibraryWorkerClient } from "../readerLibraryWorkerClient";
 import type { TrustedIpc } from "./trusted";
 
@@ -10,6 +11,9 @@ import type { TrustedIpc } from "./trusted";
 // (RUST_CANCEL_KILL_AFTER_MS + 500) still caps the total, so a renderer that
 // never answers cannot stretch the shutdown past that budget.
 const READER_LIBRARY_FLUSH_TIMEOUT_MS = 1_500;
+// src/lib/readerLibrary.ts recognises this text to treat a write lost to the
+// quit as expected rather than as a failure.
+const READER_LIBRARY_SHUTTING_DOWN_MESSAGE = "Reader library is shutting down.";
 
 export interface ReaderLibraryIpcOptions {
   /** The compiled SQLite worker script. */
@@ -49,7 +53,7 @@ export function registerReaderLibraryIpc(
   const pendingReaderLibraryFlushes = new Map<string, () => void>();
 
   function getReaderLibraryWorker(): ReaderLibraryWorkerClient {
-    if (readerLibraryShuttingDown) throw new Error("Reader library is shutting down.");
+    if (readerLibraryShuttingDown) throw new Error(READER_LIBRARY_SHUTTING_DOWN_MESSAGE);
     if (readerLibraryWorker) return readerLibraryWorker;
     const worker = new ReaderLibraryWorkerClient(
       workerPath,
@@ -137,7 +141,7 @@ export function registerReaderLibraryIpc(
 
   ipc.onPort("reader-library:save-audio-stream", (port, request) => {
     if (readerLibraryShuttingDown) {
-      rejectStreamPort(port, "Reader library is shutting down.");
+      rejectStreamPort(port, READER_LIBRARY_SHUTTING_DOWN_MESSAGE);
       return;
     }
     if (!isRecord(request)) {
@@ -147,13 +151,13 @@ export function registerReaderLibraryIpc(
     try {
       getReaderLibraryWorker().saveAudio(port, request.metadata, request.chunkCount);
     } catch (err) {
-      rejectStreamPort(port, err instanceof Error ? err.message : String(err));
+      rejectStreamPort(port, errorMessage(err));
     }
   });
 
   ipc.onPort("reader-library:get-audio-stream", (port, request) => {
     if (readerLibraryShuttingDown) {
-      rejectStreamPort(port, "Reader library is shutting down.");
+      rejectStreamPort(port, READER_LIBRARY_SHUTTING_DOWN_MESSAGE);
       return;
     }
     if (!isRecord(request)) {
@@ -163,7 +167,7 @@ export function registerReaderLibraryIpc(
     try {
       getReaderLibraryWorker().getAudio(port, request.documentId, request.sectionId);
     } catch (err) {
-      rejectStreamPort(port, err instanceof Error ? err.message : String(err));
+      rejectStreamPort(port, errorMessage(err));
     }
   });
 

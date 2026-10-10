@@ -1,4 +1,6 @@
+import { errorMessage } from "./errors";
 import type { GenerationContinuation } from "./generateRateLimiter";
+import { isRecord } from "./guards";
 import {
   getQwen3Profile,
   qwen3ProfileSupportsRuntime,
@@ -139,9 +141,7 @@ export function assertLocalModel(model: string): LocalModel {
   throw new Error(`Unsupported local model: ${model}`);
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export { isRecord };
 
 export function parseRequiredText(
   value: unknown,
@@ -708,7 +708,7 @@ export function parseBridgeResult(
       details: typeof decoded.details === "string" ? decoded.details : undefined,
     };
   } catch (err) {
-    throw new Error(`Failed parsing bridge result: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`Failed parsing bridge result: ${errorMessage(err)}`);
   }
 
   if (!parsed.ok) {

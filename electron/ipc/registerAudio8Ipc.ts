@@ -8,7 +8,8 @@ import {
 } from "../audio8Cache";
 import { AUDIO8_MAX_TEXT_CHARACTERS, isAudio8VoiceId } from "../audio8Model";
 import { Audio8NativeClient } from "../audio8NativeClient";
-import { isRecord } from "../localTtsIpc";
+import { LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE } from "../errors";
+import { isRecord } from "../guards";
 import type { TrustedIpc } from "./trusted";
 
 export interface Audio8IpcOptions {
@@ -62,7 +63,7 @@ export function registerAudio8Ipc(
     // bridge worker pool is: a request that arrives mid-quit would otherwise
     // start a thread that memory-maps ~572 MiB and races the `destroy()` the
     // shutdown barrier is already waiting on.
-    if (shuttingDown) throw new Error("The local runtime is shutting down.");
+    if (shuttingDown) throw new Error(LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE);
     audio8NativeClient ??= new Audio8NativeClient(getAudio8ModelDir(userDataPath()));
     return audio8NativeClient;
   }

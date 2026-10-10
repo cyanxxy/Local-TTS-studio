@@ -7,7 +7,7 @@ import {
   type DocumentParser,
 } from "../documentImport";
 import { DocumentParseWorkerClient } from "../documentParseWorkerClient";
-import { isRecord } from "../localTtsIpc";
+import { isRecord } from "../guards";
 import { importRemoteDocument } from "../urlImport";
 import type { TrustedIpc } from "./trusted";
 

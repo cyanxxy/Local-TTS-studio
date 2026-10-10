@@ -4,11 +4,16 @@ import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import type { ShutdownParticipant } from "../appShutdown";
 import { getDirectorySizeBytes } from "../directorySize";
+import {
+  errorMessage,
+  generationCancelledError,
+  LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE,
+} from "../errors";
 import { createGenerateRateLimiter } from "../generateRateLimiter";
+import { isRecord } from "../guards";
 import { LocalModelLifecycle } from "../localModelLifecycle";
 import {
   assertLocalModel,
-  isRecord,
   parseBridgeEnvelopeResult,
   parseBridgeProgressResult,
   parseBridgeWarmResult,
@@ -113,7 +118,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
   let shuttingDown = false;
 
   function assertAcceptingRequests(): void {
-    if (shuttingDown) throw new Error("The local runtime is shutting down.");
+    if (shuttingDown) throw new Error(LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE);
   }
 
   // Reaches a request wherever it currently runs: waiting on a warm-up (which
@@ -225,7 +230,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
       await fs.access(bridgeBinary);
       await fs.mkdir(cacheDir, { recursive: true });
       if (registry.isCancelled(requestId)) {
-        throw new Error("Generation cancelled.");
+        throw generationCancelledError();
       }
 
       const generateWarmTarget = warmTargetKey(model, payload);
@@ -238,7 +243,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
         await pendingWarm.promise;
       }
       if (warmups.isWaiterCancelled(requestId)) {
-        throw new Error("Generation cancelled.");
+        throw generationCancelledError();
       }
 
       const onProgress = (progressPayload: unknown) => {
@@ -248,7 +253,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
           event.sender.send("local-tts:progress", { requestId, model, ...progress });
         } catch (err) {
           console.warn(
-            `[local-tts:generate] Failed parsing WebSocket bridge progress: ${err instanceof Error ? err.message : String(err)}`,
+            `[local-tts:generate] Failed parsing WebSocket bridge progress: ${errorMessage(err)}`,
           );
         }
       };
@@ -283,12 +288,12 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
   return {
     probe(request, event) {
       return withBridgeRequest("probe", request, event, async ({ model, requestId }) => {
-        if (registry.isCancelled(requestId)) throw new Error("Generation cancelled.");
+        if (registry.isCancelled(requestId)) throw generationCancelledError();
         const cacheDir = environment.cacheDir(model);
         const bridgeBinary = environment.bridgeBinaryPath();
         await fs.access(bridgeBinary);
         await fs.mkdir(cacheDir, { recursive: true });
-        if (registry.isCancelled(requestId)) throw new Error("Generation cancelled.");
+        if (registry.isCancelled(requestId)) throw generationCancelledError();
         return probes.run({ requestId, model, bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) });
       });
     },
@@ -298,7 +303,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
         const payload = sanitizeGeneratePayload(model, fields.payload, process.platform, process.arch);
         const continuation = sanitizeGenerationContinuation(fields.continuation);
         if (model === "qwen3") await assertQwen3ModelDir(payload);
-        if (registry.isCancelled(requestId)) throw new Error("Generation cancelled.");
+        if (registry.isCancelled(requestId)) throw generationCancelledError();
         return generateRateLimiter.run(
           model,
           () => runWebSocketGenerate(model, requestId, payload, event),
@@ -365,7 +370,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
           });
           return parseBridgeWarmResult(response);
         } catch (err) {
-          return { warmed: false, message: err instanceof Error ? err.message : String(err) };
+          return { warmed: false, message: errorMessage(err) };
         } finally {
           signal.removeEventListener("abort", cancel);
           settle();

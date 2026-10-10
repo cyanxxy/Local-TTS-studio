@@ -2,7 +2,8 @@ import { dialog, type WebContents } from "electron";
 import path from "path";
 import { runHfXetDownloader } from "../hfXetDownload";
 import type { LocalModelLifecycle } from "../localModelLifecycle";
-import { isRecord, type LocalModel } from "../localTtsIpc";
+import { isRecord } from "../guards";
+import type { LocalModel } from "../localTtsIpc";
 import {
   adoptLegacyQwen3ModelDir,
   createQwen3ModelDownloadCoordinator,

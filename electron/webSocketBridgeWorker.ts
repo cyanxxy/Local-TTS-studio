@@ -1,5 +1,12 @@
 import type { ChildProcessWithoutNullStreams } from "child_process";
 import { randomBytes } from "crypto";
+import {
+  errorMessage,
+  GENERATION_CANCELLED_MESSAGE,
+  generationCancelledError,
+  LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE,
+} from "./errors";
+import { isRecord } from "./guards";
 
 export interface WebSocketWorkerSpawnConfig {
   bridgeBinary: string;
@@ -299,10 +306,6 @@ function parseStartupFailure(line: string): Error | null {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 // Metadata for a chunk whose binary frame has not arrived yet. Audio is always
 // little-endian Float32: the bridge never negotiates another encoding, and
 // exports (wav-f32, wav-pcm24) need the full precision end to end.
@@ -575,7 +578,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         ok: false,
         error: new Error(
           cancelled
-            ? "Generation cancelled."
+            ? GENERATION_CANCELLED_MESSAGE
             : `Rust local bridge produced no output for ${active.idleTimeoutMs / 1000}s and was stopped (the process may be stuck).`,
         ),
       });
@@ -597,7 +600,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         ok: false,
         error: new Error(
           cancelled
-            ? "Generation cancelled."
+            ? GENERATION_CANCELLED_MESSAGE
             : `Rust local bridge produced no protocol progress for ${progressTimeoutMs / 1000}s and was stopped.`,
         ),
       });
@@ -679,7 +682,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       // path collect the bridge's terminal frame so the worker survives.
       settleActive(model, worker, {
         ok: false,
-        error: new Error("Generation cancelled."),
+        error: generationCancelledError(),
       });
       requestBridgeCancel(model, worker, active.requestId);
       handleDrainMessage(model, worker, data);
@@ -740,7 +743,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     } catch (err) {
       settleActive(model, worker, {
         ok: false,
-        error: new Error(`Failed parsing WebSocket bridge message: ${err instanceof Error ? err.message : String(err)}`),
+        error: new Error(`Failed parsing WebSocket bridge message: ${errorMessage(err)}`),
       });
       killWorker(model, worker);
       return;
@@ -929,7 +932,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       ok: false,
       error: new Error(
         cancelled
-          ? "Generation cancelled."
+          ? GENERATION_CANCELLED_MESSAGE
           : wasAlive
             ? "Rust local bridge exited before returning a result."
             : "Rust local bridge is no longer available.",
@@ -945,7 +948,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       const cancelled = cancelledRequests.has(active.requestId);
       settleActive(model, worker, {
         ok: false,
-        error: new Error(cancelled ? "Generation cancelled." : reason),
+        error: cancelled ? generationCancelledError() : new Error(reason),
       });
     }
     if (wasAlive) {
@@ -1105,7 +1108,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     // it must stop here, before it can create a replacement process that was
     // absent from shutdown's worker snapshot.
     if (cancelledRequests.has(requestId) || shuttingDown || stoppingModels.has(model)) {
-      throw new Error("Generation cancelled.");
+      throw generationCancelledError();
     }
     const existing = workers.get(model);
     const wantedKey = spawnKeyOf(spawnConfig);
@@ -1119,7 +1122,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   return {
     async run(model, options) {
       if (shuttingDown || stoppingModels.has(model)) {
-        throw new Error("The local runtime is shutting down.");
+        throw new Error(LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE);
       }
       const existing = workers.get(model);
       if (existing?.active || startingModels.has(model)) {
@@ -1141,9 +1144,9 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         requestModel.delete(options.requestId);
         cancelledRequests.delete(options.requestId);
         if (cancelled) {
-          throw new Error("Generation cancelled.");
+          throw generationCancelledError();
         }
-        throw new Error(`Failed to start Rust local bridge worker: ${err instanceof Error ? err.message : String(err)}`);
+        throw new Error(`Failed to start Rust local bridge worker: ${errorMessage(err)}`);
       } finally {
         startingModels.delete(model);
       }
@@ -1152,7 +1155,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         requestModel.delete(options.requestId);
         cancelledRequests.delete(options.requestId);
         killWorker(model, worker);
-        throw new Error("Generation cancelled.");
+        throw generationCancelledError();
       }
 
       if (worker.evictTimer) {
@@ -1196,7 +1199,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         if (cancelledRequests.has(options.requestId)) {
           settleActive(model, worker, {
             ok: false,
-            error: new Error("Generation cancelled."),
+            error: generationCancelledError(),
           });
           killWorker(model, worker);
           return;
@@ -1228,8 +1231,8 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
             ok: false,
             error: new Error(
               cancelled
-                ? "Generation cancelled."
-                : `Failed to send request to Rust local bridge: ${err instanceof Error ? err.message : String(err)}`,
+                ? GENERATION_CANCELLED_MESSAGE
+                : `Failed to send request to Rust local bridge: ${errorMessage(err)}`,
             ),
           });
           killWorker(model, worker);
@@ -1262,7 +1265,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       // it again; draining keeps the process warm and reusable.
       settleActive(model, worker, {
         ok: false,
-        error: new Error("Generation cancelled."),
+        error: generationCancelledError(),
       });
       requestBridgeCancel(model, worker, requestId);
       return true;
