@@ -50,6 +50,10 @@ let activeBackend: InferenceBackend | null = null;
 let kokoroModulePromise: Promise<KokoroModule> | null = null;
 let activeGenerationEpoch = 0;
 
+// kokoro.web.js bundles its own Transformers.js, which downloads the model,
+// tokenizer, and voices from hard-coded /resolve/main/ URLs through the
+// global fetch and takes no revision option. Rewriting those URLs here is
+// what pins every Kokoro download to KOKORO_MODEL_REVISION.
 const workerScope = self as typeof self & { fetch?: typeof fetch };
 if (typeof workerScope.fetch === "function") {
   workerScope.fetch = createRevisionPinnedFetch(
@@ -94,16 +98,6 @@ async function loadKokoroModule(): Promise<KokoroModule> {
     kokoroModulePromise = import(/* @vite-ignore */ KOKORO_WEB_MODULE_URL) as Promise<KokoroModule>;
   }
   return kokoroModulePromise;
-}
-
-async function pinKokoroTransformersRevision(): Promise<void> {
-  const { env } = await import("@huggingface/transformers");
-  env.remoteHost = "https://huggingface.co";
-  // kokoro-js 1.2.1 does not forward a `revision` option to its model and
-  // tokenizer loaders. Pin the worker-local Transformers.js path template
-  // directly; the fetch wrapper above separately covers kokoro-js's hardcoded
-  // voice URLs.
-  env.remotePathTemplate = `/{model}/resolve/${KOKORO_MODEL_REVISION}/`;
 }
 
 async function ensureKokoroCacheRevisions(): Promise<void> {
@@ -229,7 +223,6 @@ async function loadModel(forceReload: boolean = false) {
   try {
     post({ type: "LOAD_PROGRESS", percent: 0 });
     await ensureKokoroCacheRevisions();
-    await pinKokoroTransformersRevision();
     const kokoroModule = await loadKokoroModule();
     const { KokoroTTS } = kokoroModule;
     let lastError: unknown = null;

@@ -10,6 +10,7 @@ interface MockKokoroInstance {
 }
 
 interface LoadOptions {
+  baseFetch?: typeof fetch;
   canUseWebGPU?: boolean;
   fallbackVoices?: string[];
   instances?: MockKokoroInstance[];
@@ -49,6 +50,7 @@ async function flushPromises(): Promise<void> {
 }
 
 async function loadWorkerModule({
+  baseFetch,
   canUseWebGPU = false,
   fallbackVoices = ["af_heart", "am_echo"],
   instances,
@@ -61,11 +63,11 @@ async function loadWorkerModule({
       postedMessages.push(message);
     }),
     onmessage: null as ((event: MessageEvent<WorkerInMessage>) => void) | null,
+    ...(baseFetch ? { fetch: baseFetch } : {}),
   };
   vi.stubGlobal("self", workerGlobal);
 
   const queue = instances ?? [createInstance([createRawAudio()], { af_heart: {}, am_echo: {} })];
-  const transformersEnv: Record<string, unknown> = {};
   const fromPretrained = vi.fn(async (_modelId: string, options: { progress_callback?: (info: unknown) => void }) => {
     options.progress_callback?.({ file: "model.onnx", status: "progress", loaded: 5, total: 10 });
     options.progress_callback?.({ file: "model.onnx", status: "done" });
@@ -79,9 +81,6 @@ async function loadWorkerModule({
     KokoroTTS: {
       from_pretrained: fromPretrained,
     },
-  }));
-  vi.doMock("@huggingface/transformers", () => ({
-    env: transformersEnv,
   }));
   vi.doMock("../lib/onnxWasmAssets", () => ({
     KOKORO_ONNX_WASM_ASSETS: { mjs: "ort.mjs", wasm: "ort.wasm" },
@@ -120,7 +119,6 @@ async function loadWorkerModule({
     dispatch,
     fromPretrained,
     postedMessages,
-    transformersEnv,
     workerGlobal,
   };
 }
@@ -136,7 +134,7 @@ describe("kokoro.worker", () => {
 
   it("falls back to wasm, reports progress, and lists dynamic voices", async () => {
     const instance = createInstance([createRawAudio()], { af_heart: {}, af_bella: {} });
-    const { dispatch, fromPretrained, postedMessages, transformersEnv } = await loadWorkerModule({ instances: [instance] });
+    const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ instances: [instance] });
 
     dispatch({ type: "LOAD" });
 
@@ -146,10 +144,6 @@ describe("kokoro.worker", () => {
       dtype: "q8",
       device: "wasm",
     }));
-    expect(transformersEnv).toMatchObject({
-      remoteHost: "https://huggingface.co",
-      remotePathTemplate: "/{model}/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231/",
-    });
     expect(postedMessages).toContainEqual({ type: "LOAD_PROGRESS", percent: 0 });
     expect(postedMessages).toContainEqual({ type: "LOAD_PROGRESS", percent: 50 });
     expect(postedMessages.at(-1)).toEqual({
@@ -157,6 +151,20 @@ describe("kokoro.worker", () => {
       voices: ["af_heart", "af_bella"],
       backend: "wasm",
     });
+  });
+
+  it("pins kokoro-js's hard-coded /resolve/main/ downloads to the pinned revision", async () => {
+    const baseFetch = vi.fn(async () => new Response("model bytes"));
+    const { workerGlobal } = await loadWorkerModule({ baseFetch });
+    const pinnedFetch = (workerGlobal as unknown as { fetch: typeof fetch }).fetch;
+
+    await pinnedFetch("https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/onnx/model_quantized.onnx");
+
+    expect(pinnedFetch).not.toBe(baseFetch);
+    expect(baseFetch).toHaveBeenCalledExactlyOnceWith(
+      "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/1939ad2a8e416c0acfeecc08a694d14ef25f2231/onnx/model_quantized.onnx",
+      undefined,
+    );
   });
 
   it("uses WebGPU with fp32 and falls back to configured static voices", async () => {
