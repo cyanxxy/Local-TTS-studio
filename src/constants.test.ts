@@ -9,6 +9,9 @@ import {
   QUALITY_DEFAULT,
   MIN_TEXT_LENGTH,
   MAX_CHUNK_LENGTH,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
+  PLAYBACK_RATES,
   SUPERTONIC3_LANGUAGES,
   SUPERTONIC3_MODEL_ID,
   SUPERTONIC3_MODEL_REVISION,
@@ -51,6 +54,13 @@ describe("constants", () => {
     expect(QUALITY_MIN).toBeLessThan(QUALITY_MAX);
     expect(QUALITY_DEFAULT).toBeGreaterThanOrEqual(QUALITY_MIN);
     expect(QUALITY_DEFAULT).toBeLessThanOrEqual(QUALITY_MAX);
+  });
+
+  it("lists ascending playback speeds bounded by the player's own limits", () => {
+    expect([...PLAYBACK_RATES]).toEqual([...PLAYBACK_RATES].sort((a, b) => a - b));
+    expect(PLAYBACK_RATES).toContain(1);
+    expect(MIN_PLAYBACK_RATE).toBe(0.5);
+    expect(MAX_PLAYBACK_RATE).toBe(2);
   });
 
   it("text constraints are valid", () => {

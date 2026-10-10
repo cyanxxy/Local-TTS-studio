@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { AudioPlayer } from "./AudioPlayer";
+import { MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE, PLAYBACK_RATES } from "../constants";
 import type { GenerationStats } from "../types";
 import { PlaybackClock } from "../lib/playbackClock";
 
@@ -95,6 +96,27 @@ describe("AudioPlayer", () => {
     expect(onPlaybackRateChange).toHaveBeenCalledWith(1.25);
     expect(onRegenerate).toHaveBeenCalledOnce();
     expect(onRetakeSegment).toHaveBeenCalledOnce();
+  });
+
+  it("offers exactly the playback speeds the player accepts", () => {
+    const onPlaybackRateChange = vi.fn();
+    renderPlayer({
+      variant: "dock",
+      clock: clockAt(2),
+      totalDuration: 10,
+      segmentCount: 3,
+      activeSegmentNumber: 2,
+      playbackRate: 1,
+      onPlaybackRateChange,
+    });
+
+    const picker = screen.getByRole("combobox", { name: "Playback speed" });
+    const offered = within(picker).getAllByRole("option").map((option) => Number((option as HTMLOptionElement).value));
+    expect(offered).toEqual([...PLAYBACK_RATES]);
+    expect(offered[0]).toBe(MIN_PLAYBACK_RATE);
+    expect(offered.at(-1)).toBe(MAX_PLAYBACK_RATE);
+    fireEvent.change(picker, { target: { value: "0.5" } });
+    expect(onPlaybackRateChange).toHaveBeenCalledWith(0.5);
   });
 
   it("uses the shared player primary action before audio exists", () => {

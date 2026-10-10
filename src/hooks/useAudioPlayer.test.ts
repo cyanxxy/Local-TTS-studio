@@ -1,6 +1,11 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS } from "../constants";
+import {
+  AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
+  PLAYBACK_RATES,
+} from "../constants";
 import * as audioExportClientModule from "../lib/audioExportClient";
 import * as exportAudioModule from "../lib/exportAudio";
 import { useAudioPlayer } from "./useAudioPlayer";
@@ -202,6 +207,24 @@ describe("useAudioPlayer", () => {
       total: 1,
     }]));
     expect(result.current.getContentEpoch()).toBe(initial + 2);
+  });
+
+  it("plays at every speed the speed picker offers", () => {
+    const { result } = renderHook(() => useAudioPlayer());
+
+    for (const rate of [...PLAYBACK_RATES].reverse()) {
+      act(() => result.current.setPlaybackRate(rate));
+      expect(result.current.playbackRate).toBe(rate);
+    }
+
+    act(() => result.current.restoreAudioCache([{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000,
+      text: "Restored slowly",
+      index: 1,
+      total: 1,
+    }], { playbackRate: MIN_PLAYBACK_RATE }));
+    expect(result.current.playbackRate).toBe(MIN_PLAYBACK_RATE);
   });
 
   it("can roll back streamed chunks to a section checkpoint", async () => {
@@ -491,9 +514,10 @@ describe("useAudioPlayer", () => {
     act(() => {
       result.current.setPlaybackRate(3);
       result.current.setPlaybackRate(2.0001);
-      result.current.setPlaybackRate(0.5);
     });
-    expect(result.current.playbackRate).toBe(0.75);
+    expect(result.current.playbackRate).toBe(MAX_PLAYBACK_RATE);
+    act(() => result.current.setPlaybackRate(0.25));
+    expect(result.current.playbackRate).toBe(MIN_PLAYBACK_RATE);
 
     act(() => {
       result.current.replaceSegment("missing", makeChunk("No-op", 5, 10));

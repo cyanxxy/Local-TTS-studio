@@ -4,6 +4,8 @@ import type { CachedReaderAudioChunk } from "../lib/readerDocument";
 import {
   AUDIO_PLAYER_RETAIN_BEHIND_SECONDS,
   AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
 } from "../constants";
 import { PlaybackClock } from "../lib/playbackClock";
 import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
@@ -69,8 +71,6 @@ export interface UseAudioPlayerReturn {
   stopAll: () => void;
 }
 
-const MIN_PLAYBACK_RATE = 0.75;
-const MAX_PLAYBACK_RATE = 2.0;
 /** Background-safe cadence for extending the playback schedule. */
 const SCHEDULE_TOPUP_INTERVAL_MS = 1000;
 
