@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useId,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -66,6 +65,8 @@ import { RemainingTime } from "./reader/RemainingTime";
 import { SegmentedChoice, SwitchRow } from "./reader/ReaderControls";
 import { ViewportPopover } from "./reader/ViewportPopover";
 import { deriveReaderDockState } from "./reader/readerDockState";
+import { useReaderAutoFollow } from "./reader/useReaderAutoFollow";
+import { useReaderSectionEditor } from "./reader/useReaderSectionEditor";
 import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
 import { findSegmentForTextOffset } from "./reader/readerSegments";
 import {
@@ -180,19 +181,6 @@ function documentPadding(fullScreen: boolean): string {
   return fullScreen
     ? "reader-doc-pad pt-8 pb-44 sm:pt-12 sm:pb-48"
     : "reader-doc-pad py-8";
-}
-
-/** Auto-follow leaves the page alone while the spoken word sits in this band. */
-const FOLLOW_BAND_TOP = 0.12;
-const FOLLOW_BAND_BOTTOM = 0.62;
-/** How long scroll events after our own scroll are not treated as the user's. */
-const INSTANT_SCROLL_GRACE_MS = 120;
-const SMOOTH_SCROLL_GRACE_MS = 800;
-
-function prefersReducedMotion(): boolean {
-  if (document.documentElement.dataset.motion === "reduced") return true;
-  return typeof window.matchMedia === "function"
-    && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 /* Icon buttons that live inside a glass capsule: no material of their own
@@ -325,16 +313,12 @@ export function AdvancedReaderPage({
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [appearanceOpen, setAppearanceOpen] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [editDraft, setEditDraft] = useState(text);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [libraryTab, setLibraryTab] = useState<ReaderSidebarTab>("library");
   const [importOpen, setImportOpen] = useState(false);
   const [urlInput, setUrlInput] = useState("");
   const [urlImportError, setUrlImportError] = useState<string | null>(null);
   const [urlImportBusy, setUrlImportBusy] = useState(false);
-  const [navigationTextOffset, setNavigationTextOffset] = useState<number | null>(null);
-  const [selectedPassage, setSelectedPassage] = useState<{ quote: string; textOffset: number } | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [sleepTimer, setSleepTimer] = useState<{
     choice: SleepTimerChoice;
@@ -348,125 +332,46 @@ export function AdvancedReaderPage({
   const appearancePopoverRef = useRef<HTMLDivElement>(null);
   const importButtonRef = useRef<HTMLButtonElement>(null);
   const importPopoverRef = useRef<HTMLDivElement>(null);
-  const editingRef = useRef(editing);
-  const editDraftRef = useRef(editDraft);
-  const onEditEndRef = useRef(onEditEnd);
-  const onTextChangeRef = useRef(onTextChange);
-  const previousDocumentIdRef = useRef(activeDocument?.id);
-  const editCommitTimerRef = useRef<number | null>(null);
-  // Cross-section jumps land after the new section's text renders; this holds
-  // the document-absolute offset to scroll to once that happens.
-  const pendingScrollOffsetRef = useRef<number | null>(null);
-  const programmaticScrollUntilRef = useRef(0);
-  const [followPaused, setFollowPaused] = useState(false);
-  const followPausedRef = useRef(false);
 
-  const cancelEditCommit = useCallback(() => {
-    if (editCommitTimerRef.current !== null) {
-      window.clearTimeout(editCommitTimerRef.current);
-      editCommitTimerRef.current = null;
-    }
-  }, []);
+  // Transient view state — a jump target that has not been spoken yet and the
+  // passage under the selection toolbar — belongs to what the pane shows.
+  // Tagging it with this scope makes it lapse on a document, section or text
+  // change by derivation, instead of an effect clearing it a frame late.
+  const activeDocumentId = activeDocument?.id ?? null;
+  const viewScope = `${activeDocumentId ?? ""}\u0000${activeSection?.id ?? ""}\u0000${activeSection?.start ?? 0}\u0000${text.length}`;
+  const [navigation, setNavigation] = useState<{ scope: string; textOffset: number } | null>(null);
+  const navigationTextOffset = navigation?.scope === viewScope ? navigation.textOffset : null;
+  const [selection, setSelection] = useState<{ scope: string; quote: string; textOffset: number } | null>(null);
+  const selectedPassage = selection?.scope === viewScope ? selection : null;
 
-  useEffect(() => {
-    editingRef.current = editing;
-    editDraftRef.current = editDraft;
-    onEditEndRef.current = onEditEnd;
-    onTextChangeRef.current = onTextChange;
-  }, [editDraft, editing, onEditEnd, onTextChange]);
+  const editor = useReaderSectionEditor({
+    documentId: activeDocumentId,
+    text,
+    onTextChange,
+    onEditStart,
+    onEditEnd,
+  });
+  const { editing, finishEditing, startEditing: openEditor } = editor;
+  const startEditing = useCallback(() => {
+    // The selection lives in the rendered article, which the editor replaces.
+    setSelection(null);
+    openEditor();
+  }, [openEditor]);
 
-  useEffect(() => {
-    if (previousDocumentIdRef.current !== activeDocument?.id) {
-      // A pending debounced commit belongs to the previous document; letting it
-      // fire now would write stale text into the newly opened one.
-      cancelEditCommit();
-      if (editingRef.current) onEditEndRef.current?.();
-    }
-    previousDocumentIdRef.current = activeDocument?.id;
-    setNavigationTextOffset(null);
-    setSelectedPassage(null);
-    setEditing(false);
-  }, [activeDocument?.id, cancelEditCommit]);
-
-  useEffect(() => () => {
-    if (editCommitTimerRef.current !== null) {
-      window.clearTimeout(editCommitTimerRef.current);
-      editCommitTimerRef.current = null;
-      if (editingRef.current) onTextChangeRef.current(editDraftRef.current);
-    }
-    if (editingRef.current) onEditEndRef.current?.();
-  }, []);
-
-  useEffect(() => {
-    if (editing) return;
-    setNavigationTextOffset(null);
-    setSelectedPassage(null);
-    setEditDraft(text);
-  }, [activeSection?.id, editing, text]);
-
-  useEffect(() => {
-    followPausedRef.current = false;
-    setFollowPaused(false);
-  }, [activeDocument?.id, activeSection?.id]);
-
-  /** Scroll the reading pane so the given local text offset sits in the upper third. */
-  const scrollToLocalOffset = useCallback((localOffset: number) => {
-    const scroller = documentScrollerRef.current;
-    const root = readerTextRef.current;
-    if (!scroller || !root) return;
-    const paragraphs = [...root.querySelectorAll<HTMLElement>("[data-block-start]")];
-    if (paragraphs.length === 0) return;
-    let paragraph = paragraphs[0];
-    for (const element of paragraphs) {
-      if (Number(element.dataset.blockStart) > localOffset) break;
-      paragraph = element;
-    }
-
-    let remaining = Math.max(0, localOffset - Number(paragraph.dataset.blockStart));
-    const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
-    let node = walker.nextNode() as Text | null;
-    while (node && remaining > node.length) {
-      remaining -= node.length;
-      node = walker.nextNode() as Text | null;
-    }
-    const range = document.createRange();
-    if (node) {
-      range.setStart(node, Math.min(node.length, remaining));
-      range.collapse(true);
-    } else {
-      range.selectNodeContents(paragraph);
-      range.collapse(true);
-    }
-    const rangeRect = typeof range.getBoundingClientRect === "function"
-      ? range.getBoundingClientRect()
-      : null;
-    const anchorRect = rangeRect && (rangeRect.height > 0 || rangeRect.top !== 0)
-      ? rangeRect
-      : paragraph.getBoundingClientRect();
-    const lead = Math.max(32, scroller.clientHeight * 0.28);
-    const nextTop = Math.max(
-      0,
-      scroller.scrollTop + anchorRect.top - scroller.getBoundingClientRect().top - lead,
-    );
-    if (Math.abs(scroller.scrollTop - nextTop) < 1) return;
-    programmaticScrollUntilRef.current = performance.now() + INSTANT_SCROLL_GRACE_MS;
-    scroller.scrollTop = nextTop;
-  }, []);
-
-  useLayoutEffect(() => {
-    if (editing) return;
-    // A grace window opened just before this section change has nothing left to cover.
-    programmaticScrollUntilRef.current = 0;
-    const pending = pendingScrollOffsetRef.current;
-    pendingScrollOffsetRef.current = null;
-    if (pending !== null && activeSection && pending >= activeSection.start) {
-      scrollToLocalOffset(pending - activeSection.start);
-      return;
-    }
-    if (documentScrollerRef.current) documentScrollerRef.current.scrollTop = 0;
-    if (textareaRef.current) textareaRef.current.scrollTop = 0;
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only on document/section change
-  }, [activeDocument?.id, activeSection?.id, editing]);
+  const hasAudio = totalDuration > 0;
+  const autoFollow = useReaderAutoFollow({
+    scope: viewScope,
+    documentId: activeDocumentId,
+    sectionId: activeSection?.id ?? null,
+    sectionStart: activeSection?.start ?? null,
+    editing,
+    isPlaying,
+    hasAudio,
+    scrollerRef: documentScrollerRef,
+    articleRef: readerTextRef,
+    textareaRef,
+  });
+  const { followPaused, scrollMarkerIntoView } = autoFollow;
 
   const previewChunks = useMemo(
     () => selectedDesktopModel?.key === "qwen3"
@@ -559,7 +464,6 @@ export function AdvancedReaderPage({
   const hasGeneratedSegments = segments.length > 0;
   const meaningfulLength = getMeaningfulTextLength(text);
   const charsRemaining = MIN_TEXT_LENGTH - meaningfulLength;
-  const hasAudio = totalDuration > 0;
   const focusMode = viewPreferences.focusMode && isPlaying && activeRange !== null;
   const sectionStart = activeSection?.start ?? 0;
   const persistedLocalOffset = clamp(
@@ -654,55 +558,6 @@ export function AdvancedReaderPage({
       ? "End of chapter"
       : `${Math.max(1, Math.ceil(((sleepTimer.endsAt ?? sleepNow) - sleepNow) / 60_000))}m`;
 
-  // Auto-follow hands control back the moment the user scrolls during playback,
-  // and stays paused until they resume it deliberately (pill, jump, or replay).
-  // Our own scrolls open a short grace window instead of a one-shot flag: a
-  // smooth scroll fires many `scroll` events, and a flag left armed by a
-  // no-op scroll would swallow the user's next real one.
-  const handleDocumentScroll = () => {
-    if (performance.now() < programmaticScrollUntilRef.current) return;
-    if (isPlaying && hasAudio && !followPausedRef.current) {
-      followPausedRef.current = true;
-      setFollowPaused(true);
-    }
-  };
-
-  const scrollMarkerIntoView = useCallback((recenter = false) => {
-    const scroller = documentScrollerRef.current;
-    if (!scroller) return;
-    const marker = scroller.querySelector<HTMLElement>(".reader-word-highlight-active")
-      ?? scroller.querySelector<HTMLElement>(".reader-chunk-highlight-active");
-    if (!marker) return;
-
-    const height = scroller.clientHeight;
-    const markerTop = marker.getBoundingClientRect().top - scroller.getBoundingClientRect().top;
-    // The page holds still while the spoken word stays in a comfortable band;
-    // re-pinning it on every new line made the text lurch every few seconds.
-    if (!recenter && markerTop >= height * FOLLOW_BAND_TOP && markerTop <= height * FOLLOW_BAND_BOTTOM) return;
-
-    // When it leaves the band, glide it back to the upper third, book-style.
-    const lead = Math.max(32, height * 0.28);
-    const nextTop = Math.max(0, scroller.scrollTop + markerTop - lead);
-    if (Math.abs(scroller.scrollTop - nextTop) < 1) return;
-    const smooth = !recenter && !prefersReducedMotion() && typeof scroller.scrollTo === "function";
-    programmaticScrollUntilRef.current = performance.now()
-      + (smooth ? SMOOTH_SCROLL_GRACE_MS : INSTANT_SCROLL_GRACE_MS);
-    if (smooth) scroller.scrollTo({ top: nextTop, behavior: "smooth" });
-    else scroller.scrollTop = nextTop;
-  }, []);
-
-  const resumeFollowing = useCallback(() => {
-    followPausedRef.current = false;
-    setFollowPaused(false);
-    scrollMarkerIntoView(true);
-  }, [scrollMarkerIntoView]);
-
-  useEffect(() => {
-    if (!isPlaying) return;
-    followPausedRef.current = false;
-    setFollowPaused(false);
-  }, [isPlaying]);
-
   useEffect(() => {
     if (!isPlaying || followPaused) return;
     scrollMarkerIntoView();
@@ -739,20 +594,6 @@ export function AdvancedReaderPage({
   const activeSegmentNumber = activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null;
   const canRetakeCurrentSegment = hasGeneratedSegments && canRetakeSegments && activeSegmentIndex >= 0 && !isRetaking;
 
-  const startEditing = useCallback(() => {
-    setEditDraft(text);
-    onEditStart?.();
-    setEditing(true);
-  }, [onEditStart, text]);
-
-  const finishEditing = useCallback(() => {
-    if (!editing) return;
-    cancelEditCommit();
-    onTextChange(editDraft);
-    onEditEnd?.();
-    setEditing(false);
-  }, [cancelEditCommit, editDraft, editing, onEditEnd, onTextChange]);
-
   const handlePreviousSegment = useCallback(() => {
     if (activeSegmentIndex > 0) {
       onJumpToSegment(segments[activeSegmentIndex - 1].id);
@@ -773,11 +614,10 @@ export function AdvancedReaderPage({
 
   const handleJumpToOffset = useCallback((offset: number, positionSec?: number) => {
     finishEditing();
-    followPausedRef.current = false;
-    setFollowPaused(false);
+    autoFollow.release();
     const documentLength = activeDocument?.text.length ?? sectionStart + text.length;
     const targetOffset = clamp(offset, 0, documentLength);
-    setNavigationTextOffset(targetOffset);
+    setNavigation({ scope: viewScope, textOffset: targetOffset });
     onNavigateToOffset?.(targetOffset, positionSec);
 
     const sectionEnd = activeSection?.end ?? sectionStart + text.length;
@@ -788,7 +628,7 @@ export function AdvancedReaderPage({
     // change; without a navigation handler nothing consumes it and it would
     // hijack the next unrelated section change instead.
     if (!isCurrentSection && onNavigateToOffset) {
-      pendingScrollOffsetRef.current = targetOffset;
+      autoFollow.scrollAfterSectionChange(targetOffset);
       return;
     }
     const localOffset = clamp(targetOffset - sectionStart, 0, text.length);
@@ -799,19 +639,20 @@ export function AdvancedReaderPage({
       if (targetSegment) onJumpToSegment(targetSegment.id);
     }
 
-    scrollToLocalOffset(localOffset);
+    autoFollow.scrollToLocalOffset(localOffset);
   }, [
     activeDocument?.text.length,
     activeSection?.end,
+    autoFollow,
     finishEditing,
     onJumpToSegment,
     onNavigateToOffset,
     onSeek,
-    scrollToLocalOffset,
     sectionStart,
     segments,
     text.length,
     totalDuration,
+    viewScope,
   ]);
 
   /**
@@ -856,18 +697,18 @@ export function AdvancedReaderPage({
     if (!info) return;
     if (!info.collapsed) {
       const quote = info.quote.trim().replace(/\s+/g, " ").slice(0, 500);
-      if (quote) setSelectedPassage({ quote, textOffset: sectionStart + info.local });
+      if (quote) setSelection({ scope: viewScope, quote, textOffset: sectionStart + info.local });
       return;
     }
     // A plain click only dismisses the note pill — seeking is double-click.
-    setSelectedPassage(null);
-  }, [getArticleSelectionOffset, sectionStart]);
+    setSelection(null);
+  }, [getArticleSelectionOffset, sectionStart, viewScope]);
 
   const handleReaderTextDoubleClick = useCallback(() => {
     const info = getArticleSelectionOffset();
     if (!info) return;
     window.getSelection()?.removeAllRanges();
-    setSelectedPassage(null);
+    setSelection(null);
     handleJumpToOffset(sectionStart + info.local);
   }, [getArticleSelectionOffset, handleJumpToOffset, sectionStart]);
 
@@ -880,7 +721,7 @@ export function AdvancedReaderPage({
       // Each page turn flushes, saves, and re-sections upstream, so a held key
       // must not fire one per repeat.
       if (event.repeat) return;
-      if (editingRef.current) return;
+      if (editing) return;
       const target = event.target;
       if (
         target instanceof HTMLElement
@@ -898,7 +739,7 @@ export function AdvancedReaderPage({
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
-  }, [handleJumpToOffset, nextSection, previousSection]);
+  }, [editing, handleJumpToOffset, nextSection, previousSection]);
 
   // Reader-level keys: "?" lists the shortcuts, "F" toggles the focus layout.
   useEffect(() => {
@@ -962,9 +803,18 @@ export function AdvancedReaderPage({
         loading={libraryLoading}
         persistent={libraryPersistent}
         onClose={() => setLibraryOpen(false)}
-        onOpenDocument={(id) => onOpenDocument?.(id)}
-        onNewDocument={() => onNewDocument?.()}
-        onDeleteDocument={(id) => onDeleteDocument?.(id)}
+        onOpenDocument={(id) => {
+          if (id !== activeDocumentId) finishEditing();
+          onOpenDocument?.(id);
+        }}
+        onNewDocument={() => {
+          finishEditing();
+          onNewDocument?.();
+        }}
+        onDeleteDocument={(id) => {
+          if (id === activeDocumentId) finishEditing();
+          onDeleteDocument?.(id);
+        }}
         onUpdateMetadata={(patch) => onUpdateDocumentMetadata?.(patch)}
         onJumpToOffset={handleJumpToOffset}
         onAddBookmark={(input) => onAddBookmark?.(input)}
@@ -1482,23 +1332,10 @@ export function AdvancedReaderPage({
               id={readingTextId}
               ref={textareaRef}
               aria-label="Reading Text"
-              value={editDraft}
-              onChange={(event) => {
-                const value = event.target.value;
-                setEditDraft(value);
-                // Re-sectioning the document on every keystroke is expensive;
-                // debounce the upstream commit and flush on blur/finish.
-                cancelEditCommit();
-                editCommitTimerRef.current = window.setTimeout(() => {
-                  editCommitTimerRef.current = null;
-                  onTextChange(value);
-                }, 400);
-              }}
-              onBlur={() => {
-                cancelEditCommit();
-                onTextChange(editDraft);
-              }}
-              onScroll={handleDocumentScroll}
+              value={editor.draft}
+              onChange={(event) => editor.changeDraft(event.target.value)}
+              onBlur={editor.commitDraft}
+              onScroll={autoFollow.handleScroll}
               onDoubleClick={(event) => {
                 if (!hasGeneratedSegments) return;
                 const targetSegment = findSegmentForTextOffset(segments, event.currentTarget.selectionStart);
@@ -1515,7 +1352,7 @@ export function AdvancedReaderPage({
               role="document"
               aria-label="Reading Text"
               tabIndex={0}
-              onScroll={handleDocumentScroll}
+              onScroll={autoFollow.handleScroll}
               className={`absolute inset-0 overflow-auto text-text-primary outline-none ${documentPadding(fullScreen)} ${fullScreen ? "reader-scroll-edge" : ""} ${focusMode ? "reader-focus" : ""}`}
               style={{ fontSize: viewPreferences.fontSize, lineHeight: viewPreferences.lineHeight }}
             >
@@ -1581,7 +1418,7 @@ export function AdvancedReaderPage({
                     onClick={() => {
                       const offset = selectedPassage.textOffset;
                       window.getSelection()?.removeAllRanges();
-                      setSelectedPassage(null);
+                      setSelection(null);
                       handleJumpToOffset(offset);
                     }}
                     className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-colors hover:bg-accent-light"
@@ -1602,7 +1439,7 @@ export function AdvancedReaderPage({
                           positionSec: findSegmentForTextOffset(segments, local)?.startSec ?? 0,
                         });
                         window.getSelection()?.removeAllRanges();
-                        setSelectedPassage(null);
+                        setSelection(null);
                       }}
                       className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-colors hover:bg-accent-light"
                     >
@@ -1627,7 +1464,7 @@ export function AdvancedReaderPage({
                     aria-label="Dismiss"
                     onClick={() => {
                       window.getSelection()?.removeAllRanges();
-                      setSelectedPassage(null);
+                      setSelection(null);
                     }}
                     className="flex h-7 w-7 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-accent-light hover:text-accent"
                   >
@@ -1640,7 +1477,7 @@ export function AdvancedReaderPage({
           {followPaused && isPlaying && !editing && (
             <button
               type="button"
-              onClick={resumeFollowing}
+              onClick={autoFollow.resume}
               className="absolute bottom-5 left-1/2 z-10 -translate-x-1/2 glass rounded-full px-4 py-2 text-xs font-semibold text-accent transition-transform active:scale-[0.98]"
             >
               Resume auto-follow

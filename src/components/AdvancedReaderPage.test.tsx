@@ -188,6 +188,50 @@ describe("AdvancedReaderPage", () => {
     expect(view.props.onTextChange).toHaveBeenCalledWith("CHAPTER TWO ");
   });
 
+  it("commits the last keystrokes to the open book before switching books mid-edit", () => {
+    const first = createReaderDocument({ id: "switch-one", title: "One", text: "First book." });
+    const second = createReaderDocument({ id: "switch-two", title: "Two", text: "Second book." });
+    const onEditEnd = vi.fn();
+    const onOpenDocument = vi.fn();
+    const view = renderReader({
+      text: first.text,
+      documents: [first, second],
+      activeDocument: first,
+      onEditEnd,
+      onOpenDocument,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit current section" }));
+    fireEvent.change(screen.getByLabelText("Reading Text"), { target: { value: "First book, revised." } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Two/ }));
+
+    expect(view.props.onTextChange).toHaveBeenCalledWith("First book, revised.");
+    expect(onEditEnd).toHaveBeenCalledTimes(1);
+    expect(onOpenDocument).toHaveBeenCalledWith("switch-two");
+    const commitOrder = vi.mocked(view.props.onTextChange).mock.invocationCallOrder[0];
+    expect(commitOrder).toBeLessThan(onOpenDocument.mock.invocationCallOrder[0]);
+  });
+
+  it("drops the selection toolbar in the same render that shows another book", () => {
+    const first = createReaderDocument({ id: "scope-one", title: "One", text: "A memorable first passage." });
+    const second = createReaderDocument({ id: "scope-two", title: "Two", text: "A different second passage." });
+    const view = renderReader({ text: first.text, documents: [first, second], activeDocument: first });
+    const textNode = view.container.querySelector("article span")!.firstChild!;
+    const range = document.createRange();
+    range.setStart(textNode, 2);
+    range.setEnd(textNode, 12);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.mouseUp(view.container.querySelector("article")!);
+    expect(screen.getByRole("toolbar", { name: "Selected passage" })).toBeInTheDocument();
+
+    view.rerender(<AdvancedReaderPage {...view.props} text={second.text} activeDocument={second} />);
+
+    expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+    window.getSelection()?.removeAllRanges();
+  });
+
   it("closes popovers with Escape and restores focus to their trigger", () => {
     renderReader();
     const trigger = screen.getByRole("button", { name: "Reading appearance" });
