@@ -354,8 +354,10 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(second.response).toMatchObject({ ok: true, requestId: "r2" });
   });
 
-  it("converts pcm16-encoded audio chunks to Float32 before delivery", async () => {
-    const { pool } = makePool((message, server) => {
+  it.each(["opus", "pcm16"])("rejects an audio chunk that declares a %s encoding", async (encoding) => {
+    // Float32 is the only wire format; Int16 would quantise wav-f32/wav-pcm24
+    // exports, so no encoding field is accepted at all.
+    const { pool, children } = makePool((message, server) => {
       server.sendJson({
         type: "audio_chunk",
         requestId: message.requestId,
@@ -364,87 +366,21 @@ describe("createWebSocketBridgeWorkerPool", () => {
         sampleRate: 24000,
         sampleCount: 2,
         silenceAfterSamples: 0,
-        encoding: "pcm16",
+        encoding,
       });
-      const audio = Buffer.alloc(2 * Int16Array.BYTES_PER_ELEMENT);
-      audio.writeInt16LE(16384, 0);
-      audio.writeInt16LE(-32768, 2);
-      server.sendBinary(audio);
-      server.sendJson({
-        type: "result",
-        requestId: message.requestId,
-        ok: true,
-        result: {
-          audioTransport: "websocket-binary",
-          audioChunkCount: 1,
-          sampleRate: 24000,
-          modelRepo: "R",
-          durationSec: 1,
-          elapsedSec: 2,
-          phaseTimingsSec: {},
-        },
-      });
+      server.sendBinary(Buffer.alloc(2 * Int16Array.BYTES_PER_ELEMENT));
     });
-    const audioChunks: { sampleCount: number; audio: ArrayBuffer }[] = [];
+    const audioChunks: unknown[] = [];
 
-    const run = await pool.run("qwen3", {
+    await expect(pool.run("qwen3", {
       ...RUN_DEFAULTS,
       requestId: "r1",
       payload: { text: "one" },
       spawnConfig: SPAWN_CONFIG,
       onAudioChunk: (payload) => audioChunks.push(payload),
-    });
-
-    expect(run.response).toMatchObject({ ok: true, requestId: "r1" });
-    expect(audioChunks).toHaveLength(1);
-    expect(audioChunks[0].sampleCount).toBe(2);
-    const samples = new Float32Array(audioChunks[0].audio);
-    expect(Array.from(samples)).toEqual([0.5, -1]);
-  });
-
-  it("rejects a pcm16 audio chunk whose binary frame has a Float32 byte length", async () => {
-    const { pool } = makePool((message, server) => {
-      server.sendJson({
-        type: "audio_chunk",
-        requestId: message.requestId,
-        index: 0,
-        total: 0,
-        sampleRate: 24000,
-        sampleCount: 2,
-        silenceAfterSamples: 0,
-        encoding: "pcm16",
-      });
-      server.sendBinary(Buffer.alloc(2 * Float32Array.BYTES_PER_ELEMENT));
-    });
-
-    await expect(pool.run("qwen3", {
-      ...RUN_DEFAULTS,
-      requestId: "r1",
-      payload: { text: "one" },
-      spawnConfig: SPAWN_CONFIG,
-    })).rejects.toThrow(/unexpected byte length/);
-  });
-
-  it("rejects an audio chunk with an unsupported encoding", async () => {
-    const { pool } = makePool((message, server) => {
-      server.sendJson({
-        type: "audio_chunk",
-        requestId: message.requestId,
-        index: 0,
-        total: 0,
-        sampleRate: 24000,
-        sampleCount: 2,
-        silenceAfterSamples: 0,
-        encoding: "opus",
-      });
-    });
-
-    await expect(pool.run("qwen3", {
-      ...RUN_DEFAULTS,
-      requestId: "r1",
-      payload: { text: "one" },
-      spawnConfig: SPAWN_CONFIG,
     })).rejects.toThrow(/unsupported encoding/);
+    expect(audioChunks).toEqual([]);
+    expect(children[0].killed).toBe(true);
   });
 
   it("keeps a cancellation authoritative over a success result already in flight", async () => {

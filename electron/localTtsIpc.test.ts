@@ -508,32 +508,34 @@ describe("localTtsIpc bridge result parsing", () => {
     expect(() => parseBridgeGenerateResult({ ...generateResult, phaseTimingsSec: { bad: -1 } })).toThrow("phaseTimingsSec");
   });
 
-  it("parses one-shot probe envelopes and rejects one-shot generate results", () => {
+  it("parses one-shot probe envelopes", () => {
     const probeEnvelope = `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: true, result: probeResult })}`;
-    expect(parseBridgeResult(`noise\n${probeEnvelope}\n`, "", "probe")).toEqual(probeResult);
+    expect(parseBridgeResult(`noise\n${probeEnvelope}\n`, "")).toEqual(probeResult);
 
+    // A generate-shaped result is not a probe result.
     const generateEnvelope = `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: true, result: generateResult })}`;
-    expect(() => parseBridgeResult(generateEnvelope, "", "generate"))
-      .toThrow("One-shot generate bridge results are not supported");
-    expect(() => parseBridgeResult("", "stderr text", "probe")).toThrow("stderr text");
-    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}{bad`, "", "probe")).toThrow("Failed parsing");
-    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "Bridge failed" })}`, "", "probe"))
+    expect(() => parseBridgeResult(generateEnvelope, "")).toThrow("`ready` boolean");
+    expect(() => parseBridgeResult("", "stderr text")).toThrow("stderr text");
+    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}{bad`, "")).toThrow("Failed parsing");
+    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "Bridge failed" })}`, ""))
       .toThrow("Bridge failed");
-  });
-
-  it("parses WebSocket envelopes", () => {
-    expect(parseBridgeEnvelopeResult({ ok: true, result: generateResult }, "generate")).toEqual(generateResult);
-    expect(parseBridgeEnvelopeResult({ ok: true, result: probeResult }, "probe")).toEqual(probeResult);
-    expect(() => parseBridgeEnvelopeResult({ ok: false, error: "request failed" }, "generate"))
-      .toThrow("request failed");
 
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    expect(() => parseBridgeEnvelopeResult({
-      ok: false,
-      error: "request failed",
-      details: "stack",
-    }, "generate")).toThrow("request failed");
+    expect(() => parseBridgeResult(
+      `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "Bridge failed", details: "stack" })}`,
+      "",
+    )).toThrow("Bridge failed");
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("local bridge details\nstack"));
     errorSpy.mockRestore();
+  });
+
+  it("parses WebSocket generate envelopes", () => {
+    expect(parseBridgeEnvelopeResult({ ok: true, result: generateResult })).toEqual(generateResult);
+    // A probe-shaped result is not a generate result.
+    expect(() => parseBridgeEnvelopeResult({ ok: true, result: probeResult })).toThrow("sampleRate");
+    expect(() => parseBridgeEnvelopeResult({ ok: false, error: "request failed", details: "stack" }))
+      .toThrow("request failed");
+    expect(() => parseBridgeEnvelopeResult({ ok: false })).toThrow("Local bridge failed.");
+    expect(() => parseBridgeEnvelopeResult({ result: generateResult })).toThrow("Missing required `ok` field.");
   });
 });

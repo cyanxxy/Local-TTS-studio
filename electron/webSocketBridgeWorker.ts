@@ -303,20 +303,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function pcm16ToFloat32Buffer(pcm: ArrayBuffer): ArrayBuffer {
-  const source = new Int16Array(pcm);
-  const target = new Float32Array(source.length);
-  for (let i = 0; i < source.length; i += 1) {
-    target[i] = source[i] / 32768;
-  }
-  return target.buffer;
-}
-
-// Internal metadata for a chunk whose binary frame has not arrived yet. The
-// bridge sends `encoding: "pcm16"` when the binary frame carries Int16 PCM
-// (half the bytes of Float32); the worker converts before delivery so
-// consumers always see Float32 audio.
-type PendingAudioChunkMetadata = Omit<WebSocketAudioChunk, "audio"> & { pcm16: boolean };
+// Metadata for a chunk whose binary frame has not arrived yet. Audio is always
+// little-endian Float32: the bridge never negotiates another encoding, and
+// exports (wav-f32, wav-pcm24) need the full precision end to end.
+type PendingAudioChunkMetadata = Omit<WebSocketAudioChunk, "audio">;
 
 function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: string): PendingAudioChunkMetadata {
   const fields = ["index", "total", "sampleRate", "sampleCount", "silenceAfterSamples"] as const;
@@ -352,7 +342,7 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
   if (silenceAfterSamples > MAX_AUDIO_SILENCE_SAMPLES) {
     throw new Error("WebSocket bridge returned an audio chunk with excessive trailing silence.");
   }
-  if (parsed.encoding !== undefined && parsed.encoding !== "pcm16") {
+  if (parsed.encoding !== undefined) {
     throw new Error("WebSocket bridge returned an audio chunk with an unsupported encoding.");
   }
   const hasTextUnitIndex = parsed.textUnitIndex !== undefined;
@@ -384,7 +374,6 @@ function parseAudioChunkMetadata(parsed: Record<string, unknown>, requestId: str
     sampleCount,
     silenceAfterSamples,
     ...textUnitMetadata,
-    pcm16: parsed.encoding === "pcm16",
   };
 }
 
@@ -724,8 +713,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         killWorker(model, worker);
         return;
       }
-      const bytesPerSample = metadata.pcm16 ? Int16Array.BYTES_PER_ELEMENT : Float32Array.BYTES_PER_ELEMENT;
-      if (binaryData.byteLength !== metadata.sampleCount * bytesPerSample) {
+      if (binaryData.byteLength !== metadata.sampleCount * Float32Array.BYTES_PER_ELEMENT) {
         settleActive(model, worker, {
           ok: false,
           error: new Error("WebSocket bridge returned an audio binary frame with an unexpected byte length."),
@@ -738,10 +726,8 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       }
       active.receivedAudioChunkIndexes.add(metadata.index);
       active.receivedAudioOutputSamples += metadata.sampleCount + metadata.silenceAfterSamples;
-      const { pcm16, ...chunkMetadata } = metadata;
-      const audio = pcm16 ? pcm16ToFloat32Buffer(binaryData) : binaryData;
       try {
-        active.onAudioChunk({ ...chunkMetadata, audio });
+        active.onAudioChunk({ ...metadata, audio: binaryData });
       } catch {
         // An audio chunk consumer must never break request handling.
       }

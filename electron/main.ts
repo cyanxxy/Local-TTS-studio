@@ -43,7 +43,6 @@ import { configureApplicationMenu } from "./applicationMenu";
 import { LocalModelLifecycle } from "./localModelLifecycle";
 import { getDirectorySizeBytes } from "./directorySize";
 import {
-  BRIDGE_PROGRESS_PREFIX,
   assertLocalModel,
   isRecord,
   parseBridgeEnvelopeResult,
@@ -86,11 +85,6 @@ const RUST_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
 // local runtimes. Keep its warm-start grace short so macOS can reclaim unified
 // memory promptly after the user finishes a generation.
 const QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS = 60 * 1000;
-// Local runtimes use the resident WebSocket worker for generation
-// instead of the legacy stdout line-framed subprocess protocol. There is
-// intentionally no stdout fallback for models in this set; generation is
-// WebSocket-only, and `probe` is the only remaining one-shot subprocess action.
-const WEBSOCKET_WORKER_MODELS: ReadonlySet<LocalModel> = new Set<LocalModel>(["neutts", "qwen3"]);
 const windowOptions = { isDev, appDirectory: __dirname };
 registerAppScheme();
 
@@ -489,11 +483,7 @@ async function runRustBridge(
   const model = sanitized.model;
   const cacheDir = getCacheDir(model);
   const bridgeBinary = getRustBridgeBinaryPath();
-  const shouldRateLimit = action === "generate";
   const requestId = sanitized.requestId;
-  // Generation for every local runtime runs on a resident WebSocket worker
-  // (load once, serve many). Probe keeps the one-shot subprocess path below.
-  const useWebSocketWorker = action === "generate" && WEBSOCKET_WORKER_MODELS.has(model);
 
   const runWebSocketGenerate = async (): Promise<unknown> => {
     const generateRequestId = requestId!; // generate always carries a requestId.
@@ -569,12 +559,12 @@ async function runRustBridge(
       cancelledWarmWaiters.delete(generateRequestId);
     }
     const { response } = await runPromise;
-    return parseBridgeEnvelopeResult(response, "generate");
+    return parseBridgeEnvelopeResult(response);
   };
 
-  // One-shot subprocess path. With generation served by the WebSocket worker
-  // pool, this is only ever reached for `probe`: it runs to a single absolute
-  // deadline and parses the stdout result envelope with parseBridgeResult.
+  // One-shot subprocess path, used only for `probe`: it runs to a single
+  // absolute deadline and parses the stdout result envelope with
+  // parseBridgeResult. The probe prints nothing but that result line.
   const runProbeBridge = async () => {
     await fs.access(bridgeBinary);
     await fs.mkdir(cacheDir, { recursive: true });
@@ -589,7 +579,7 @@ async function runRustBridge(
         bridgeBinary,
         [
           "--action",
-          action,
+          "probe",
           "--model",
           model,
           "--cache-dir",
@@ -610,7 +600,6 @@ async function runRustBridge(
       // multi-megabyte string reallocates the whole buffer on every data event.
       const stdoutParts: string[] = [];
       const stderrParts: string[] = [];
-      let stdoutLineBuffer = "";
       let stdoutBytes = 0;
       let stderrBytes = 0;
       let settled = false;
@@ -649,30 +638,7 @@ async function runRustBridge(
           rejectForOutputLimit("stdout", RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES);
           return;
         }
-        const text = chunk.toString("utf-8");
-        stdoutParts.push(text);
-        stdoutLineBuffer += text;
-
-        const lines = stdoutLineBuffer.split(/\r?\n/);
-        stdoutLineBuffer = lines.pop() ?? "";
-
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line.startsWith(BRIDGE_PROGRESS_PREFIX) || !requestId || !event) continue;
-
-          try {
-            const progress = parseBridgeProgressResult(JSON.parse(line.slice(BRIDGE_PROGRESS_PREFIX.length)));
-            event.sender.send("local-tts:progress", {
-              requestId,
-              model,
-              ...progress,
-            });
-          } catch (err) {
-            console.warn(
-              `[local-tts:${action}] Failed parsing bridge progress: ${err instanceof Error ? err.message : String(err)}`,
-            );
-          }
-        }
+        stdoutParts.push(chunk.toString("utf-8"));
       });
 
       child.stderr.on("data", (chunk: Buffer) => {
@@ -706,7 +672,7 @@ async function runRustBridge(
         }
 
         try {
-          resolve(parseBridgeResult(stdoutParts.join(""), stderr, action));
+          resolve(parseBridgeResult(stdoutParts.join(""), stderr));
         } catch (err) {
           reject(err);
         }
@@ -718,10 +684,9 @@ async function runRustBridge(
     });
   };
 
-  const task = useWebSocketWorker ? runWebSocketGenerate : runProbeBridge;
-  return await (shouldRateLimit
-    ? generateRateLimiter.run(model, task, sanitized.continuation)
-    : task());
+  return await (action === "generate"
+    ? generateRateLimiter.run(model, runWebSocketGenerate, sanitized.continuation)
+    : runProbeBridge());
   } finally {
     signal.removeEventListener("abort", cancel);
   }

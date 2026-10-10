@@ -19,7 +19,6 @@ import {
 } from "./localTtsLimits";
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
-export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
 export const LOCAL_MODELS = ["neutts", "qwen3"] as const;
 
 const MAX_REFERENCE_TEXT_LENGTH = 2000;
@@ -678,11 +677,14 @@ export function parseBridgeGenerateResult(result: unknown): BridgeGenerateResult
   return parsed;
 }
 
+/**
+ * Parses the stdout of the one-shot `--action probe` subprocess, the only
+ * bridge action that still reports through a stdout result line.
+ */
 export function parseBridgeResult(
   stdout: string,
   stderr: string,
-  action: BridgeAction,
-): BridgeProbeResult | BridgeGenerateResult {
+): BridgeProbeResult {
   const lines = stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -711,40 +713,25 @@ export function parseBridgeResult(
 
   if (!parsed.ok) {
     if (parsed.details) {
-      console.error(`[local-tts:${action}] local bridge details\n${parsed.details}`);
+      console.error(`[local-tts:probe] local bridge details\n${parsed.details}`);
     }
     throw new Error(parsed.error ?? "Local bridge failed.");
-  }
-
-  if (action !== "probe") {
-    throw new Error("One-shot generate bridge results are not supported; generation is WebSocket-binary only.");
   }
 
   return parseBridgeProbeResult(parsed.result);
 }
 
-export function parseBridgeEnvelopeResult(
-  decoded: unknown,
-  action: BridgeAction,
-): BridgeProbeResult | BridgeGenerateResult {
+/**
+ * Parses the terminal result frame of a WebSocket generate request. The worker
+ * pool settles failed envelopes itself, so only a successful one reaches here;
+ * a failed one is still rejected rather than trusted.
+ */
+export function parseBridgeEnvelopeResult(decoded: unknown): BridgeGenerateResult {
   if (!isRecord(decoded) || typeof decoded.ok !== "boolean") {
     throw new Error("Missing required `ok` field.");
   }
-  const parsed = {
-    ok: decoded.ok,
-    result: decoded.result,
-    error: typeof decoded.error === "string" ? decoded.error : undefined,
-    details: typeof decoded.details === "string" ? decoded.details : undefined,
-  };
-
-  if (!parsed.ok) {
-    if (parsed.details) {
-      console.error(`[local-tts:${action}] local bridge details\n${parsed.details}`);
-    }
-    throw new Error(parsed.error ?? "Local bridge failed.");
+  if (!decoded.ok) {
+    throw new Error(typeof decoded.error === "string" ? decoded.error : "Local bridge failed.");
   }
-
-  return action === "probe"
-    ? parseBridgeProbeResult(parsed.result)
-    : parseBridgeGenerateResult(parsed.result);
+  return parseBridgeGenerateResult(decoded.result);
 }
