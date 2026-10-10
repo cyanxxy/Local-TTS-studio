@@ -43,6 +43,28 @@ pub fn read_message(client: &mut Client) -> Message {
     client.read().expect("a message from the bridge")
 }
 
+pub fn read_json(client: &mut Client) -> Value {
+    match read_message(client) {
+        Message::Text(text) => serde_json::from_str(&text).unwrap(),
+        other => panic!("expected a text frame, got {other:?}"),
+    }
+}
+
+pub fn read_binary(client: &mut Client) -> Vec<u8> {
+    match read_message(client) {
+        Message::Binary(bytes) => bytes.to_vec(),
+        other => panic!("expected a binary frame, got {other:?}"),
+    }
+}
+
+/// Little-endian Float32 samples from a binary audio frame.
+pub fn decode_samples(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+        .collect()
+}
+
 pub fn send_json(client: &mut Client, message: Value) {
     client
         .send(Message::Text(message.to_string().into()))

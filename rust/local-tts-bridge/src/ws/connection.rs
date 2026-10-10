@@ -45,6 +45,13 @@ pub struct WebSocketConnection {
 
 impl WebSocketConnection {
     pub fn accept(mut stream: TcpStream, auth_token: &str) -> Result<Self> {
+        // Everything below relies on blocking reads and writes bounded by
+        // timeouts. macOS and Windows hand an accepted socket the listener's
+        // nonblocking mode, so never inherit it: an idle read loop would treat
+        // every empty read as an expired timeout and answer it with a ping.
+        stream
+            .set_nonblocking(false)
+            .context("Failed to make the WebSocket connection blocking")?;
         stream
             .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_READ_TIMEOUT_SEC)))
             .context("Failed to set WebSocket read timeout")?;
@@ -288,10 +295,59 @@ fn enable_tcp_keepalive(stream: &TcpStream) {
 mod tests {
     use super::*;
     use crate::protocol::MAX_AUDIO_CHUNK_SAMPLES;
-    use crate::ws::test_support::{READ_TIMEOUT, TOKEN, connected_pair, read_message, send_json};
+    use crate::ws::test_support::{
+        READ_TIMEOUT, TOKEN, connect, connected_pair, read_message, send_json,
+    };
     use std::io::Read;
     use std::net::TcpListener;
     use std::thread;
+
+    #[test]
+    fn a_connection_accepted_from_a_nonblocking_listener_still_waits_for_requests() {
+        // macOS and Windows give an accepted socket the listener's nonblocking
+        // mode. The bridge's idle read then failed at once, every time, and
+        // each failure was answered with a ping: an idle bridge spun a core
+        // and flooded its client.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let client = thread::spawn(move || connect(address, TOKEN).unwrap());
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        };
+        let mut connection = WebSocketConnection::accept(stream, TOKEN).unwrap();
+        let mut client = client.join().unwrap();
+
+        // The request only arrives after the bridge has started waiting.
+        let request = r#"{"requestId":"r1","payload":{}}"#;
+        let sender = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            client.send(Message::Text(request.into())).unwrap();
+            client
+        });
+        assert_eq!(connection.recv_text().unwrap().as_deref(), Some(request));
+
+        // Waiting sent nothing to the client.
+        let mut client = sender.join().unwrap();
+        client
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        match client.read() {
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!("expected no frames while the bridge waited, got {other:?}"),
+        }
+    }
 
     /// Polls until `request_id` reads as cancelled, or gives up at the deadline.
     fn wait_for_cancel(connection: &mut WebSocketConnection, request_id: &str) -> bool {

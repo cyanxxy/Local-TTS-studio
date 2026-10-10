@@ -382,6 +382,392 @@ impl Drop for Heartbeat {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::{CANCELLED_MESSAGE, StreamedAudioSummary};
+    use crate::ws::test_support::{
+        Client, READ_TIMEOUT, TOKEN, connect, decode_samples, read_binary, read_json, read_message,
+        send_json,
+    };
+    use anyhow::bail;
+    use std::io::Read;
+    use std::net::TcpStream;
+    use tungstenite::Message;
+    use tungstenite::http::StatusCode;
+
+    const FAKE_SAMPLE_RATE: usize = 24_000;
+    /// Upper bound for the endless generation, so a lost cancel fails the test.
+    const MAX_FAKE_CHUNKS: usize = 5_000;
+
+    /// A backend whose payload says what to do: stream text units, stream
+    /// until cancelled, return whole-text audio, return nothing, or fail.
+    struct FakeBackend;
+
+    impl FakeBackend {
+        fn stream_unit(
+            connection: &mut WebSocketConnection,
+            request_id: &str,
+            unit: usize,
+            units: usize,
+        ) -> Result<()> {
+            let mut header = json!({
+                "type": "audio_chunk",
+                "requestId": request_id,
+                "index": unit,
+                "total": 0,
+                "sampleRate": FAKE_SAMPLE_RATE,
+                "sampleCount": 2,
+                "silenceAfterSamples": if unit + 1 < units { 4_800 } else { 0 },
+            });
+            if units > 0 {
+                header["textUnitIndex"] = json!(unit);
+                header["textUnitTotal"] = json!(units);
+            }
+            connection.send_json(&header)?;
+            connection.send_binary(float32_to_le_bytes(&[0.25, f32::NAN]))
+        }
+
+        fn streamed_output(chunks: usize) -> GenerationOutput {
+            GenerationOutput {
+                samples: Vec::new(),
+                sample_rate: FAKE_SAMPLE_RATE,
+                model_repo: "fake/streaming".to_string(),
+                device: Some("fake-device".to_string()),
+                warnings: vec!["Fake warning.".to_string()],
+                streamed_audio: Some(StreamedAudioSummary {
+                    sample_count: chunks * 2,
+                    audio_chunk_count: chunks,
+                }),
+                phase_timings: serde_json::Map::new(),
+            }
+        }
+
+        fn buffered_output(samples: Vec<f32>) -> GenerationOutput {
+            GenerationOutput {
+                samples,
+                sample_rate: FAKE_SAMPLE_RATE,
+                model_repo: "fake/buffered".to_string(),
+                device: None,
+                warnings: Vec::new(),
+                streamed_audio: None,
+                phase_timings: serde_json::Map::new(),
+            }
+        }
+    }
+
+    impl Backend for FakeBackend {
+        fn warm(&mut self, payload: Value) -> Result<Value> {
+            if payload["fail"] == true {
+                bail!("fake warm failure");
+            }
+            Ok(json!({ "warmed": true }))
+        }
+
+        fn generate(
+            &mut self,
+            request_id: &str,
+            payload: Value,
+            connection: &mut WebSocketConnection,
+        ) -> Result<GenerationOutput> {
+            let started = Instant::now();
+            match payload["mode"].as_str().unwrap_or_default() {
+                "stream" => {
+                    let units = usize::try_from(payload["units"].as_u64().unwrap()).unwrap();
+                    connection.bail_if_cancelled(request_id)?;
+                    connection.send_progress(request_id, "inference", "Faking it.", started)?;
+                    for unit in 0..units {
+                        connection.bail_if_cancelled(request_id)?;
+                        Self::stream_unit(connection, request_id, unit, units)?;
+                    }
+                    Ok(Self::streamed_output(units))
+                }
+                "until_cancelled" => {
+                    for chunk in 0..MAX_FAKE_CHUNKS {
+                        connection.bail_if_cancelled(request_id)?;
+                        Self::stream_unit(connection, request_id, chunk, 0)?;
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                    Ok(Self::streamed_output(MAX_FAKE_CHUNKS))
+                }
+                "buffered" => {
+                    let samples = usize::try_from(payload["samples"].as_u64().unwrap()).unwrap();
+                    Ok(Self::buffered_output(vec![0.5; samples]))
+                }
+                "silent" => Ok(Self::buffered_output(Vec::new())),
+                _ => bail!("fake generation failure"),
+            }
+        }
+    }
+
+    fn start_server() -> (SocketAddr, JoinHandle<Result<()>>) {
+        let (listener, address) = bind_loopback_listener("127.0.0.1", 0).unwrap();
+        let server = thread::spawn(move || serve_owner(listener, TOKEN, &mut FakeBackend));
+        (address, server)
+    }
+
+    fn generate(client: &mut Client, request_id: &str, payload: Value) {
+        send_json(
+            client,
+            json!({ "requestId": request_id, "payload": payload }),
+        );
+    }
+
+    /// Reads past streamed frames to the next result envelope.
+    fn read_result(client: &mut Client) -> Value {
+        loop {
+            if let Message::Text(text) = read_message(client) {
+                let message: Value = serde_json::from_str(&text).unwrap();
+                if message["type"] == "result" {
+                    return message;
+                }
+            }
+        }
+    }
+
+    fn shut_down(mut client: Client, server: JoinHandle<Result<()>>) {
+        send_json(&mut client, json!({ "command": "shutdown" }));
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn streamed_audio_arrives_as_header_and_payload_pairs_before_the_result() {
+        let (address, server) = start_server();
+        let mut client = connect(address, TOKEN).unwrap();
+        generate(&mut client, "r1", json!({ "mode": "stream", "units": 2 }));
+
+        let progress = read_json(&mut client);
+        assert_eq!(progress["type"], "progress");
+        assert_eq!(progress["requestId"], "r1");
+        assert_eq!(progress["phase"], "inference");
+        assert_eq!(progress["message"], "Faking it.");
+        for unit in 0..2 {
+            let header = read_json(&mut client);
+            assert_eq!(header["type"], "audio_chunk");
+            assert_eq!(header["index"], unit);
+            assert_eq!(header["textUnitIndex"], unit);
+            // NaN never reaches the client.
+            assert_eq!(decode_samples(&read_binary(&mut client)), [0.25, 0.0]);
+        }
+        let result = read_json(&mut client);
+        assert_eq!(result["type"], "result");
+        assert_eq!(result["requestId"], "r1");
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["result"],
+            json!({
+                "audioChunkCount": 2,
+                "audioTransport": "websocket-binary",
+                "device": "fake-device",
+                "durationSec": 0.0,
+                "elapsedSec": 0.0,
+                "modelRepo": "fake/streaming",
+                "phaseTimingsSec": {},
+                "sampleRate": FAKE_SAMPLE_RATE,
+                "warnings": ["Fake warning."],
+            })
+        );
+        shut_down(client, server);
+    }
+
+    #[test]
+    fn whole_text_audio_is_split_into_numbered_transport_frames() {
+        let (address, server) = start_server();
+        let mut client = connect(address, TOKEN).unwrap();
+        let samples = MAX_AUDIO_CHUNK_SAMPLES * 2 + 1_000;
+        generate(
+            &mut client,
+            "r1",
+            json!({ "mode": "buffered", "samples": samples }),
+        );
+
+        for (index, expected) in [MAX_AUDIO_CHUNK_SAMPLES, MAX_AUDIO_CHUNK_SAMPLES, 1_000]
+            .into_iter()
+            .enumerate()
+        {
+            let header = read_json(&mut client);
+            assert_eq!(
+                header,
+                json!({
+                    "type": "audio_chunk",
+                    "requestId": "r1",
+                    "index": index,
+                    "total": 3,
+                    "sampleRate": FAKE_SAMPLE_RATE,
+                    "sampleCount": expected,
+                    "silenceAfterSamples": 0,
+                })
+            );
+            assert_eq!(read_binary(&mut client).len(), expected * 4);
+        }
+        let result = read_json(&mut client);
+        assert_eq!(result["ok"], true);
+        assert_eq!(result["result"]["audioChunkCount"], 3);
+        assert_eq!(
+            result["result"]["durationSec"],
+            round_secs(samples as f64 / FAKE_SAMPLE_RATE as f64)
+        );
+        assert!(result["result"]["phaseTimingsSec"]["transportEncodingSec"].is_number());
+        assert!(result["result"].get("device").is_none());
+        assert!(result["result"].get("warnings").is_none());
+        shut_down(client, server);
+    }
+
+    #[test]
+    fn a_cancel_mid_generation_fails_that_request_and_keeps_serving() {
+        let (address, server) = start_server();
+        let mut client = connect(address, TOKEN).unwrap();
+        generate(&mut client, "r1", json!({ "mode": "until_cancelled" }));
+        assert_eq!(read_json(&mut client)["type"], "audio_chunk");
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "r1" }),
+        );
+        let cancelled = read_result(&mut client);
+        assert_eq!(cancelled["requestId"], "r1");
+        assert_eq!(cancelled["ok"], false);
+        assert_eq!(cancelled["error"], CANCELLED_MESSAGE);
+
+        // A cancel that lands between generations has nothing to abort and
+        // gets no reply, and it does not leak into the next request.
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "r2" }),
+        );
+        generate(&mut client, "r2", json!({ "mode": "stream", "units": 1 }));
+        let completed = read_result(&mut client);
+        assert_eq!(completed["requestId"], "r2");
+        assert_eq!(completed["ok"], true);
+        shut_down(client, server);
+    }
+
+    #[test]
+    fn protocol_errors_are_typed_results() {
+        let (address, server) = start_server();
+        let mut client = connect(address, TOKEN).unwrap();
+
+        client.send(Message::Text("{".into())).unwrap();
+        let invalid = read_json(&mut client);
+        assert_eq!(
+            invalid,
+            json!({
+                "type": "result",
+                "requestId": "",
+                "ok": false,
+                "error": "Invalid WebSocket request JSON.",
+                "details": "Invalid WebSocket request JSON.",
+            })
+        );
+        send_json(&mut client, json!({ "payload": {} }));
+        assert_eq!(
+            read_json(&mut client)["error"],
+            "WebSocket requests require a non-empty requestId."
+        );
+        send_json(&mut client, json!({ "requestId": "x", "command": "typo" }));
+        let unsupported = read_json(&mut client);
+        assert_eq!(unsupported["requestId"], "x");
+        assert_eq!(unsupported["error"], "Unsupported WebSocket command.");
+        send_json(
+            &mut client,
+            json!({ "requestId": "x", "unknownField": true }),
+        );
+        assert_eq!(
+            read_json(&mut client)["error"],
+            "Invalid WebSocket request JSON."
+        );
+        shut_down(client, server);
+    }
+
+    #[test]
+    fn warm_requests_report_the_backend_outcome() {
+        let (address, server) = start_server();
+        let mut client = connect(address, TOKEN).unwrap();
+        send_json(
+            &mut client,
+            json!({ "requestId": "w1", "command": "warm", "payload": {} }),
+        );
+        assert_eq!(
+            read_json(&mut client),
+            json!({
+                "type": "result",
+                "requestId": "w1",
+                "ok": true,
+                "result": { "warmed": true },
+            })
+        );
+        send_json(
+            &mut client,
+            json!({ "requestId": "w2", "command": "warm", "payload": { "fail": true } }),
+        );
+        let failed = read_json(&mut client);
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["error"], "fake warm failure");
+        shut_down(client, server);
+    }
+
+    #[test]
+    fn generation_failures_and_empty_audio_are_reported() {
+        let (address, server) = start_server();
+        let mut client = connect(address, TOKEN).unwrap();
+        generate(&mut client, "r1", json!({ "mode": "explode" }));
+        let failed = read_json(&mut client);
+        assert_eq!(failed["requestId"], "r1");
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["error"], "fake generation failure");
+        generate(&mut client, "r2", json!({ "mode": "silent" }));
+        assert_eq!(
+            read_json(&mut client)["error"],
+            "Generation produced no audio samples."
+        );
+        shut_down(client, server);
+    }
+
+    #[test]
+    fn the_session_ends_when_the_owner_disconnects() {
+        let (address, server) = start_server();
+        let mut client = connect(address, TOKEN).unwrap();
+        client.close(None).unwrap();
+        server.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn only_an_authorized_upgrade_becomes_the_owner() {
+        let (address, server) = start_server();
+        match connect(address, "wrong-token") {
+            Err(tungstenite::Error::Http(response)) => {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            }
+            other => panic!("expected a 401, got {other:?}"),
+        }
+        let client = connect(address, TOKEN).unwrap();
+        shut_down(client, server);
+    }
+
+    #[test]
+    fn concurrent_handshakes_are_capped() {
+        let (address, server) = start_server();
+        let silent_peers = (0..MAX_CONCURRENT_HANDSHAKES)
+            .map(|_| TcpStream::connect(address).unwrap())
+            .collect::<Vec<_>>();
+        // Every handshake slot is held by a peer that sent nothing, so the next
+        // connection is closed without one.
+        let mut refused = TcpStream::connect(address).unwrap();
+        refused.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+        let mut byte = [0_u8; 1];
+        assert!(matches!(refused.read(&mut byte), Ok(0) | Err(_)));
+
+        // Once the silent peers leave, their slots free up for the owner.
+        drop(silent_peers);
+        let deadline = Instant::now() + READ_TIMEOUT;
+        let client = loop {
+            match connect(address, TOKEN) {
+                Ok(client) => break client,
+                Err(error) if Instant::now() < deadline => {
+                    eprintln!("retrying the owner connection: {error}");
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("the owner never got a handshake slot: {error}"),
+            }
+        };
+        shut_down(client, server);
+    }
 
     #[test]
     fn websocket_bind_host_must_resolve_only_to_loopback() {
