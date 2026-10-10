@@ -1360,12 +1360,9 @@ app.whenReady().then(() => {
     // Generation lazily fetches the voice profile into the model directory, so
     // it writes there too and has to clear the same gate as a load.
     await audio8CacheClear;
-    const onProgress = (percent: number) => sendAudio8Progress(event.sender, requestId, percent);
-    // A default take keeps its original four-argument call; overrides are
-    // passed only when the renderer asked for a different take.
-    return sampling
-      ? getAudio8NativeClient().generate(requestId, text, voice, onProgress, sampling)
-      : getAudio8NativeClient().generate(requestId, text, voice, onProgress);
+    return getAudio8NativeClient().generate(requestId, text, voice, (percent) => {
+      sendAudio8Progress(event.sender, requestId, percent);
+    }, sampling);
   });
 
   ipcMain.handle("audio8:cancel", (event, request: unknown) => {
