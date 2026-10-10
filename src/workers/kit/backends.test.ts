@@ -197,6 +197,21 @@ describe("withLoadWatchdog", () => {
     expect(disposeLate).toHaveBeenCalledExactlyOnceWith("late model");
   });
 
+  it("leaves no timer behind for progress reported after the load settled", async () => {
+    vi.useFakeTimers();
+    let watchdog!: LoadWatchdog;
+    const result = withLoadWatchdog((signal) => {
+      watchdog = signal;
+      return Promise.resolve("model");
+    }, options());
+    await expect(result).resolves.toBe("model");
+
+    // Transformers.js can still emit events (such as "ready") afterwards.
+    watchdog.touch();
+    watchdog.settle();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("passes through load failures and synchronous start errors", async () => {
     const load = deferred<string>();
     const failed = withLoadWatchdog(() => load.promise, options());

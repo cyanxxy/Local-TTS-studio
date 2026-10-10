@@ -115,9 +115,11 @@ export function withLoadWatchdog<T>(
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     let expired = false;
+    // Set once the load settled; progress reported after that is ignored.
+    let finished = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const arm = (budgetMs: number, describe: (seconds: number) => string): void => {
-      if (expired) return;
+      if (expired || finished) return;
       clearTimeout(timer);
       timer = setTimeout(() => {
         expired = true;
@@ -129,18 +131,23 @@ export function withLoadWatchdog<T>(
       settle: () => arm(settlingMs, (seconds) => `did not finish within ${seconds}s of downloading`),
     };
 
+    const finish = (): void => {
+      finished = true;
+      clearTimeout(timer);
+    };
+
     watchdog.touch();
     let pending: Promise<T>;
     try {
       pending = start(watchdog);
     } catch (error) {
-      clearTimeout(timer);
+      finish();
       reject(error);
       return;
     }
     pending.then(
       (value) => {
-        clearTimeout(timer);
+        finish();
         if (!expired) {
           resolve(value);
           return;
@@ -148,7 +155,7 @@ export function withLoadWatchdog<T>(
         void disposeLate(value).catch(() => undefined);
       },
       (error: unknown) => {
-        clearTimeout(timer);
+        finish();
         if (!expired) reject(error);
       },
     );
