@@ -1,6 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
-import { hashFile as hashFileOnce } from "./nativeModels/fileDigest";
+import { FileDigestCache } from "./nativeModels/fileDigest";
 import { readHubJson, requestUrl, type UrlRequest } from "./nativeModels/hubHttps";
 import { downloadVerifiedFile, type DownloadFailure } from "./nativeModels/verifiedDownload";
 import { QWEN3_OPTIONAL_MODEL_FILES, type Qwen3Profile } from "./qwen3Profiles";
@@ -179,8 +179,16 @@ async function getHubFiles(
   return files;
 }
 
+/**
+ * Setup inspects every profile on mount and on each profile switch, and every
+ * inspection used to re-read gigabytes of weights. Digests are remembered while
+ * a file provably has not changed; each inspection still compares them with
+ * the manifest it reads, so nothing unverified is ever reported as verified.
+ */
+const modelFileDigests = new FileDigestCache(downloadCancelledError);
+
 async function hashFile(filePath: string, signal?: AbortSignal): Promise<{ sizeBytes: number; sha256: string }> {
-  const { sizeBytes, digest } = await hashFileOnce(filePath, "sha256", { signal, cancelledError: downloadCancelledError });
+  const { sizeBytes, digest } = await modelFileDigests.digest(filePath, "sha256", signal);
   return { sizeBytes, sha256: digest };
 }
 
@@ -319,13 +327,19 @@ export async function inspectQwen3ModelDir(
   return { readiness: "verified" };
 }
 
+/**
+ * Moves a pre-revision cache directory into its revision-scoped name. The
+ * decision only needs to know whether a directory has the profile's files, so
+ * it uses the structural check: a full inspection answers the same question
+ * after hashing every weight file, and setup asks it for every profile.
+ */
 export async function adoptLegacyQwen3ModelDir(
   profile: Qwen3Profile,
   revisionDir: string,
   legacyDir: string,
 ): Promise<string> {
-  if ((await inspectQwen3ModelDir(revisionDir, profile)).readiness !== "missing") return revisionDir;
-  if ((await inspectQwen3ModelDir(legacyDir, profile)).readiness === "missing") return revisionDir;
+  if (await isStructurallyValidQwen3ModelDir(revisionDir, profile)) return revisionDir;
+  if (!(await isStructurallyValidQwen3ModelDir(legacyDir, profile))) return revisionDir;
 
   await fs.mkdir(path.dirname(revisionDir), { recursive: true });
   try {
@@ -334,7 +348,7 @@ export async function adoptLegacyQwen3ModelDir(
     // Setup and download IPC can race during renderer startup. If another
     // caller already adopted the directory, use its result; otherwise retain
     // the original error instead of hiding a filesystem failure.
-    if ((await inspectQwen3ModelDir(revisionDir, profile)).readiness === "missing") throw error;
+    if (!(await isStructurallyValidQwen3ModelDir(revisionDir, profile))) throw error;
   }
   return revisionDir;
 }

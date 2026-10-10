@@ -89,8 +89,15 @@ function makeTempDir(): string {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
+
+/** Records which files are opened for hashing; metadata reads do not go through here. */
+function spyOnHashedFiles(): () => string[] {
+  const open = vi.spyOn(fs.promises, "open");
+  return () => open.mock.calls.map(([file]) => path.basename(String(file)));
+}
 
 describe("safe progress and Hub URLs", () => {
   it("drops progress safely after the window is destroyed", () => {
@@ -299,6 +306,63 @@ describe("downloadQwen3Model", () => {
     fs.rmSync(path.join(modelDir, QWEN3_MODEL_MANIFEST));
     const second = await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
     expect(second).toMatchObject({ downloadedFiles: 0, skippedFiles: 2, readiness: "verified" });
+  });
+});
+
+describe("setup verification cache", () => {
+  it("re-inspects an unchanged verified profile without re-reading its weights", async () => {
+    const modelDir = makeTempDir();
+    await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    const hashed = spyOnHashedFiles();
+
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
+
+    expect(hashed()).toEqual([]);
+  });
+
+  it("still catches a same-size edit whose modification time was put back", async () => {
+    const modelDir = makeTempDir();
+    await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    const weights = path.join(modelDir, "model.safetensors");
+    const { mtime } = fs.statSync(weights);
+    fs.writeFileSync(weights, "WEIGHTS");
+    fs.utimesSync(weights, mtime, mtime);
+    const hashed = spyOnHashedFiles();
+
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({
+      readiness: "structural",
+      reason: "model.safetensors does not match its manifest digest.",
+    });
+    expect(hashed()).toEqual(["model.safetensors"]);
+  });
+
+  it("decides legacy adoption without hashing any weights", async () => {
+    const root = makeTempDir();
+    const legacyDir = path.join(root, "example");
+    const revisionDir = path.join(root, `example-${REVISION.slice(0, 12)}`);
+    await downloadQwen3Model(PROFILE, legacyDir, () => {}, fakeHubRequest());
+    const hashed = spyOnHashedFiles();
+
+    await expect(adoptLegacyQwen3ModelDir(PROFILE, revisionDir, legacyDir)).resolves.toBe(revisionDir);
+    await expect(adoptLegacyQwen3ModelDir(PROFILE, revisionDir, legacyDir)).resolves.toBe(revisionDir);
+
+    expect(fs.existsSync(legacyDir)).toBe(false);
+    expect(hashed()).toEqual([]);
+    // Adoption moved the directory, so nothing about it is assumed: the moved
+    // files are identical, and inspection proves it rather than trusting a path.
+    await expect(inspectQwen3ModelDir(revisionDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
+  });
+
+  it("serves the download's skip check from an earlier inspection", async () => {
+    const modelDir = makeTempDir();
+    await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    fs.rmSync(path.join(modelDir, QWEN3_MODEL_MANIFEST));
+    const hashed = spyOnHashedFiles();
+
+    await expect(downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest()))
+      .resolves.toMatchObject({ downloadedFiles: 0, skippedFiles: 2, readiness: "verified" });
+    expect(hashed()).toEqual([]);
   });
 });
 

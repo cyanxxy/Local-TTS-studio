@@ -5,10 +5,16 @@
  * the content, and small files as plain git blobs, which are only addressable
  * by `sha1("blob <size>\0" + content)`. Every desktop model is verified against
  * one of the two before it is trusted.
+ *
+ * `FileDigestCache` remembers a digest for as long as the file it was read from
+ * is provably the same file, so re-inspecting gigabytes of unchanged weights on
+ * every setup call and profile switch costs a `stat` per file.
  */
 
 import { createHash, type Hash } from "crypto";
-import { promises as fs } from "fs";
+import { promises as fs, type BigIntStats } from "fs";
+import path from "path";
+import { SharedTaskGroup } from "./sharedTask";
 
 export type FileDigest =
   | { algorithm: "sha256"; value: string }
@@ -118,4 +124,109 @@ export async function isVerifiedFile(
     await handle.close();
   }
   return hash.digest("hex") === expected.digest.value;
+}
+
+/**
+ * What makes a file the same file. Device and inode survive a rename but not a
+ * replacement, every write moves the modification time, and the change time
+ * moves on every write and on every attempt to set the modification time back,
+ * which userland cannot fake. Nanosecond fields keep two edits within one
+ * filesystem tick apart wherever the filesystem records them.
+ */
+interface FileIdentity {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+function identityOf(stat: BigIntStats): FileIdentity {
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs };
+}
+
+function identityKey(identity: FileIdentity): string {
+  return `${identity.dev}:${identity.ino}:${identity.size}:${identity.mtimeNs}:${identity.ctimeNs}`;
+}
+
+interface CachedDigest {
+  identity: string;
+  result: FileDigestResult;
+}
+
+export interface FileDigestCacheOptions {
+  /** Paths remembered at once; the least recently hashed is forgotten first. */
+  maxEntries?: number;
+}
+
+/**
+ * Digests remembered per path while the file is provably unchanged.
+ *
+ * Only the content digest is cached, never a verdict: callers still compare it
+ * with whatever pin or manifest applies to that call, so a changed manifest,
+ * revision or expected digest is judged afresh every time. A file whose
+ * identity moves while it is being read is hashed for the caller but not
+ * remembered. Concurrent requests for the same unchanged file share one read,
+ * abandoned only once every caller has cancelled.
+ */
+export class FileDigestCache {
+  readonly #cancelledError: () => Error;
+  readonly #maxEntries: number;
+  readonly #entries = new Map<string, CachedDigest>();
+  readonly #reads: SharedTaskGroup<FileDigestResult>;
+
+  constructor(cancelledError: () => Error, { maxEntries = 256 }: FileDigestCacheOptions = {}) {
+    this.#cancelledError = cancelledError;
+    this.#maxEntries = Math.max(1, maxEntries);
+    this.#reads = new SharedTaskGroup<FileDigestResult>(cancelledError);
+  }
+
+  /** Rejects like `hashFile` when the file cannot be opened or read. */
+  async digest(filePath: string, algorithm: DigestAlgorithm, signal?: AbortSignal): Promise<FileDigestResult> {
+    if (signal?.aborted) throw this.#cancelledError();
+    const resolved = path.resolve(filePath);
+    const entryKey = `${algorithm}:${resolved}`;
+    const identity = identityKey(identityOf(await fs.stat(resolved, { bigint: true })));
+    const cached = this.#entries.get(entryKey);
+    if (cached?.identity === identity) return { ...cached.result };
+    const result = await this.#reads.run(
+      `${entryKey}\0${identity}`,
+      ({ signal: shared }) => this.#read(resolved, entryKey, algorithm, identity, shared),
+      { signal },
+    );
+    return { ...result };
+  }
+
+  /** Forgets every remembered digest. */
+  clear(): void {
+    this.#entries.clear();
+  }
+
+  async #read(
+    filePath: string,
+    entryKey: string,
+    algorithm: DigestAlgorithm,
+    expected: string,
+    signal: AbortSignal,
+  ): Promise<FileDigestResult> {
+    const handle = await fs.open(filePath, "r");
+    try {
+      const before = identityKey(identityOf(await handle.stat({ bigint: true })));
+      const result = await hashHandle(handle, algorithm, { signal, cancelledError: this.#cancelledError });
+      const after = identityKey(identityOf(await handle.stat({ bigint: true })));
+      if (before === expected && after === expected) this.#remember(entryKey, expected, result);
+      return result;
+    } finally {
+      await handle.close();
+    }
+  }
+
+  #remember(entryKey: string, identity: string, result: FileDigestResult): void {
+    this.#entries.delete(entryKey);
+    this.#entries.set(entryKey, { identity, result });
+    for (const oldest of this.#entries.keys()) {
+      if (this.#entries.size <= this.#maxEntries) break;
+      this.#entries.delete(oldest);
+    }
+  }
 }
