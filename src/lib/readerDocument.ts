@@ -619,6 +619,21 @@ export function createReaderNote(input: Omit<ReaderNote, "id" | "createdAt" | "u
   return { ...input, id: createId("note"), createdAt: now, updatedAt: now };
 }
 
+/**
+ * The tuning inputs that shape an engine's audio, already narrowed to the ones
+ * it reads. An omitted field is one the engine ignores, so changing it can
+ * never invalidate cached audio.
+ */
+export interface AudioSignatureTuning {
+  speed?: number;
+  sentenceSpeedVariance?: number;
+  quality?: number;
+  language?: string;
+  pauseOverridesSec?: GenerationTuningSettings["pauseOverridesSec"];
+  pronunciationRules?: GenerationTuningSettings["pronunciationRules"];
+  emphasisStrength?: number;
+}
+
 export function buildAudioSignature(parts: {
   text: string;
   model: string;

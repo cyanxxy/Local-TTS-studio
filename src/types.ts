@@ -1,5 +1,10 @@
-/** Supported TTS model identifiers */
-export type ModelType = "kokoro" | "supertonic";
+import type { BrowserEngineId } from "./models/registry";
+
+/**
+ * Engines that run in a browser module worker managed by `useModelLoader`.
+ * Derived from the engine registry (`src/models/registry.ts`).
+ */
+export type ModelType = BrowserEngineId;
 export type InferenceBackend = "webgpu" | "wasm";
 export type ChunkPauseKind = "none" | "comma" | "sentence" | "paragraph";
 export type ExportAudioFormat = "wav-f32" | "wav-pcm24" | "wav-pcm16" | "mp3";
