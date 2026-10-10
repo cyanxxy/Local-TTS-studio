@@ -1,9 +1,19 @@
 mod config;
+#[cfg(qwen3_native)]
+mod engines;
+#[cfg(qwen3_native)]
+mod host;
 mod model_files;
 #[cfg(qwen3_native)]
 mod reference;
 #[cfg(qwen3_native)]
 mod runtime;
+// Model-free: compiled for tests on every target so its fake-engine suite runs
+// even where no tensor provider exists. `bridge-policy-tests` includes it too.
+#[cfg(any(test, qwen3_native))]
+mod streaming;
+#[cfg(qwen3_native)]
+mod target;
 mod text;
 
 pub const UPSTREAM_REVISION: &str = "288a716ce38a91c826dd67968c75d1dd4b0f07bc";
@@ -14,10 +24,11 @@ pub(super) use config::{
 };
 pub(super) use model_files::ExpectedModelType;
 #[cfg(qwen3_native)]
-pub(super) use runtime::{
-    AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneReference,
-    VoiceCloneRequest, VoiceDesignRequest, resolved_runtime_target,
-};
+pub(super) use runtime::{Qwen3Runtime, VoiceCloneReference, VoiceCloneRequest};
+#[cfg(qwen3_native)]
+pub(super) use streaming::{AudioSink, CustomVoiceRequest, GenerationSummary, VoiceDesignRequest};
+#[cfg(qwen3_native)]
+pub(super) use target::resolved_runtime_target;
 
 #[cfg(test)]
 mod tests {
