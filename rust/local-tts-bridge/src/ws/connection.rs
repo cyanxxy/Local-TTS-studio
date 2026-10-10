@@ -288,6 +288,235 @@ fn enable_tcp_keepalive(stream: &TcpStream) {
 mod tests {
     use super::*;
     use crate::protocol::MAX_AUDIO_CHUNK_SAMPLES;
+    use crate::ws::test_support::{READ_TIMEOUT, TOKEN, connected_pair, read_message, send_json};
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::thread;
+
+    /// Polls until `request_id` reads as cancelled, or gives up at the deadline.
+    fn wait_for_cancel(connection: &mut WebSocketConnection, request_id: &str) -> bool {
+        let deadline = Instant::now() + READ_TIMEOUT;
+        while Instant::now() < deadline {
+            if connection.poll_cancelled(request_id).unwrap() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+
+    fn upgrade_request(path: &str, extra_headers: &str) -> String {
+        format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n{extra_headers}\r\n"
+        )
+    }
+
+    fn masked_text_frame(text: &str) -> Vec<u8> {
+        let mask = [0x37, 0xfa, 0x21, 0x3d];
+        let payload = text.as_bytes();
+        let length = u8::try_from(payload.len()).unwrap();
+        assert!(length < 126, "short frames only");
+        let mut frame = vec![0x81, 0x80 | length];
+        frame.extend_from_slice(&mask);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % 4]),
+        );
+        frame
+    }
+
+    #[test]
+    fn polling_finds_a_buffered_cancel_for_its_own_request() {
+        let (mut connection, mut client) = connected_pair();
+        assert!(!connection.poll_cancelled("r1").unwrap());
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "r1" }),
+        );
+        assert!(wait_for_cancel(&mut connection, "r1"));
+        assert!(!connection.poll_cancelled("r2").unwrap());
+        // A finished request releases its cancel, so a reused id starts clean.
+        connection.finish_request("r1");
+        assert!(!connection.poll_cancelled("r1").unwrap());
+        assert!(connection.bail_if_cancelled("r1").is_ok());
+    }
+
+    #[test]
+    fn cancelled_requests_bail_with_the_message_the_client_matches() {
+        let (mut connection, mut client) = connected_pair();
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "r1" }),
+        );
+        assert!(wait_for_cancel(&mut connection, "r1"));
+        let error = connection.bail_if_cancelled("r1").unwrap_err();
+        assert_eq!(error.to_string(), CANCELLED_MESSAGE);
+    }
+
+    #[test]
+    fn a_cancel_that_arrived_with_its_request_is_seen_by_the_first_poll() {
+        // Both frames reach the socket in one write, so one read takes them
+        // both and the cancel waits in tungstenite's buffer rather than the
+        // kernel's. A poll that only asked whether the socket is readable
+        // would miss it.
+        let (mut connection, mut client) = connected_pair();
+        let request = json!({ "requestId": "r1", "payload": {} }).to_string();
+        let cancel = json!({ "command": "cancel", "requestId": "r1" }).to_string();
+        client.write(Message::Text(request.clone().into())).unwrap();
+        client.write(Message::Text(cancel.into())).unwrap();
+        client.flush().unwrap();
+        assert_eq!(connection.recv_text().unwrap(), Some(request));
+        assert!(connection.poll_cancelled("r1").unwrap());
+    }
+
+    #[test]
+    fn requests_read_mid_generation_are_replayed_in_order() {
+        let (mut connection, mut client) = connected_pair();
+        for index in 0..MAX_PENDING_REQUESTS + 2 {
+            send_json(
+                &mut client,
+                json!({ "requestId": format!("queued-{index}"), "payload": {} }),
+            );
+        }
+        // The marker is sent last, so once it is seen everything before it
+        // has been drained.
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "marker" }),
+        );
+        assert!(wait_for_cancel(&mut connection, "marker"));
+        for index in 0..MAX_PENDING_REQUESTS {
+            let replayed = connection.recv_text().unwrap().unwrap();
+            assert!(
+                replayed.contains(&format!("\"queued-{index}\"")),
+                "{replayed}"
+            );
+        }
+        // The overflow was dropped: the next request comes from the wire.
+        send_json(&mut client, json!({ "requestId": "fresh", "payload": {} }));
+        let next = connection.recv_text().unwrap().unwrap();
+        assert!(next.contains("\"fresh\""), "{next}");
+    }
+
+    #[test]
+    fn tracked_cancellations_are_bounded() {
+        let (mut connection, mut client) = connected_pair();
+        for index in 0..MAX_TRACKED_CANCELLATIONS {
+            send_json(
+                &mut client,
+                json!({ "command": "cancel", "requestId": format!("old-{index}") }),
+            );
+        }
+        let newest = format!("old-{}", MAX_TRACKED_CANCELLATIONS - 1);
+        assert!(wait_for_cancel(&mut connection, &newest));
+        assert!(connection.poll_cancelled("old-0").unwrap());
+        // One cancel past the cap forgets the older ones instead of growing.
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "new" }),
+        );
+        assert!(wait_for_cancel(&mut connection, "new"));
+        assert!(!connection.poll_cancelled("old-0").unwrap());
+    }
+
+    #[test]
+    fn cancels_without_a_request_id_are_ignored() {
+        let (mut connection, mut client) = connected_pair();
+        send_json(&mut client, json!({ "command": "cancel" }));
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": " " }),
+        );
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "marker" }),
+        );
+        assert!(wait_for_cancel(&mut connection, "marker"));
+        assert!(!connection.poll_cancelled(" ").unwrap());
+        // Nor were they deferred as requests.
+        send_json(&mut client, json!({ "requestId": "next", "payload": {} }));
+        let next = connection.recv_text().unwrap().unwrap();
+        assert!(next.contains("\"next\""), "{next}");
+    }
+
+    #[test]
+    fn a_peer_close_cancels_whatever_is_running() {
+        let (mut connection, mut client) = connected_pair();
+        client.close(None).unwrap();
+        assert!(wait_for_cancel(&mut connection, "any-request"));
+        assert_eq!(connection.recv_text().unwrap(), None);
+    }
+
+    #[test]
+    fn pings_read_while_polling_are_answered() {
+        let (mut connection, mut client) = connected_pair();
+        client
+            .send(Message::Ping(b"keepalive".to_vec().into()))
+            .unwrap();
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "marker" }),
+        );
+        assert!(wait_for_cancel(&mut connection, "marker"));
+        assert_eq!(
+            read_message(&mut client),
+            Message::Pong(b"keepalive".to_vec().into())
+        );
+    }
+
+    #[test]
+    fn binary_requests_are_refused() {
+        let (mut connection, mut client) = connected_pair();
+        client.send(Message::Binary(vec![1, 2, 3].into())).unwrap();
+        let error = connection.recv_text().unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Binary WebSocket requests are not supported."
+        );
+    }
+
+    #[test]
+    fn a_request_pipelined_with_the_upgrade_is_served() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let request = r#"{"requestId":"pipelined","payload":{}}"#;
+        let mut packet = upgrade_request(&format!("/{TOKEN}"), "").into_bytes();
+        packet.extend(masked_text_frame(request));
+        peer.write_all(&packet).unwrap();
+
+        let (stream, _) = listener.accept().unwrap();
+        let mut connection = WebSocketConnection::accept(stream, TOKEN).unwrap();
+        assert_eq!(connection.recv_text().unwrap().as_deref(), Some(request));
+    }
+
+    #[test]
+    fn upgrades_without_the_token_or_from_a_browser_get_401() {
+        for (path, extra_headers) in [
+            ("/wrong-token".to_string(), ""),
+            (format!("/{TOKEN}?debug=1"), ""),
+            (format!("/{TOKEN}"), "Origin: https://evil.example\r\n"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            peer.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
+            peer.write_all(upgrade_request(&path, extra_headers).as_bytes())
+                .unwrap();
+
+            let (stream, _) = listener.accept().unwrap();
+            let error = WebSocketConnection::accept(stream, TOKEN)
+                .err()
+                .expect("the upgrade must be refused");
+            assert_eq!(error.to_string(), "Unauthorized WebSocket path.");
+            let mut response = String::new();
+            peer.read_to_string(&mut response).unwrap();
+            assert!(
+                response.starts_with("HTTP/1.1 401 Unauthorized"),
+                "{path}: {response}"
+            );
+        }
+    }
 
     #[test]
     fn client_disconnect_covers_peer_loss_but_not_stalled_writes() {

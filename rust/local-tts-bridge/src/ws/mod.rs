@@ -5,6 +5,8 @@
 mod connection;
 mod handshake;
 mod server;
+#[cfg(test)]
+mod test_support;
 
 pub use connection::WebSocketConnection;
 pub use server::{Backend, bind_loopback_listener, serve_owner};
