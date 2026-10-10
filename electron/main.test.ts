@@ -38,7 +38,7 @@ const mocks = vi.hoisted(() => ({
   audio8AfterLoad: null as (() => void) | null,
   audio8Hold: null as Promise<void> | null,
   localWsRun: vi.fn(),
-  localWsCancel: vi.fn(() => false),
+  localWsCancel: vi.fn<(requestId: string) => boolean>(() => false),
   localWsShutdown: vi.fn(async () => undefined),
   localWsShutdownAll: vi.fn(async () => undefined),
   qwenDownload: vi.fn(),
@@ -1199,6 +1199,145 @@ describe("local model cache lifecycle IPC", () => {
     expect(deletion.removed).toHaveBeenCalledOnce();
     deletion.release();
     await clear;
+  });
+
+  /** Holds the next pool run open until the returned controls settle it. */
+  function holdNextRun() {
+    let resolveRun!: (value: unknown) => void;
+    let rejectRun!: (error: Error) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    mocks.localWsRun.mockImplementationOnce(() => new Promise((resolve, reject) => {
+      resolveRun = resolve;
+      rejectRun = reject;
+      markStarted();
+    }));
+    return {
+      started,
+      resolve: (value: unknown) => resolveRun(value),
+      reject: (error: Error) => rejectRun(error),
+    };
+  }
+
+  const GENERATE_RESPONSE = {
+    response: { ok: true, result: {
+      sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+      audioTransport: "websocket-binary", audioChunkCount: 1, phaseTimingsSec: {},
+    } },
+  };
+
+  it("routes a cancel from the owning renderer to the worker pool", async () => {
+    const run = holdNextRun();
+    mocks.localWsCancel.mockReturnValue(true);
+    const generated = invoke("local-tts:generate", generateRequest).catch((error: Error) => error.message);
+    await run.started;
+
+    await expect(invoke("local-tts:cancel", { model: "neutts", requestId: "local-generate" }))
+      .resolves.toEqual({ cancelled: true });
+    expect(mocks.localWsCancel).toHaveBeenCalledWith("local-generate");
+
+    run.reject(new Error("Generation cancelled."));
+    await expect(generated).resolves.toBe("Generation cancelled.");
+    // Settled requests are forgotten, so a late cancel is undelivered.
+    await expect(invoke("local-tts:cancel", { model: "neutts", requestId: "local-generate" }))
+      .resolves.toEqual({ cancelled: false });
+  });
+
+  it("refuses a cancel from a renderer or model that does not own the request", async () => {
+    const run = holdNextRun();
+    const generated = invoke("local-tts:generate", generateRequest);
+    await run.started;
+    const otherRenderer = createEvent(undefined);
+    otherRenderer.sender.id = 2;
+
+    await expect(Promise.resolve(mocks.invokeHandlers.get("local-tts:cancel")!(
+      otherRenderer,
+      { model: "neutts", requestId: "local-generate" },
+    ))).rejects.toThrow("Cancellation request does not own the active local-runtime request.");
+    await expect(invoke("local-tts:cancel", { model: "qwen3", requestId: "local-generate" }))
+      .rejects.toThrow("does not own");
+    expect(mocks.localWsCancel).not.toHaveBeenCalled();
+
+    run.resolve(GENERATE_RESPONSE);
+    await expect(generated).resolves.toMatchObject({ audioChunkCount: 1 });
+  });
+
+  it("refuses a second request that reuses a running request id", async () => {
+    const run = holdNextRun();
+    const generated = invoke("local-tts:generate", generateRequest);
+    await run.started;
+
+    await expect(invoke("local-tts:generate", generateRequest))
+      .rejects.toThrow("A request with id local-generate is already running.");
+
+    run.resolve(GENERATE_RESPONSE);
+    await generated;
+  });
+
+  it("cancels a renderer's running generation when its web contents are destroyed", async () => {
+    const run = holdNextRun();
+    mocks.localWsCancel.mockReturnValue(true);
+    const event = createEvent(undefined);
+    const generated = Promise.resolve(mocks.invokeHandlers.get("local-tts:generate")!(event, generateRequest))
+      .catch((error: Error) => error.message);
+    await run.started;
+
+    const destroyed = event.sender.once.mock.calls.find(([name]) => name === "destroyed")?.[1] as () => void;
+    destroyed();
+
+    expect(mocks.localWsCancel).toHaveBeenCalledWith("local-generate");
+    run.reject(new Error("Generation cancelled."));
+    await expect(generated).resolves.toBe("Generation cancelled.");
+  });
+
+  it("makes a generate wait for an in-flight warm-up of the same model instead of failing", async () => {
+    const warmRun = holdNextRun();
+    const warmed = invoke("local-tts:warm", { model: "neutts" });
+    await warmRun.started;
+
+    const generated = invoke("local-tts:generate", generateRequest);
+    await drainTurns();
+    // The warm-up is doing the model load the generation needs.
+    expect(mocks.localWsRun).toHaveBeenCalledTimes(1);
+    expect(mocks.localWsCancel).not.toHaveBeenCalled();
+
+    warmRun.resolve({ response: { ok: true, result: { warmed: true } } });
+    await expect(warmed).resolves.toEqual({ warmed: true });
+    await expect(generated).resolves.toMatchObject({ audioChunkCount: 1 });
+    expect(mocks.localWsRun).toHaveBeenCalledTimes(2);
+    expect(mocks.localWsRun.mock.calls[1][1]).toMatchObject({ requestId: "local-generate" });
+  });
+
+  it("cancels an in-flight warm-up for a different model target before generating", async () => {
+    const warmRun = holdNextRun();
+    const warmed = invoke("local-tts:warm", { model: "neutts" });
+    await warmRun.started;
+    const warmRequestId = (mocks.localWsRun.mock.calls[0][1] as { requestId: string }).requestId;
+    mocks.localWsCancel.mockImplementation((requestId: string) => {
+      if (requestId === warmRequestId) warmRun.reject(new Error("Generation cancelled."));
+      return requestId === warmRequestId;
+    });
+
+    const generated = invoke("local-tts:generate", {
+      ...generateRequest,
+      payload: { ...generateRequest.payload, modelRepo: "neuphonic/neutts-air-q4-gguf" },
+    });
+
+    await expect(warmed).resolves.toEqual({ warmed: false, message: "Generation cancelled." });
+    await expect(generated).resolves.toMatchObject({ audioChunkCount: 1 });
+    expect(mocks.localWsCancel).toHaveBeenCalledWith(warmRequestId);
+  });
+
+  it("reports a second warm-up of the same target as already warming", async () => {
+    const warmRun = holdNextRun();
+    const first = invoke("local-tts:warm", { model: "neutts" });
+    await warmRun.started;
+
+    await expect(invoke("local-tts:warm", { model: "neutts" }))
+      .resolves.toEqual({ warmed: false, message: "This model is already warming." });
+
+    warmRun.resolve({ response: { ok: true, result: { warmed: true } } });
+    await first;
   });
 
   it("holds quit for deletion and never starts the generation queued behind it", async () => {
