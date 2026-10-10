@@ -54,6 +54,19 @@ vi.mock("./AudioPlayer", () => ({
   },
 }));
 
+// The toolbar is not memoised, so it renders exactly when the page does.
+const toolbarRenderMock = vi.hoisted(() => vi.fn());
+
+vi.mock("./reader/ReaderToolbar", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./reader/ReaderToolbar")>();
+  return {
+    ReaderToolbar: (props: ComponentProps<typeof actual.ReaderToolbar>) => {
+      toolbarRenderMock();
+      return <actual.ReaderToolbar {...props} />;
+    },
+  };
+});
+
 const readyState: ModelState = {
   loading: false,
   ready: true,
@@ -734,6 +747,33 @@ describe("AdvancedReaderPage", () => {
 
     act(() => clock.set(2.8));
     expect(activeWord()).toBe("world.");
+  });
+
+  it("re-renders only the reading pane as the spoken word advances", () => {
+    const clock = clockAt(0.2);
+    const { container } = renderReader({
+      text: "Hello extraordinary world.",
+      totalDuration: 3,
+      clock,
+      isPlaying: true,
+      activeSegmentId: "segment-1",
+      segments: [createSegment({
+        text: "Hello extraordinary world.",
+        startSec: 0,
+        endSec: 3,
+        textStart: 0,
+        textEnd: 26,
+      })],
+    });
+    const pageRenders = toolbarRenderMock.mock.calls.length;
+    const dockRenders = audioPlayerMock.mock.calls.length;
+
+    act(() => clock.set(1.5));
+    act(() => clock.set(2.8));
+
+    expect(container.querySelector("[data-reader-active-word='true']")).toHaveTextContent("world.");
+    expect(toolbarRenderMock).toHaveBeenCalledTimes(pageRenders);
+    expect(audioPlayerMock).toHaveBeenCalledTimes(dockRenders);
   });
 
   it("auto-scrolls again when the playback clock advances within one sentence", () => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AudioSegment } from "../../hooks/useAudioPlayer";
-import { findSegmentForTextOffset, segmentSpeechEndSec } from "./readerSegments";
+import { estimateSegmentWords, findSegmentForTextOffset, segmentSpeechEndSec } from "./readerSegments";
 
 function segment(id: string, textStart: number | undefined, textEnd: number | undefined, startSec = 0): AudioSegment {
   return { id, text: id, startSec, endSec: startSec + 1, index: 1, total: 1, textStart, textEnd };
@@ -30,5 +30,27 @@ describe("segmentSpeechEndSec", () => {
     expect(segmentSpeechEndSec({ ...segment("a", 0, 1, 2), endSec: 5, pauseAfterSec: 0.5 })).toBe(4.5);
     expect(segmentSpeechEndSec({ ...segment("a", 0, 1, 2), endSec: 5 })).toBe(5);
     expect(segmentSpeechEndSec({ ...segment("a", 0, 1, 2), endSec: 3, pauseAfterSec: 9 })).toBe(2);
+  });
+});
+
+describe("estimateSegmentWords", () => {
+  it("spreads a segment's words over its speech, in section-local offsets", () => {
+    const words = estimateSegmentWords({
+      ...segment("a", 20, 31),
+      text: "Hello world",
+      endSec: 2.5,
+      pauseAfterSec: 0.5,
+    });
+
+    expect(words.map((word) => [word.word, word.start, word.end])).toEqual([
+      ["Hello", 20, 25],
+      ["world", 26, 31],
+    ]);
+    expect(words[0].startSec).toBe(0);
+    expect(words[1].endSec).toBe(2);
+  });
+
+  it("estimates nothing for a segment without a text range", () => {
+    expect(estimateSegmentWords(segment("a", undefined, undefined))).toEqual([]);
   });
 });

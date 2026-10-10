@@ -1,82 +1,46 @@
 import {
   useCallback,
-  useEffect,
   useId,
   useMemo,
   useRef,
   useState,
-  type ReactNode,
   type CSSProperties,
+  type ReactNode,
 } from "react";
-import {
-  BookmarkPlus,
-  Check,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  FileUp,
-  Keyboard,
-  Library,
-  Link2,
-  Loader2,
-  Maximize2,
-  Minimize2,
-  Moon,
-  NotebookPen,
-  Pencil,
-  Play,
-  SlidersHorizontal,
-  Type,
-  X,
-} from "lucide-react";
-import {
-  MIN_TEXT_LENGTH,
-  MODELS,
-  QUALITY_MIN,
-  QUALITY_MAX,
-  QUALITY_STEP,
-} from "../constants";
-import { getMeaningfulTextLength } from "../lib/textValidation";
-import type { ModelState, ModelType, GenerationStats } from "../types";
+import { Check, Maximize2, Minimize2, Pencil } from "lucide-react";
+import { MIN_TEXT_LENGTH, MODELS } from "../constants";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
+import type { PlaybackClock } from "../lib/playbackClock";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
-import {
-  estimateWordRanges,
-  type ReaderChapter,
-  type ReaderDocumentRecord,
-  type ReaderSection,
-} from "../lib/readerDocument";
+import type { ReaderChapter, ReaderDocumentRecord, ReaderSection } from "../lib/readerDocument";
 import {
   DEFAULT_READER_VIEW_PREFERENCES,
   readerColumnWidthRem,
-  type ReaderColumnWidth,
-  type ReaderTone,
   type ReaderViewPreferences,
 } from "../lib/readerPreferences";
-import { usePlaybackSelector, type PlaybackClock } from "../lib/playbackClock";
-import { AudioPlayer, type AudioPlayerPrimaryAction } from "./AudioPlayer";
-import { ModelToggle } from "./ModelToggle";
+import { getMeaningfulTextLength } from "../lib/textValidation";
+import type { GenerationStats, ModelState, ModelType } from "../types";
 import { ReaderLibrarySidebar, type ReaderSidebarTab } from "./ReaderLibrarySidebar";
-import { VoiceSelector } from "./VoiceSelector";
-import { ReaderParagraph } from "./reader/ReaderParagraph";
+import { ReaderAppearanceMenu } from "./reader/ReaderAppearanceMenu";
+import { ReaderChapterRail } from "./reader/ReaderChapterRail";
+import { ReaderDesktopModelAlert } from "./reader/ReaderDesktopModelAlert";
+import { ReaderImportMenu } from "./reader/ReaderImportMenu";
+import { ReaderPlayerDock } from "./reader/ReaderPlayerDock";
+import type { SelectedPassage } from "./reader/ReaderSelectionToolbar";
 import { ReaderShortcutsDialog } from "./reader/ReaderShortcutsDialog";
-import { RemainingTime } from "./reader/RemainingTime";
-import { SegmentedChoice, SwitchRow } from "./reader/ReaderControls";
-import { ViewportPopover } from "./reader/ViewportPopover";
-import { deriveReaderDockState } from "./reader/readerDockState";
-import { useReaderAutoFollow } from "./reader/useReaderAutoFollow";
-import { useReaderSectionEditor } from "./reader/useReaderSectionEditor";
-import { SLEEP_TIMER_OPTIONS, useReaderSleepTimer } from "./reader/useReaderSleepTimer";
+import { ReaderTextPane } from "./reader/ReaderTextPane";
+import { ReaderToolbar } from "./reader/ReaderToolbar";
+import { ReaderVoiceMenu, type ReaderDesktopModelOption } from "./reader/ReaderVoiceMenu";
 import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
 import { findSegmentForTextOffset } from "./reader/readerSegments";
-import {
-  buildOverlayParts,
-  chapterHeadingBlockStart,
-  clamp,
-  groupPartsByBlock,
-  splitTextBlocks,
-} from "./reader/readerTextLayout";
+import { TOOL_BUTTON } from "./reader/readerStyles";
+import { chapterHeadingBlockStart, clamp, splitTextBlocks } from "./reader/readerTextLayout";
+import { useReaderAutoFollow } from "./reader/useReaderAutoFollow";
+import { useReaderKeyboard } from "./reader/useReaderKeyboard";
+import { useReaderSectionEditor } from "./reader/useReaderSectionEditor";
+import { useReaderSleepTimer } from "./reader/useReaderSleepTimer";
+import { useStableCallback } from "./reader/useStableCallback";
 
 interface AdvancedReaderPageProps {
   fullScreen?: boolean;
@@ -171,46 +135,13 @@ interface AdvancedReaderPageProps {
   onAutoAdvanceHoldChange?: (held: boolean) => void;
 }
 
-interface ReaderDesktopModelOption {
-  key: string;
-  label: string;
-  badge: string;
-  detail: string;
-  selected?: boolean;
-  onSelect: () => void;
-}
+const BOOKMARK_LABEL_LIMIT = 40;
 
-/* Shared metrics for the overlay and the transparent textarea beneath it.
-   Both must be glyph-for-glyph identical, so they always use this one string. */
-const DOCUMENT_TEXT_CLASSES =
-  "whitespace-pre-wrap break-words font-reading";
-
-/* Horizontal padding comes from .reader-doc-pad, which centers a readable
-   text column inside the full-bleed panel at any window size. */
-function documentPadding(fullScreen: boolean): string {
-  return fullScreen
-    ? "reader-doc-pad pt-8 pb-44 sm:pt-12 sm:pb-48"
-    : "reader-doc-pad py-8";
-}
-
-/* Icon buttons that live inside a glass capsule: no material of their own
-   (glass never sits on glass), just a fill on hover and a give on press. A
-   40px circle in a capsule with 4px padding keeps the corners concentric. */
-const TOOL_BUTTON =
-  "flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-text-secondary transition-[background-color,color,transform] duration-200 hover:bg-text-primary/[0.07] hover:text-text-primary active:scale-95";
-
-const READER_TONE_OPTIONS: ReadonlyArray<{ value: ReaderTone; label: string }> = [
-  { value: "paper", label: "Paper" },
-  { value: "sepia", label: "Sepia" },
-  { value: "night", label: "Night" },
-];
-
-const COLUMN_WIDTH_OPTIONS: ReadonlyArray<{ value: ReaderColumnWidth; label: string }> = [
-  { value: "narrow", label: "narrow" },
-  { value: "comfortable", label: "Standard" },
-  { value: "wide", label: "wide" },
-];
-
+/**
+ * The Reader page: a composition root that owns the cross-cutting session
+ * state (library drawer, selection, pending jump, editor, sleep timer) and
+ * hands each region of the page only what it renders.
+ */
 export function AdvancedReaderPage({
   fullScreen = false,
   text,
@@ -289,55 +220,40 @@ export function AdvancedReaderPage({
   onImmersiveChange,
   onAutoAdvanceHoldChange,
 }: AdvancedReaderPageProps) {
-  const runtimeBackend = activeModel === "kokoro"
-    ? kokoroState.backend
-    : supertonicState.backend;
+  const readingTextId = useId();
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  const articleRef = useRef<HTMLElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [libraryOpen, setLibraryOpen] = useState(false);
+  const [libraryTab, setLibraryTab] = useState<ReaderSidebarTab>("library");
+  const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+  /* ── Runtime labels ───────────────────────────────────────── */
   const selectedDesktopModel = desktopModelOptions.find((option) => option.selected);
   const activeModelState = selectedDesktopModel
-    ? {
-        ready: modelReady,
-        loading: !modelReady && !modelError,
-        downloadProgress: loadingProgress,
-        error: modelError,
-        backend: null,
-      }
+    ? { ready: modelReady, error: modelError }
     : activeModel === "kokoro" ? kokoroState : supertonicState;
   const activeModelLabel = selectedDesktopModel?.label ?? MODELS[activeModel].label;
   const activeVoiceLabel = selectedDesktopModel
     ? desktopVoiceLabel ?? selectedDesktopModel.label
     : formatVoiceName(voice);
-  const documentScrollerRef = useRef<HTMLDivElement>(null);
-  const readerTextRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const readingTextId = useId();
 
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [appearanceOpen, setAppearanceOpen] = useState(false);
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  const [libraryTab, setLibraryTab] = useState<ReaderSidebarTab>("library");
-  const [importOpen, setImportOpen] = useState(false);
-  const [urlInput, setUrlInput] = useState("");
-  const [urlImportError, setUrlImportError] = useState<string | null>(null);
-  const [urlImportBusy, setUrlImportBusy] = useState(false);
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const settingsButtonRef = useRef<HTMLButtonElement>(null);
-  const settingsPopoverRef = useRef<HTMLDivElement>(null);
-  const appearanceButtonRef = useRef<HTMLButtonElement>(null);
-  const appearancePopoverRef = useRef<HTMLDivElement>(null);
-  const importButtonRef = useRef<HTMLButtonElement>(null);
-  const importPopoverRef = useRef<HTMLDivElement>(null);
-
-  // Transient view state — a jump target that has not been spoken yet and the
-  // passage under the selection toolbar — belongs to what the pane shows.
-  // Tagging it with this scope makes it lapse on a document, section or text
-  // change by derivation, instead of an effect clearing it a frame late.
+  /* ── View state ───────────────────────────────────────────── */
+  // Transient view state — a jump target that playback has not reached yet
+  // and the passage under the selection toolbar — belongs to what the pane
+  // shows. Tagging it with this scope makes it lapse on a document, section or
+  // text change by derivation, instead of an effect clearing it a frame late.
   const activeDocumentId = activeDocument?.id ?? null;
-  const viewScope = `${activeDocumentId ?? ""}\u0000${activeSection?.id ?? ""}\u0000${activeSection?.start ?? 0}\u0000${text.length}`;
+  const sectionStart = activeSection?.start ?? 0;
+  const viewScope = `${activeDocumentId ?? ""}\u0000${activeSection?.id ?? ""}\u0000${sectionStart}\u0000${text.length}`;
   const [navigation, setNavigation] = useState<{ scope: string; textOffset: number } | null>(null);
   const navigationTextOffset = navigation?.scope === viewScope ? navigation.textOffset : null;
-  const [selection, setSelection] = useState<{ scope: string; quote: string; textOffset: number } | null>(null);
+  const [selection, setSelection] = useState<(SelectedPassage & { scope: string }) | null>(null);
   const selectedPassage = selection?.scope === viewScope ? selection : null;
+  const selectPassage = useCallback((passage: SelectedPassage | null) => {
+    setSelection(passage ? { ...passage, scope: viewScope } : null);
+  }, [viewScope]);
 
   const editor = useReaderSectionEditor({
     documentId: activeDocumentId,
@@ -358,16 +274,18 @@ export function AdvancedReaderPage({
     scope: viewScope,
     documentId: activeDocumentId,
     sectionId: activeSection?.id ?? null,
-    sectionStart: activeSection?.start ?? null,
+    sectionStart: activeSection ? activeSection.start : null,
     editing,
     isPlaying,
     hasAudio,
-    scrollerRef: documentScrollerRef,
-    articleRef: readerTextRef,
+    scrollerRef,
+    articleRef,
     textareaRef,
   });
-  const { followPaused, scrollMarkerIntoView } = autoFollow;
+  const { release: releaseFollow, scrollAfterSectionChange, scrollToLocalOffset } = autoFollow;
 
+  /* ── Text and playback position ───────────────────────────── */
+  const runtimeBackend = activeModel === "kokoro" ? kokoroState.backend : supertonicState.backend;
   const previewChunks = useMemo(
     () => selectedDesktopModel?.key === "qwen3"
       ? desktopQwenMode === "voiceClone"
@@ -380,204 +298,70 @@ export function AdvancedReaderPage({
         ),
     [activeModel, desktopQwenMode, quality, runtimeBackend, selectedDesktopModel?.key, text],
   );
-
-  const activeSegmentIndex = useMemo(
-    () => segments.findIndex((segment) => segment.id === activeSegmentId),
-    [activeSegmentId, segments],
-  );
-
-  const activeSegment = useMemo(
-    () => segments.find((segment) => segment.id === activeSegmentId) ?? null,
-    [activeSegmentId, segments],
-  );
-
-  const activeRange = useMemo(() => {
-    if (
-      activeSegment
-      && typeof activeSegment.textStart === "number"
-      && typeof activeSegment.textEnd === "number"
-    ) {
-      return {
-        start: activeSegment.textStart,
-        end: activeSegment.textEnd,
-      };
-    }
-
-    const fallback = activeSegmentIndex >= 0 ? previewChunks[activeSegmentIndex] : null;
-    if (fallback) {
-      return { start: fallback.start, end: fallback.end };
-    }
-
-    return null;
-  }, [activeSegment, activeSegmentIndex, previewChunks]);
-
-  const estimatedWords = useMemo(() => {
-    if (
-      !estimatedWordTrackingStable
-      || !activeSegment
-      || typeof activeSegment.textStart !== "number"
-    ) return [];
-    const speechEnd = Math.max(
-      activeSegment.startSec,
-      activeSegment.endSec - Math.max(0, activeSegment.pauseAfterSec ?? 0),
-    );
-    return estimateWordRanges(
-      activeSegment.text,
-      activeSegment.textStart,
-      activeSegment.startSec,
-      speechEnd,
-    );
-  }, [activeSegment, estimatedWordTrackingStable]);
-
-  // Selecting an *index* rather than the position itself is what keeps this page
-  // off the animation-frame path: the value only changes when the spoken word
-  // changes, a few times a second, so everything below re-renders at that rate.
-  const selectActiveWordIndex = useCallback(
-    (timeSec: number) => estimatedWords.findIndex(
-      (word) => timeSec >= word.startSec && timeSec < word.endSec,
-    ),
-    [estimatedWords],
-  );
-  const activeWordIndex = usePlaybackSelector(clock, selectActiveWordIndex);
-  const activeWordRange = useMemo(() => {
-    const activeWord = activeWordIndex >= 0 ? estimatedWords[activeWordIndex] : undefined;
-    return activeWord ? { start: activeWord.start, end: activeWord.end } : null;
-  }, [activeWordIndex, estimatedWords]);
-
   const textBlocks = useMemo(() => splitTextBlocks(text), [text]);
 
-  const overlayParts = useMemo(
-    () => buildOverlayParts(text, textBlocks, activeRange),
-    [text, textBlocks, activeRange],
+  const activeSegmentIndex = segments.findIndex((segment) => segment.id === activeSegmentId);
+  const activeSegment = activeSegmentIndex >= 0 ? segments[activeSegmentIndex] : null;
+  const segmentHasRange = activeSegment !== null
+    && typeof activeSegment.textStart === "number"
+    && typeof activeSegment.textEnd === "number";
+  // A segment without text offsets falls back to the preview chunk at its index.
+  const fallbackRange = activeSegmentIndex >= 0 ? previewChunks[activeSegmentIndex] : undefined;
+  const activeRangeStart = segmentHasRange ? activeSegment.textStart : fallbackRange?.start;
+  const activeRangeEnd = segmentHasRange ? activeSegment.textEnd : fallbackRange?.end;
+  // Keyed on the offsets so the pane's memoised spans survive re-renders that
+  // leave the spoken passage where it was.
+  const activeRange = useMemo(
+    () => (activeRangeStart === undefined || activeRangeEnd === undefined
+      ? null
+      : { start: activeRangeStart, end: activeRangeEnd }),
+    [activeRangeEnd, activeRangeStart],
   );
 
-  const paragraphs = useMemo(
-    () => groupPartsByBlock(textBlocks, overlayParts),
-    [overlayParts, textBlocks],
-  );
-
-  const hasGeneratedSegments = segments.length > 0;
-  const meaningfulLength = getMeaningfulTextLength(text);
-  const charsRemaining = MIN_TEXT_LENGTH - meaningfulLength;
-  const focusMode = viewPreferences.focusMode && isPlaying && activeRange !== null;
-  const sectionStart = activeSection?.start ?? 0;
+  const charsRemaining = MIN_TEXT_LENGTH - getMeaningfulTextLength(text);
   const persistedLocalOffset = clamp(
     (activeDocument?.progress.textOffset ?? sectionStart) - sectionStart,
     0,
     text.length,
   );
-  const currentLocalTextOffset = activeWordRange?.start
-    ?? activeRange?.start
+  // Passage-level on purpose: only the reading pane follows the spoken word,
+  // so the rest of the page does not re-render several times a second.
+  const currentLocalTextOffset = activeRange?.start
     ?? (navigationTextOffset === null ? null : navigationTextOffset - sectionStart)
     ?? persistedLocalOffset;
   const currentTextOffset = sectionStart + clamp(currentLocalTextOffset, 0, text.length);
   const readingProgress = activeDocument && activeDocument.text.length > 0
     ? (currentTextOffset / activeDocument.text.length) * 100
     : text.length > 0 ? (currentLocalTextOffset / text.length) * 100 : 0;
-  const currentChapter = activeChapter ?? activeDocument?.chapters.find(
-    (chapter) => currentTextOffset >= chapter.start && currentTextOffset < chapter.end,
-  ) ?? activeDocument?.chapters.at(-1) ?? null;
 
-  /* ── Chapter rail labels ──────────────────────────────────── */
+  /* ── Chapter ──────────────────────────────────────────────── */
+  const chapters = activeDocument?.chapters;
+  const currentChapter = activeChapter ?? chapters?.find(
+    (chapter) => currentTextOffset >= chapter.start && currentTextOffset < chapter.end,
+  ) ?? chapters?.at(-1) ?? null;
   const partCount = activeSection?.chapterSectionCount ?? 1;
   const partIndex = activeSection?.chapterSectionIndex ?? 0;
   const isChapterStart = partIndex === 0;
-  const chapters = activeDocument?.chapters ?? [];
   // Imported chapters usually open with their own title line, drawn as the
   // heading instead of a second copy above it. A plain document's only
   // "chapter" is named after the book, which the toolbar already shows, so it
   // gets no chapter heading at all.
   const showChapterHeading = currentChapter !== null && (
-    chapters.length > 1 || currentChapter.title !== activeDocument?.title
+    (chapters?.length ?? 0) > 1 || currentChapter.title !== activeDocument?.title
   );
   const headingBlockStart = showChapterHeading && currentChapter && isChapterStart
     ? chapterHeadingBlockStart(text, textBlocks[0], currentChapter.title)
     : null;
-  const previousStepLabel = chapterStepLabel(previousSection, false, currentChapter?.id ?? null, chapters);
-  const nextStepLabel = chapterStepLabel(nextSection, true, currentChapter?.id ?? null, chapters);
-  const contentsLabel = contentsButtonLabel(
-    currentChapter,
-    activeDocument?.chapters.length ?? 1,
-    partIndex,
-    partCount,
+  const chapterHeadingTitle = showChapterHeading && headingBlockStart === null ? currentChapter?.title : undefined;
+  const chapterHeading = useMemo(
+    () => (chapterHeadingTitle === undefined ? null : { title: chapterHeadingTitle, continued: !isChapterStart }),
+    [chapterHeadingTitle, isChapterStart],
   );
-  const openContents = useCallback(() => {
-    setLibraryTab("contents");
-    setLibraryOpen(true);
-  }, []);
 
-  /* ── Sleep timer ──────────────────────────────────────────── */
-  const sleepTimer = useReaderSleepTimer({
-    sectionKey: `${activeDocumentId ?? ""}\u0000${activeSection?.id ?? ""}`,
-    atChapterEnd: !nextSection || nextSection.chapterId !== activeSection?.chapterId,
-    hasNextSection: nextSection !== null,
-    clock,
-    totalDuration,
-    isPlaying,
-    isGenerating,
-    onPause: onTogglePlay,
-    onStopGeneration: onStop,
-    onHoldChange: onAutoAdvanceHoldChange,
-  });
-  const sleepTimerLabel = sleepTimer.label;
-
-  useEffect(() => {
-    if (!isPlaying || followPaused) return;
-    scrollMarkerIntoView();
-  }, [activeRange, activeWordIndex, followPaused, isPlaying, scrollMarkerIntoView]);
-
-  /* ── Player dock actions ──────────────────────────────────── */
-  const dockState = deriveReaderDockState({
-    hasAudio,
-    isGenerating,
-    generationProgress,
-    modelReady,
-    modelError,
-    generationError,
-    canGenerate,
-    charsRemaining,
-    loadingProgress,
-  });
-  const { showRetry, isPreparing, statusLabel } = dockState;
-  const handlePrimaryAction = useCallback(() => {
-    if (showRetry) {
-      onRetryLoad();
-      return;
-    }
-    if (isGenerating || isPreparing) return;
-    if (canGenerate) onGenerate();
-  }, [canGenerate, isGenerating, isPreparing, onGenerate, onRetryLoad, showRetry]);
-
-  const primaryAction: AudioPlayerPrimaryAction | undefined = dockState.primaryAction
-    ? { ...dockState.primaryAction, onClick: handlePrimaryAction }
-    : undefined;
-
-  const canPreviousSegment = activeSegmentIndex > 0;
-  const canNextSegment = activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1;
-  const activeSegmentNumber = activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null;
-  const canRetakeCurrentSegment = hasGeneratedSegments && canRetakeSegments && activeSegmentIndex >= 0 && !isRetaking;
-
-  const handlePreviousSegment = useCallback(() => {
-    if (activeSegmentIndex > 0) {
-      onJumpToSegment(segments[activeSegmentIndex - 1].id);
-    }
-  }, [activeSegmentIndex, onJumpToSegment, segments]);
-
-  const handleNextSegment = useCallback(() => {
-    if (activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1) {
-      onJumpToSegment(segments[activeSegmentIndex + 1].id);
-    }
-  }, [activeSegmentIndex, onJumpToSegment, segments]);
-
-  const handleRetakeCurrentSegment = useCallback(() => {
-    if (activeSegmentIndex >= 0) {
-      onRetakeSegment(segments[activeSegmentIndex].id);
-    }
-  }, [activeSegmentIndex, onRetakeSegment, segments]);
-
+  /* ── Navigation ───────────────────────────────────────────── */
   const handleJumpToOffset = useCallback((offset: number, positionSec?: number) => {
     finishEditing();
-    autoFollow.release();
+    releaseFollow();
     const documentLength = activeDocument?.text.length ?? sectionStart + text.length;
     const targetOffset = clamp(offset, 0, documentLength);
     setNavigation({ scope: viewScope, textOffset: targetOffset });
@@ -591,7 +375,7 @@ export function AdvancedReaderPage({
     // change; without a navigation handler nothing consumes it and it would
     // hijack the next unrelated section change instead.
     if (!isCurrentSection && onNavigateToOffset) {
-      autoFollow.scrollAfterSectionChange(targetOffset);
+      scrollAfterSectionChange(targetOffset);
       return;
     }
     const localOffset = clamp(targetOffset - sectionStart, 0, text.length);
@@ -601,16 +385,17 @@ export function AdvancedReaderPage({
       const targetSegment = findSegmentForTextOffset(segments, localOffset);
       if (targetSegment) onJumpToSegment(targetSegment.id);
     }
-
-    autoFollow.scrollToLocalOffset(localOffset);
+    scrollToLocalOffset(localOffset);
   }, [
     activeDocument?.text.length,
     activeSection?.end,
-    autoFollow,
     finishEditing,
     onJumpToSegment,
     onNavigateToOffset,
     onSeek,
+    releaseFollow,
+    scrollAfterSectionChange,
+    scrollToLocalOffset,
     sectionStart,
     segments,
     text.length,
@@ -618,137 +403,101 @@ export function AdvancedReaderPage({
     viewScope,
   ]);
 
-  /**
-   * Maps the current DOM selection back to a local text offset. Paragraph
-   * elements carry their block's character offset, so the prefix length inside
-   * the containing paragraph plus that offset is exact even though newline
-   * glyphs are never rendered.
-   */
-  const getArticleSelectionOffset = useCallback((): {
-    local: number;
-    collapsed: boolean;
-    quote: string;
-  } | null => {
-    const root = readerTextRef.current;
-    const selection = window.getSelection();
-    if (!root || !selection || selection.rangeCount === 0) return null;
-    const selectedRange = selection.getRangeAt(0);
-    if (!root.contains(selectedRange.startContainer) || !root.contains(selectedRange.endContainer)) return null;
-    const startElement = selectedRange.startContainer instanceof Element
-      ? selectedRange.startContainer
-      : selectedRange.startContainer.parentElement;
-    const paragraph = startElement?.closest<HTMLElement>("[data-block-start]");
-    if (!paragraph || !root.contains(paragraph)) return null;
+  const handleEditorSeek = useCallback((localOffset: number) => {
+    const targetSegment = findSegmentForTextOffset(segments, localOffset);
+    if (targetSegment) onJumpToSegment(targetSegment.id);
+  }, [onJumpToSegment, segments]);
 
-    const prefix = document.createRange();
-    prefix.selectNodeContents(paragraph);
-    prefix.setEnd(selectedRange.startContainer, selectedRange.startOffset);
-    const local = clamp(
-      Number(paragraph.dataset.blockStart) + prefix.toString().length,
-      0,
-      text.length,
-    );
-    return { local, collapsed: selection.isCollapsed, quote: selection.toString() };
-  }, [text.length]);
+  const goToPreviousSection = useMemo(
+    () => (previousSection ? () => handleJumpToOffset(previousSection.start) : undefined),
+    [handleJumpToOffset, previousSection],
+  );
+  const goToNextSection = useMemo(
+    () => (nextSection ? () => handleJumpToOffset(nextSection.start) : undefined),
+    [handleJumpToOffset, nextSection],
+  );
 
-  const handleReaderTextMouseUp = useCallback((event: React.MouseEvent) => {
-    // The second mouseup of a double-click lands after the browser has selected
-    // the word under the cursor, which would flash the note pill for a frame
-    // before `dblclick` seeks and clears it. Only a deliberate drag opens it.
-    if (event.detail > 1) return;
-    const info = getArticleSelectionOffset();
-    if (!info) return;
-    if (!info.collapsed) {
-      const quote = info.quote.trim().replace(/\s+/g, " ").slice(0, 500);
-      if (quote) setSelection({ scope: viewScope, quote, textOffset: sectionStart + info.local });
-      return;
-    }
-    // A plain click only dismisses the note pill — seeking is double-click.
-    setSelection(null);
-  }, [getArticleSelectionOffset, sectionStart, viewScope]);
+  /* ── Library drawer ───────────────────────────────────────── */
+  const openLibrary = useCallback(() => setLibraryOpen(true), []);
+  const closeLibrary = useCallback(() => setLibraryOpen(false), []);
+  const openContents = useCallback(() => {
+    setLibraryTab("contents");
+    setLibraryOpen(true);
+  }, []);
+  const openNotes = useCallback(() => {
+    setLibraryTab("notes");
+    setLibraryOpen(true);
+  }, []);
+  // Switching books from the drawer commits the draft into the book it was
+  // typed in first, while that book is still the active one.
+  const handleOpenDocument = useStableCallback((id: string) => {
+    if (id !== activeDocumentId) finishEditing();
+    onOpenDocument?.(id);
+  });
+  const handleNewDocument = useStableCallback(() => {
+    finishEditing();
+    onNewDocument?.();
+  });
+  const handleDeleteDocument = useStableCallback((id: string) => {
+    if (id === activeDocumentId) finishEditing();
+    onDeleteDocument?.(id);
+  });
+  const handleUpdateMetadata = useStableCallback(
+    (patch: Pick<Partial<ReaderDocumentRecord>, "title" | "author">) => onUpdateDocumentMetadata?.(patch),
+  );
+  const handleAddBookmark = useStableCallback(
+    (input: { label: string; textOffset: number; positionSec: number }) => onAddBookmark?.(input),
+  );
+  const handleRemoveBookmark = useStableCallback((id: string) => onRemoveBookmark?.(id));
+  const handleAddNote = useStableCallback(
+    (input: { text: string; quote: string; textOffset: number }) => onAddNote?.(input),
+  );
+  const handleUpdateNote = useStableCallback((id: string, value: string) => onUpdateNote?.(id, value));
+  const handleRemoveNote = useStableCallback((id: string) => onRemoveNote?.(id));
 
-  const handleReaderTextDoubleClick = useCallback(() => {
-    const info = getArticleSelectionOffset();
-    if (!info) return;
-    window.getSelection()?.removeAllRanges();
-    setSelection(null);
-    handleJumpToOffset(sectionStart + info.local);
-  }, [getArticleSelectionOffset, handleJumpToOffset, sectionStart]);
+  const handleBookmarkPassage = useCallback((passage: SelectedPassage) => {
+    onAddBookmark?.({
+      label: passage.quote.length > BOOKMARK_LABEL_LIMIT
+        ? `${passage.quote.slice(0, BOOKMARK_LABEL_LIMIT).trimEnd()}…`
+        : passage.quote,
+      textOffset: passage.textOffset,
+      positionSec: findSegmentForTextOffset(segments, passage.textOffset - sectionStart)?.startSec ?? 0,
+    });
+  }, [onAddBookmark, sectionStart, segments]);
 
-  // Arrow keys page through reading sections while the reader itself has focus —
-  // the book-reader equivalent of turning pages.
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      // Each page turn flushes, saves, and re-sections upstream, so a held key
-      // must not fire one per repeat.
-      if (event.repeat) return;
-      if (editing) return;
-      const target = event.target;
-      if (
-        target instanceof HTMLElement
-        && target.closest("input, textarea, select, [contenteditable='true'], [role='dialog']")
-      ) return;
-      // Toolbar buttons keep focus after use; paging from there is surprising.
-      // Only the unfocused page and the reading pane itself turn pages.
-      const inReader = target === document.body
-        || (target instanceof Node && !!documentScrollerRef.current?.contains(target));
-      if (!inReader) return;
-      const section = event.key === "ArrowRight" ? nextSection : previousSection;
-      if (!section) return;
-      event.preventDefault();
-      handleJumpToOffset(section.start);
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [editing, handleJumpToOffset, nextSection, previousSection]);
+  /* ── Sleep timer and keyboard ─────────────────────────────── */
+  const sleepTimer = useReaderSleepTimer({
+    sectionKey: `${activeDocumentId ?? ""}\u0000${activeSection?.id ?? ""}`,
+    atChapterEnd: !nextSection || nextSection.chapterId !== activeSection?.chapterId,
+    hasNextSection: nextSection !== null,
+    clock,
+    totalDuration,
+    isPlaying,
+    isGenerating,
+    onPause: onTogglePlay,
+    onStopGeneration: onStop,
+    onHoldChange: onAutoAdvanceHoldChange,
+  });
+  const { start: startSleepTimer } = sleepTimer;
+  const cancelSleepTimer = useCallback(() => startSleepTimer("off"), [startSleepTimer]);
 
-  // Reader-level keys: "?" lists the shortcuts, "F" toggles the focus layout.
-  useEffect(() => {
-    const handler = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
-      const target = event.target;
-      if (
-        target instanceof HTMLElement
-        && target.closest("input, textarea, select, [contenteditable='true']")
-      ) return;
-      if (event.key === "?") {
-        event.preventDefault();
-        setShortcutsOpen((open) => !open);
-      } else if ((event.key === "f" || event.key === "F") && !event.shiftKey && onImmersiveChange) {
-        if (target instanceof HTMLElement && target.closest("[role='dialog']")) return;
-        event.preventDefault();
-        onImmersiveChange(!immersive);
-      }
-    };
-    document.addEventListener("keydown", handler);
-    return () => document.removeEventListener("keydown", handler);
-  }, [immersive, onImmersiveChange]);
+  const toggleShortcuts = useCallback(() => setShortcutsOpen((open) => !open), []);
+  const showShortcuts = useCallback(() => setShortcutsOpen(true), []);
+  useReaderKeyboard({
+    editing,
+    scrollerRef,
+    previousSection,
+    nextSection,
+    onJumpToOffset: handleJumpToOffset,
+    onToggleShortcuts: toggleShortcuts,
+    immersive,
+    onImmersiveChange,
+  });
 
-  const handleFilePick = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    event.target.value = "";
-    if (file) void onImportFile?.(file);
-  }, [onImportFile]);
-
-  const handleUrlImport = useCallback(async () => {
-    const url = urlInput.trim();
-    if (!url || !onImportUrl || urlImportBusy) return;
-    setUrlImportBusy(true);
-    setUrlImportError(null);
-    try {
-      await onImportUrl(url);
-      setUrlInput("");
-      setImportOpen(false);
-      setLibraryOpen(true);
-    } catch (error) {
-      setUrlImportError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setUrlImportBusy(false);
-    }
-  }, [onImportUrl, urlImportBusy, urlInput]);
-
+  // The parent passes these as inline arrows; a stable identity keeps the
+  // memoised dock from re-rendering with every parent render.
+  const skipBackward = useStableCallback(onSkipBackward);
+  const skipForward = useStableCallback(onSkipForward);
 
   return (
     // On wide windows the open library pushes the page aside instead of
@@ -765,188 +514,64 @@ export function AdvancedReaderPage({
         clock={clock}
         loading={libraryLoading}
         persistent={libraryPersistent}
-        onClose={() => setLibraryOpen(false)}
-        onOpenDocument={(id) => {
-          if (id !== activeDocumentId) finishEditing();
-          onOpenDocument?.(id);
-        }}
-        onNewDocument={() => {
-          finishEditing();
-          onNewDocument?.();
-        }}
-        onDeleteDocument={(id) => {
-          if (id === activeDocumentId) finishEditing();
-          onDeleteDocument?.(id);
-        }}
-        onUpdateMetadata={(patch) => onUpdateDocumentMetadata?.(patch)}
+        onClose={closeLibrary}
+        onOpenDocument={handleOpenDocument}
+        onNewDocument={handleNewDocument}
+        onDeleteDocument={handleDeleteDocument}
+        onUpdateMetadata={handleUpdateMetadata}
         onJumpToOffset={handleJumpToOffset}
-        onAddBookmark={(input) => onAddBookmark?.(input)}
-        onRemoveBookmark={(id) => onRemoveBookmark?.(id)}
-        onAddNote={(input) => onAddNote?.(input)}
-        onUpdateNote={(id, value) => onUpdateNote?.(id, value)}
-        onRemoveNote={(id) => onRemoveNote?.(id)}
+        onAddBookmark={handleAddBookmark}
+        onRemoveBookmark={handleRemoveBookmark}
+        onAddNote={handleAddNote}
+        onUpdateNote={handleUpdateNote}
+        onRemoveNote={handleRemoveNote}
         selectedPassage={selectedPassage}
         tab={libraryTab}
         onTabChange={setLibraryTab}
       />
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".epub,.txt,.md,.html,.htm"
-        onChange={handleFilePick}
-        className="sr-only"
-        tabIndex={-1}
-        aria-hidden
-      />
-
-      {/* ── Toolbar ─────────────────────────────────────────── */}
-      {/* relative z-30 lifts the toolbar's stacking context above the document
-          panel so the settings popover never paints behind the reader overlay */}
-      {/* No bar slab behind the controls: Apple's toolbars express hierarchy
-          by grouping, so the tools float as glass capsules beside the title. */}
-      <div className="relative z-30 flex flex-wrap items-center justify-between gap-2 sm:gap-3">
-        {/* The library drawer opens from the left edge, so the button that
-            opens it sits on the left too, beside the book it replaces. */}
-        <div className="flex min-w-0 flex-1 items-center gap-2.5">
-          <button
-            type="button"
-            onClick={() => setLibraryOpen(true)}
-            aria-label="Open Reader library"
-            title="Library"
-            className="glass-control relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-text-secondary"
-          >
-            <Library size={16} />
-            <span className="absolute -top-1 -right-1 min-w-4 rounded-full bg-accent px-1 text-center font-mono text-2xs leading-4 text-white">
-              {documents.length}
-            </span>
-          </button>
-          <div className="min-w-0">
-            <h2 className="truncate font-display text-xl leading-tight font-semibold text-text-primary">
-              {activeDocument?.title || "Reader"}
-            </h2>
-            {/* Generation status lives in the player dock; the header only
-                identifies the book so long titles keep their room. */}
-            <p className="mt-0.5 truncate font-mono text-xs tabular-nums text-text-muted">
-              {activeDocument
-                ? activeDocument.author
-                  || (activeDocument.chapters.length > 1 ? `${activeDocument.chapters.length} chapters` : "Reading")
-                : "No book open"}
-            </p>
-          </div>
-        </div>
-
-        <div className="flex shrink-0 items-center gap-2">
-        {/* One capsule for the icon tools; the voice button, which carries
-            text, gets a container of its own so the two never read as one. */}
-        <div className="glass flex items-center gap-0.5 rounded-full p-1">
-        <div className="relative">
-          <button
-            ref={appearanceButtonRef}
-            type="button"
-            onClick={() => setAppearanceOpen((open) => !open)}
-            aria-label="Reading appearance"
-            aria-expanded={appearanceOpen}
-            title="Reading appearance"
-            className={TOOL_BUTTON}
-          >
-            <Type size={16} />
-          </button>
-          {appearanceOpen && (
-            <ViewportPopover
-              anchorRef={appearanceButtonRef}
-              popoverRef={appearancePopoverRef}
-              maxWidth={360}
-              className="glass-pop animate-scale-in origin-top-right rounded-[26px] p-4"
-              ariaLabel="Reading appearance"
-              onClose={() => setAppearanceOpen(false)}
-            >
-              <div className="space-y-4">
-                <SegmentedChoice
-                  legend="Page"
-                  value={viewPreferences.tone}
-                  options={READER_TONE_OPTIONS}
-                  onChange={(tone) => onViewPreferencesChange?.({ tone })}
-                />
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <label htmlFor={`${readingTextId}-font-size`} className="text-sm font-semibold text-text-secondary">
-                      Text size
-                    </label>
-                    <span className="font-mono text-xs text-text-secondary">{viewPreferences.fontSize}px</span>
-                  </div>
-                  <input
-                    id={`${readingTextId}-font-size`}
-                    type="range"
-                    min={15}
-                    max={26}
-                    step={1}
-                    value={viewPreferences.fontSize}
-                    onChange={(event) => onViewPreferencesChange?.({ fontSize: Number(event.target.value) })}
-                  />
-                </div>
-                <div>
-                  <div className="mb-2 flex items-center justify-between">
-                    <label htmlFor={`${readingTextId}-line-height`} className="text-sm font-semibold text-text-secondary">
-                      Line spacing
-                    </label>
-                    <span className="font-mono text-xs text-text-secondary">{viewPreferences.lineHeight.toFixed(2)}</span>
-                  </div>
-                  <input
-                    id={`${readingTextId}-line-height`}
-                    type="range"
-                    min={1.4}
-                    max={2.2}
-                    step={0.05}
-                    value={viewPreferences.lineHeight}
-                    onChange={(event) => onViewPreferencesChange?.({ lineHeight: Number(event.target.value) })}
-                  />
-                </div>
-                <SegmentedChoice
-                  legend="Column width"
-                  value={viewPreferences.columnWidth}
-                  options={COLUMN_WIDTH_OPTIONS}
-                  onChange={(columnWidth) => onViewPreferencesChange?.({ columnWidth })}
-                />
-                <SegmentedChoice
-                  legend="Sleep timer"
-                  value={sleepTimer.choice}
-                  options={SLEEP_TIMER_OPTIONS}
-                  onChange={sleepTimer.start}
-                />
-                <SwitchRow
-                  label="Focus spoken text"
-                  checked={viewPreferences.focusMode}
-                  onChange={(focusMode) => onViewPreferencesChange?.({ focusMode })}
-                />
-                <SwitchRow
-                  label="Continue automatically"
-                  checked={viewPreferences.autoAdvance}
-                  onChange={(autoAdvance) => onViewPreferencesChange?.({ autoAdvance })}
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAppearanceOpen(false);
-                    setShortcutsOpen(true);
-                  }}
-                  className="flex w-full items-center gap-2 rounded-xl px-1 py-1 text-xs text-text-muted transition-colors hover:text-accent"
-                >
-                  <Keyboard size={13} aria-hidden />
-                  Keyboard shortcuts
-                  <kbd className="ml-auto rounded border border-border px-1.5 font-mono text-2xs">?</kbd>
-                </button>
-              </div>
-            </ViewportPopover>
-          )}
-        </div>
-
+      <ReaderToolbar
+        title={activeDocument?.title || "Reader"}
+        subtitle={activeDocument
+          ? activeDocument.author
+            || (activeDocument.chapters.length > 1 ? `${activeDocument.chapters.length} chapters` : "Reading")
+          : "No book open"}
+        documentCount={documents.length}
+        onOpenLibrary={openLibrary}
+        voiceMenu={(
+          <ReaderVoiceMenu
+            open={voiceMenuOpen}
+            onOpenChange={setVoiceMenuOpen}
+            modelState={activeModelState}
+            voiceLabel={activeVoiceLabel}
+            modelLabel={activeModelLabel}
+            activeModel={activeModel}
+            onModelChange={onModelChange}
+            desktopModelOptions={desktopModelOptions}
+            selectedDesktopModel={selectedDesktopModel}
+            desktopModelSettings={desktopModelSettings}
+            kokoroState={kokoroState}
+            supertonicState={supertonicState}
+            visibleModels={visibleModels}
+            unavailableModels={unavailableModels}
+            kokoroVoices={kokoroVoices}
+            voice={voice}
+            onVoiceChange={onVoiceChange}
+            quality={quality}
+            onQualityChange={onQualityChange}
+          />
+        )}
+      >
+        <ReaderAppearanceMenu
+          viewPreferences={viewPreferences}
+          onViewPreferencesChange={onViewPreferencesChange}
+          sleepTimerChoice={sleepTimer.choice}
+          onSleepTimerChange={startSleepTimer}
+          onShowShortcuts={showShortcuts}
+        />
         <button
           type="button"
-          onClick={() => {
-            if (editing) finishEditing();
-            else startEditing();
-          }}
+          onClick={editing ? finishEditing : startEditing}
           aria-label={editing ? "Finish editing section" : "Edit current section"}
           title={editing ? "Finish editing" : "Edit current section"}
           className={editing
@@ -955,92 +580,15 @@ export function AdvancedReaderPage({
         >
           {editing ? <Check size={16} /> : <Pencil size={15} />}
         </button>
-
         {(onImportDocument || onImportFile || onImportUrl) && (
-          <div className="relative">
-            <button
-              ref={importButtonRef}
-              type="button"
-              onClick={() => {
-                setImportOpen((open) => !open);
-                setUrlImportError(null);
-              }}
-              disabled={isImportingDocument && !importOpen}
-              aria-label="Import document"
-              aria-expanded={importOpen}
-              title="Import a file or an article URL"
-              className={`${TOOL_BUTTON} disabled:cursor-default disabled:opacity-60`}
-            >
-              {isImportingDocument
-                ? <Loader2 size={15} className="animate-spin" />
-                : <FileUp size={15} />}
-            </button>
-            {importOpen && (
-              <ViewportPopover
-                anchorRef={importButtonRef}
-                popoverRef={importPopoverRef}
-                maxWidth={400}
-                className="glass-pop animate-scale-in origin-top-right rounded-[26px] p-4"
-                ariaLabel="Import document"
-                onClose={() => setImportOpen(false)}
-              >
-                {(onImportDocument || onImportFile) && (
-                  <button
-                    type="button"
-                    disabled={isImportingDocument}
-                    onClick={() => {
-                      setImportOpen(false);
-                      if (onImportDocument) onImportDocument();
-                      else fileInputRef.current?.click();
-                    }}
-                    className="flex w-full items-center gap-3 rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2.5 text-left text-sm text-text-primary transition-colors hover:bg-text-primary/[0.07] disabled:cursor-default disabled:opacity-60"
-                  >
-                    <FileUp size={15} className="shrink-0 text-accent" />
-                    <span className="min-w-0">
-                      <span className="block font-semibold">Choose a file…</span>
-                      <span className="block text-xs text-text-muted">
-                        {onImportDocument
-                          ? "EPUB, PDF, text, Markdown, Office, or images"
-                          : "EPUB, text, Markdown, or HTML"}
-                      </span>
-                    </span>
-                  </button>
-                )}
-                {onImportUrl && (
-                  <div className={onImportDocument || onImportFile ? "mt-4 border-t border-border/50 pt-4" : undefined}>
-                    <label className="block text-sm font-semibold text-text-secondary">
-                      Article URL
-                      <input
-                        type="url"
-                        value={urlInput}
-                        onChange={(event) => setUrlInput(event.target.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") void handleUrlImport();
-                        }}
-                        placeholder="https://example.com/article"
-                        className="mt-2 w-full rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2.5 text-sm normal-case tracking-normal text-text-primary outline-none placeholder:text-text-muted focus:border-accent/40"
-                      />
-                    </label>
-                    {urlImportError && <p className="mt-2 text-xs leading-5 text-danger">{urlImportError}</p>}
-                    <p className="mt-2 text-xs leading-5 text-text-muted">
-                      Article text and headings are extracted locally after download.
-                    </p>
-                    <button
-                      type="button"
-                      disabled={!urlInput.trim() || urlImportBusy}
-                      onClick={() => void handleUrlImport()}
-                      className="glass-accent mt-3 flex w-full items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-sm font-semibold text-white transition-transform active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {urlImportBusy ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
-                      {urlImportBusy ? "Importing article…" : "Import article"}
-                    </button>
-                  </div>
-                )}
-              </ViewportPopover>
-            )}
-          </div>
+          <ReaderImportMenu
+            onImportDocument={onImportDocument}
+            onImportFile={onImportFile}
+            onImportUrl={onImportUrl}
+            isImportingDocument={isImportingDocument}
+            onArticleImported={openLibrary}
+          />
         )}
-
         {onImmersiveChange && (
           <button
             type="button"
@@ -1055,445 +603,124 @@ export function AdvancedReaderPage({
             {immersive ? <Minimize2 size={15} /> : <Maximize2 size={15} />}
           </button>
         )}
-
-        </div>
-
-        {/* Voice & model settings popover */}
-        <div className="relative">
-          <button
-            ref={settingsButtonRef}
-            type="button"
-            onClick={() => setSettingsOpen((o) => !o)}
-            aria-expanded={settingsOpen}
-            aria-label="Voice settings"
-            className="glass-control flex h-12 min-w-12 items-center justify-center gap-2 rounded-full px-4 text-sm text-text-primary"
-          >
-            <span
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                activeModelState.ready ? "bg-success" : activeModelState.error ? "bg-danger" : "bg-text-muted animate-pulse"
-              }`}
-              style={activeModelState.ready ? { boxShadow: "0 0 6px color-mix(in srgb, var(--color-success) 60%, transparent)" } : undefined}
-            />
-            <span className="hidden font-medium sm:inline">{activeVoiceLabel}</span>
-            <span className="hidden text-xs text-text-muted md:inline">{activeModelLabel}</span>
-            <SlidersHorizontal size={13} className="text-text-muted sm:hidden" />
-            <ChevronDown
-              size={13}
-              className={`hidden text-text-muted transition-transform duration-200 sm:block ${settingsOpen ? "rotate-180" : ""}`}
-            />
-          </button>
-
-          {settingsOpen && (
-            <ViewportPopover
-              anchorRef={settingsButtonRef}
-              popoverRef={settingsPopoverRef}
-              maxWidth={448}
-              className="glass-pop animate-scale-in origin-top-right rounded-[26px] p-4"
-              ariaLabel="Voice settings"
-              onClose={() => setSettingsOpen(false)}
-              // ModelToggle portals its menu to document.body so it can escape
-              // this scrollable popover. A press inside that menu must not close
-              // and unmount the settings tree before the option's click selects
-              // the new runtime.
-              keepOpenWithin="[data-model-picker-menu]"
-            >
-              <div className="flex flex-col gap-4">
-                <ModelToggle
-                  activeModel={activeModel}
-                  onModelChange={onModelChange}
-                  desktopModelOptions={desktopModelOptions}
-                  kokoroState={kokoroState}
-                  supertonicState={supertonicState}
-                  visibleModels={visibleModels}
-                  unavailableModels={unavailableModels}
-                />
-
-                {selectedDesktopModel && desktopModelSettings}
-
-                {!selectedDesktopModel && (
-                  <VoiceSelector
-                    activeModel={activeModel}
-                    voice={voice}
-                    onVoiceChange={onVoiceChange}
-                    kokoroVoices={kokoroVoices}
-                  />
-                )}
-
-                {!selectedDesktopModel && activeModel === "supertonic" && (
-                  <div>
-                    <div className="mb-2 flex items-baseline justify-between">
-                      <label
-                        htmlFor={`${readingTextId}-quality`}
-                        className="text-sm font-semibold text-text-secondary"
-                      >
-                        Quality
-                      </label>
-                      <span className="font-mono text-sm font-medium tabular-nums text-text-primary">
-                        {quality} steps
-                      </span>
-                    </div>
-                    <input
-                      id={`${readingTextId}-quality`}
-                      type="range"
-                      min={QUALITY_MIN}
-                      max={QUALITY_MAX}
-                      step={QUALITY_STEP}
-                      value={quality}
-                      onChange={(e) => onQualityChange(parseInt(e.target.value))}
-                    />
-                    <div className="mt-1.5 flex justify-between">
-                      <span className="text-xs text-text-muted">Faster</span>
-                      <span className="text-xs text-text-muted">Higher quality</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-            </ViewportPopover>
-          )}
-        </div>
-        </div>
-      </div>
+      </ReaderToolbar>
 
       {selectedDesktopModel && modelError && (
-        <div className="flex flex-col gap-3 rounded-2xl border border-danger/20 bg-danger/[0.06] px-4 py-3 sm:flex-row sm:items-center sm:justify-between" role="status">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-text-primary">
-              {selectedDesktopModel.key === "qwen3"
-                ? `${activeModelLabel} needs setup in Reader`
-                : `${activeModelLabel} is unavailable`}
-            </p>
-            <p className="mt-0.5 line-clamp-2 text-xs leading-5 text-text-secondary">{modelError}</p>
-          </div>
-          <button
-            type="button"
-            onClick={selectedDesktopModel.key === "qwen3" ? () => setSettingsOpen(true) : onRetryLoad}
-            className="shrink-0 rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2 text-sm font-semibold text-text-primary transition-all hover:bg-text-primary/[0.07] active:scale-[0.98]"
-          >
-            {selectedDesktopModel.key === "qwen3" ? "Open Qwen settings" : "Retry"}
-          </button>
-        </div>
+        <ReaderDesktopModelAlert
+          title={selectedDesktopModel.key === "qwen3"
+            ? `${activeModelLabel} needs setup in Reader`
+            : `${activeModelLabel} is unavailable`}
+          message={modelError}
+          actionLabel={selectedDesktopModel.key === "qwen3" ? "Open Qwen settings" : "Retry"}
+          onAction={selectedDesktopModel.key === "qwen3" ? () => setVoiceMenuOpen(true) : onRetryLoad}
+        />
       )}
 
       {libraryError && (
         <p className="px-1 text-xs text-danger" role="status">{libraryError}</p>
       )}
 
-      {/* ── Document ────────────────────────────────────────── */}
       <section
         className={`surface reader-tone-${viewPreferences.tone} relative flex flex-col overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}
         style={{
           "--reader-column-width": `${readerColumnWidthRem(viewPreferences.columnWidth)}rem`,
         } as CSSProperties}
       >
-        {/* Running head: where you are, one tap to the contents, and the two
-            page turns — the only chapter chrome the reader needs. */}
         {currentChapter && (
-          <nav
-            aria-label="Chapter navigation"
-            className="flex shrink-0 items-center gap-2 border-b border-border/40 px-2.5 py-2 sm:gap-3 sm:px-3"
-          >
-            {/* Both page turns sit together on the left, the way a reader's
-                thumb expects them, instead of straddling the title. */}
-            <div className="flex shrink-0 items-center rounded-full bg-text-primary/[0.05] p-0.5">
-              <button
-                type="button"
-                disabled={!previousSection}
-                onClick={() => previousSection && handleJumpToOffset(previousSection.start)}
-                aria-label={previousStepLabel}
-                title={`${previousStepLabel} (←)`}
-                className="flex h-7 w-7 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-text-primary/[0.08] hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
-              >
-                <ChevronLeft size={15} />
-              </button>
-              <span className="h-4 w-px bg-border/70" aria-hidden />
-              <button
-                type="button"
-                disabled={!nextSection}
-                onClick={() => nextSection && handleJumpToOffset(nextSection.start)}
-                aria-label={nextStepLabel}
-                title={`${nextStepLabel} (→)`}
-                className="flex h-7 w-7 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-text-primary/[0.08] hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-30 disabled:hover:bg-transparent"
-              >
-                <ChevronRight size={15} />
-              </button>
-            </div>
-
-            {/* Hugging its own text keeps the hover and focus ring on the
-                title instead of stretching a highlight across the whole rail. */}
-            <button
-              type="button"
-              onClick={openContents}
-              aria-label={contentsLabel}
-              aria-haspopup="dialog"
-              title="Open contents"
-              className="group -ml-1 mr-auto flex min-w-0 items-center gap-2 rounded-lg px-2 py-1 text-left transition-colors hover:bg-text-primary/[0.07]"
-            >
-              {/* A one-chapter document would just repeat the book title from
-                  the header, so the rail names the destination instead. */}
-              <span className="truncate text-sm font-medium text-text-secondary transition-colors group-hover:text-accent">
-                {(activeDocument?.chapters.length ?? 0) > 1 ? currentChapter.title : "Contents"}
-              </span>
-              {partCount > 1 && (
-                <span className="flex shrink-0 items-center gap-1" aria-hidden>
-                  {partCount <= 6 ? (
-                    Array.from({ length: partCount }, (_, index) => (
-                      <span
-                        key={index}
-                        className={`h-1.5 w-1.5 rounded-full transition-colors ${
-                          index === partIndex ? "bg-accent" : "bg-border"
-                        }`}
-                      />
-                    ))
-                  ) : (
-                    <span className="font-mono text-2xs text-text-muted tabular-nums">
-                      {partIndex + 1}/{partCount}
-                    </span>
-                  )}
-                </span>
-              )}
-              <ChevronDown
-                size={13}
-                className="shrink-0 text-text-muted transition-colors group-hover:text-accent"
-              />
-            </button>
-
-            <div className="flex shrink-0 items-center gap-2">
-              <div className="hidden h-1 w-20 overflow-hidden rounded-full bg-border/80 sm:block md:w-28">
-                <div
-                  className="h-full rounded-full bg-accent transition-[transform] duration-300 origin-left"
-                  style={{ transform: `scaleX(${clamp(readingProgress / 100, 0, 1)})` }}
-                />
-              </div>
-              {/* Fixed width so the rail does not twitch as the number grows. */}
-              <span className="w-9 shrink-0 text-right font-mono text-2xs text-text-muted tabular-nums">
-                {Math.round(readingProgress)}%
-              </span>
-              <RemainingTime
-                clock={clock}
-                totalDuration={totalDuration}
-                className="hidden whitespace-nowrap font-mono text-2xs text-text-muted tabular-nums md:inline"
-              />
-              {sleepTimerLabel && (
-                <button
-                  type="button"
-                  onClick={() => sleepTimer.start("off")}
-                  aria-label={`Sleep timer: ${sleepTimerLabel}. Cancel`}
-                  title="Cancel sleep timer"
-                  className="flex items-center gap-1 rounded-full bg-accent-light px-2 py-0.5 font-mono text-2xs text-accent tabular-nums"
-                >
-                  <Moon size={10} aria-hidden />
-                  {sleepTimerLabel}
-                </button>
-              )}
-            </div>
-          </nav>
+          <ReaderChapterRail
+            previousLabel={chapterStepLabel(previousSection, false, currentChapter.id, chapters ?? [])}
+            nextLabel={chapterStepLabel(nextSection, true, currentChapter.id, chapters ?? [])}
+            onPrevious={goToPreviousSection}
+            onNext={goToNextSection}
+            // A one-chapter document would just repeat the book title from
+            // the header, so the rail names the destination instead.
+            title={(chapters?.length ?? 0) > 1 ? currentChapter.title : "Contents"}
+            contentsLabel={contentsButtonLabel(currentChapter, chapters?.length ?? 1, partIndex, partCount)}
+            onOpenContents={openContents}
+            partIndex={partIndex}
+            partCount={partCount}
+            readingProgress={readingProgress}
+            clock={clock}
+            totalDuration={totalDuration}
+            sleepTimerLabel={sleepTimer.label}
+            onCancelSleepTimer={cancelSleepTimer}
+          />
         )}
 
-        <div className={`relative ${fullScreen ? "min-h-[55vh] flex-1" : "min-h-72"}`}>
-          {editing ? (
-            <textarea
-              id={readingTextId}
-              ref={textareaRef}
-              aria-label="Reading Text"
-              value={editor.draft}
-              onChange={(event) => editor.changeDraft(event.target.value)}
-              onBlur={editor.commitDraft}
-              onScroll={autoFollow.handleScroll}
-              onDoubleClick={(event) => {
-                if (!hasGeneratedSegments) return;
-                const targetSegment = findSegmentForTextOffset(segments, event.currentTarget.selectionStart);
-                if (targetSegment) onJumpToSegment(targetSegment.id);
-              }}
-              placeholder="Type or paste text for this reading section…"
-              className={`absolute inset-0 h-full w-full resize-none overflow-auto bg-transparent text-text-primary caret-text-primary placeholder:font-sans placeholder:text-text-muted focus:outline-none ${DOCUMENT_TEXT_CLASSES} ${documentPadding(fullScreen)}`}
-              style={{ fontSize: viewPreferences.fontSize, lineHeight: viewPreferences.lineHeight }}
-            />
-          ) : (
-            <div
-              id={readingTextId}
-              ref={documentScrollerRef}
-              role="document"
-              aria-label="Reading Text"
-              tabIndex={0}
-              onScroll={autoFollow.handleScroll}
-              className={`absolute inset-0 overflow-auto text-text-primary outline-none ${documentPadding(fullScreen)} ${fullScreen ? "reader-scroll-edge" : ""} ${focusMode ? "reader-focus" : ""}`}
-              style={{ fontSize: viewPreferences.fontSize, lineHeight: viewPreferences.lineHeight }}
-            >
-              {/* A chapter opens like a printed chapter opens; the parts after
-                  it pick up mid-flow with a quiet continuation marker instead
-                  of restating the title at full size. */}
-              {currentChapter && showChapterHeading && headingBlockStart === null && (isChapterStart ? (
-                <header className="mb-7 border-b border-border/50 pb-5">
-                  <h3 className="font-display text-[1.45em] leading-tight font-semibold text-text-primary">
-                    {currentChapter.title}
-                  </h3>
-                </header>
-              ) : (
-                <p className="mb-6 truncate font-mono text-xs text-text-secondary">
-                  {currentChapter.title} · continued
-                </p>
-              ))}
-              <article
-                ref={readerTextRef}
-                onMouseUp={handleReaderTextMouseUp}
-                onDoubleClick={handleReaderTextDoubleClick}
-                title="Double-click to listen from here"
-                className={`${DOCUMENT_TEXT_CLASSES} reader-article`}
-              >
-                {paragraphs.map(({ block, parts }) => {
-                  // Hand the word offsets only to the paragraph that contains
-                  // them; every other paragraph keeps its memoised output.
-                  const holdsActiveWord = activeWordRange !== null
-                    && activeWordRange.start < block.end
-                    && activeWordRange.end > block.start;
-                  return (
-                    <ReaderParagraph
-                      key={`block-${block.start}`}
-                      block={block}
-                      parts={parts}
-                      wordStart={holdsActiveWord ? activeWordRange.start : -1}
-                      wordEnd={holdsActiveWord ? activeWordRange.end : -1}
-                      heading={block.start === headingBlockStart}
-                    />
-                  );
-                })}
-              </article>
-              {paragraphs.length === 0 && (
-                <div className="rounded-2xl border border-dashed border-border p-5 text-center font-sans text-sm text-text-muted">
-                  <p>This section is empty.</p>
-                  <button
-                    type="button"
-                    onClick={startEditing}
-                    className="mt-3 rounded-xl border border-border bg-text-primary/[0.04] px-3 py-2 text-sm font-medium text-text-primary transition-all duration-200 hover:bg-text-primary/[0.07] hover:text-accent active:scale-[0.98]"
-                  >
-                    Add text
-                  </button>
-                </div>
-              )}
-              {selectedPassage && (
-                <div
-                  role="toolbar"
-                  aria-label="Selected passage"
-                  className="sticky bottom-44 left-1/2 mt-8 flex w-max -translate-x-1/2 items-center gap-0.5 glass rounded-full p-1 font-sans text-xs font-semibold text-accent"
-                >
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const offset = selectedPassage.textOffset;
-                      window.getSelection()?.removeAllRanges();
-                      setSelection(null);
-                      handleJumpToOffset(offset);
-                    }}
-                    className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-colors hover:bg-accent-light"
-                  >
-                    <Play size={12} aria-hidden />
-                    Listen from here
-                  </button>
-                  {onAddBookmark && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const local = selectedPassage.textOffset - sectionStart;
-                        onAddBookmark({
-                          label: selectedPassage.quote.length > 40
-                            ? `${selectedPassage.quote.slice(0, 40).trimEnd()}…`
-                            : selectedPassage.quote,
-                          textOffset: selectedPassage.textOffset,
-                          positionSec: findSegmentForTextOffset(segments, local)?.startSec ?? 0,
-                        });
-                        window.getSelection()?.removeAllRanges();
-                        setSelection(null);
-                      }}
-                      className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-colors hover:bg-accent-light"
-                    >
-                      <BookmarkPlus size={12} aria-hidden />
-                      Bookmark
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    aria-label="Add note to selection"
-                    onClick={() => {
-                      setLibraryTab("notes");
-                      setLibraryOpen(true);
-                    }}
-                    className="flex items-center gap-1.5 rounded-full px-3 py-1.5 transition-colors hover:bg-accent-light"
-                  >
-                    <NotebookPen size={12} aria-hidden />
-                    Note
-                  </button>
-                  <button
-                    type="button"
-                    aria-label="Dismiss"
-                    onClick={() => {
-                      window.getSelection()?.removeAllRanges();
-                      setSelection(null);
-                    }}
-                    className="flex h-7 w-7 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-accent-light hover:text-accent"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
-              )}
-            </div>
-          )}
-          {followPaused && isPlaying && !editing && (
-            <button
-              type="button"
-              onClick={autoFollow.resume}
-              className="absolute bottom-5 left-1/2 z-10 -translate-x-1/2 glass rounded-full px-4 py-2 text-xs font-semibold text-accent transition-transform active:scale-[0.98]"
-            >
-              Resume auto-follow
-            </button>
-          )}
-        </div>
+        <ReaderTextPane
+          readingTextId={readingTextId}
+          fullScreen={fullScreen}
+          fontSize={viewPreferences.fontSize}
+          lineHeight={viewPreferences.lineHeight}
+          focusMode={viewPreferences.focusMode && isPlaying && activeRange !== null}
+          text={text}
+          blocks={textBlocks}
+          activeRange={activeRange}
+          sectionStart={sectionStart}
+          chapterHeading={chapterHeading}
+          headingBlockStart={headingBlockStart}
+          clock={clock}
+          activeSegment={activeSegment}
+          estimatedWordTrackingStable={estimatedWordTrackingStable}
+          isPlaying={isPlaying}
+          editing={editing}
+          draft={editor.draft}
+          onDraftChange={editor.changeDraft}
+          onDraftCommit={editor.commitDraft}
+          onEditorSeek={handleEditorSeek}
+          onStartEditing={startEditing}
+          scrollerRef={scrollerRef}
+          articleRef={articleRef}
+          textareaRef={textareaRef}
+          followPaused={autoFollow.followPaused}
+          onScroll={autoFollow.handleScroll}
+          onResumeFollow={autoFollow.resume}
+          scrollMarkerIntoView={autoFollow.scrollMarkerIntoView}
+          selectedPassage={selectedPassage}
+          onSelectPassage={selectPassage}
+          onListenFrom={handleJumpToOffset}
+          onBookmarkPassage={onAddBookmark ? handleBookmarkPassage : undefined}
+          onNotePassage={openNotes}
+        />
       </section>
 
       {shortcutsOpen && (
         <ReaderShortcutsDialog onClose={() => setShortcutsOpen(false)} />
       )}
 
-      {/* ── Player dock ─────────────────────────────────────── */}
-      <div
-        className={`reader-tone-${viewPreferences.tone} ${
-          fullScreen
-            ? "fixed bottom-4 left-1/2 z-40 w-[min(44rem,calc(100vw-1.5rem))] -translate-x-1/2 sm:bottom-6"
-            : "w-full"
-        }`}
-      >
-        <AudioPlayer
-          variant="dock"
-          embedded
-          isPlaying={isPlaying}
-          clock={clock}
-          totalDuration={totalDuration}
-          segmentCount={segments.length}
-          activeSegmentNumber={activeSegmentNumber}
-          sectionPreviewCount={previewChunks.length}
-          statusLabel={statusLabel}
-          stats={stats}
-          isGenerating={isGenerating}
-          allowPlaybackDuringGeneration
-          playbackRate={playbackRate}
-          onPlaybackRateChange={onPlaybackRateChange}
-          canPreviousSegment={canPreviousSegment}
-          canNextSegment={canNextSegment}
-          onPreviousSegment={handlePreviousSegment}
-          onNextSegment={handleNextSegment}
-          canRegenerate={hasAudio && !isGenerating && canGenerate}
-          onRegenerate={onGenerate}
-          canRetakeSegment={canRetakeCurrentSegment}
-          onRetakeSegment={canRetakeSegments ? handleRetakeCurrentSegment : undefined}
-          isRetaking={isRetaking}
-          primaryAction={primaryAction}
-          onTogglePlay={onTogglePlay}
-          onSeek={onSeek}
-          onSkipBackward={onSkipBackward}
-          onSkipForward={onSkipForward}
-          onDownload={onDownload}
-          onStop={onStop}
-        />
-      </div>
+      <ReaderPlayerDock
+        fullScreen={fullScreen}
+        tone={viewPreferences.tone}
+        isPlaying={isPlaying}
+        clock={clock}
+        totalDuration={totalDuration}
+        segments={segments}
+        activeSegmentId={activeSegmentId}
+        sectionPreviewCount={previewChunks.length}
+        stats={stats}
+        isGenerating={isGenerating}
+        generationProgress={generationProgress}
+        generationError={generationError}
+        modelReady={modelReady}
+        modelError={modelError}
+        loadingProgress={loadingProgress}
+        canGenerate={canGenerate}
+        charsRemaining={charsRemaining}
+        playbackRate={playbackRate}
+        onPlaybackRateChange={onPlaybackRateChange}
+        isRetaking={isRetaking}
+        canRetakeSegments={canRetakeSegments}
+        onRetakeSegment={onRetakeSegment}
+        onJumpToSegment={onJumpToSegment}
+        onGenerate={onGenerate}
+        onRetryLoad={onRetryLoad}
+        onTogglePlay={onTogglePlay}
+        onSeek={onSeek}
+        onSkipBackward={skipBackward}
+        onSkipForward={skipForward}
+        onDownload={onDownload}
+        onStop={onStop}
+      />
     </div>
   );
 }
