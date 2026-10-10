@@ -432,6 +432,70 @@ describe("Kokoro load timeout cleanup", () => {
   });
 });
 
+describe("Kokoro load watchdog", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("keeps WebGPU for a slow download that keeps reporting progress", async () => {
+    const gpu = createInstance([createRawAudio()], { af_heart: {} });
+    const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ canUseWebGPU: true, instances: [] });
+    vi.useFakeTimers();
+    fromPretrained.mockImplementationOnce(async (_modelId: string, options: FromPretrainedOptions) => {
+      const total = FILE_SIZES["onnx/model.onnx"];
+      // Ten minutes of progress every 30 s: far past any fixed deadline.
+      for (let step = 1; step <= 20; step += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 30_000));
+        options.progress_callback?.({ status: "progress", file: "onnx/model.onnx", loaded: (total * step) / 20, total });
+      }
+      return gpu;
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "READY", voices: ["af_heart"], backend: "webgpu" }));
+    expect(fromPretrained).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to WASM when the WebGPU download stalls for a minute", async () => {
+    const wasm = createInstance([], { af_heart: {} });
+    const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ canUseWebGPU: true, instances: [wasm] });
+    vi.useFakeTimers();
+    fromPretrained.mockImplementationOnce((_modelId: string, options: FromPretrainedOptions) => {
+      options.progress_callback?.({ status: "progress", file: "onnx/model.onnx", loaded: 1_000, total: FILE_SIZES["onnx/model.onnx"] });
+      return new Promise<MockKokoroInstance>(() => undefined);
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.advanceTimersByTimeAsync(59_000);
+    expect(fromPretrained).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "READY", voices: ["af_heart"], backend: "wasm" }));
+    expect(fromPretrained).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ dtype: "q8", device: "wasm" }));
+  });
+
+  it("gives session creation two minutes once every download has finished", async () => {
+    const wasm = createInstance([], { af_heart: {} });
+    const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ canUseWebGPU: true, instances: [wasm] });
+    vi.useFakeTimers();
+    fromPretrained.mockImplementationOnce((_modelId: string, options: FromPretrainedOptions) => {
+      for (const event of downloadEvents("fp32")) options.progress_callback?.(event);
+      return new Promise<MockKokoroInstance>(() => undefined);
+    });
+
+    dispatch({ type: "LOAD" });
+    // Well past the inactivity budget, but nothing is left to download.
+    await vi.advanceTimersByTimeAsync(119_000);
+    expect(fromPretrained).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "READY", voices: ["af_heart"], backend: "wasm" }));
+  });
+});
+
 describe("Kokoro soft abort", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
