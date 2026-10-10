@@ -224,16 +224,18 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
     port.post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend: backend ?? undefined });
     return;
   }
-  if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
+  // Dropped before the first await, so a GENERATE that arrives during the
+  // reload is refused instead of running on sessions about to be released.
+  const previousRuntime = runtime;
+  runtime = null;
+  backend = null;
   try {
-    // Never release sessions under a running inference.
-    generations.invalidate();
+    // The runtime superseded the running generation when this reload
+    // arrived; never release sessions under its in-flight inference.
     await generations.idle();
-    const previousRuntime = runtime;
-    runtime = null;
-    backend = null;
     clearStyles();
     await disposeRuntime(previousRuntime);
+    if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
     const progress = createModelLoadProgress();
     progress.reset();
     ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;

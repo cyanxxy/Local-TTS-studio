@@ -36,7 +36,23 @@ export interface GenerationTuningSettings {
   emphasisStrength?: number;
 }
 
-/** Messages sent FROM main thread TO worker */
+/**
+ * Messages sent FROM main thread TO the browser TTS workers (Kokoro,
+ * Supertonic 2, Supertonic 3). The rules every worker follows
+ * (src/workers/kit/runtime.ts):
+ *
+ * - LOADs run one at a time, in arrival order. A LOAD with `forceReload`
+ *   supersedes every generation sent before it the moment it arrives; a
+ *   GENERATE sent after it never runs on the outgoing model (it fails with a
+ *   generate ERROR while the model is unloaded).
+ * - One generation runs at a time. A GENERATE supersedes the previous
+ *   generation at once (it posts nothing more) but starts inference only
+ *   after the previous one's in-flight inference has returned, so ONNX
+ *   sessions never run concurrently.
+ * - Every AUDIO_CHUNK, GENERATION_COMPLETE, and generate ERROR echoes the
+ *   GENERATE's `generationId`. A current generation ends with exactly one
+ *   GENERATION_COMPLETE or generate ERROR; a superseded one ends silently.
+ */
 export type WorkerInMessage =
   | { type: "LOAD"; forceReload?: boolean; preferredVoice?: string; debugProfiling?: boolean }
   | {

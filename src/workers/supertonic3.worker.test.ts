@@ -372,6 +372,29 @@ describe("Supertonic 3 generation scheduling", () => {
     expect(messages.some((message) => message.type === "AUDIO_CHUNK")).toBe(false);
   });
 
+  it("refuses a generation that arrives while a forced reload waits for the running one", async () => {
+    const gate = deferred<Float32Array>();
+    const { dispatch, messages, runtime } = await loadSupertonic3Worker({ synthesize: () => gate.promise });
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "A sentence that is still running.", voice: "M1", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(runtime.synthesize).toHaveBeenCalledOnce());
+    dispatch({ type: "LOAD", forceReload: true });
+    dispatch({ type: "GENERATE", generationId: "b", text: "A sentence sent during the reload.", voice: "M1", speed: 1, quality: 5 });
+
+    gate.resolve(new Float32Array([0.5]));
+    await vi.waitFor(() => expect(messages.filter((message) => message.type === "READY")).toHaveLength(2));
+    // The released sessions never ran "b"; it was refused like any early request.
+    expect(runtime.synthesize).toHaveBeenCalledOnce();
+    expect(messages).toContainEqual({
+      type: "ERROR",
+      scope: "generate",
+      generationId: "b",
+      message: "Supertonic 3 is not loaded.",
+    });
+  });
+
   it("reports a generation before the model loads as a generate error with its id", async () => {
     const { dispatch, messages } = await loadSupertonic3Worker();
 

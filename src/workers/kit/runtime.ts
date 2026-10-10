@@ -3,7 +3,9 @@
  * its model's `load` and `generate`; this module applies the protocol rules
  * documented on WorkerInMessage (src/types.ts):
  *
- * - LOAD requests run one at a time, in order.
+ * - LOAD requests run one at a time, in order. A forced reload supersedes
+ *   every generation sent before it as soon as it arrives, so generations
+ *   sent after it are never cut short by it.
  * - Each GENERATE runs as a generation task (see generation.ts): it
  *   supersedes the previous generation and waits for it to settle before
  *   touching the model. Errors are posted with scope "generate" only while
@@ -35,7 +37,12 @@ export function createSerialQueue(): SerialQueue {
 }
 
 export interface WorkerModelHandlers {
-  /** Loads the model and posts LOAD_PROGRESS and READY. Throws to report a load error. */
+  /**
+   * Loads the model and posts LOAD_PROGRESS and READY. Throws to report a
+   * load error. A forced reload must drop the resident model before its
+   * first await, so a GENERATE that arrives meanwhile fails instead of
+   * running on it, and must await `generations.idle()` before releasing it.
+   */
   load(message: LoadMessage): Promise<void>;
   /**
    * Runs one generation. Throws to report a generate error. Must check
@@ -70,6 +77,9 @@ export function createWorkerRuntime(
   const handleMessage = (message: WorkerInMessage): void => {
     switch (message.type) {
       case "LOAD":
+        // Here rather than in the queued load, which may start later: only
+        // generations sent before the reload are superseded by it.
+        if (message.forceReload) generations.invalidate();
         void loads.run(() => handlers.load(message)).catch((error: unknown) => {
           port.postError("load", error);
         });

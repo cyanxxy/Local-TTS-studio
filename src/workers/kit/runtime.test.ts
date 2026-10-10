@@ -135,6 +135,40 @@ describe("createWorkerRuntime", () => {
     expect(events).toEqual(["a:start", "a:end", "b:start", "b:end"]);
   });
 
+  it("supersedes only the generations sent before a forced reload, as soon as it arrives", async () => {
+    const { port } = createPort();
+    const tickets = new Map<string, GenerationTicket>();
+    const firstLoad = deferred();
+    const before = deferred();
+    const load = vi.fn()
+      .mockImplementationOnce(() => firstLoad.promise)
+      .mockImplementationOnce(async () => undefined);
+    const runtime = createWorkerRuntime({
+      load,
+      generate: vi.fn(async (message: GenerateMessage, ticket: GenerationTicket) => {
+        tickets.set(message.generationId!, ticket);
+        await (message.generationId === "before" ? before.promise : new Promise<void>(() => undefined));
+      }),
+    }, { port, close: vi.fn() });
+
+    runtime.handleMessage({ type: "LOAD" });
+    runtime.handleMessage(generateMessage("before"));
+    runtime.handleMessage({ type: "LOAD", forceReload: true });
+    // Superseded on arrival, although the reload is queued behind the first load.
+    expect(tickets.get("before")?.isCurrent()).toBe(false);
+
+    runtime.handleMessage(generateMessage("after"));
+    before.resolve();
+    await flushPromises();
+    expect(tickets.get("after")?.isCurrent()).toBe(true);
+
+    firstLoad.resolve();
+    await flushPromises();
+    expect(load).toHaveBeenCalledTimes(2);
+    // Running the reload later does not cut short what was sent after it.
+    expect(tickets.get("after")?.isCurrent()).toBe(true);
+  });
+
   it("hard-cancels by invalidating generations, posting CANCELLED, and closing", async () => {
     const { port, posted } = createPort();
     const close = vi.fn();
