@@ -9,6 +9,7 @@ import {
   type NativeFailureDiagnostics,
 } from "./errors";
 import { isRecord } from "./guards";
+import { BRIDGE_RESULT_PREFIX, parseBridgeFailureLine, reportedBridgeFailure } from "./localTtsIpc";
 import {
   NativeOutputTail,
   redactSecret,
@@ -151,10 +152,8 @@ interface DrainState {
 }
 
 const BRIDGE_PORT_PREFIX = "__PORT__";
-const BRIDGE_RESULT_PREFIX = "__RESULT__";
 const WEBSOCKET_TARGET_LABEL = "Rust local bridge WebSocket";
 const MAX_PORT_ANNOUNCEMENT_BUFFER_BYTES = 64 * 1024;
-const MAX_STARTUP_ERROR_CHARS = 2_000;
 // How long a failure waits for a dead process's last output. 'exit' and the
 // socket close can both arrive before the stderr pipe is drained, and the
 // final lines are usually the panic or abort that explains the failure.
@@ -299,29 +298,9 @@ function parsePortAnnouncement(line: string): number | null {
   return port;
 }
 
-// The sanitized, bounded `error` of a `__RESULT__{"ok":false,…}` stdout line,
-// or null when the line is not such a failure envelope. The bridge prints one
-// when it exits with an error, at startup or after its connection failed.
-function resultLineFailure(line: string): string | null {
-  try {
-    const parsed = JSON.parse(line.slice(BRIDGE_RESULT_PREFIX.length));
-    if (!isRecord(parsed) || parsed.ok !== false || typeof parsed.error !== "string") return null;
-    return [...parsed.error]
-      .map((character) => {
-        const code = character.charCodeAt(0);
-        return code <= 0x1F || code === 0x7F ? " " : character;
-      })
-      .join("")
-      .trim()
-      .slice(0, MAX_STARTUP_ERROR_CHARS);
-  } catch {
-    return null;
-  }
-}
-
 function parseStartupFailure(line: string): Error | null {
   if (!line.startsWith(BRIDGE_RESULT_PREFIX)) return null;
-  const message = resultLineFailure(line);
+  const message = parseBridgeFailureLine(line);
   if (message === null) return new Error("Rust local bridge returned an invalid startup result.");
   return new Error(message || "Rust local bridge reported a startup failure.");
 }
@@ -334,21 +313,11 @@ function exitStatus(worker: Worker): string {
   return worker.exitSignal ? `signal ${worker.exitSignal}` : `code ${worker.exitCode ?? "unknown"}`;
 }
 
-// The failure the bridge printed to stdout on its way out, if it printed one.
-function reportedExitFailure(worker: Worker): string | null {
-  const lines = worker.stdoutTail.text.split(/\r?\n/);
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    const line = lines[index].trim();
-    if (line.startsWith(BRIDGE_RESULT_PREFIX)) return resultLineFailure(line) || null;
-  }
-  return null;
-}
-
 // `summary` plus whatever the dead process can still say for itself: its exit
 // status once known, and the failure it reported on stdout before exiting.
 function exitFailureMessage(worker: Worker, summary: string): string {
   const status = hasExited(worker) ? ` (${exitStatus(worker)})` : "";
-  const reported = reportedExitFailure(worker);
+  const reported = reportedBridgeFailure(worker.stdoutTail.text);
   return `${summary}${status}${reported ? `: ${reported}` : "."}`;
 }
 

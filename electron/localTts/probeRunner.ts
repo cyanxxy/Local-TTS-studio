@@ -1,5 +1,18 @@
 import { spawn as spawnChild, type ChildProcessWithoutNullStreams } from "child_process";
-import { parseBridgeResult, type BridgeProbeResult, type LocalModel } from "../localTtsIpc";
+import { generationCancelledError, NativeRuntimeError } from "../errors";
+import {
+  parseBridgeResult,
+  reportedBridgeFailure,
+  type BridgeProbeResult,
+  type LocalModel,
+} from "../localTtsIpc";
+import {
+  NATIVE_OUTPUT_TAIL_CHARS,
+  NativeOutputTail,
+  nativeOutputExcerpt,
+  sanitizeNativeOutput,
+  withNativeOutput,
+} from "../nativeOutput";
 
 export type SpawnBridgeProcess = (
   command: string,
@@ -64,6 +77,13 @@ export function createProbeRunner({
 }: ProbeRunnerOptions): ProbeRunner {
   // Tracked so a probe child can be force-killed by cancellation and the quit.
   const children = new Map<string, ChildProcessWithoutNullStreams>();
+  // Children stopped on purpose; their exit is a cancellation, not a failure.
+  const stopped = new WeakSet<ChildProcessWithoutNullStreams>();
+
+  function stop(child: ChildProcessWithoutNullStreams): void {
+    stopped.add(child);
+    terminateChild(child, killGraceMs);
+  }
 
   return {
     run({ requestId, model, bridgeBinary, cacheDir, env }) {
@@ -90,10 +110,13 @@ export function createProbeRunner({
         );
         children.set(requestId, child);
 
-        // Collected as fragments and joined once at close. Repeated `+=` on a
-        // multi-megabyte string reallocates the whole buffer on every data event.
-        const stdoutParts: string[] = [];
-        const stderrParts: string[] = [];
+        // stdout carries the result line, so it is kept whole (up to its cap)
+        // and decoded once at close: per-chunk decoding can split a multi-byte
+        // character, and repeated `+=` on a multi-megabyte string reallocates
+        // it on every data event. stderr is only ever diagnostics, so a
+        // bounded tail does.
+        const stdoutChunks: Buffer[] = [];
+        const stderrTail = new NativeOutputTail();
         let stdoutBytes = 0;
         let stderrBytes = 0;
         let settled = false;
@@ -126,7 +149,7 @@ export function createProbeRunner({
             rejectForOutputLimit("stdout", maxStdoutBytes);
             return;
           }
-          stdoutParts.push(chunk.toString("utf-8"));
+          stdoutChunks.push(chunk);
         });
 
         child.stderr.on("data", (chunk: Buffer) => {
@@ -135,7 +158,7 @@ export function createProbeRunner({
             rejectForOutputLimit("stderr", maxStderrBytes);
             return;
           }
-          stderrParts.push(chunk.toString("utf-8"));
+          stderrTail.append(chunk);
         });
 
         child.on("error", (err) => {
@@ -145,22 +168,34 @@ export function createProbeRunner({
           reject(new Error(`Failed to run Rust local bridge: ${err.message}`));
         });
 
-        child.on("close", (code) => {
+        child.on("close", (code, signal) => {
           if (settled) return;
           settled = true;
           cleanup();
 
-          const stderr = stderrParts.join("");
+          if (stopped.has(child)) {
+            reject(generationCancelledError());
+            return;
+          }
+          const stdout = Buffer.concat(stdoutChunks).toString("utf-8");
           if (code !== 0) {
-            if (stderr.trim()) {
-              console.error(`[local-tts:probe] Rust local bridge stderr\n${stderr}`);
-            }
-            reject(new Error(stderr.trim() || `Rust local bridge exited with code ${code ?? "unknown"}.`));
+            // The bridge prints why it failed as its last stdout result line;
+            // stderr then explains what led there.
+            const stderr = sanitizeNativeOutput(stderrTail.text);
+            const stdoutTail = sanitizeNativeOutput(stdout.slice(-NATIVE_OUTPUT_TAIL_CHARS));
+            const summary = reportedBridgeFailure(stdout)
+              ?? `Rust local bridge exited with ${signal ? `signal ${signal}` : `code ${code ?? "unknown"}`}.`;
+            reject(new NativeRuntimeError(withNativeOutput(summary, stderr), {
+              ...(stderr.trim() ? { stderr } : {}),
+              ...(stdoutTail.trim() ? { stdout: stdoutTail } : {}),
+              exitCode: code,
+              signal,
+            }));
             return;
           }
 
           try {
-            resolve(parseBridgeResult(stdoutParts.join(""), stderr));
+            resolve(parseBridgeResult(stdout, nativeOutputExcerpt(stderrTail.text)));
           } catch (err) {
             reject(err);
           }
@@ -174,14 +209,14 @@ export function createProbeRunner({
     terminate(requestId) {
       const child = children.get(requestId);
       if (!child) return false;
-      terminateChild(child, killGraceMs);
+      stop(child);
       return true;
     },
 
     terminateAll() {
       const running = [...children.values()];
       for (const child of running) {
-        terminateChild(child, killGraceMs);
+        stop(child);
       }
       children.clear();
       return running.map((child) =>

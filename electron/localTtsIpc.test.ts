@@ -8,6 +8,7 @@ import {
   isRecord,
   isStringArray,
   parseBridgeEnvelopeResult,
+  parseBridgeFailureLine,
   parseBridgeGenerateResult,
   parseBridgeProbeResult,
   parseBridgeProgressResult,
@@ -19,6 +20,7 @@ import {
   parseOptionalStringArray,
   parseRequestId,
   parseRequiredText,
+  reportedBridgeFailure,
   sanitizeCacheRequest,
   sanitizeCancelRequest,
   sanitizeGenerationContinuation,
@@ -537,5 +539,30 @@ describe("localTtsIpc bridge result parsing", () => {
       .toThrow("request failed");
     expect(() => parseBridgeEnvelopeResult({ ok: false })).toThrow("Local bridge failed.");
     expect(() => parseBridgeEnvelopeResult({ result: generateResult })).toThrow("Missing required `ok` field.");
+  });
+
+  it("reads the failure out of one exit envelope line, sanitized and bounded", () => {
+    const failure = (value: unknown) => `${BRIDGE_RESULT_PREFIX}${JSON.stringify(value)}`;
+
+    expect(parseBridgeFailureLine(failure({ ok: false, error: "  Model\nload\u0007failed  " })))
+      .toBe("Model load failed");
+    expect(parseBridgeFailureLine(failure({ ok: false, error: "x".repeat(3_000) }))).toHaveLength(2_000);
+    expect(parseBridgeFailureLine(failure({ ok: false, error: "   " }))).toBe("");
+    // Not a failure envelope at all.
+    expect(parseBridgeFailureLine("__PORT__1234")).toBeNull();
+    expect(parseBridgeFailureLine(failure({ ok: true, result: {} }))).toBeNull();
+    expect(parseBridgeFailureLine(failure({ ok: false }))).toBeNull();
+    expect(parseBridgeFailureLine(`${BRIDGE_RESULT_PREFIX}{broken`)).toBeNull();
+  });
+
+  it("finds the failure in the last exit envelope a process printed", () => {
+    const failure = (error: string) => `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error })}`;
+
+    expect(reportedBridgeFailure(`__PORT__1\n${failure("older")}\r\n  ${failure("Metal device lost")}  \n`))
+      .toBe("Metal device lost");
+    // The last envelope decides, even when it reports nothing usable.
+    expect(reportedBridgeFailure(`${failure("older")}\n${failure(" ")}\n`)).toBeNull();
+    expect(reportedBridgeFailure("__PORT__1\nplain output\n")).toBeNull();
+    expect(reportedBridgeFailure("")).toBeNull();
   });
 });

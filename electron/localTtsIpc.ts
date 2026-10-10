@@ -677,6 +677,42 @@ export function parseBridgeGenerateResult(result: unknown): BridgeGenerateResult
   return parsed;
 }
 
+const MAX_REPORTED_FAILURE_CHARS = 2_000;
+
+/**
+ * The `error` of one `__RESULT__{"ok":false,…}` stdout line, with control
+ * characters blanked and its length capped for display, or null when the line
+ * is not such a failure envelope. The bridge prints one whenever it exits with
+ * an error, during startup or later.
+ */
+export function parseBridgeFailureLine(line: string): string | null {
+  if (!line.startsWith(BRIDGE_RESULT_PREFIX)) return null;
+  try {
+    const parsed: unknown = JSON.parse(line.slice(BRIDGE_RESULT_PREFIX.length));
+    if (!isRecord(parsed) || parsed.ok !== false || typeof parsed.error !== "string") return null;
+    return [...parsed.error]
+      .map((character) => {
+        const code = character.charCodeAt(0);
+        return code <= 0x1F || code === 0x7F ? " " : character;
+      })
+      .join("")
+      .trim()
+      .slice(0, MAX_REPORTED_FAILURE_CHARS);
+  } catch {
+    return null;
+  }
+}
+
+/** The failure in the last result line of `stdout`, if the bridge printed one on its way out. */
+export function reportedBridgeFailure(stdout: string): string | null {
+  const lines = stdout.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (line.startsWith(BRIDGE_RESULT_PREFIX)) return parseBridgeFailureLine(line) || null;
+  }
+  return null;
+}
+
 /**
  * Parses the stdout of the one-shot `--action probe` subprocess, the only
  * bridge action that still reports through a stdout result line.
