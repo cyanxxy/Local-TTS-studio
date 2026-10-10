@@ -5,6 +5,7 @@ import {
   calculateReaderProgress,
   chapterAtOffset,
   createReaderDocument,
+  createReaderOffsetRebaser,
   estimateWordRanges,
   unwrapHardLineBreaks,
   normalizeReaderDocumentRecord,
@@ -203,5 +204,106 @@ describe("readerDocument", () => {
     expect(rebaseReaderTextOffset(previous, next, 2)).toBe(2);
     expect(rebaseReaderTextOffset(previous, next, previous.indexOf("after")))
       .toBe(next.indexOf("after"));
+  });
+});
+
+/** The per-offset whole-text scan the single-pass rebaser replaces. */
+function referenceRebase(previousText: string, nextText: string, offset: number): number {
+  let prefixLength = 0;
+  const sharedLimit = Math.min(previousText.length, nextText.length);
+  while (prefixLength < sharedLimit && previousText[prefixLength] === nextText[prefixLength]) prefixLength += 1;
+  let suffixLength = 0;
+  while (
+    suffixLength < sharedLimit - prefixLength
+    && previousText[previousText.length - suffixLength - 1] === nextText[nextText.length - suffixLength - 1]
+  ) suffixLength += 1;
+  const previousChangeEnd = previousText.length - suffixLength;
+  const nextChangeEnd = nextText.length - suffixLength;
+  const safeOffset = Math.max(0, Math.min(previousText.length, offset));
+  if (safeOffset < prefixLength) return safeOffset;
+  if (safeOffset >= previousChangeEnd) return safeOffset + nextText.length - previousText.length;
+  return prefixLength + Math.min(safeOffset - prefixLength, nextChangeEnd - prefixLength);
+}
+
+/** Deterministic PRNG so a failing case can be replayed. */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value ^= value + Math.imul(value ^ (value >>> 7), 61 | value);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+describe("createReaderOffsetRebaser", () => {
+  it("maps every offset exactly like a whole-text scan per offset", () => {
+    const random = seededRandom(20_261_010);
+    // A tiny alphabet makes repeated runs, where prefix and suffix overlap.
+    const alphabet = "ab \n";
+    const word = (length: number) => Array.from(
+      { length },
+      () => alphabet[Math.floor(random() * alphabet.length)],
+    ).join("");
+
+    for (let round = 0; round < 300; round += 1) {
+      const previous = word(Math.floor(random() * 40));
+      const start = Math.floor(random() * (previous.length + 1));
+      const previousEnd = start + Math.floor(random() * (previous.length - start + 1));
+      const replacement = word(Math.floor(random() * 8));
+      const next = previous.slice(0, start) + replacement + previous.slice(previousEnd);
+      const hint = { start, previousEnd, nextEnd: start + replacement.length };
+      const rebase = createReaderOffsetRebaser(previous, next);
+      const hinted = createReaderOffsetRebaser(previous, next, hint);
+
+      for (let offset = -2; offset <= previous.length + 2; offset += 1) {
+        const expected = referenceRebase(previous, next, offset);
+        expect(rebase(offset)).toBe(expected);
+        expect(hinted(offset)).toBe(expected);
+        expect(rebaseReaderTextOffset(previous, next, offset)).toBe(expected);
+      }
+    }
+  });
+
+  it("only needs to scan the edited span when told where the edit is", () => {
+    const filler = "Unchanged prose that the scan never has to visit. ".repeat(2_000);
+    const previous = `${filler}The old line.${filler}`;
+    const next = `${filler}A brand new, longer line.${filler}`;
+    const rebase = createReaderOffsetRebaser(previous, next, {
+      start: filler.length,
+      previousEnd: filler.length + "The old line.".length,
+      nextEnd: filler.length + "A brand new, longer line.".length,
+    });
+
+    expect(rebase(10)).toBe(10);
+    expect(rebase(previous.length - 5)).toBe(next.length - 5);
+    expect(rebase(filler.length + 2)).toBe(referenceRebase(previous, next, filler.length + 2));
+  });
+
+  it("falls back to a full scan when a hint does not describe the two texts", () => {
+    const previous = "before EDIT after";
+    const next = "before A MUCH LONGER EDIT after";
+    const offset = previous.indexOf("after");
+
+    for (const hint of [
+      { start: -1, previousEnd: 11, nextEnd: 25 },
+      { start: 7, previousEnd: 99, nextEnd: 25 },
+      { start: 7, previousEnd: 11, nextEnd: 20 },
+      { start: 7.5, previousEnd: 11, nextEnd: 25 },
+    ]) {
+      expect(createReaderOffsetRebaser(previous, next, hint)(offset)).toBe(next.indexOf("after"));
+      // Alternate pairs so the remembered scan cannot answer for the hint.
+      expect(createReaderOffsetRebaser(next, previous)(0)).toBe(0);
+    }
+  });
+
+  it("never answers one text pair with the scan of another", () => {
+    const first = ["one two three", "one TWO three"] as const;
+    const second = ["alpha beta", "alpha beta gamma delta"] as const;
+
+    expect(rebaseReaderTextOffset(...first, 9)).toBe(referenceRebase(...first, 9));
+    expect(rebaseReaderTextOffset(...second, 9)).toBe(referenceRebase(...second, 9));
+    expect(rebaseReaderTextOffset(...first, 9)).toBe(referenceRebase(...first, 9));
+    expect(rebaseReaderChapters(first[0], first[1], [], "Book")).toHaveLength(1);
   });
 });

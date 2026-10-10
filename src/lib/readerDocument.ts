@@ -316,16 +316,49 @@ interface ReaderTextChangeRange {
   nextChangeEnd: number;
 }
 
-function getReaderTextChangeRange(previousText: string, nextText: string): ReaderTextChangeRange {
-  let prefixLength = 0;
+/**
+ * Where an edit is already known to fall, e.g. the section a draft replaced.
+ * The texts must be identical before `start` and after the two ends; the scan
+ * for the exact change then only covers the edited span.
+ */
+export interface ReaderTextChangeHint {
+  start: number;
+  /** End of the replaced span in the previous text. */
+  previousEnd: number;
+  /** End of its replacement in the next text. */
+  nextEnd: number;
+}
+
+function isUsableChangeHint(previousText: string, nextText: string, hint: ReaderTextChangeHint): boolean {
+  return Number.isSafeInteger(hint.start)
+    && Number.isSafeInteger(hint.previousEnd)
+    && Number.isSafeInteger(hint.nextEnd)
+    && hint.start >= 0
+    && hint.start <= hint.previousEnd
+    && hint.previousEnd <= previousText.length
+    && hint.start <= hint.nextEnd
+    && hint.nextEnd <= nextText.length
+    && previousText.length - hint.previousEnd === nextText.length - hint.nextEnd;
+}
+
+function getReaderTextChangeRange(
+  previousText: string,
+  nextText: string,
+  hint?: ReaderTextChangeHint,
+): ReaderTextChangeRange {
+  const trusted = hint && isUsableChangeHint(previousText, nextText, hint) ? hint : null;
   const sharedLimit = Math.min(previousText.length, nextText.length);
+  // Starting past the known-equal ends yields exactly what a full scan finds:
+  // both loops still extend as far as the texts keep matching.
+  let prefixLength = trusted?.start ?? 0;
   while (prefixLength < sharedLimit && previousText[prefixLength] === nextText[prefixLength]) {
     prefixLength += 1;
   }
 
-  let suffixLength = 0;
+  const suffixLimit = sharedLimit - prefixLength;
+  let suffixLength = trusted ? Math.min(previousText.length - trusted.previousEnd, suffixLimit) : 0;
   while (
-    suffixLength < sharedLimit - prefixLength
+    suffixLength < suffixLimit
     && previousText[previousText.length - suffixLength - 1] === nextText[nextText.length - suffixLength - 1]
   ) {
     suffixLength += 1;
@@ -338,13 +371,60 @@ function getReaderTextChangeRange(previousText: string, nextText: string): Reade
   };
 }
 
+/**
+ * The last text pair scanned. An edit commit rebases progress, every bookmark,
+ * note and highlight, and the chapter table against the same two texts, so
+ * remembering one scan turns a whole-book pass per offset into one pass per
+ * edit. It holds the two most recent texts until the next edit replaces them.
+ */
+let lastTextChange: { previousText: string; nextText: string; range: ReaderTextChangeRange } | null = null;
+
+function rememberedTextChangeRange(
+  previousText: string,
+  nextText: string,
+  hint?: ReaderTextChangeHint,
+): ReaderTextChangeRange {
+  if (lastTextChange?.previousText === previousText && lastTextChange.nextText === nextText) {
+    return lastTextChange.range;
+  }
+  const range = getReaderTextChangeRange(previousText, nextText, hint);
+  lastTextChange = { previousText, nextText, range };
+  return range;
+}
+
+function rebaseOffsetAcross(
+  { prefixLength, previousChangeEnd, nextChangeEnd }: ReaderTextChangeRange,
+  previousLength: number,
+  nextLength: number,
+  offset: number,
+): number {
+  const safeOffset = Math.max(0, Math.min(previousLength, offset));
+  if (safeOffset < prefixLength) return safeOffset;
+  if (safeOffset >= previousChangeEnd) return safeOffset + nextLength - previousLength;
+  return prefixLength + Math.min(safeOffset - prefixLength, nextChangeEnd - prefixLength);
+}
+
+/**
+ * Maps offsets in `previousText` onto `nextText`, finding the edit once for
+ * any number of offsets. A hint narrows that one scan to the edited span.
+ */
+export function createReaderOffsetRebaser(
+  previousText: string,
+  nextText: string,
+  hint?: ReaderTextChangeHint,
+): (offset: number) => number {
+  const range = rememberedTextChangeRange(previousText, nextText, hint);
+  return (offset) => rebaseOffsetAcross(range, previousText.length, nextText.length, offset);
+}
+
 /** Keep whole-book annotations anchored as text before them grows or shrinks. */
 export function rebaseReaderTextOffset(previousText: string, nextText: string, offset: number): number {
-  const { prefixLength, previousChangeEnd, nextChangeEnd } = getReaderTextChangeRange(previousText, nextText);
-  const safeOffset = Math.max(0, Math.min(previousText.length, offset));
-  if (safeOffset < prefixLength) return safeOffset;
-  if (safeOffset >= previousChangeEnd) return safeOffset + nextText.length - previousText.length;
-  return prefixLength + Math.min(safeOffset - prefixLength, nextChangeEnd - prefixLength);
+  return rebaseOffsetAcross(
+    rememberedTextChangeRange(previousText, nextText),
+    previousText.length,
+    nextText.length,
+    offset,
+  );
 }
 
 function nearestReaderSectionBoundary(text: string, start: number, end: number): number {
@@ -448,7 +528,7 @@ export function rebaseReaderChapters(
 ): ReaderChapter[] {
   if (chapters.length === 0) return structureTextChapters(nextText, documentTitle);
 
-  const { prefixLength, previousChangeEnd } = getReaderTextChangeRange(previousText, nextText);
+  const { prefixLength, previousChangeEnd } = rememberedTextChangeRange(previousText, nextText);
   const delta = nextText.length - previousText.length;
   const insertionOnly = previousChangeEnd === prefixLength;
   const moveBoundary = (offset: number): number => {
