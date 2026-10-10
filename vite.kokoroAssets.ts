@@ -13,6 +13,12 @@ const KOKORO_BUNDLED_JSEP_WASM_URL_RE =
   /new URL\(\s*(["'])ort-wasm-simd-threaded\.jsep\.wasm\1\s*,\s*import\.meta\.url\s*\)/g;
 const KOKORO_ENV_WASM_PATHS_ONLY_RE =
   /const\s+(\w+)=\{set wasmPaths\((\w+)\)\{(\w+)\.backends\.onnx\.wasm\.wasmPaths=\2\},get wasmPaths\(\)\{return \3\.backends\.onnx\.wasm\.wasmPaths\}\};/;
+// kokoro-js keeps its phonemizer private: `async function df(text,
+// language = "a", normalize = true)` in 1.2.1, which generate() runs before
+// tokenizing with truncation at the model's 512-token context. The worker
+// re-runs that exact phonemizer to count tokens before generating.
+const KOKORO_PHONEMIZE_FUNCTION_RE = /async function ([\w$]+)\([\w$]+,[\w$]+="a",[\w$]+=!0\)/g;
+const KOKORO_EXPORTS_RE = /export\{([^{}]*\bas KokoroTTS\b[^{}]*)\};?\s*$/;
 
 function isKokoroBrowserBuild(id: string): boolean {
   return normalizePath(id).split("?")[0].endsWith(KOKORO_BROWSER_BUILD_SUFFIX);
@@ -43,8 +49,38 @@ function exposeKokoroWasmThreadConfig(code: string): string {
   );
 }
 
-function transformKokoroBrowserBuild(code: string): string {
-  return exposeKokoroWasmThreadConfig(suppressKokoroBundledJsepWasmWarning(code));
+function exposeKokoroPhonemizer(code: string): string {
+  const exports = KOKORO_EXPORTS_RE.exec(code);
+  if (!exports || /\bas phonemize\b/.test(exports[1])) return code;
+  const candidates = [...code.matchAll(KOKORO_PHONEMIZE_FUNCTION_RE)].map((match) => match[1]);
+  // Exporting the wrong function would be worse than exporting none.
+  if (candidates.length !== 1) return code;
+  return code.replace(KOKORO_EXPORTS_RE, (_match, list: string) => `export{${candidates[0]} as phonemize,${list}};`);
+}
+
+/**
+ * The source fixes kokoro.web.js needs. Each regex targets the minified
+ * kokoro-js 1.2.1 build that package.json pins; `missing` names every fix
+ * that did not apply, so a kokoro-js bump fails loudly instead of shipping a
+ * worker that silently lost its thread setting or token counting.
+ */
+export function transformKokoroBrowserBuild(code: string): { code: string; missing: string[] } {
+  const transformed = exposeKokoroPhonemizer(exposeKokoroWasmThreadConfig(suppressKokoroBundledJsepWasmWarning(code)));
+  const missing: string[] = [];
+  KOKORO_BUNDLED_JSEP_WASM_URL_RE.lastIndex = 0;
+  if (!transformed.includes("/* @vite-ignore */ ") || KOKORO_BUNDLED_JSEP_WASM_URL_RE.test(transformed)) {
+    missing.push("the ONNX Runtime JSEP wasm URL");
+  }
+  if (!transformed.includes("set numThreads(")) missing.push("the WASM numThreads setting");
+  if (!/\bas phonemize\b/.test(KOKORO_EXPORTS_RE.exec(transformed)?.[1] ?? "")) {
+    missing.push("the phonemize export");
+  }
+  return { code: transformed, missing };
+}
+
+function describeMissingPatches(missing: readonly string[]): string {
+  return `kokoro-js/dist/kokoro.web.js no longer matches the patches in vite.kokoroAssets.ts (${missing.join(", ")}). `
+    + "Re-verify every patch against the installed kokoro-js build.";
 }
 
 function resolveKokoroBrowserBuild(rootDir: string): string {
@@ -79,7 +115,8 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
     transform(code, id) {
       if (!isKokoroBrowserBuild(id)) return null;
 
-      const transformed = transformKokoroBrowserBuild(code);
+      const { code: transformed, missing } = transformKokoroBrowserBuild(code);
+      if (missing.length > 0) this.warn(describeMissingPatches(missing));
       return transformed === code ? null : { code: transformed, map: null };
     },
     load(id) {
@@ -95,14 +132,16 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
           source: readFileSync(mjsPath),
         });
 
-        // Shipped byte-for-byte (after the two source fixes above) instead of
+        // Shipped byte-for-byte (after the source fixes above) instead of
         // being bundled: Rolldown's rewrite of the embedded espeak-ng runtime
         // leaves it with an empty voice list, so every phonemization fails
         // with `Invalid language identifier: "en-us"`.
+        const kokoroBuild = transformKokoroBrowserBuild(readFileSync(resolveKokoroBrowserBuild(rootDir), "utf8"));
+        if (kokoroBuild.missing.length > 0) throw new Error(describeMissingPatches(kokoroBuild.missing));
         const kokoroReferenceId = this.emitFile({
           type: "asset",
           name: "kokoro.web.js",
-          source: transformKokoroBrowserBuild(readFileSync(resolveKokoroBrowserBuild(rootDir), "utf8")),
+          source: kokoroBuild.code,
         });
 
         return [
