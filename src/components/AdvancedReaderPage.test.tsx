@@ -1009,6 +1009,65 @@ describe("AdvancedReaderPage", () => {
     }
   });
 
+  it("holds auto-continuation at the chapter's end when the sleep timer is set to Chapter", () => {
+    const document = createReaderDocument({
+      id: "sleepy-chapters",
+      title: "Two chapters",
+      text: `# Opening\n${"A paragraph with enough words for a reading section. ".repeat(700)}\n\n# Ending\nFinal text.`,
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const crossing = sections.findIndex((section) => section.chapterId === document.chapters[1].id);
+    const onAutoAdvanceHoldChange = vi.fn();
+    const clock = clockAt(0);
+    const segment = createSegment({ endSec: 30, textEnd: sections[crossing - 1].end - sections[crossing - 1].start });
+    const props = {
+      text: getReaderSectionText(document.text, sections[crossing - 1]),
+      documents: [document],
+      activeDocument: document,
+      activeChapter: document.chapters[0],
+      activeSection: sections[crossing - 1],
+      previousSection: sections[crossing - 2] ?? null,
+      nextSection: sections[crossing],
+      isPlaying: true,
+      clock,
+      totalDuration: 30,
+      segments: [segment],
+      activeSegmentId: segment.id,
+      onAutoAdvanceHoldChange,
+    };
+    const view = renderReader(props);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reading appearance" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chapter" }));
+    expect(screen.getByRole("button", { name: "Sleep timer: End of chapter. Cancel" })).toBeInTheDocument();
+    expect(onAutoAdvanceHoldChange).toHaveBeenLastCalledWith(true);
+
+    // The section plays out: the timer has fired, yet the hold stays until
+    // the parent turns the page.
+    act(() => clock.set(30));
+    view.rerender(<AdvancedReaderPage {...view.props} {...props} isPlaying={false} />);
+    expect(screen.queryByRole("button", { name: /^Sleep timer/ })).toBeNull();
+    expect(onAutoAdvanceHoldChange).toHaveBeenLastCalledWith(true);
+    expect(view.props.onTogglePlay).not.toHaveBeenCalled();
+
+    view.rerender(
+      <AdvancedReaderPage
+        {...view.props}
+        {...props}
+        text={getReaderSectionText(document.text, sections[crossing])}
+        activeChapter={document.chapters[1]}
+        activeSection={sections[crossing]}
+        previousSection={sections[crossing - 1]}
+        nextSection={null}
+        isPlaying={false}
+        totalDuration={0}
+        segments={[]}
+        activeSegmentId={null}
+      />,
+    );
+    expect(onAutoAdvanceHoldChange).toHaveBeenLastCalledWith(false);
+  });
+
   it("imports article URLs from the toolbar", async () => {
     const onImportUrl = vi.fn(async () => {});
     renderReader({ onImportUrl });

@@ -67,6 +67,7 @@ import { ViewportPopover } from "./reader/ViewportPopover";
 import { deriveReaderDockState } from "./reader/readerDockState";
 import { useReaderAutoFollow } from "./reader/useReaderAutoFollow";
 import { useReaderSectionEditor } from "./reader/useReaderSectionEditor";
+import { SLEEP_TIMER_OPTIONS, useReaderSleepTimer } from "./reader/useReaderSleepTimer";
 import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
 import { findSegmentForTextOffset } from "./reader/readerSegments";
 import {
@@ -159,6 +160,15 @@ interface AdvancedReaderPageProps {
   /** Focus layout hides the app header and page tabs above the Reader. */
   immersive?: boolean;
   onImmersiveChange?: (immersive: boolean) => void;
+  /**
+   * Called with `true` while the sleep timer forbids starting the next section
+   * ("End of chapter" on a chapter's last section, or a timer that ran out as
+   * the section ended) and with `false` once that no longer applies. While
+   * held, auto-continuation must not start the next section: turn the page
+   * without auto-play or auto-generation instead. Leaving the section releases
+   * the hold, so a held page turn cannot start the following chapter.
+   */
+  onAutoAdvanceHoldChange?: (held: boolean) => void;
 }
 
 interface ReaderDesktopModelOption {
@@ -199,16 +209,6 @@ const COLUMN_WIDTH_OPTIONS: ReadonlyArray<{ value: ReaderColumnWidth; label: str
   { value: "narrow", label: "narrow" },
   { value: "comfortable", label: "Standard" },
   { value: "wide", label: "wide" },
-];
-
-type SleepTimerChoice = "off" | "15" | "30" | "60" | "chapter";
-
-const SLEEP_TIMER_OPTIONS: ReadonlyArray<{ value: SleepTimerChoice; label: string }> = [
-  { value: "off", label: "Off" },
-  { value: "15", label: "15m" },
-  { value: "30", label: "30m" },
-  { value: "60", label: "60m" },
-  { value: "chapter", label: "Chapter" },
 ];
 
 export function AdvancedReaderPage({
@@ -287,6 +287,7 @@ export function AdvancedReaderPage({
   generationError = null,
   immersive = false,
   onImmersiveChange,
+  onAutoAdvanceHoldChange,
 }: AdvancedReaderPageProps) {
   const runtimeBackend = activeModel === "kokoro"
     ? kokoroState.backend
@@ -320,12 +321,6 @@ export function AdvancedReaderPage({
   const [urlImportError, setUrlImportError] = useState<string | null>(null);
   const [urlImportBusy, setUrlImportBusy] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
-  const [sleepTimer, setSleepTimer] = useState<{
-    choice: SleepTimerChoice;
-    endsAt: number | null;
-    chapterId: string | null;
-  }>({ choice: "off", endsAt: null, chapterId: null });
-  const [sleepNow, setSleepNow] = useState(() => Date.now());
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsPopoverRef = useRef<HTMLDivElement>(null);
   const appearanceButtonRef = useRef<HTMLButtonElement>(null);
@@ -512,51 +507,19 @@ export function AdvancedReaderPage({
   }, []);
 
   /* ── Sleep timer ──────────────────────────────────────────── */
-  const isPlayingRef = useRef(isPlaying);
-  const onTogglePlayRef = useRef(onTogglePlay);
-  useEffect(() => {
-    isPlayingRef.current = isPlaying;
-    onTogglePlayRef.current = onTogglePlay;
-  }, [isPlaying, onTogglePlay]);
-  const currentChapterId = currentChapter?.id ?? null;
-
-  const startSleepTimer = useCallback((choice: SleepTimerChoice) => {
-    const now = Date.now();
-    setSleepNow(now);
-    setSleepTimer({
-      choice,
-      endsAt: choice === "off" || choice === "chapter" ? null : now + Number(choice) * 60_000,
-      chapterId: choice === "chapter" ? currentChapterId : null,
-    });
-  }, [currentChapterId]);
-
-  const fallAsleep = useCallback(() => {
-    if (isPlayingRef.current) onTogglePlayRef.current();
-    setSleepTimer({ choice: "off", endsAt: null, chapterId: null });
-  }, []);
-
-  useEffect(() => {
-    if (sleepTimer.endsAt === null) return;
-    const timeout = window.setTimeout(fallAsleep, Math.max(0, sleepTimer.endsAt - Date.now()));
-    // The rail shows minutes left; a half-minute tick keeps it honest.
-    const tick = window.setInterval(() => setSleepNow(Date.now()), 30_000);
-    return () => {
-      window.clearTimeout(timeout);
-      window.clearInterval(tick);
-    };
-  }, [fallAsleep, sleepTimer.endsAt]);
-
-  // "End of chapter" fires as playback carries the reader into the next one.
-  useEffect(() => {
-    if (sleepTimer.choice !== "chapter" || sleepTimer.chapterId === null) return;
-    if (currentChapterId !== sleepTimer.chapterId) fallAsleep();
-  }, [currentChapterId, fallAsleep, sleepTimer.chapterId, sleepTimer.choice]);
-
-  const sleepTimerLabel = sleepTimer.choice === "off"
-    ? null
-    : sleepTimer.choice === "chapter"
-      ? "End of chapter"
-      : `${Math.max(1, Math.ceil(((sleepTimer.endsAt ?? sleepNow) - sleepNow) / 60_000))}m`;
+  const sleepTimer = useReaderSleepTimer({
+    sectionKey: `${activeDocumentId ?? ""}\u0000${activeSection?.id ?? ""}`,
+    atChapterEnd: !nextSection || nextSection.chapterId !== activeSection?.chapterId,
+    hasNextSection: nextSection !== null,
+    clock,
+    totalDuration,
+    isPlaying,
+    isGenerating,
+    onPause: onTogglePlay,
+    onStopGeneration: onStop,
+    onHoldChange: onAutoAdvanceHoldChange,
+  });
+  const sleepTimerLabel = sleepTimer.label;
 
   useEffect(() => {
     if (!isPlaying || followPaused) return;
@@ -949,7 +912,7 @@ export function AdvancedReaderPage({
                   legend="Sleep timer"
                   value={sleepTimer.choice}
                   options={SLEEP_TIMER_OPTIONS}
-                  onChange={startSleepTimer}
+                  onChange={sleepTimer.start}
                 />
                 <SwitchRow
                   label="Focus spoken text"
@@ -1313,7 +1276,7 @@ export function AdvancedReaderPage({
               {sleepTimerLabel && (
                 <button
                   type="button"
-                  onClick={() => startSleepTimer("off")}
+                  onClick={() => sleepTimer.start("off")}
                   aria-label={`Sleep timer: ${sleepTimerLabel}. Cancel`}
                   title="Cancel sleep timer"
                   className="flex items-center gap-1 rounded-full bg-accent-light px-2 py-0.5 font-mono text-2xs text-accent tabular-nums"
