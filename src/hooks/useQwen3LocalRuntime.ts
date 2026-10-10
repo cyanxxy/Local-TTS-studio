@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type {
   LocalTtsAudioChunkEvent,
   LocalTtsGenerateResult,
@@ -85,6 +85,10 @@ function message(error: unknown): string {
   return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
 }
 
+function sameItems(left: readonly unknown[], right: readonly unknown[]): boolean {
+  return left.length === right.length && left.every((item, index) => Object.is(item, right[index]));
+}
+
 function mergeGenerateResults(
   current: LocalTtsGenerateResult | null,
   next: LocalTtsGenerateResult,
@@ -144,6 +148,9 @@ export function useQwen3LocalRuntime({
   const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const cancelProgressFlushRef = useRef<(() => void) | null>(null);
   const pendingAudioDeliveryRef = useRef<PendingAudioDelivery | null>(null);
+  // The player's content epoch when this runtime's generated audio entered it,
+  // or null while the player holds nothing this runtime made.
+  const ownedPlayerEpochRef = useRef<number | null>(null);
   const warmedKeyRef = useRef<string | null>(null);
   const warmingKeyRef = useRef<string | null>(null);
   const activeTextUnitsRef = useRef<TextChunk[]>([]);
@@ -152,6 +159,7 @@ export function useQwen3LocalRuntime({
   const beginStream = player.beginStream;
   const endStream = player.endStream;
   const getAudioChunkCount = player.getAudioChunkCount;
+  const getContentEpoch = player.getContentEpoch;
   const resetPlayer = player.reset;
   const scheduleChunk = player.scheduleChunk;
   const stopAll = player.stopAll;
@@ -213,7 +221,9 @@ export function useQwen3LocalRuntime({
     };
   }, [cancelPendingAudioDelivery]);
 
-  const clearGeneratedResult = useCallback(() => {
+  // Empties the shared player and forgets the streamed audio bookkeeping. It
+  // touches no React state, so the settings effect below can call it.
+  const releasePlayerAudio = useCallback(() => {
     pendingChunksRef.current.clear();
     receivedChunkIndexesRef.current.clear();
     sampleRateRef.current = null;
@@ -222,10 +232,15 @@ export function useQwen3LocalRuntime({
     activeRequestUnitCountRef.current = 1;
     activeTextUnitsRef.current = [];
     resetPlayer();
+    ownedPlayerEpochRef.current = null;
+  }, [resetPlayer]);
+
+  const clearGeneratedResult = useCallback(() => {
+    releasePlayerAudio();
     setResult(null);
     setProgress(null);
     setGenerationProgress(0);
-  }, [resetPlayer]);
+  }, [releasePlayerAudio]);
 
   const cancelActiveGeneration = useCallback(() => {
     const active = activeRequestRef.current;
@@ -247,9 +262,50 @@ export function useQwen3LocalRuntime({
     setGenerationProgress(0);
   }, [cancelActiveGeneration, cancelPendingAudioDelivery, clearGeneratedResult, setShowPlayer]);
 
-  // Generated audio and errors belong to the exact synthesis configuration
-  // that produced them. Clear the shared player when any audible Qwen setting
-  // changes so old speech is never presented as the newly selected voice.
+  // Generated audio, errors and progress belong to the exact synthesis
+  // configuration that produced them, so any audible Qwen setting change
+  // retires them and old speech is never presented as the new voice. This
+  // hook's own state is adjusted while rendering; the bridge request and the
+  // shared player live outside React and are released by the effect below.
+  const audibleSettings: readonly unknown[] = [
+    settings.instruct,
+    settings.language,
+    settings.maxNewTokens,
+    settings.modelPath,
+    settings.profile.mode,
+    settings.profile.repo,
+    // Compared by identity: never copy or scan a reference of up to 60 MB.
+    settings.referenceAudioBase64,
+    settings.referenceText,
+    settings.seed,
+    settings.speaker,
+    settings.temperature,
+    settings.topK,
+  ];
+  const [appliedAudibleSettings, setAppliedAudibleSettings] = useState(audibleSettings);
+  if (!sameItems(appliedAudibleSettings, audibleSettings)) {
+    setAppliedAudibleSettings(audibleSettings);
+    setGenerateBusy(false);
+    setError(null);
+    setResult(null);
+    setProgress(null);
+    setGenerationProgress(0);
+  }
+
+  // The shared player belongs to whichever engine drives the visible surface,
+  // and Qwen3 settings are also edited from the Qwen3 setup page. The audio is
+  // Qwen3's to clear only while Qwen3 drives the surface (restored Reader audio
+  // included) or while the audio this runtime generated is still the player's.
+  const releaseStalePlayerAudio = useEffectEvent(() => {
+    const ownsPlayerAudio = ownedPlayerEpochRef.current !== null
+      && ownedPlayerEpochRef.current === getContentEpoch();
+    if (!enabled && !ownsPlayerAudio) return;
+    releasePlayerAudio();
+    setShowPlayer(false);
+  });
+
+  // Keyed on the applied settings, which change identity exactly when an
+  // audible setting does.
   useEffect(() => {
     generationVersionRef.current += 1;
     cancelPendingAudioDelivery();
@@ -259,28 +315,8 @@ export function useQwen3LocalRuntime({
     pendingProgressRef.current = null;
     cancelProgressFlushRef.current?.();
     cancelProgressFlushRef.current = null;
-    setGenerateBusy(false);
-    setError(null);
-    clearGeneratedResult();
-    setShowPlayer(false);
-  }, [
-    cancelActiveGeneration,
-    clearGeneratedResult,
-    setShowPlayer,
-    settings.instruct,
-    settings.language,
-    settings.maxNewTokens,
-    settings.modelPath,
-    settings.profile.mode,
-    settings.profile.repo,
-    settings.referenceAudioBase64,
-    settings.referenceText,
-    settings.seed,
-    settings.speaker,
-    settings.temperature,
-    settings.topK,
-    cancelPendingAudioDelivery,
-  ]);
+    releaseStalePlayerAudio();
+  }, [appliedAudibleSettings, cancelActiveGeneration, cancelPendingAudioDelivery]);
 
   const runProbe = useCallback(async () => {
     if (!enabled || !bridge) return;
@@ -489,6 +525,7 @@ export function useQwen3LocalRuntime({
     const requestSections = requestPlan.sections;
     if (requestSections.length === 0) return;
     clearGeneratedResult();
+    ownedPlayerEpochRef.current = getContentEpoch();
     // Every mode uses the units re-split from the exact IPC request text.
     activeTextUnitsRef.current = requestPlan.units;
     setShowPlayer(true);
@@ -679,6 +716,7 @@ export function useQwen3LocalRuntime({
     clearGeneratedResult,
     endStream,
     getAudioChunkCount,
+    getContentEpoch,
     scheduleChunk,
     setShowPlayer,
     settings,

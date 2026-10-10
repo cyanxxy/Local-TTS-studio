@@ -180,6 +180,30 @@ describe("useAudioPlayer", () => {
     expect(result.current.segments[1]?.startSec).toBe(500);
   });
 
+  it("advances the content epoch only when the buffered audio is replaced wholesale", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    const initial = result.current.getContentEpoch();
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Streamed", 4, 2));
+      await result.current.scheduleChunk(makeChunk("Streamed more", 4, 2));
+    });
+    act(() => result.current.truncateAudioChunks(1));
+    expect(result.current.getContentEpoch()).toBe(initial);
+
+    act(() => result.current.reset());
+    expect(result.current.getContentEpoch()).toBe(initial + 1);
+
+    act(() => result.current.restoreAudioCache([{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000,
+      text: "Restored",
+      index: 1,
+      total: 1,
+    }]));
+    expect(result.current.getContentEpoch()).toBe(initial + 2);
+  });
+
   it("can roll back streamed chunks to a section checkpoint", async () => {
     const { result } = renderHook(() => useAudioPlayer());
 

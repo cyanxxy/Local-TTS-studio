@@ -51,6 +51,12 @@ export interface UseAudioPlayerReturn {
   downloadCaptions: (format: CaptionExportFormat) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
   getAudioChunkCount: () => number;
+  /**
+   * Increments whenever the buffered audio is replaced wholesale (a reset or a
+   * restored cache). A runtime that generated the current audio can compare
+   * it later to tell whether the player still holds its audio.
+   */
+  getContentEpoch: () => number;
   truncateAudioChunks: (count: number) => void;
   getAudioCacheSnapshot: () => CachedReaderAudioChunk[];
   restoreAudioCache: (
@@ -118,6 +124,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const autoPlayOnChunkRef = useRef(true);
   const streamCompleteRef = useRef(true);
   const playbackOperationRef = useRef(0);
+  const contentEpochRef = useRef(0);
   // Lowest chunk index that may still hold a decoded AudioBuffer. Pruning walks
   // forward from here instead of rescanning every chunk on every frame.
   const decodedLowIndexRef = useRef(0);
@@ -806,6 +813,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   ), []);
 
   const getAudioChunkCount = useCallback(() => allChunksRef.current.length, []);
+  const getContentEpoch = useCallback(() => contentEpochRef.current, []);
 
   const truncateAudioChunks = useCallback((count: number) => {
     const retainedCount = clamp(Math.floor(Number.isFinite(count) ? count : 0), 0, allChunksRef.current.length);
@@ -840,6 +848,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     options: { currentTime?: number; playbackRate?: number; synthesisComplete?: boolean } = {},
   ) => {
     playbackOperationRef.current += 1;
+    contentEpochRef.current += 1;
     stopAllNodes();
     cancelTimelineStateFlush();
     segmentCounterRef.current = 0;
@@ -927,6 +936,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
   const reset = useCallback(() => {
     playbackOperationRef.current += 1;
+    contentEpochRef.current += 1;
     stopAllNodes();
     cancelTimelineStateFlush();
 
@@ -1005,6 +1015,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     downloadCaptions,
     replaceSegment,
     getAudioChunkCount,
+    getContentEpoch,
     truncateAudioChunks,
     getAudioCacheSnapshot,
     restoreAudioCache,
