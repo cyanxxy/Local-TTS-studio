@@ -52,6 +52,16 @@ export type WorkerInMessage =
       sentenceSpeedVariance?: number;
       pronunciationRules?: PronunciationRule[];
       emphasisStrength?: number;
+      /**
+       * Optional noise seed for repeatable takes, an integer from 0 to
+       * 4294967295. Honored by Supertonic 3, whose sampler starts from random
+       * noise: each chunk's noise derives from this seed and the chunk's text,
+       * so the same text, voice, settings, and seed reproduce the same audio
+       * on the same backend. Omit it for a fresh variation. Supertonic 3
+       * reports any other value as a generate ERROR; Kokoro and Supertonic 2
+       * ignore the field.
+       */
+      seed?: number;
     }
   | { type: "CANCEL" };
 

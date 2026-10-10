@@ -20,8 +20,11 @@ import { generationMeta } from "./kit/protocol";
 import { createWorkerRuntime, type GenerateMessage, type LoadMessage } from "./kit/runtime";
 import { SUPERTONIC3_ASSETS } from "./manifests/supertonic3";
 import {
+  createSeededRandom,
   createSupertonic3RuntimeStreaming,
   createSupertonic3Style,
+  deriveChunkSeed,
+  SUPERTONIC3_MAX_SEED,
   type Supertonic3Config,
   type Supertonic3ModelName,
   type Supertonic3Style,
@@ -254,9 +257,18 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
   }
 }
 
+function validateSeed(seed: number | undefined): number | undefined {
+  if (seed === undefined) return undefined;
+  if (!Number.isInteger(seed) || seed < 0 || seed > SUPERTONIC3_MAX_SEED) {
+    throw new Error(`Supertonic 3 seed must be an integer from 0 to ${SUPERTONIC3_MAX_SEED}.`);
+  }
+  return seed;
+}
+
 async function generate(message: GenerateMessage, ticket: GenerationTicket): Promise<void> {
   const activeRuntime = runtime;
   if (!activeRuntime) throw new Error("Supertonic 3 is not loaded.");
+  const seed = validateSeed(message.seed);
   const language = (SUPERTONIC3_LANGUAGES as readonly string[]).includes(message.language ?? "")
     ? message.language!
     : "en";
@@ -272,12 +284,14 @@ async function generate(message: GenerateMessage, ticket: GenerationTicket): Pro
   const variance = message.sentenceSpeedVariance ?? 0;
   const totalSteps = Math.max(1, Math.min(20, Math.round(message.quality)));
   for (const [index, chunk] of chunks.entries()) {
+    const tunedText = tuneChunkText(chunk.text, pronunciationRules, emphasisStrength);
     const audio = await activeRuntime.synthesize(
-      tuneChunkText(chunk.text, pronunciationRules, emphasisStrength),
+      tunedText,
       language,
       style,
       totalSteps,
       resolveSentenceSpeed(message.speed, variance, chunk.text),
+      { random: seed === undefined ? undefined : createSeededRandom(deriveChunkSeed(seed, tunedText)) },
     );
     if (!ticket.isCurrent()) return;
     emitAudioChunk(port, {

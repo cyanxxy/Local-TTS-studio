@@ -1,9 +1,12 @@
 import * as ort from "onnxruntime-web";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createSeededRandom,
   createSupertonic3Runtime,
   createSupertonic3RuntimeStreaming,
+  deriveChunkSeed,
   normalizeSupertonic3Text,
+  SUPERTONIC3_MAX_SEED,
   Supertonic3Runtime,
 } from "./supertonic3Runtime";
 
@@ -140,5 +143,61 @@ describe("Supertonic 3 runtime resources", () => {
     ]);
     await runtime.dispose();
     create.mockRestore();
+  });
+});
+
+describe("Supertonic 3 seeded noise", () => {
+  const sample = (random: () => number, count = 6) => Array.from({ length: count }, () => random());
+
+  it("repeats a uniform [0, 1) sequence for the same seed", () => {
+    const values = sample(createSeededRandom(42));
+
+    expect(values).toEqual(sample(createSeededRandom(42)));
+    expect(values).not.toEqual(sample(createSeededRandom(43)));
+    expect(values.every((value) => value >= 0 && value < 1)).toBe(true);
+    expect(sample(createSeededRandom(SUPERTONIC3_MAX_SEED)).every((value) => value >= 0 && value < 1)).toBe(true);
+  });
+
+  it("derives each chunk's seed from both the generation seed and the chunk text", () => {
+    const seed = deriveChunkSeed(7, "Hello there.");
+
+    expect(deriveChunkSeed(7, "Hello there.")).toBe(seed);
+    expect(deriveChunkSeed(8, "Hello there.")).not.toBe(seed);
+    expect(deriveChunkSeed(7, "Hello there!")).not.toBe(seed);
+    expect(deriveChunkSeed(7, "\u4f60\u597d")).not.toBe(deriveChunkSeed(7, "\u597d\u4f60"));
+    expect(Number.isInteger(seed) && seed >= 0 && seed <= SUPERTONIC3_MAX_SEED).toBe(true);
+  });
+
+  it("starts denoising from the same latent noise for the same random source", async () => {
+    const initialLatents: number[][] = [];
+    const runtime = new Supertonic3Runtime(
+      config,
+      new Array(256).fill(1),
+      session(async () => ({ duration: outputTensor(new Float32Array([1])) })),
+      session(async () => ({ text_emb: outputTensor(new Float32Array([1])) })),
+      session(async (feeds) => {
+        initialLatents.push(Array.from(feeds.noisy_latent.data as Float32Array));
+        return { denoised_latent: outputTensor(new Float32Array(4)) };
+      }),
+      session(async () => ({ wav_tts: outputTensor(new Float32Array(8)) })),
+    );
+    const style = {
+      ttl: new ort.Tensor("float32", new Float32Array([1]), [1]),
+      dp: new ort.Tensor("float32", new Float32Array([1]), [1]),
+    };
+
+    await runtime.synthesize("hello", "en", style, 1, 1, { random: createSeededRandom(1) });
+    await runtime.synthesize("hello", "en", style, 1, 1, { random: createSeededRandom(1) });
+    await runtime.synthesize("hello", "en", style, 1, 1, { random: createSeededRandom(2) });
+    const mathRandom = vi.spyOn(Math, "random");
+    await runtime.synthesize("hello", "en", style, 1, 1);
+
+    expect(initialLatents[0]).toHaveLength(4);
+    expect(initialLatents[1]).toEqual(initialLatents[0]);
+    expect(initialLatents[2]).not.toEqual(initialLatents[0]);
+    expect(mathRandom).toHaveBeenCalled();
+    mathRandom.mockRestore();
+    style.ttl.dispose();
+    style.dp.dispose();
   });
 });

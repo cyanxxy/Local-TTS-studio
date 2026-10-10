@@ -61,10 +61,51 @@ export function createSupertonic3Style(value: VoiceStyleJson): Supertonic3Style 
   }
 }
 
-function gaussianRandom(): number {
-  const u1 = Math.max(0.0001, Math.random());
-  const u2 = Math.random();
+/** Largest seed GENERATE accepts: seeds are unsigned 32-bit integers. */
+export const SUPERTONIC3_MAX_SEED = 0xFFFF_FFFF;
+
+/** Deterministic uniform [0, 1) generator (mulberry32) for repeatable latent noise. */
+export function createSeededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6D2B_79F5) >>> 0;
+    let mixed = state;
+    mixed = Math.imul(mixed ^ (mixed >>> 15), mixed | 1);
+    mixed ^= mixed + Math.imul(mixed ^ (mixed >>> 7), mixed | 61);
+    return ((mixed ^ (mixed >>> 14)) >>> 0) / 0x1_0000_0000;
+  };
+}
+
+/**
+ * The noise seed for one chunk: FNV-1a over the generation seed and the text
+ * being synthesized. Deriving it from the chunk's own text, not its position,
+ * means the same text, seed, and settings reproduce the same audio wherever
+ * the chunk falls in a passage.
+ */
+export function deriveChunkSeed(seed: number, text: string): number {
+  let hash = 0x811C_9DC5;
+  const mix = (byte: number) => {
+    hash = Math.imul(hash ^ byte, 0x0100_0193) >>> 0;
+  };
+  for (let shift = 0; shift < 32; shift += 8) mix((seed >>> shift) & 0xFF);
+  for (let index = 0; index < text.length; index += 1) {
+    const codeUnit = text.charCodeAt(index);
+    mix(codeUnit & 0xFF);
+    mix(codeUnit >>> 8);
+  }
+  return hash;
+}
+
+function gaussianRandom(random: () => number): number {
+  const u1 = Math.max(0.0001, random());
+  const u2 = random();
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+}
+
+export interface Supertonic3SynthesisOptions {
+  onStep?: (step: number, total: number) => void;
+  /** Uniform [0, 1) source for the initial latent noise. Defaults to Math.random. */
+  random?: () => number;
 }
 
 export function normalizeSupertonic3Text(text: string): string {
@@ -152,7 +193,7 @@ export class Supertonic3Runtime {
     style: Supertonic3Style,
     totalSteps: number,
     speed: number,
-    onStep?: (step: number, total: number) => void,
+    { onStep, random = Math.random }: Supertonic3SynthesisOptions = {},
   ): Promise<Float32Array> {
     if (this.disposed) throw new Error("Supertonic 3 runtime has been disposed.");
     const processed = this.processor.process(text, language);
@@ -190,7 +231,7 @@ export class Supertonic3Runtime {
       const latentLength = Math.ceil((duration * this.sampleRate) / chunkSize);
       const latentChannels = this.config.ttl.latent_dim * this.config.ttl.chunk_compress_factor;
       const latent = new Float32Array(latentChannels * latentLength);
-      for (let index = 0; index < latent.length; index += 1) latent[index] = gaussianRandom();
+      for (let index = 0; index < latent.length; index += 1) latent[index] = gaussianRandom(random);
       latentTensor = new ort.Tensor("float32", latent, [1, latentChannels, latentLength]);
       latentMask = new ort.Tensor("float32", new Float32Array(latentLength).fill(1), [1, 1, latentLength]);
       totalStepTensor = new ort.Tensor("float32", new Float32Array([totalSteps]), [1]);

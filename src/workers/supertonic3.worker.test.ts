@@ -150,7 +150,8 @@ async function loadSupertonic3Worker({
   });
   vi.doMock("./manifests/supertonic3", () => ({ SUPERTONIC3_ASSETS: fakeManifest() }));
   vi.doMock("../lib/webgpu", () => ({ canInitializeWebGPU: async () => canUseWebGPU }));
-  vi.doMock("../lib/supertonic3Runtime", () => ({
+  vi.doMock("../lib/supertonic3Runtime", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../lib/supertonic3Runtime")>(),
     createSupertonic3RuntimeStreaming: createRuntime,
     createSupertonic3Style: () => ({ ttl: { dispose() {} }, dp: { dispose() {} } }),
   }));
@@ -433,5 +434,46 @@ describe("Supertonic 3 backend selection", () => {
     }));
     expect(createRuntime).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls.filter(([url]) => fileFromUrl(url) === "onnx/vocoder.onnx")).toHaveLength(1);
+  });
+});
+
+describe("Supertonic 3 seeds", () => {
+  const sample = (random: (() => number) | undefined) => Array.from({ length: 4 }, () => random!());
+  const noiseSource = (call: unknown[]) => (call[5] as { random?: () => number }).random;
+
+  async function generateWith(dispatch: (message: WorkerInMessage) => void, messages: WorkerOutMessage[], id: string, extra: Partial<WorkerInMessage>) {
+    dispatch({ type: "GENERATE", generationId: id, text: "A repeatable sentence for seeds.", voice: "M1", speed: 1, quality: 5, ...extra } as WorkerInMessage);
+    await vi.waitFor(() => expect(messages.some((message) => message.type === "GENERATION_COMPLETE" && message.generationId === id)).toBe(true));
+  }
+
+  it("passes noise that repeats for the same text and seed and differs for another seed", async () => {
+    const { dispatch, messages, runtime } = await loadSupertonic3Worker();
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    await generateWith(dispatch, messages, "a", { seed: 7 });
+    await generateWith(dispatch, messages, "b", { seed: 7 });
+    await generateWith(dispatch, messages, "c", { seed: 8 });
+    await generateWith(dispatch, messages, "d", {});
+
+    const [first, repeat, otherSeed, unseeded] = runtime.synthesize.mock.calls.map(noiseSource);
+    expect(sample(repeat)).toEqual(sample(first));
+    expect(sample(otherSeed)).not.toEqual(sample(first));
+    expect(unseeded).toBeUndefined();
+  });
+
+  it.each([1.5, -1, 2 ** 32, Number.NaN])("rejects the invalid seed %s", async (seed) => {
+    const { dispatch, messages, runtime } = await loadSupertonic3Worker();
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    dispatch({ type: "GENERATE", generationId: "bad", text: "Seeded sentence.", voice: "M1", speed: 1, quality: 5, seed });
+    await vi.waitFor(() => expect(messages.at(-1)).toEqual({
+      type: "ERROR",
+      scope: "generate",
+      generationId: "bad",
+      message: "Supertonic 3 seed must be an integer from 0 to 4294967295.",
+    }));
+    expect(runtime.synthesize).not.toHaveBeenCalled();
   });
 });
