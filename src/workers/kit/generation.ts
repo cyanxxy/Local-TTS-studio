@@ -23,18 +23,20 @@ export interface GenerationTicket {
 export interface GenerationController {
   /**
    * Starts a generation task. Resolves when the task has settled and never
-   * rejects; the task reports its own errors (see createWorkerMessageHandler).
+   * rejects; the task reports its own errors (see createWorkerRuntime).
    * The task starts synchronously when no earlier task is pending.
    */
   run(generationId: string | undefined, task: (ticket: GenerationTicket) => Promise<void>): Promise<void>;
   /**
    * Soft abort. Invalidates the named generation when it is the current one
-   * (the latest pending one when `generationId` is omitted) and resolves once
-   * that generation has settled, i.e. its in-flight inference returned and it
-   * will post nothing more. Resolves immediately when no pending generation
-   * matches; a stale id never invalidates a newer generation.
+   * (the latest pending one when `generationId` is omitted). `onSettled` runs
+   * once that generation has settled, i.e. its in-flight inference returned
+   * and it will post nothing more, and before any later generation starts.
+   * When no pending generation matches, `onSettled` runs in a microtask; a
+   * stale id never invalidates a newer generation. The returned promise
+   * resolves after `onSettled` has run.
    */
-  abort(generationId?: string): Promise<void>;
+  abort(generationId?: string, onSettled?: () => void): Promise<void>;
   /** Invalidates every generation started so far (hard cancel, forced reload). */
   invalidate(): void;
   /** Resolves once every generation started so far has settled. */
@@ -44,7 +46,9 @@ export interface GenerationController {
 interface PendingGeneration {
   readonly generationId: string | undefined;
   readonly epoch: number;
-  readonly settled: Promise<void>;
+  /** Abort callbacks, run when this generation settles. */
+  readonly onSettled: Array<() => void>;
+  settled: Promise<void>;
 }
 
 function latestPending(
@@ -56,6 +60,15 @@ function latestPending(
     if (pending[index].generationId === generationId) return pending[index];
   }
   return undefined;
+}
+
+function runSettledCallback(callback: () => void): void {
+  try {
+    callback();
+  } catch (error) {
+    // A failing callback must not wedge the generations queued behind it.
+    console.error("[worker] abort callback failed", error);
+  }
 }
 
 export function createGenerationController(): GenerationController {
@@ -75,27 +88,36 @@ export function createGenerationController(): GenerationController {
       // A generation superseded while it queued never touches the model.
       if (ticket.isCurrent()) await task(ticket);
     };
+    const entry: PendingGeneration = { generationId, epoch: ticketEpoch, onSettled: [], settled: tail };
     const done = pending.length === 0 ? start() : tail.then(start);
-    const settled = done.catch((error: unknown) => {
-      // Tasks catch their own errors; reaching this is a worker bug, and the
-      // chain must keep going so later generations are not wedged behind it.
-      console.error("[worker] generation task failed unexpectedly", error);
-    });
-    const entry: PendingGeneration = { generationId, epoch: ticketEpoch, settled };
     pending.push(entry);
-    tail = settled;
-    void settled.then(() => {
-      pending.splice(pending.indexOf(entry), 1);
-    });
-    return settled;
+    entry.settled = done
+      .catch((error: unknown) => {
+        // Tasks catch their own errors; reaching this is a worker bug, and the
+        // chain must keep going so later generations are not wedged behind it.
+        console.error("[worker] generation task failed unexpectedly", error);
+      })
+      .then(() => {
+        // Part of the settle step itself, so the next generation, which is
+        // chained on it, starts only after the abort callbacks have run.
+        pending.splice(pending.indexOf(entry), 1);
+        entry.onSettled.forEach(runSettledCallback);
+      });
+    tail = entry.settled;
+    return entry.settled;
   };
 
   return {
     run,
-    abort(generationId) {
+    abort(generationId, onSettled) {
       const target = latestPending(pending, generationId);
-      if (!target) return Promise.resolve();
+      if (!target) {
+        return Promise.resolve().then(() => {
+          if (onSettled) runSettledCallback(onSettled);
+        });
+      }
       if (target.epoch === epoch) epoch += 1;
+      if (onSettled) target.onSettled.push(onSettled);
       return target.settled;
     },
     invalidate() {

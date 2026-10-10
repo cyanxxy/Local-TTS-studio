@@ -51,7 +51,8 @@ export interface GenerationTuningSettings {
  *   sessions never run concurrently.
  * - Every AUDIO_CHUNK, GENERATION_COMPLETE, and generate ERROR echoes the
  *   GENERATE's `generationId`. A current generation ends with exactly one
- *   GENERATION_COMPLETE or generate ERROR; a superseded one ends silently.
+ *   GENERATION_COMPLETE or generate ERROR; a superseded or aborted one ends
+ *   silently.
  */
 export type WorkerInMessage =
   | { type: "LOAD"; forceReload?: boolean; preferredVoice?: string; debugProfiling?: boolean }
@@ -79,13 +80,41 @@ export type WorkerInMessage =
        */
       seed?: number;
     }
+  /**
+   * Soft abort: stops a generation without closing the worker or unloading
+   * the model, so the next GENERATE starts without a reload.
+   *
+   * It invalidates the generation with this `generationId` when that is the
+   * current one (the latest GENERATE when the id is omitted), which then
+   * posts nothing more: no AUDIO_CHUNK, GENERATION_COMPLETE, or ERROR. An
+   * id that is not current (finished, superseded, or unknown) invalidates
+   * nothing, so a stale ABORT can never stop a newer generation.
+   *
+   * Every ABORT is answered by exactly one ABORTED carrying the same
+   * `generationId`: once the targeted generation's in-flight inference has
+   * returned, or at once when no unfinished generation matches. A GENERATE
+   * may be sent without waiting for ABORTED; it queues behind the aborted
+   * inference either way. A GPU inference that never returns never yields
+   * ABORTED, so hosts should fall back to CANCEL after a timeout.
+   */
+  | { type: "ABORT"; generationId?: string }
+  /**
+   * Hard cancel: invalidates every generation, posts CANCELLED, and closes
+   * the worker. The host must create a new worker and LOAD the model again.
+   */
   | { type: "CANCEL" };
 
 /** Messages sent FROM worker TO main thread */
 export type WorkerOutMessage =
   | { type: "LOAD_PROGRESS"; percent: number }
   | { type: "READY"; voices?: string[]; backend?: InferenceBackend }
+  /** The worker closed after a hard CANCEL. */
   | { type: "CANCELLED" }
+  /**
+   * Answers an ABORT (same `generationId`): the aborted generation has
+   * stopped and will post nothing more. The model stays loaded.
+   */
+  | { type: "ABORTED"; generationId?: string }
   | {
       type: "AUDIO_CHUNK";
       generationId?: string;

@@ -94,6 +94,49 @@ describe("createGenerationController", () => {
     expect(aborted).toBe(true);
   });
 
+  it("runs the abort callback before the next generation starts", async () => {
+    const generations = createGenerationController();
+    const first = blockingTask();
+    const events: string[] = [];
+    void generations.run("a", first.task);
+    void generations.run("b", async () => {
+      events.push("b:start");
+    });
+    // Registered after "b" queued, yet it still runs ahead of "b".
+    void generations.abort("a", () => events.push("a:aborted"));
+
+    first.release();
+    await flushPromises();
+    expect(events).toEqual(["a:aborted", "b:start"]);
+  });
+
+  it("runs the abort callback in a microtask when nothing matches", async () => {
+    const generations = createGenerationController();
+    const onSettled = vi.fn();
+
+    const aborted = generations.abort("missing", onSettled);
+    expect(onSettled).not.toHaveBeenCalled();
+    await aborted;
+    expect(onSettled).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the queue moving when an abort callback throws", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const generations = createGenerationController();
+    const first = blockingTask();
+    const next = vi.fn(async () => undefined);
+    void generations.run("a", first.task);
+    void generations.abort("a", () => {
+      throw new Error("callback failed");
+    });
+    void generations.run("b", next);
+
+    first.release();
+    await flushPromises();
+    expect(consoleError).toHaveBeenCalledWith("[worker] abort callback failed", expect.any(Error));
+    expect(next).toHaveBeenCalledOnce();
+  });
+
   it("ignores a stale abort for a generation that was already superseded", async () => {
     const generations = createGenerationController();
     const first = blockingTask();

@@ -10,12 +10,14 @@
  *   supersedes the previous generation and waits for it to settle before
  *   touching the model. Errors are posted with scope "generate" only while
  *   the generation is still current.
+ * - ABORT invalidates the named generation without closing the worker and
+ *   answers with ABORTED once that generation has settled.
  * - CANCEL invalidates every generation, posts CANCELLED, and closes the
  *   worker.
  */
 import type { WorkerInMessage } from "../../types";
 import { createGenerationController, type GenerationController, type GenerationTicket } from "./generation";
-import { createWorkerPort, type WorkerPort } from "./protocol";
+import { createWorkerPort, generationMeta, type WorkerPort } from "./protocol";
 
 export type LoadMessage = Extract<WorkerInMessage, { type: "LOAD" }>;
 export type GenerateMessage = Extract<WorkerInMessage, { type: "GENERATE" }>;
@@ -91,6 +93,13 @@ export function createWorkerRuntime(
           } catch (error) {
             if (ticket.isCurrent()) port.postError("generate", error, message.generationId);
           }
+        });
+        break;
+      case "ABORT":
+        // Posted before the next generation can start, so hosts always see
+        // ABORTED ahead of anything the next generation posts.
+        void generations.abort(message.generationId, () => {
+          port.post({ type: "ABORTED", ...generationMeta(message.generationId) });
         });
         break;
       case "CANCEL":

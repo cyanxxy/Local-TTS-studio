@@ -169,6 +169,91 @@ describe("createWorkerRuntime", () => {
     expect(tickets.get("after")?.isCurrent()).toBe(true);
   });
 
+  it("soft-aborts a generation and answers ABORTED once its inference returned", async () => {
+    const { port, posted } = createPort();
+    const close = vi.fn();
+    const inference = deferred();
+    const tickets = new Map<string, GenerationTicket>();
+    const runtime = createWorkerRuntime({
+      load: vi.fn(),
+      generate: vi.fn(async (message: GenerateMessage, ticket: GenerationTicket) => {
+        tickets.set(message.generationId!, ticket);
+        if (message.generationId === "a") await inference.promise;
+        if (ticket.isCurrent()) port.post({ type: "GENERATION_COMPLETE", generationId: message.generationId });
+      }),
+    }, { port, close });
+
+    runtime.handleMessage(generateMessage("a"));
+    runtime.handleMessage({ type: "ABORT", generationId: "a" });
+    expect(tickets.get("a")?.isCurrent()).toBe(false);
+    await flushPromises();
+    // Not before the in-flight inference has returned.
+    expect(posted).toEqual([]);
+
+    inference.resolve();
+    await flushPromises();
+    expect(posted).toEqual([{ type: "ABORTED", generationId: "a" }]);
+    expect(close).not.toHaveBeenCalled();
+
+    // The worker stays usable: the next generation runs and completes.
+    runtime.handleMessage(generateMessage("b"));
+    await flushPromises();
+    expect(posted.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "b" });
+  });
+
+  it("answers stale and unknown ABORTs without stopping the current generation", async () => {
+    const { port, posted } = createPort();
+    const first = deferred();
+    const tickets = new Map<string, GenerationTicket>();
+    const runtime = createWorkerRuntime({
+      load: vi.fn(),
+      generate: vi.fn(async (message: GenerateMessage, ticket: GenerationTicket) => {
+        tickets.set(message.generationId!, ticket);
+        if (message.generationId === "a") await first.promise;
+        if (ticket.isCurrent()) port.post({ type: "GENERATION_COMPLETE", generationId: message.generationId });
+      }),
+    }, { port, close: vi.fn() });
+
+    runtime.handleMessage(generateMessage("a"));
+    runtime.handleMessage(generateMessage("b"));
+    runtime.handleMessage({ type: "ABORT", generationId: "a" });
+    runtime.handleMessage({ type: "ABORT", generationId: "unknown" });
+    await flushPromises();
+    // Nothing matches "unknown", so it is answered at once; "a" is answered
+    // when its inference returns.
+    expect(posted).toEqual([{ type: "ABORTED", generationId: "unknown" }]);
+
+    first.resolve();
+    await flushPromises();
+    expect(posted).toEqual([
+      { type: "ABORTED", generationId: "unknown" },
+      { type: "ABORTED", generationId: "a" },
+      { type: "GENERATION_COMPLETE", generationId: "b" },
+    ]);
+    expect(tickets.get("b")?.isCurrent()).toBe(true);
+  });
+
+  it("aborts the latest generation when ABORT carries no id", async () => {
+    const { port, posted } = createPort();
+    const inference = deferred();
+    const tickets: GenerationTicket[] = [];
+    const runtime = createWorkerRuntime({
+      load: vi.fn(),
+      generate: vi.fn(async (_message: GenerateMessage, ticket: GenerationTicket) => {
+        tickets.push(ticket);
+        await inference.promise;
+      }),
+    }, { port, close: vi.fn() });
+
+    runtime.handleMessage({ ...generateMessage("ignored"), generationId: undefined });
+    runtime.handleMessage({ type: "ABORT" });
+    expect(tickets[0].isCurrent()).toBe(false);
+
+    inference.resolve();
+    await flushPromises();
+    expect(posted).toEqual([{ type: "ABORTED" }]);
+  });
+
   it("hard-cancels by invalidating generations, posting CANCELLED, and closing", async () => {
     const { port, posted } = createPort();
     const close = vi.fn();

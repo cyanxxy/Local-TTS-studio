@@ -536,3 +536,84 @@ describe("Supertonic 3 asset prefetch", () => {
     expect(fetched()).toHaveLength(7);
   });
 });
+
+describe("Supertonic 3 soft abort", () => {
+  const threeChunks: TextChunk[] = [
+    { text: "First chunk.", start: 0, end: 12, pauseKind: "sentence", pauseAfterSec: 0 },
+    { text: "Second chunk.", start: 13, end: 26, pauseKind: "sentence", pauseAfterSec: 0 },
+    { text: "Third chunk.", start: 27, end: 39, pauseKind: "none", pauseAfterSec: 0 },
+  ];
+
+  it("stops after the in-flight chunk and keeps the model loaded for the next generation", async () => {
+    const gates: Array<ReturnType<typeof deferred<Float32Array>>> = [];
+    let active = 0;
+    let maxActive = 0;
+    const { createRuntime, dispatch, messages, runtime, worker } = await loadSupertonic3Worker({
+      chunks: threeChunks,
+      synthesize: async () => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        const gate = deferred<Float32Array>();
+        gates.push(gate);
+        try {
+          return await gate.promise;
+        } finally {
+          active -= 1;
+        }
+      },
+    });
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+    const messagesAfterLoad = messages.length;
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "First chunk. Second chunk. Third chunk.", voice: "M1", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(gates).toHaveLength(1));
+    gates[0].resolve(new Float32Array([0.1]));
+    await vi.waitFor(() => expect(gates).toHaveLength(2));
+    dispatch({ type: "ABORT", generationId: "a" });
+    dispatch({ type: "GENERATE", generationId: "b", text: "First chunk. Second chunk. Third chunk.", voice: "M1", speed: 1, quality: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // "b" waits for the aborted inference instead of running beside it.
+    expect(gates).toHaveLength(2);
+    expect(messages.some((message) => message.type === "ABORTED")).toBe(false);
+
+    gates[1].resolve(new Float32Array([0.2]));
+    await vi.waitFor(() => expect(gates).toHaveLength(3));
+    for (let index = 2; index < 5; index += 1) {
+      await vi.waitFor(() => expect(gates.length).toBeGreaterThan(index));
+      gates[index].resolve(new Float32Array([0.3]));
+    }
+    await vi.waitFor(() => expect(messages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "b" }));
+
+    const generationMessages = messages.slice(messagesAfterLoad);
+    expect(generationMessages.map((message) => [message.type, "generationId" in message ? message.generationId : undefined]))
+      .toEqual([
+        ["AUDIO_CHUNK", "a"],
+        ["ABORTED", "a"],
+        ["AUDIO_CHUNK", "b"],
+        ["AUDIO_CHUNK", "b"],
+        ["AUDIO_CHUNK", "b"],
+        ["GENERATION_COMPLETE", "b"],
+      ]);
+    // No reload, no restart, and never two inferences at once.
+    expect(createRuntime).toHaveBeenCalledOnce();
+    expect(worker.close).not.toHaveBeenCalled();
+    expect(runtime.synthesize).toHaveBeenCalledTimes(5);
+    expect(maxActive).toBe(1);
+  });
+
+  it("answers a stale ABORT without stopping the generation that replaced it", async () => {
+    const { dispatch, messages } = await loadSupertonic3Worker({ chunks: threeChunks });
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "First chunk. Second chunk. Third chunk.", voice: "M1", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(messages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "a" }));
+    dispatch({ type: "GENERATE", generationId: "b", text: "First chunk. Second chunk. Third chunk.", voice: "M1", speed: 1, quality: 5 });
+    dispatch({ type: "ABORT", generationId: "a" });
+
+    await vi.waitFor(() => expect(messages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "b" }));
+    expect(messages).toContainEqual({ type: "ABORTED", generationId: "a" });
+    expect(messages.filter((message) => message.type === "AUDIO_CHUNK" && message.generationId === "b")).toHaveLength(3);
+  });
+});
