@@ -25,10 +25,6 @@ const WEBSOCKET_READ_TIMEOUT_SEC: u64 = 10;
 const WEBSOCKET_IDLE_READ_TIMEOUT_SEC: u64 = 30 * 60;
 const WEBSOCKET_WRITE_TIMEOUT_SEC: u64 = 30;
 const MAX_WEBSOCKET_WRITE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
-// Poll budget for draining cancel frames between generation chunks. Short
-// enough to add no measurable latency per chunk, long enough for a frame that
-// is already in the socket buffer to be read in one pass.
-const CANCEL_POLL_TIMEOUT: Duration = Duration::from_millis(1);
 // Bound the request/cancel bookkeeping a peer can accumulate between requests.
 const MAX_PENDING_REQUESTS: usize = 8;
 const MAX_TRACKED_CANCELLATIONS: usize = 64;
@@ -137,23 +133,24 @@ impl WebSocketConnection {
     /// `request_id` has been cancelled. Called between generation chunks so a
     /// Stop unwinds the request through the normal error path, leaving the
     /// process (and its loaded model) alive for the next generation.
+    ///
+    /// The socket is nonblocking only for the drain, so a poll costs a few
+    /// syscalls instead of waiting out a read timeout before every chunk, and
+    /// the idle read timeout set at accept time is never touched.
     pub fn poll_cancelled(&mut self, request_id: &str) -> Result<bool> {
         if self.peer_closed || self.cancelled_requests.contains(request_id) {
             return Ok(true);
         }
         self.socket
             .get_ref()
-            .set_read_timeout(Some(CANCEL_POLL_TIMEOUT))
+            .set_nonblocking(true)
             .context("Failed arming WebSocket cancel poll")?;
         let outcome = self.drain_buffered_requests();
-        // Restore the idle deadline even when draining failed, so a caller that
-        // ignores the error does not inherit the 1ms poll timeout.
-        let restored = self
-            .socket
-            .get_ref()
-            .set_read_timeout(Some(Duration::from_secs(WEBSOCKET_IDLE_READ_TIMEOUT_SEC)));
+        // Restore blocking mode even when draining failed, so a caller that
+        // ignores the error does not inherit a nonblocking socket.
+        let restored = self.socket.get_ref().set_nonblocking(false);
         outcome?;
-        restored.context("Failed restoring WebSocket idle read timeout")?;
+        restored.context("Failed restoring blocking WebSocket reads")?;
         Ok(self.peer_closed || self.cancelled_requests.contains(request_id))
     }
 
@@ -165,8 +162,13 @@ impl WebSocketConnection {
                     self.peer_closed = true;
                     return Ok(());
                 }
-                Ok(Message::Ping(payload)) => self.socket.send(Message::Pong(payload))?,
-                Ok(Message::Binary(_) | Message::Pong(_) | Message::Frame(_)) => {}
+                // tungstenite has already queued the pong. The next read here or
+                // the next frame sent flushes it; answering explicitly on this
+                // nonblocking socket would fail the poll whenever the client is
+                // slow to read, where a queued pong just waits.
+                Ok(
+                    Message::Ping(_) | Message::Binary(_) | Message::Pong(_) | Message::Frame(_),
+                ) => {}
                 Err(tungstenite::Error::Io(err))
                     if matches!(
                         err.kind(),
@@ -296,11 +298,77 @@ mod tests {
     use super::*;
     use crate::protocol::MAX_AUDIO_CHUNK_SAMPLES;
     use crate::ws::test_support::{
-        READ_TIMEOUT, TOKEN, connect, connected_pair, read_message, send_json,
+        Client, READ_TIMEOUT, TOKEN, connect, connected_pair, read_message, send_json,
     };
     use std::io::Read;
     use std::net::TcpListener;
     use std::thread;
+
+    /// Asserts the bridge sent the client nothing it has not read yet.
+    fn assert_nothing_sent(client: &mut Client) {
+        client
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        match client.read() {
+            Err(tungstenite::Error::Io(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            other => panic!("expected no frames from the bridge, got {other:?}"),
+        }
+        client
+            .get_ref()
+            .set_read_timeout(Some(READ_TIMEOUT))
+            .unwrap();
+    }
+
+    /// Sends `request` once the bridge has had time to start waiting for it.
+    fn send_request_later(mut client: Client, request: &'static str) -> thread::JoinHandle<Client> {
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            client.send(Message::Text(request.into())).unwrap();
+            client
+        })
+    }
+
+    /// Writes binary frames to a client that is not reading until the kernel
+    /// takes no more, leaving the rest of the last one in tungstenite's write
+    /// buffer. A refused write is not enough on its own: the kernel keeps
+    /// moving data into the client's receive buffer for a while after it, so
+    /// the socket only counts as full once it still refuses after a pause.
+    fn fill_send_buffer(connection: &mut WebSocketConnection) {
+        const FRAME_BYTES: usize = 1024 * 1024;
+        let would_block = |outcome: &tungstenite::Result<()>| {
+            matches!(
+                outcome,
+                Err(tungstenite::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+            )
+        };
+        connection.socket.get_ref().set_nonblocking(true).unwrap();
+        let mut full = false;
+        for _ in 0..256 {
+            // Queue a frame only once the previous one has been written out.
+            let outcome = match connection.socket.flush() {
+                Ok(()) => connection
+                    .socket
+                    .write(Message::Binary(vec![0; FRAME_BYTES].into())),
+                pending => pending,
+            };
+            if would_block(&outcome) {
+                thread::sleep(Duration::from_millis(50));
+                if would_block(&connection.socket.flush()) {
+                    full = true;
+                    break;
+                }
+            } else {
+                outcome.unwrap();
+            }
+        }
+        connection.socket.get_ref().set_nonblocking(false).unwrap();
+        assert!(full, "the client never pushed back");
+    }
 
     #[test]
     fn a_connection_accepted_from_a_nonblocking_listener_still_waits_for_requests() {
@@ -322,31 +390,97 @@ mod tests {
             }
         };
         let mut connection = WebSocketConnection::accept(stream, TOKEN).unwrap();
-        let mut client = client.join().unwrap();
 
-        // The request only arrives after the bridge has started waiting.
+        // The request only arrives after the bridge has started waiting, and
+        // waiting sends the client nothing.
         let request = r#"{"requestId":"r1","payload":{}}"#;
-        let sender = thread::spawn(move || {
-            thread::sleep(Duration::from_millis(100));
-            client.send(Message::Text(request.into())).unwrap();
-            client
-        });
+        let sender = send_request_later(client.join().unwrap(), request);
         assert_eq!(connection.recv_text().unwrap().as_deref(), Some(request));
+        assert_nothing_sent(&mut sender.join().unwrap());
+    }
 
-        // Waiting sent nothing to the client.
-        let mut client = sender.join().unwrap();
-        client
-            .get_ref()
-            .set_read_timeout(Some(Duration::from_millis(100)))
-            .unwrap();
-        match client.read() {
-            Err(tungstenite::Error::Io(error))
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            other => panic!("expected no frames while the bridge waited, got {other:?}"),
+    #[test]
+    fn idle_polls_return_without_waiting_out_a_timeout() {
+        // A poll runs before every streamed chunk and progress frame. Each one
+        // used to arm a 1 ms read timeout and, on an idle socket, wait it out,
+        // so these polls took at least 200 ms; reading only what has arrived
+        // takes a few microseconds each.
+        const POLLS: u32 = 200;
+        let (mut connection, _client) = connected_pair();
+        let started = Instant::now();
+        for _ in 0..POLLS {
+            assert!(!connection.poll_cancelled("r1").unwrap());
         }
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "{POLLS} idle polls took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_poll_leaves_the_connection_waiting_for_requests() {
+        // The drain reads without blocking. Leaving the socket that way would
+        // turn the next idle wait into a ping flood, and it must keep the idle
+        // timeout it was given at accept time.
+        let (mut connection, client) = connected_pair();
+        assert!(!connection.poll_cancelled("r1").unwrap());
+        assert_eq!(
+            connection.socket.get_ref().read_timeout().unwrap(),
+            Some(Duration::from_secs(WEBSOCKET_IDLE_READ_TIMEOUT_SEC))
+        );
+        let request = r#"{"requestId":"r2","payload":{}}"#;
+        let sender = send_request_later(client, request);
+        assert_eq!(connection.recv_text().unwrap().as_deref(), Some(request));
+        assert_nothing_sent(&mut sender.join().unwrap());
+    }
+
+    #[test]
+    fn a_poll_on_a_congested_socket_queues_its_pong_instead_of_failing() {
+        // A client that is slow to read leaves the bridge's send buffer full.
+        // The drain cannot write a pong without blocking then; failing the poll
+        // would fail the generation, so the pong waits for the next send.
+        let (mut connection, mut client) = connected_pair();
+        fill_send_buffer(&mut connection);
+        client
+            .send(Message::Ping(b"congested".to_vec().into()))
+            .unwrap();
+        send_json(
+            &mut client,
+            json!({ "command": "cancel", "requestId": "r1" }),
+        );
+        assert!(wait_for_cancel(&mut connection, "r1"));
+
+        // Once the client reads again, the next send delivers the queued pong
+        // ahead of its own frame.
+        let reader = thread::spawn(move || {
+            loop {
+                match read_message(&mut client) {
+                    Message::Binary(_) => {}
+                    first => return (first, read_message(&mut client)),
+                }
+            }
+        });
+        connection
+            .send_json(&json!({ "type": "progress" }))
+            .unwrap();
+        let (first, second) = reader.join().unwrap();
+        assert_eq!(first, Message::Pong(b"congested".to_vec().into()));
+        assert_eq!(second, Message::Text(r#"{"type":"progress"}"#.into()));
+    }
+
+    #[test]
+    fn a_frame_split_across_polls_completes_on_a_later_poll() {
+        // A nonblocking read can stop partway through a frame. The bytes read
+        // so far must wait in tungstenite's buffer for the rest of it.
+        let (mut connection, mut client) = connected_pair();
+        let frame = masked_text_frame(r#"{"command":"cancel","requestId":"r1"}"#);
+        let (head, tail) = frame.split_at(frame.len() / 2);
+        client.get_mut().write_all(head).unwrap();
+        thread::sleep(Duration::from_millis(20));
+        assert!(!connection.poll_cancelled("r1").unwrap());
+        client.get_mut().write_all(tail).unwrap();
+        assert!(wait_for_cancel(&mut connection, "r1"));
     }
 
     /// Polls until `request_id` reads as cancelled, or gives up at the deadline.
