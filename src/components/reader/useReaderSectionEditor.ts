@@ -45,6 +45,11 @@ export function useReaderSectionEditor({
   onEditEnd,
 }: UseReaderSectionEditorOptions): ReaderSectionEditor {
   const [session, setSession] = useState<EditSession | null>(null);
+  if (session !== null && session.documentId !== documentId) {
+    // Derivation already hides the session in this render; dropping it too
+    // keeps it from coming back if the reader returns to that book later.
+    setSession(null);
+  }
   const editing = session !== null && session.documentId === documentId;
   const draft = editing ? session.draft : "";
   const commitTimerRef = useRef<number | null>(null);

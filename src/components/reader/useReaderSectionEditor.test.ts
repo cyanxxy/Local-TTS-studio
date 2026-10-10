@@ -115,6 +115,21 @@ describe("useReaderSectionEditor", () => {
     expect(onEditEnd).toHaveBeenCalledTimes(1);
   });
 
+  it("does not revive an abandoned edit when the reader returns to its document", () => {
+    const { result, rerender, onTextChange, onEditEnd } = setup();
+    act(() => result.current.startEditing());
+    act(() => result.current.changeDraft("Half-typed"));
+
+    rerender({ documentId: "book-2", text: "Another book." });
+    rerender({ documentId: "book-1", text: "Section text." });
+
+    expect(result.current.editing).toBe(false);
+    expect(result.current.draft).toBe("");
+    act(() => result.current.finishEditing());
+    expect(onTextChange).not.toHaveBeenCalled();
+    expect(onEditEnd).toHaveBeenCalledTimes(1);
+  });
+
   it("does not end an edit twice when it was finished before the switch", () => {
     const { result, rerender, onEditEnd } = setup();
     act(() => result.current.startEditing());
