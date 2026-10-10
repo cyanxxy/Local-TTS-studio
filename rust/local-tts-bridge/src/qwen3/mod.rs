@@ -1,14 +1,8 @@
 mod config;
 mod model_files;
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 mod reference;
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 mod runtime;
 mod text;
 
@@ -19,10 +13,7 @@ pub(super) use config::{
     MAX_GENERATION_TOKENS,
 };
 pub(super) use model_files::ExpectedModelType;
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 pub(super) use runtime::{
     AudioSink, CustomVoiceRequest, GenerationSummary, Qwen3Runtime, VoiceCloneReference,
     VoiceCloneRequest, VoiceDesignRequest, resolved_runtime_target,

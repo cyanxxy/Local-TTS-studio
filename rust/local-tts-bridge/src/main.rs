@@ -29,10 +29,7 @@ use tungstenite::http::StatusCode;
 use tungstenite::protocol::{Role, WebSocketConfig};
 use tungstenite::{Message, WebSocket};
 
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 use qwen3::{
     AudioSink, CustomVoiceRequest, DEFAULT_CUSTOM_VOICE_LANGUAGE, DEFAULT_CUSTOM_VOICE_SPEAKER,
     GenerationSummary, Qwen3Runtime, VoiceCloneReference, VoiceCloneRequest, VoiceDesignRequest,
@@ -165,10 +162,7 @@ struct NeuttsHost {
 struct RuntimeState {
     model: LocalModel,
     cache_dir: PathBuf,
-    #[cfg(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64")
-    ))]
+    #[cfg(qwen3_native)]
     qwen3: Qwen3Runtime,
     neutts: Option<NeuttsHost>,
     neutts_encoder: Option<neucodec_encoder::NeuCodecRtenEncoder>,
@@ -237,10 +231,7 @@ fn run_probe(cli: &Cli) -> Result<()> {
     emit_result(&json!({ "ok": true, "result": result }))
 }
 
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 fn qwen3_probe_result() -> Value {
     let target = resolved_runtime_target();
     let (recommended_model, recommended_base_model) = if cfg!(target_os = "macos") {
@@ -272,10 +263,7 @@ fn qwen3_probe_result() -> Value {
     })
 }
 
-#[cfg(not(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-)))]
+#[cfg(not(qwen3_native))]
 fn qwen3_probe_result() -> Value {
     json!({
         "ready": false,
@@ -327,10 +315,7 @@ fn run_websocket_server(cli: &Cli) -> Result<()> {
     let mut state = RuntimeState {
         model: cli.model,
         cache_dir: cli.cache_dir.clone(),
-        #[cfg(any(
-            all(target_os = "macos", target_arch = "aarch64"),
-            all(target_os = "windows", target_arch = "x86_64")
-        ))]
+        #[cfg(qwen3_native)]
         qwen3: Qwen3Runtime::new(),
         neutts: None,
         neutts_encoder: None,
@@ -590,10 +575,7 @@ impl RuntimeState {
         }
     }
 
-    #[cfg(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64")
-    ))]
+    #[cfg(qwen3_native)]
     fn warm_qwen3(&mut self, payload: Value) -> Result<Value> {
         let target = resolved_runtime_target();
         let payload: Qwen3WarmPayload =
@@ -613,10 +595,7 @@ impl RuntimeState {
         }))
     }
 
-    #[cfg(not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64")
-    )))]
+    #[cfg(not(qwen3_native))]
     fn warm_qwen3(&mut self, _payload: Value) -> Result<Value> {
         bail!("Qwen3 is unavailable on this platform.")
     }
@@ -633,10 +612,7 @@ impl RuntimeState {
         }
     }
 
-    #[cfg(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64")
-    ))]
+    #[cfg(qwen3_native)]
     fn generate_qwen3(
         &mut self,
         request_id: &str,
@@ -765,10 +741,7 @@ impl RuntimeState {
         qwen_generation_output(summary, payload.model_repo, inference_started.elapsed())
     }
 
-    #[cfg(not(any(
-        all(target_os = "macos", target_arch = "aarch64"),
-        all(target_os = "windows", target_arch = "x86_64")
-    )))]
+    #[cfg(not(qwen3_native))]
     fn generate_qwen3(
         &mut self,
         _request_id: &str,
@@ -928,10 +901,7 @@ impl RuntimeState {
     }
 }
 
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 fn qwen_generation_output(
     summary: GenerationSummary,
     model_repo: String,
@@ -961,11 +931,7 @@ fn qwen_generation_output(
     })
 }
 
-#[cfg(any(
-    test,
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(any(test, qwen3_native))]
 fn qwen_reference_warnings(truncated: bool, short: bool) -> Vec<String> {
     let mut warnings = Vec::new();
     if truncated {
@@ -1010,10 +976,7 @@ fn parse_model_type(mode: &str) -> Result<ExpectedModelType> {
     }
 }
 
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 struct WebSocketQwenSink<'a> {
     request_id: &'a str,
     websocket: &'a mut WebSocketConnection,
@@ -1021,10 +984,7 @@ struct WebSocketQwenSink<'a> {
     audio_chunk_count: usize,
 }
 
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 impl WebSocketQwenSink<'_> {
     /// Abort the generation if the client asked for it. Every Qwen3 mode now
     /// streams audio during a text unit, so a Stop is observed within a few
@@ -1035,10 +995,7 @@ impl WebSocketQwenSink<'_> {
     }
 }
 
-#[cfg(any(
-    all(target_os = "macos", target_arch = "aarch64"),
-    all(target_os = "windows", target_arch = "x86_64")
-))]
+#[cfg(qwen3_native)]
 impl AudioSink for WebSocketQwenSink<'_> {
     fn progress(&mut self, phase: &str, message: &str) -> Result<()> {
         self.bail_if_cancelled()?;
