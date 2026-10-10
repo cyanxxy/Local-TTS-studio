@@ -157,6 +157,19 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("(the WASM numThreads setting, the phonemize export)"));
   });
 
+  it("leaves the dev server's ?url import of kokoro.web.js alone", () => {
+    const root = makeAssetRoot();
+    const plugin = kokoroOnnxWasmAssetPlugin(root);
+    const warn = vi.fn();
+    const id = join(root, "node_modules/kokoro-js/dist/kokoro.web.js");
+
+    // The virtual module imports the build with ?url, which loads as a
+    // one-line module exporting the URL; only the module itself is patched.
+    expect(transformCode(plugin, `export default "/@fs${id}"`, `${id}?url`, warn)).toBeNull();
+    expect(transformCode(plugin, FAKE_KOKORO_BUILD, `${id}?t=1700000000000`, warn)).toContain("as phonemize");
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it("exposes Kokoro's internal ONNX Runtime wasm thread setting", () => {
     const root = makeAssetRoot();
     const plugin = kokoroOnnxWasmAssetPlugin(root);

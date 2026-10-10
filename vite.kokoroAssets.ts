@@ -19,9 +19,12 @@ const KOKORO_ENV_WASM_PATHS_ONLY_RE =
 // re-runs that exact phonemizer to count tokens before generating.
 const KOKORO_PHONEMIZE_FUNCTION_RE = /async function ([\w$]+)\([\w$]+,[\w$]+="a",[\w$]+=!0\)/g;
 const KOKORO_EXPORTS_RE = /export\{([^{}]*\bas KokoroTTS\b[^{}]*)\};?\s*$/;
+// `?url` and `?raw` imports load the file's URL or text, not the module.
+const ASSET_QUERY_RE = /[?&](?:url|raw)(?:&|$)/;
 
 function isKokoroBrowserBuild(id: string): boolean {
-  return normalizePath(id).split("?")[0].endsWith(KOKORO_BROWSER_BUILD_SUFFIX);
+  const normalized = normalizePath(id);
+  return normalized.split("?")[0].endsWith(KOKORO_BROWSER_BUILD_SUFFIX) && !ASSET_QUERY_RE.test(normalized);
 }
 
 function suppressKokoroBundledJsepWasmWarning(code: string): string {
