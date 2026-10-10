@@ -14,6 +14,7 @@ import { canInitializeWebGPU } from "../lib/webgpu";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { getSafeWasmThreadCount } from "../lib/onnxRuntime";
 import { verifyPinnedAssetIntegrity, type PinnedAssetIntegrity } from "../lib/pinnedModelFetch";
+import { createLoadProgress, type LoadProgress } from "./kit/progress";
 import { SUPERTONIC3_ASSETS } from "./manifests/supertonic3";
 import {
   createSupertonic3RuntimeStreaming,
@@ -41,19 +42,19 @@ const MODEL_FILE_BY_NAME: Record<Supertonic3ModelName, string> = {
   vector_estimator: "onnx/vector_estimator.onnx",
   vocoder: "onnx/vocoder.onnx",
 };
-const LOAD_FILE_COUNT = MODEL_FILES.length + 1;
+const DEFAULT_VOICE = "M1";
 // Exact sizes and repository digests at SUPERTONIC3_MODEL_REVISION, generated
 // by scripts/pin-hf-assets.mjs; regenerate the manifest with the revision.
 const ASSET_INTEGRITY: Readonly<Record<string, PinnedAssetIntegrity>> = SUPERTONIC3_ASSETS.files;
+// Downloads fill the bar up to here; session creation takes the rest.
+const DOWNLOAD_PROGRESS_MAX = 94;
 
 let runtime: Supertonic3Runtime | null = null;
 let backend: InferenceBackend | null = null;
-let isLoadingModel = false;
 let activeGenerationEpoch = 0;
 let loadQueue: Promise<void> = Promise.resolve();
 let activeGenerationTask: Promise<void> | null = null;
 const styles = new Map<string, Supertonic3Style>();
-const loadProgress = new Map<string, number>();
 
 function post(message: WorkerOutMessage): void {
   if (message.type === "AUDIO_CHUNK") {
@@ -67,84 +68,97 @@ function assetUrl(file: string): string {
   return `https://huggingface.co/${SUPERTONIC3_MODEL_ID}/resolve/${SUPERTONIC3_MODEL_REVISION}/${file}`;
 }
 
-function updateLoadProgress(file: string, fraction: number): void {
-  if (!isLoadingModel) return;
-  loadProgress.set(file, Math.max(0, Math.min(1, fraction)));
-  const total = Array.from(loadProgress.values()).reduce((sum, value) => sum + value, 0);
-  post({ type: "LOAD_PROGRESS", percent: (total / LOAD_FILE_COUNT) * 94 });
+function styleFile(voice: string): string {
+  return `voice_styles/${voice}.json`;
 }
 
-async function assertAssetIntegrity(file: string, buffer: ArrayBuffer): Promise<void> {
-  const expected = ASSET_INTEGRITY[file];
-  if (!expected || !await verifyPinnedAssetIntegrity(buffer, expected)) {
-    throw new Error(`Supertonic 3 ${file} failed integrity verification.`);
+/** Byte-weighted load progress over every file a cold load downloads. */
+function createModelLoadProgress(): LoadProgress {
+  const loadFiles = [...MODEL_FILES, styleFile(DEFAULT_VOICE)];
+  return createLoadProgress({
+    report: (percent) => post({ type: "LOAD_PROGRESS", percent }),
+    range: [0, DOWNLOAD_PROGRESS_MAX],
+    expectedBytes: Object.fromEntries(loadFiles.map((file) => [file, ASSET_INTEGRITY[file].byteLength])),
+  });
+}
+
+/**
+ * Reads a response body into exactly `byteLength` bytes. The pinned size is
+ * authoritative and Content-Length is never used to size the buffer: Hugging
+ * Face serves the small JSON assets compressed with no Content-Length, and
+ * when one is present it counts encoded bytes, not the decoded body read here.
+ */
+async function readPinnedBody(
+  response: Response,
+  file: string,
+  byteLength: number,
+  progress?: LoadProgress,
+): Promise<ArrayBuffer> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength !== byteLength) {
+      throw new Error(`Supertonic 3 ${file} did not match its pinned size.`);
+    }
+    return buffer;
   }
+
+  const bytes = new Uint8Array(byteLength);
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (received + value.byteLength > byteLength) {
+        throw new Error(`Supertonic 3 ${file} exceeded its pinned size.`);
+      }
+      bytes.set(value, received);
+      received += value.byteLength;
+      progress?.update(file, received);
+    }
+  } catch (error) {
+    // Stop the download instead of draining a body that is already rejected.
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  if (received !== byteLength) {
+    throw new Error(`Supertonic 3 ${file} was truncated at ${received} of ${byteLength} bytes.`);
+  }
+  return bytes.buffer;
 }
 
-async function fetchAsset(file: string): Promise<ArrayBuffer> {
+/** Headers for the cached copy, which holds the decoded body. */
+function cacheHeaders(response: Response, byteLength: number): Headers {
+  const headers = new Headers({ "content-length": String(byteLength) });
+  const contentType = response.headers.get("content-type");
+  if (contentType) headers.set("content-type", contentType);
+  return headers;
+}
+
+async function fetchAsset(file: string, progress?: LoadProgress): Promise<ArrayBuffer> {
+  const expected = ASSET_INTEGRITY[file];
+  if (!expected) throw new Error(`Supertonic 3 ${file} is not a pinned asset.`);
   const url = assetUrl(file);
   const cache = typeof caches === "undefined" ? null : await caches.open(CACHE_NAME);
   const cached = await cache?.match(url);
   if (cached) {
     const buffer = await cached.arrayBuffer();
-    try {
-      await assertAssetIntegrity(file, buffer);
-      updateLoadProgress(file, 1);
+    if (await verifyPinnedAssetIntegrity(buffer, expected)) {
+      progress?.complete(file);
       return buffer;
-    } catch {
-      await cache?.delete(url);
     }
+    await cache?.delete(url);
   }
 
   const response = await fetch(url);
   if (!response.ok) throw new Error(`Failed to download ${file}: HTTP ${response.status}.`);
-  const declaredLength = Number(response.headers.get("content-length"));
-  const reader = response.body?.getReader();
-  if (!reader) {
-    const buffer = await response.arrayBuffer();
-    await assertAssetIntegrity(file, buffer);
-    await cache?.put(url, new Response(buffer, { headers: response.headers }));
-    updateLoadProgress(file, 1);
-    return buffer;
+  const buffer = await readPinnedBody(response, file, expected.byteLength, progress);
+  if (!await verifyPinnedAssetIntegrity(buffer, expected)) {
+    throw new Error(`Supertonic 3 ${file} failed integrity verification.`);
   }
-
-  const canPreallocate = Number.isSafeInteger(declaredLength) && declaredLength >= 0;
-  const preallocated = canPreallocate ? new Uint8Array(declaredLength) : null;
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      if (preallocated) {
-        if (received + value.byteLength > preallocated.byteLength) {
-          throw new Error(`Supertonic 3 ${file} exceeded its declared size.`);
-        }
-        preallocated.set(value, received);
-      } else {
-        chunks.push(value);
-      }
-      received += value.byteLength;
-      if (Number.isFinite(declaredLength) && declaredLength > 0) {
-        updateLoadProgress(file, received / declaredLength);
-      }
-    }
-  }
-  if (preallocated && received !== preallocated.byteLength) {
-    throw new Error(`Supertonic 3 ${file} did not match its declared size.`);
-  }
-  const merged = preallocated ?? new Uint8Array(received);
-  if (!preallocated) {
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-  }
-  await assertAssetIntegrity(file, merged.buffer);
-  await cache?.put(url, new Response(merged, { headers: response.headers }));
-  updateLoadProgress(file, 1);
-  return merged.buffer;
+  await cache?.put(url, new Response(buffer, { headers: cacheHeaders(response, buffer.byteLength) }));
+  progress?.complete(file);
+  return buffer;
 }
 
 function parseJson<T>(buffer: ArrayBuffer, file: string): T {
@@ -175,12 +189,12 @@ async function disposeRuntime(value: Supertonic3Runtime | null): Promise<void> {
   await value?.dispose();
 }
 
-async function loadStyle(voice: string): Promise<Supertonic3Style> {
-  const normalized = (SUPERTONIC3_VOICES as readonly string[]).includes(voice) ? voice : "M1";
+async function loadStyle(voice: string, progress?: LoadProgress): Promise<Supertonic3Style> {
+  const normalized = (SUPERTONIC3_VOICES as readonly string[]).includes(voice) ? voice : DEFAULT_VOICE;
   const cached = styles.get(normalized);
   if (cached) return cached;
-  const file = `voice_styles/${normalized}.json`;
-  const value = parseJson<VoiceStyleJson>(await fetchAsset(file), file);
+  const file = styleFile(normalized);
+  const value = parseJson<VoiceStyleJson>(await fetchAsset(file, progress), file);
   const style = createSupertonic3Style(value);
   styles.set(normalized, style);
   return style;
@@ -192,7 +206,6 @@ async function loadModel(forceReload: boolean): Promise<void> {
     return;
   }
   if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
-  isLoadingModel = true;
   try {
     activeGenerationEpoch += 1;
     if (activeGenerationTask) await activeGenerationTask.catch(() => undefined);
@@ -201,15 +214,15 @@ async function loadModel(forceReload: boolean): Promise<void> {
     backend = null;
     clearStyles();
     await disposeRuntime(previousRuntime);
-    loadProgress.clear();
-    post({ type: "LOAD_PROGRESS", percent: 0 });
+    const progress = createModelLoadProgress();
+    progress.reset();
     ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;
     ort.env.wasm.numThreads = getSafeWasmThreadCount(MAX_WASM_THREADS);
-    const configBuffer = await fetchAsset("onnx/tts.json");
-    const indexerBuffer = await fetchAsset("onnx/unicode_indexer.json");
+    const configBuffer = await fetchAsset("onnx/tts.json", progress);
+    const indexerBuffer = await fetchAsset("onnx/unicode_indexer.json", progress);
     const config = parseJson<Supertonic3Config>(configBuffer, "onnx/tts.json");
     const indexer = parseJson<number[]>(indexerBuffer, "onnx/unicode_indexer.json");
-    const loadModelBuffer = (name: Supertonic3ModelName) => fetchAsset(MODEL_FILE_BY_NAME[name]);
+    const loadModelBuffer = (name: Supertonic3ModelName) => fetchAsset(MODEL_FILE_BY_NAME[name], progress);
     const preferredBackend: InferenceBackend = await canInitializeWebGPU() ? "webgpu" : "wasm";
     try {
       runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, preferredBackend);
@@ -219,7 +232,7 @@ async function loadModel(forceReload: boolean): Promise<void> {
       runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, "wasm");
       backend = "wasm";
     }
-    await loadStyle("M1");
+    await loadStyle(DEFAULT_VOICE, progress);
     post({ type: "LOAD_PROGRESS", percent: 100 });
     post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend });
   } catch (error) {
@@ -229,8 +242,6 @@ async function loadModel(forceReload: boolean): Promise<void> {
     clearStyles();
     await disposeRuntime(failedRuntime);
     throw error;
-  } finally {
-    isLoadingModel = false;
   }
 }
 
