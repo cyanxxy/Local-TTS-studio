@@ -65,13 +65,24 @@ function streamResponse(
   return new Response(body, { status: 200, headers });
 }
 
+type Synthesize = (text: string, ...rest: unknown[]) => Promise<Float32Array>;
+
 interface HarnessOptions {
   respond?: (file: string) => Response | Promise<Response>;
   cachedAssets?: Record<string, Uint8Array<ArrayBuffer>>;
   chunks?: TextChunk[];
+  synthesize?: Synthesize;
 }
 
-async function loadSupertonic3Worker({ respond, cachedAssets = {}, chunks }: HarnessOptions = {}) {
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
+async function loadSupertonic3Worker({ respond, cachedAssets = {}, chunks, synthesize }: HarnessOptions = {}) {
   vi.resetModules();
   const messages: WorkerOutMessage[] = [];
   const worker = {
@@ -105,7 +116,7 @@ async function loadSupertonic3Worker({ respond, cachedAssets = {}, chunks }: Har
 
   const runtime = {
     sampleRate: 10,
-    synthesize: vi.fn(async () => new Float32Array([0.5, 0.5])),
+    synthesize: vi.fn<Synthesize>(synthesize ?? (async () => new Float32Array([0.5, 0.5]))),
     dispose: vi.fn(async () => undefined),
   };
   const createRuntime = vi.fn(async (
@@ -278,5 +289,71 @@ describe("Supertonic 3 generation", () => {
     const chunks = messages.filter((message) => message.type === "AUDIO_CHUNK");
     expect(Array.from(chunks[0].audio)).toEqual([0.5, 0.5, 0, 0, 0]);
     expect(Array.from(chunks[1].audio)).toEqual([0.5, 0.5, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe("Supertonic 3 generation scheduling", () => {
+  it("runs one inference at a time when a GENERATE arrives mid-generation", async () => {
+    const gate = deferred<Float32Array>();
+    let active = 0;
+    let maxActive = 0;
+    const { dispatch, messages, runtime } = await loadSupertonic3Worker({
+      synthesize: async (text) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        try {
+          return text.startsWith("Slow") ? await gate.promise : new Float32Array([0.25]);
+        } finally {
+          active -= 1;
+        }
+      },
+    });
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "Slow sentence that holds the model.", voice: "M1", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(runtime.synthesize).toHaveBeenCalledOnce());
+    dispatch({ type: "GENERATE", generationId: "b", text: "Fast sentence that runs afterwards.", voice: "M1", speed: 1, quality: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtime.synthesize).toHaveBeenCalledOnce();
+
+    gate.resolve(new Float32Array([0.75]));
+    await vi.waitFor(() => expect(messages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "b" }));
+
+    expect(maxActive).toBe(1);
+    const generationMessages = messages.filter((message) => "generationId" in message);
+    expect(generationMessages.map((message) => [message.type, "generationId" in message && message.generationId]))
+      .toEqual([["AUDIO_CHUNK", "b"], ["GENERATION_COMPLETE", "b"]]);
+  });
+
+  it("waits for the running generation before a forced reload releases its sessions", async () => {
+    const gate = deferred<Float32Array>();
+    const { dispatch, messages, runtime } = await loadSupertonic3Worker({ synthesize: () => gate.promise });
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "A sentence that is still running.", voice: "M1", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(runtime.synthesize).toHaveBeenCalledOnce());
+    dispatch({ type: "LOAD", forceReload: true });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(runtime.dispose).not.toHaveBeenCalled();
+
+    gate.resolve(new Float32Array([0.5]));
+    await vi.waitFor(() => expect(messages.filter((message) => message.type === "READY")).toHaveLength(2));
+    expect(runtime.dispose).toHaveBeenCalledOnce();
+    expect(messages.some((message) => message.type === "AUDIO_CHUNK")).toBe(false);
+  });
+
+  it("reports a generation before the model loads as a generate error with its id", async () => {
+    const { dispatch, messages } = await loadSupertonic3Worker();
+
+    dispatch({ type: "GENERATE", generationId: "early", text: "Too early to speak.", voice: "M1", speed: 1, quality: 5 });
+
+    await vi.waitFor(() => expect(messages.at(-1)).toEqual({
+      type: "ERROR",
+      scope: "generate",
+      generationId: "early",
+      message: "Supertonic 3 is not loaded.",
+    }));
   });
 });

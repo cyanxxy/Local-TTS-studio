@@ -1,20 +1,24 @@
 /** Electron-renderer-only Supertonic 3 worker. */
 import * as ort from "onnxruntime-web";
-import type { InferenceBackend, WorkerInMessage, WorkerOutMessage } from "../types";
+import type { InferenceBackend, WorkerInMessage } from "../types";
 import {
   SUPERTONIC3_LANGUAGES,
   SUPERTONIC3_MODEL_ID,
   SUPERTONIC3_MODEL_REVISION,
   SUPERTONIC3_VOICES,
 } from "../constants";
-import { concatFloat32Arrays, createSilence } from "../lib/audio";
 import { chunkWithConstraintsDetailed } from "../lib/chunking";
-import { resolvePauseSeconds, resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
+import { resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
 import { canInitializeWebGPU } from "../lib/webgpu";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { getSafeWasmThreadCount } from "../lib/onnxRuntime";
 import { verifyPinnedAssetIntegrity, type PinnedAssetIntegrity } from "../lib/pinnedModelFetch";
+import { MAX_WASM_THREADS } from "./kit/backends";
+import { emitAudioChunk, resolveChunkPauseSec } from "./kit/emit";
+import type { GenerationTicket } from "./kit/generation";
 import { createLoadProgress, type LoadProgress } from "./kit/progress";
+import { generationMeta } from "./kit/protocol";
+import { createWorkerRuntime, type GenerateMessage, type LoadMessage } from "./kit/runtime";
 import { SUPERTONIC3_ASSETS } from "./manifests/supertonic3";
 import {
   createSupertonic3RuntimeStreaming,
@@ -27,7 +31,6 @@ import {
 } from "../lib/supertonic3Runtime";
 
 const CACHE_NAME = "transformers-cache-supertonic3-v1";
-const MAX_WASM_THREADS = 4;
 const MODEL_FILES = [
   "onnx/tts.json",
   "onnx/unicode_indexer.json",
@@ -51,18 +54,9 @@ const DOWNLOAD_PROGRESS_MAX = 94;
 
 let runtime: Supertonic3Runtime | null = null;
 let backend: InferenceBackend | null = null;
-let activeGenerationEpoch = 0;
-let loadQueue: Promise<void> = Promise.resolve();
-let activeGenerationTask: Promise<void> | null = null;
 const styles = new Map<string, Supertonic3Style>();
-
-function post(message: WorkerOutMessage): void {
-  if (message.type === "AUDIO_CHUNK") {
-    self.postMessage(message, { transfer: [message.audio.buffer as ArrayBuffer] });
-  } else {
-    self.postMessage(message);
-  }
-}
+const workerRuntime = createWorkerRuntime({ load: loadModel, generate });
+const { port, generations } = workerRuntime;
 
 function assetUrl(file: string): string {
   return `https://huggingface.co/${SUPERTONIC3_MODEL_ID}/resolve/${SUPERTONIC3_MODEL_REVISION}/${file}`;
@@ -76,7 +70,7 @@ function styleFile(voice: string): string {
 function createModelLoadProgress(): LoadProgress {
   const loadFiles = [...MODEL_FILES, styleFile(DEFAULT_VOICE)];
   return createLoadProgress({
-    report: (percent) => post({ type: "LOAD_PROGRESS", percent }),
+    report: (percent) => port.post({ type: "LOAD_PROGRESS", percent }),
     range: [0, DOWNLOAD_PROGRESS_MAX],
     expectedBytes: Object.fromEntries(loadFiles.map((file) => [file, ASSET_INTEGRITY[file].byteLength])),
   });
@@ -200,15 +194,16 @@ async function loadStyle(voice: string, progress?: LoadProgress): Promise<Supert
   return style;
 }
 
-async function loadModel(forceReload: boolean): Promise<void> {
+async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
   if (runtime && !forceReload) {
-    post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend: backend ?? undefined });
+    port.post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend: backend ?? undefined });
     return;
   }
   if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
   try {
-    activeGenerationEpoch += 1;
-    if (activeGenerationTask) await activeGenerationTask.catch(() => undefined);
+    // Never release sessions under a running inference.
+    generations.invalidate();
+    await generations.idle();
     const previousRuntime = runtime;
     runtime = null;
     backend = null;
@@ -233,8 +228,8 @@ async function loadModel(forceReload: boolean): Promise<void> {
       backend = "wasm";
     }
     await loadStyle(DEFAULT_VOICE, progress);
-    post({ type: "LOAD_PROGRESS", percent: 100 });
-    post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend });
+    port.post({ type: "LOAD_PROGRESS", percent: 100 });
+    port.post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend });
   } catch (error) {
     const failedRuntime: Supertonic3Runtime | null = runtime;
     runtime = null;
@@ -245,19 +240,14 @@ async function loadModel(forceReload: boolean): Promise<void> {
   }
 }
 
-function enqueueModelLoad(forceReload: boolean): Promise<void> {
-  const request = loadQueue.catch(() => undefined).then(() => loadModel(forceReload));
-  loadQueue = request;
-  return request;
-}
-
-async function generate(message: Extract<WorkerInMessage, { type: "GENERATE" }>): Promise<void> {
-  if (!runtime) throw new Error("Supertonic 3 is not loaded.");
-  const epoch = ++activeGenerationEpoch;
+async function generate(message: GenerateMessage, ticket: GenerationTicket): Promise<void> {
+  const activeRuntime = runtime;
+  if (!activeRuntime) throw new Error("Supertonic 3 is not loaded.");
   const language = (SUPERTONIC3_LANGUAGES as readonly string[]).includes(message.language ?? "")
     ? message.language!
     : "en";
   const style = await loadStyle(message.voice);
+  if (!ticket.isCurrent()) return;
   const chunks = chunkWithConstraintsDetailed(message.text, {
     minCharacters: 30,
     maxCharacters: language === "ko" || language === "ja" ? 120 : 280,
@@ -266,68 +256,38 @@ async function generate(message: Extract<WorkerInMessage, { type: "GENERATE" }>)
   const pronunciationRules = message.pronunciationRules ?? [];
   const emphasisStrength = message.emphasisStrength ?? 0;
   const variance = message.sentenceSpeedVariance ?? 0;
-  for (let index = 0; index < chunks.length; index += 1) {
-    if (epoch !== activeGenerationEpoch) return;
-    const chunk = chunks[index];
-    const speed = resolveSentenceSpeed(message.speed, variance, chunk.text);
-    const audio = await runtime.synthesize(
+  const totalSteps = Math.max(1, Math.min(20, Math.round(message.quality)));
+  for (const [index, chunk] of chunks.entries()) {
+    const audio = await activeRuntime.synthesize(
       tuneChunkText(chunk.text, pronunciationRules, emphasisStrength),
       language,
       style,
-      Math.max(1, Math.min(20, Math.round(message.quality))),
-      speed,
+      totalSteps,
+      resolveSentenceSpeed(message.speed, variance, chunk.text),
     );
-    if (epoch !== activeGenerationEpoch) return;
-    const pauseSec = index + 1 === chunks.length
-      ? Math.max(0, Math.min(5, message.finalPauseSec ?? 0))
-      : resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec, message.pauseOverridesSec);
-    post({
-      type: "AUDIO_CHUNK",
+    if (!ticket.isCurrent()) return;
+    emitAudioChunk(port, {
       generationId: message.generationId,
-      audio: pauseSec > 0 ? concatFloat32Arrays([audio, createSilence(pauseSec, runtime.sampleRate)]) : audio,
-      samplingRate: runtime.sampleRate,
+      audio,
+      samplingRate: activeRuntime.sampleRate,
       text: chunk.text,
       index: index + 1,
       total: chunks.length,
       textStart: chunk.start,
       textEnd: chunk.end,
-      pauseAfterSec: pauseSec,
       pauseKind: chunk.pauseKind,
+      pauseSec: resolveChunkPauseSec({
+        hasFollowing: index + 1 < chunks.length,
+        pauseKind: chunk.pauseKind,
+        pauseAfterSec: chunk.pauseAfterSec,
+        pauseOverridesSec: message.pauseOverridesSec,
+        finalPauseSec: message.finalPauseSec,
+      }),
     });
   }
-  if (epoch === activeGenerationEpoch) {
-    post({ type: "GENERATION_COMPLETE", generationId: message.generationId });
-  }
+  port.post({ type: "GENERATION_COMPLETE", ...generationMeta(message.generationId) });
 }
 
-self.onmessage = (event: MessageEvent<WorkerInMessage & { language?: string }>) => {
-  const message = event.data;
-  if (message.type === "CANCEL") {
-    activeGenerationEpoch += 1;
-    post({ type: "CANCELLED" });
-    self.close();
-    return;
-  }
-  if (message.type === "LOAD") {
-    void enqueueModelLoad(Boolean(message.forceReload)).catch((error: unknown) => {
-      post({ type: "ERROR", scope: "load", message: error instanceof Error ? error.message : String(error) });
-    });
-    return;
-  }
-  if (message.type === "GENERATE") {
-    const task = generate(message);
-    activeGenerationTask = task;
-    void task
-      .catch((error: unknown) => {
-        post({
-          type: "ERROR",
-          scope: "generate",
-          generationId: message.generationId,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        if (activeGenerationTask === task) activeGenerationTask = null;
-      });
-  }
+self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
+  workerRuntime.handleMessage(event.data);
 };
