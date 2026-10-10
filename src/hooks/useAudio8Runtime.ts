@@ -3,8 +3,8 @@ import type { LocalTtsCacheInfo } from "../electron";
 import type { StatusTone } from "../components/localRuntime/utils";
 import { MIN_TEXT_LENGTH } from "../constants";
 import { concatFloat32Arrays, createSilence } from "../lib/audio";
-import { chunkWithConstraintsDetailed } from "../lib/chunking";
 import { resolvePauseSeconds, tuneChunkText } from "../lib/textTuning";
+import { chunkAudio8Text } from "../models/audio8";
 import type { GenerationStats, GenerationTuningSettings, ModelState } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 
@@ -36,17 +36,6 @@ interface GenerationAttempt {
 
 const INITIAL_STATE: ModelState = { ready: false, loading: false, downloadProgress: 0, error: null, backend: null };
 const INITIAL_STATS: GenerationStats = { firstLatency: null, processingTime: 0, charsPerSec: 0, rtf: 0, totalDuration: 0, currentDuration: 0 };
-
-// Audio8 re-prefills the voice-reference prompt before every chunk emits its
-// first token, so small chunks pay that fixed cost over and over; large ones
-// delay the first audible sample. 180 characters is the compromise. Kokoro
-// derives its budget from the backend (`KOKORO_*_MAX_INFERENCE_CHARS`) and
-// Qwen3 mirrors the Rust unit size (`QWEN3_UNIT_MAX_CHARS`); Audio8 has no
-// equivalent upstream constraint to mirror, so the number is tuned here.
-// `getAdaptiveChunkLimits` clamps the floor up to 40 regardless; 30 is kept
-// verbatim because it is what sets the derived 105-character target.
-const AUDIO8_MIN_CHUNK_CHARACTERS = 30;
-const AUDIO8_MAX_CHUNK_CHARACTERS = 180;
 
 function id(kind: string): string {
   return `audio8-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
@@ -196,10 +185,8 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
     player.reset();
     player.beginStream();
     setShowPlayer(true);
-    const chunks = chunkWithConstraintsDetailed(text, {
-      minCharacters: AUDIO8_MIN_CHUNK_CHARACTERS,
-      maxCharacters: AUDIO8_MAX_CHUNK_CHARACTERS,
-    });
+    // The same passages the Reader previews for Audio8.
+    const chunks = chunkAudio8Text(text);
     void (async () => {
       try {
         for (let index = 0; index < chunks.length; index += 1) {

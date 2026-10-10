@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Audio8LoadResult, Audio8ProgressEvent } from "../electron";
+import { enginePreviewChunks } from "../models/registry";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useAudio8Runtime } from "./useAudio8Runtime";
 
@@ -233,6 +234,10 @@ describe("useAudio8Runtime generation", () => {
       expect(request.voice).toBe("clara");
       expect(request.text.length).toBeLessThanOrEqual(180);
     }
+    // The Reader previews Audio8 passages with the same chunker, so its
+    // passage count matches what generation actually produces.
+    const preview = enginePreviewChunks("audio8", LONG_TEXT, { settings: { voice: "clara" }, backend: null, quality: 5 });
+    expect(bridge.generate.mock.calls.map(([request]) => request.text)).toEqual(preview.map((chunk) => chunk.text));
     expect(result.current.generationProgress).toBe(100);
     expect(result.current.stats.totalDuration).toBeGreaterThan(0);
     expect(result.current.stats.totalDuration).toBeGreaterThan(chunkCount);
