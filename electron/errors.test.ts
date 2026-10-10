@@ -6,6 +6,8 @@ import {
   GENERATION_CANCELLED_MESSAGE,
   generationCancelledError,
   isGenerationCancelled,
+  nativeFailureDiagnostics,
+  NativeRuntimeError,
 } from "./errors";
 
 describe("main-process errors", () => {
@@ -25,5 +27,15 @@ describe("main-process errors", () => {
     expect(errorMessage(new TypeError("bad"))).toBe("bad");
     expect(errorMessage("plain")).toBe("plain");
     expect(errorMessage(42)).toBe("42");
+  });
+
+  it("carries diagnostics without changing how the error serialises over IPC", () => {
+    const error = new NativeRuntimeError("Rust local bridge exited.", { stderr: "panic", exitCode: 101 });
+
+    // Electron sends `${error}`; the renderer strips only an "Error: " prefix.
+    expect(String(error)).toBe("Error: Rust local bridge exited.");
+    expect(error).toBeInstanceOf(Error);
+    expect(nativeFailureDiagnostics(error)).toEqual({ stderr: "panic", exitCode: 101 });
+    expect(nativeFailureDiagnostics(new Error("plain"))).toBeUndefined();
   });
 });
