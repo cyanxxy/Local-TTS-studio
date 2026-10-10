@@ -3,10 +3,6 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
-  net,
-  protocol,
-  session,
-  shell,
   type IpcMainInvokeEvent,
   type MessagePortMain,
   type WebContents,
@@ -15,8 +11,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
-import { pathToFileURL } from "url";
-import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
+import { createMainWindow, registerAppScheme, registerSessionSecurity } from "./appWindow";
 import {
   MAX_IMPORT_PAGES,
   importDocumentFromDialog,
@@ -47,13 +42,6 @@ import {
   createWebSocketBridgeWorkerPool,
   type WebSocketBridgeWorkerPool,
 } from "./webSocketBridgeWorker";
-import {
-  buildContentSecurityPolicy,
-  DEV_SERVER_URL,
-  isAllowedAppUrl,
-  isSafeExternalUrl,
-  shouldGrantPermission,
-} from "./security";
 import { ReaderLibraryWorkerClient } from "./readerLibraryWorkerClient";
 import { configureApplicationMenu } from "./applicationMenu";
 import { LocalModelLifecycle } from "./localModelLifecycle";
@@ -193,17 +181,8 @@ const QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS = 60 * 1000;
 // intentionally no stdout fallback for models in this set; generation is
 // WebSocket-only, and `probe` is the only remaining one-shot subprocess action.
 const WEBSOCKET_WORKER_MODELS: ReadonlySet<LocalModel> = new Set<LocalModel>(["neutts", "qwen3"]);
-protocol.registerSchemesAsPrivileged([
-  {
-    scheme: ELECTRON_APP_SCHEME,
-    privileges: {
-      standard: true,
-      secure: true,
-      supportFetchAPI: true,
-      corsEnabled: true,
-    },
-  },
-]);
+const windowOptions = { isDev, appDirectory: __dirname };
+registerAppScheme();
 
 // Only `probe` runs as a one-shot subprocess now; this lets a probe child be
 // force-killed by handleCancel/before-quit. Generation runs on the WebSocket
@@ -436,122 +415,6 @@ function getWebSocketBridgeWorkers(): WebSocketBridgeWorkerPool<LocalModel> {
     });
   }
   return webSocketBridgeWorkers;
-}
-
-function createMainWindow() {
-  const isMac = process.platform === "darwin";
-  const win = new BrowserWindow({
-    title: "Open TTS",
-    width: 1100,
-    height: 750,
-    minWidth: 800,
-    minHeight: 600,
-    // Transparent on macOS so the native vibrancy material shows through and
-    // the translucent UI panels read as real Liquid Glass over the desktop.
-    backgroundColor: isMac ? "#00000000" : "#f5f5f7",
-    ...(isMac
-      ? {
-          vibrancy: "under-window" as const,
-          visualEffectState: "active" as const,
-          titleBarStyle: "hiddenInset" as const,
-        }
-      : {}),
-    webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-      // The playback clock, chunk scheduler, end-of-stream detection and Reader
-      // auto-advance all run off requestAnimationFrame. Chromium throttles rAF
-      // and timers hard once the window is hidden or occluded, which is exactly
-      // what a listener does with a text-to-speech reader — so opt out.
-      backgroundThrottling: false,
-    },
-  });
-
-  const target = isDev ? `${DEV_SERVER_URL}/desktop/studio` : getElectronAppUrl("/studio");
-  // loadURL rejects on a navigation abort (e.g. the window is closed mid-load);
-  // attach a handler so it is logged rather than surfacing as an unhandled
-  // rejection on the main process.
-  win.loadURL(target).catch((err) => {
-    console.error(`Failed to load ${target}:`, err);
-  });
-}
-
-function registerRendererSecurityHeaders() {
-  session.defaultSession.webRequest.onHeadersReceived(
-    {
-      urls: [`${ELECTRON_APP_SCHEME}://*/*`, `${DEV_SERVER_URL}/*`],
-    },
-    (details, callback) => {
-      const isHtmlDocument = details.resourceType === "mainFrame";
-      const responseHeaders = {
-        ...(details.responseHeaders ?? {}),
-        "Cross-Origin-Opener-Policy": ["same-origin"],
-        "Cross-Origin-Embedder-Policy": ["require-corp"],
-        ...(isHtmlDocument
-          ? { "Content-Security-Policy": [buildContentSecurityPolicy(isDev)] }
-          : {}),
-      };
-
-      callback({ cancel: false, responseHeaders });
-    },
-  );
-}
-
-function registerProductionAppProtocol() {
-  if (isDev) return;
-
-  const distDir = path.join(__dirname, "../dist");
-  protocol.handle(ELECTRON_APP_SCHEME, (request) => {
-    try {
-      const resolvedPath = resolveElectronAppPath(distDir, request.url);
-      return net.fetch(pathToFileURL(resolvedPath).toString());
-    } catch {
-      return new Response("Forbidden", { status: 403 });
-    }
-  });
-}
-
-function registerNavigationSecurityHandlers() {
-  app.on("web-contents-created", (_event, contents) => {
-    contents.on("will-navigate", (event, navigationUrl) => {
-      if (isAllowedAppUrl(navigationUrl, { allowDevServer: isDev })) return;
-
-      event.preventDefault();
-      if (isSafeExternalUrl(navigationUrl)) {
-        void shell.openExternal(navigationUrl);
-      }
-    });
-
-    contents.setWindowOpenHandler(({ url }) => {
-      if (isSafeExternalUrl(url)) {
-        void shell.openExternal(url);
-      }
-
-      return { action: "deny" };
-    });
-
-    // The app never uses <webview>, so block attachment outright (security
-    // checklist item 12: a webview can be created by page script even when
-    // the embedder itself never renders one).
-    contents.on("will-attach-webview", (event) => {
-      event.preventDefault();
-    });
-  });
-}
-
-function registerPermissionHandlers() {
-  // Deny every permission across all three gates: the async request flow, the
-  // synchronous check flow (navigator.permissions.query, capability checks),
-  // and device selection (WebUSB/Serial/HID). The Electron security checklist
-  // requires wiring all of them, not just the request handler, so synchronous
-  // checks don't fall through to permissive built-in defaults.
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(shouldGrantPermission());
-  });
-  session.defaultSession.setPermissionCheckHandler(() => shouldGrantPermission());
-  session.defaultSession.setDevicePermissionHandler(() => shouldGrantPermission());
 }
 
 async function sanitizeLocalBridgeRequest(
@@ -1191,11 +1054,8 @@ if (process.platform === "linux") {
 
 app.whenReady().then(() => {
   configureApplicationMenu(process.platform, !isDev);
-  registerProductionAppProtocol();
-  registerRendererSecurityHeaders();
-  registerNavigationSecurityHandlers();
-  registerPermissionHandlers();
-  createMainWindow();
+  registerSessionSecurity(windowOptions);
+  createMainWindow(windowOptions);
 
   ipcMain.handle("reader-library:list-documents", (event) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
@@ -1554,6 +1414,6 @@ app.on("window-all-closed", () => {
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) {
     // Re-create window on macOS dock click
-    createMainWindow();
+    createMainWindow(windowOptions);
   }
 });
