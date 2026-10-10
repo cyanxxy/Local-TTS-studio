@@ -395,6 +395,22 @@ describe("startAudio8Worker request validation", () => {
     ]);
   });
 
+  it("refuses out-of-range sampling overrides with the IPC boundary's wording", async () => {
+    const port = startWorker();
+
+    await port.receive({ type: "generate", requestId: "gen-1", text: "Hello", voice: "clara", seed: -1 });
+    await port.receive({ type: "generate", requestId: "gen-2", text: "Hello", voice: "clara", seed: 2 ** 32 });
+    await port.receive({ type: "generate", requestId: "gen-3", text: "Hello", voice: "clara", temperature: 0 });
+    await port.receive({ type: "generate", requestId: "gen-4", text: "Hello", voice: "clara", temperature: "0.3" });
+
+    expect(port.sent).toEqual([
+      { type: "error", requestId: "gen-1", error: "Audio8 seed must be an integer from 0 to 4294967295." },
+      { type: "error", requestId: "gen-2", error: "Audio8 seed must be an integer from 0 to 4294967295." },
+      { type: "error", requestId: "gen-3", error: "Audio8 temperature must be a number from 0.1 to 1." },
+      { type: "error", requestId: "gen-4", error: "Audio8 temperature must be a number from 0.1 to 1." },
+    ]);
+  });
+
   it("answers an unsupported request type rather than leaving it pending", async () => {
     const port = startWorker();
 
@@ -472,5 +488,65 @@ describe("Audio8 generation completion", () => {
     const { runtime, decode, voice } = await setup(null, 1);
     await expect(runtime.synthesize("Hello.", voice)).rejects.toThrow("context window");
     expect(decode).not.toHaveBeenCalled();
+  });
+});
+
+describe("Audio8 takes", () => {
+  const FRAMES = 12;
+  const CODEBOOKS = 3;
+
+  /**
+   * Drives the real sampling loop over graphs whose logits are close enough
+   * together that every draw depends on the random stream, and returns the
+   * code matrix handed to the decoder: the take itself.
+   */
+  async function take(options?: { seed?: number; temperature?: number }): Promise<bigint[]> {
+    const { Audio8Runtime } = await import("./audio8NativeWorker");
+    let steps = 0;
+    const slow = {
+      outputNames: ["logits", "hidden"],
+      run: async () => ({
+        // Four semantic codes, then end-of-speech once FRAMES frames exist.
+        logits: new ort.Tensor("float32", Float32Array.from(
+          steps++ >= FRAMES ? [-1000, -1000, -1000, -1000, 1000] : [0.4, 0.3, 0.2, 0.1, -1000],
+        ), [1, 5]),
+        hidden: new ort.Tensor("float16", new Uint16Array([0]), [1, 1, 1]),
+      }),
+    } as unknown as ort.InferenceSession;
+    const fast = {
+      outputNames: ["logits"],
+      run: async () => ({ logits: new ort.Tensor("float32", Float32Array.from([0.3, 0.2, 0.1, 0]), [1, 4]) }),
+    } as unknown as ort.InferenceSession;
+    let codes: bigint[] = [];
+    const decoder = {
+      outputNames: ["audio"],
+      run: async ({ codes: input }: { codes: ort.Tensor }) => {
+        codes = [...(input.data as BigInt64Array)];
+        return { audio: new ort.Tensor("float32", new Float32Array([0.25]), [1]) };
+      },
+    } as unknown as ort.InferenceSession;
+    const runtime = new Audio8Runtime({ sampleRate: 44100, slowLogitsSize: 5, codebookSize: 4, maxSeqLen: 64, numLayers: 0, numFastLayers: 0, numCodebooks: CODEBOOKS, localHeads: 1, fastLocalHeads: 1, headDim: 1, fastHeadDim: 1, fastDim: 1, semanticBeginId: 100, imEndId: 104 }, () => ({ input_ids: [] }), slow, fast, decoder);
+    await runtime.synthesize("Hello there.", { codes: new Uint16Array(10), frames: 1, referenceText: "reference" }, options);
+    expect(codes).toHaveLength(FRAMES * CODEBOOKS);
+    return codes;
+  }
+
+  it("keeps the reference take when the defaults are spelled out", async () => {
+    const reference = await take();
+
+    expect(await take({ seed: 42, temperature: 0.3 })).toEqual(reference);
+    expect(await take({ seed: undefined, temperature: undefined })).toEqual(reference);
+  });
+
+  it("repeats a take for the same seed and changes it for another", async () => {
+    const pinned = await take({ seed: 7 });
+
+    expect(await take({ seed: 7 })).toEqual(pinned);
+    expect(await take({ seed: 8 })).not.toEqual(pinned);
+    expect(await take()).not.toEqual(pinned);
+  });
+
+  it("samples the nucleus at the requested temperature", async () => {
+    expect(await take({ seed: 7, temperature: 1 })).not.toEqual(await take({ seed: 7 }));
   });
 });

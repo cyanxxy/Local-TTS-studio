@@ -64,7 +64,7 @@ import {
   pruneStaleAudio8Revisions,
   readAudio8CacheInfo,
 } from "./audio8Cache";
-import { AUDIO8_MAX_TEXT_CHARACTERS, isAudio8VoiceId } from "./audio8Model";
+import { parseAudio8GenerateRequest, parseAudio8RequestId } from "./audio8Ipc";
 import { Audio8NativeClient } from "./audio8NativeClient";
 import {
   BRIDGE_PROGRESS_PREFIX,
@@ -146,13 +146,6 @@ async function handleAudio8ClearCache(): Promise<{ path: string; cleared: boolea
   audio8NativeClient = null;
   await shutdown;
   return clearAudio8Cache(app.getPath("userData"));
-}
-
-function audio8RequestId(request: unknown): string {
-  if (!isRecord(request) || typeof request.requestId !== "string" || !/^[a-zA-Z0-9._-]{1,128}$/.test(request.requestId)) {
-    throw new TypeError("Invalid Audio8 request id.");
-  }
-  return request.requestId;
 }
 
 function stageEpubTransfer(senderId: number, bytes: Uint8Array): string {
@@ -1346,7 +1339,7 @@ app.whenReady().then(() => {
 
   ipcMain.handle("audio8:load", async (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    const requestId = audio8RequestId(request);
+    const requestId = parseAudio8RequestId(request);
     await audio8CacheClear;
     const result = await getAudio8NativeClient().load(requestId, (percent) => {
       sendAudio8Progress(event.sender, requestId, percent);
@@ -1363,25 +1356,21 @@ app.whenReady().then(() => {
 
   ipcMain.handle("audio8:generate", async (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    const requestId = audio8RequestId(request);
-    if (!isRecord(request) || typeof request.text !== "string" || request.text.trim().length === 0 || [...request.text].length > AUDIO8_MAX_TEXT_CHARACTERS) {
-      throw new TypeError("Invalid Audio8 synthesis text.");
-    }
-    // Rejected rather than substituted with the default voice: every other enum
-    // on this boundary throws, and quietly rendering the whole request in a
-    // voice the caller did not ask for is a wrong answer with nothing to show it.
-    if (!isAudio8VoiceId(request.voice)) throw new TypeError("Unsupported Audio8 voice.");
+    const { requestId, text, voice, sampling } = parseAudio8GenerateRequest(request);
     // Generation lazily fetches the voice profile into the model directory, so
     // it writes there too and has to clear the same gate as a load.
     await audio8CacheClear;
-    return getAudio8NativeClient().generate(requestId, request.text, request.voice, (percent) => {
-      sendAudio8Progress(event.sender, requestId, percent);
-    });
+    const onProgress = (percent: number) => sendAudio8Progress(event.sender, requestId, percent);
+    // A default take keeps its original four-argument call; overrides are
+    // passed only when the renderer asked for a different take.
+    return sampling
+      ? getAudio8NativeClient().generate(requestId, text, voice, onProgress, sampling)
+      : getAudio8NativeClient().generate(requestId, text, voice, onProgress);
   });
 
   ipcMain.handle("audio8:cancel", (event, request: unknown) => {
     assertTrustedIpcSender(event, { allowDevServer: isDev });
-    const requestId = audio8RequestId(request);
+    const requestId = parseAudio8RequestId(request);
     // Forwarded rather than assumed: `false` covers every way there is nothing
     // to stop — no worker built yet, the request already settled, or it was
     // never issued. Reporting `true` regardless told the renderer it had

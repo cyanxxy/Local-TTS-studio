@@ -9,6 +9,7 @@
 
 import path from "path";
 import { Worker } from "worker_threads";
+import type { Audio8SamplingOptions } from "./audio8Ipc";
 
 export interface Audio8NativeResult {
   ready?: boolean;
@@ -19,7 +20,7 @@ export interface Audio8NativeResult {
 
 export type Audio8WorkerRequest =
   | { type: "load"; requestId: string }
-  | { type: "generate"; requestId: string; text: string; voice: string }
+  | ({ type: "generate"; requestId: string; text: string; voice: string } & Audio8SamplingOptions)
   | { type: "cancel"; requestId: string };
 
 export type Audio8WorkerResponse =
@@ -110,13 +111,18 @@ export class Audio8NativeClient {
     return this.#request({ type: "load", requestId }, onProgress);
   }
 
+  /**
+   * `sampling` asks for a different take; leaving it out reproduces the
+   * reference take exactly, and the worker validates it again either way.
+   */
   generate(
     requestId: string,
     text: string,
     voice: string,
     onProgress?: (percent: number) => void,
+    sampling?: Audio8SamplingOptions,
   ): Promise<Audio8NativeResult> {
-    return this.#request({ type: "generate", requestId, text, voice }, onProgress);
+    return this.#request({ type: "generate", requestId, text, voice, ...sampling }, onProgress);
   }
 
   /**

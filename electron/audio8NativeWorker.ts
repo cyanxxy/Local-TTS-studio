@@ -21,7 +21,10 @@ import path from "path";
 import { parentPort, workerData } from "worker_threads";
 import * as ort from "onnxruntime-node";
 import { Audio8AssetCache } from "./audio8AssetCache";
+import { parseAudio8SamplingOptions, type Audio8SamplingOptions } from "./audio8Ipc";
 import {
+  AUDIO8_DEFAULT_SEED,
+  AUDIO8_DEFAULT_TEMPERATURE,
   AUDIO8_MAX_TEXT_CHARACTERS,
   AUDIO8_MODEL_ASSETS,
   AUDIO8_VOICE_ASSETS,
@@ -86,9 +89,11 @@ const PROGRESS_SLOW_SESSION = 95;
 const PROGRESS_FAST_SESSION = 97;
 const PROGRESS_READY = 100;
 
-/** Sampling settings from the reference runtime. */
-const SAMPLER_SEED = 42;
-const NUCLEUS_SAMPLING: SamplingOptions = { temperature: 0.3, topP: 0.9, topK: 50 };
+/**
+ * Sampling settings from the reference runtime. A request may override the
+ * nucleus temperature; the repeat-escape draw always runs hot.
+ */
+const NUCLEUS_SAMPLING: SamplingOptions = { temperature: AUDIO8_DEFAULT_TEMPERATURE, topP: 0.9, topK: 50 };
 const REPEAT_ESCAPE_SAMPLING: SamplingOptions = { temperature: 1, topP: 0.9, topK: 50 };
 
 /** Semantic tokens seen this recently are re-rolled at a higher temperature. */
@@ -158,9 +163,15 @@ interface SlowStep {
   hidden: ort.Tensor;
 }
 
-interface SynthesisOptions {
+interface SynthesisOptions extends Audio8SamplingOptions {
   signal?: AbortSignal;
   onProgress?: (percent: number) => void;
+}
+
+/** One take's random stream and nucleus settings, shared by every draw. */
+interface TakeSampler {
+  random: () => number;
+  nucleus: SamplingOptions;
 }
 
 function loadCancelledError(): Error {
@@ -246,9 +257,9 @@ function trailingHiddenState(tensor: ort.Tensor, size: number): ort.Tensor {
 }
 
 /**
- * mulberry32. Seeding the sampler makes a given text, voice and model revision
- * reproduce the same audio, which is what makes regressions in this file
- * detectable at all.
+ * mulberry32. Seeding the sampler makes a given text, voice, seed and model
+ * revision reproduce the same audio, which is what makes regressions in this
+ * file detectable at all, and what lets a user keep a take they liked.
  */
 export function createSeededRandom(seed: number): () => number {
   let state = seed >>> 0;
@@ -432,7 +443,7 @@ export class Audio8Runtime {
   async synthesize(
     text: string,
     voice: Audio8Voice,
-    { signal, onProgress }: SynthesisOptions = {},
+    { signal, onProgress, seed = AUDIO8_DEFAULT_SEED, temperature }: SynthesisOptions = {},
   ): Promise<Float32Array> {
     const manifest = this.#manifest;
     const prompt = this.#buildPrompt(text, voice);
@@ -452,7 +463,10 @@ export class Audio8Runtime {
       manifest.maxSeqLen,
       manifest.headDim,
     );
-    const random = createSeededRandom(SAMPLER_SEED);
+    const sampler: TakeSampler = {
+      random: createSeededRandom(seed),
+      nucleus: temperature === undefined ? NUCLEUS_SAMPLING : { ...NUCLEUS_SAMPLING, temperature },
+    };
     const frames: number[][] = [];
     let step: SlowStep | null = null;
     let recentSemantics: number[] = [];
@@ -468,13 +482,13 @@ export class Audio8Runtime {
       );
       for (let token = 0; token < maxTokens; token += 1) {
         throwIfSynthesisCancelled(signal);
-        const semantic = this.#chooseSemanticToken(step.logits, recentSemantics, random);
+        const semantic = this.#chooseSemanticToken(step.logits, recentSemantics, sampler);
         if (semantic === manifest.imEndId) {
           reachedEnd = true;
           break;
         }
         recentSemantics = [...recentSemantics, semantic].slice(-RECENT_SEMANTIC_WINDOW);
-        frames.push(await this.#expandFrame(semantic, step.hidden, random, signal));
+        frames.push(await this.#expandFrame(semantic, step.hidden, sampler, signal));
         if (token % PROGRESS_TOKEN_INTERVAL === 0) onProgress?.((token / maxTokens) * 100);
 
         // The final frame needs no follow-up state, and the slow step is the
@@ -505,11 +519,11 @@ export class Audio8Runtime {
    * re-rolled once at a higher temperature, which is what stops the loop
    * settling into a repeated syllable.
    */
-  #chooseSemanticToken(logits: Float64Array, recent: number[], random: () => number): number {
+  #chooseSemanticToken(logits: Float64Array, recent: number[], { random, nucleus }: TakeSampler): number {
     const manifest = this.#manifest;
     // Both draws are always taken so the seeded stream stays aligned with the
     // reference runtime whether or not the retry is used.
-    const first = sampleTokenId(logits, NUCLEUS_SAMPLING, random);
+    const first = sampleTokenId(logits, nucleus, random);
     const retry = sampleTokenId(logits, REPEAT_ESCAPE_SAMPLING, random);
     const toSemantic = (index: number) => (
       index < manifest.codebookSize ? manifest.semanticBeginId + index : manifest.imEndId
@@ -526,7 +540,7 @@ export class Audio8Runtime {
   async #expandFrame(
     semantic: number,
     hidden: ort.Tensor,
-    random: () => number,
+    { random, nucleus }: TakeSampler,
     signal?: AbortSignal,
   ): Promise<number[]> {
     const manifest = this.#manifest;
@@ -544,7 +558,7 @@ export class Audio8Runtime {
       for (let book = 1; book < manifest.numCodebooks; book += 1) {
         throwIfSynthesisCancelled(signal);
         const logits = await this.#fastStep(hidden, code, false, book, fastCaches, signal);
-        code = sampleTokenId(logits, NUCLEUS_SAMPLING, random);
+        code = sampleTokenId(logits, nucleus, random);
         frame.push(code);
       }
       return frame;
@@ -888,10 +902,12 @@ export function startAudio8Worker(port: Audio8WorkerPort, modelDir: string): voi
   ): Promise<Audio8NativeResult> => {
     const text = assertSynthesisText(request.text);
     const voiceId = assertVoiceId(request.voice);
+    const sampling = parseAudio8SamplingOptions(request);
     const loaded = await load(requestId, signal);
     const voice = await loadVoice(voiceId, signal);
     const startedAt = performance.now();
     const audio = await loaded.synthesize(text, voice, {
+      ...sampling,
       signal,
       onProgress: (percent) => post({ type: "progress", requestId, percent }),
     });

@@ -39,6 +39,24 @@ export const AUDIO8_DEFAULT_VOICE: Audio8VoiceId = "clara";
 export const AUDIO8_MAX_TEXT_CHARACTERS = 1000;
 
 /**
+ * Sampler settings from the reference runtime. A request that leaves `seed`
+ * and `temperature` unset gets exactly the take every earlier build produced
+ * for the same text, voice, and revision; setting them asks for another take.
+ */
+export const AUDIO8_DEFAULT_SEED = 42;
+/** Seeds cross IPC as JSON numbers; 32 bits stays exact and is mulberry32's whole state. */
+export const AUDIO8_MAX_SEED = 0xFFFF_FFFF;
+export const AUDIO8_DEFAULT_TEMPERATURE = 0.3;
+/**
+ * Bounds for the nucleus temperature of the semantic and acoustic draws.
+ * Below 0.1 the draws are close to greedy, so different seeds stop producing
+ * different takes; hotter than the reference runtime's own 1.0 repeat-escape
+ * draw is untested and drifts toward noise.
+ */
+export const AUDIO8_MIN_TEMPERATURE = 0.1;
+export const AUDIO8_MAX_TEMPERATURE = 1;
+
+/**
  * Integrity digests come in two flavours because the Hub serves LFS files and
  * plain git blobs differently: LFS pointers expose an upstream SHA-256 of the
  * content, while small text files are only addressable by their git blob
