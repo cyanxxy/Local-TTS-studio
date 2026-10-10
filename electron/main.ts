@@ -4,7 +4,6 @@ import {
   dialog,
   ipcMain,
   type IpcMainInvokeEvent,
-  type MessagePortMain,
   type WebContents,
 } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "child_process";
@@ -13,6 +12,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { createShutdownCoordinator, type ShutdownParticipant } from "./appShutdown";
 import { createMainWindow, registerAppScheme, registerSessionSecurity } from "./appWindow";
+import { registerReaderLibraryIpc } from "./ipc/registerReaderLibraryIpc";
 import { createTrustedIpc } from "./ipc/trusted";
 import {
   MAX_IMPORT_PAGES,
@@ -44,7 +44,6 @@ import {
   createWebSocketBridgeWorkerPool,
   type WebSocketBridgeWorkerPool,
 } from "./webSocketBridgeWorker";
-import { ReaderLibraryWorkerClient } from "./readerLibraryWorkerClient";
 import { configureApplicationMenu } from "./applicationMenu";
 import { LocalModelLifecycle } from "./localModelLifecycle";
 import { getDirectorySizeBytes } from "./directorySize";
@@ -163,11 +162,6 @@ const RUST_BRIDGE_GENERATE_PROGRESS_TIMEOUT_MS = 30 * 60 * 1000;
 const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDOUT_BYTES = 2 * 1024 * 1024;
 const RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES = 16 * 1024 * 1024;
 const RUST_CANCEL_KILL_AFTER_MS = 2_000;
-// Renderers debounce Reader writes for up to a second, so the quit has to hold
-// long enough for a flush round trip. The outer quit race
-// (RUST_CANCEL_KILL_AFTER_MS + 500) still caps the total, so a renderer that
-// never answers cannot stretch the shutdown past that budget.
-const READER_LIBRARY_FLUSH_TIMEOUT_MS = 1_500;
 const GENERATE_RATE_WINDOW_MS = 500;
 // Generation reuses a resident WebSocket worker (load once, serve many). The
 // worker is killed after this much idle time to release model memory; the next
@@ -203,92 +197,7 @@ const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
 });
 let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
 const localModelLifecycle = new LocalModelLifecycle<LocalModel>();
-let readerLibraryWorker: ReaderLibraryWorkerClient | null = null;
 let documentParser: DocumentParseWorkerClient | null = null;
-// Tracked apart from `bridgeShuttingDown`: the quit asks every renderer to
-// flush its debounced Reader writes first, so `reader-library:*` has to keep
-// working after the local runtime has already been told to stop.
-let readerLibraryShuttingDown = false;
-const pendingReaderLibraryFlushes = new Map<string, () => void>();
-
-function getReaderLibraryWorker(): ReaderLibraryWorkerClient {
-  if (readerLibraryShuttingDown) throw new Error("Reader library is shutting down.");
-  if (readerLibraryWorker) return readerLibraryWorker;
-  const worker = new ReaderLibraryWorkerClient(
-    path.join(__dirname, "readerLibraryWorker.js"),
-    path.join(app.getPath("userData"), "reader-library.sqlite3"),
-    () => {
-      if (readerLibraryWorker === worker) readerLibraryWorker = null;
-    },
-  );
-  readerLibraryWorker = worker;
-  return worker;
-}
-
-function requestField(request: unknown, field: string): unknown {
-  if (!isRecord(request) || !(field in request)) {
-    throw new TypeError(`Reader library request is missing ${field}.`);
-  }
-  return request[field];
-}
-
-// Electron has already transferred the port into main by the time a stream
-// handler runs, so every failure path has to answer on it and close it;
-// otherwise the renderer waits out the full audio stream timeout.
-function rejectStreamPort(port: MessagePortMain, message: string): void {
-  port.postMessage({ type: "result", ok: false, error: message });
-  port.close();
-}
-
-/**
- * Asks every open window to write out the Reader edits it is still holding
- * behind a debounce timer. `before-quit` blocks the quit, so those timers would
- * otherwise never fire and the edits would be lost without a trace.
- *
- * Resolves once every window has acknowledged or the timeout expires — a
- * renderer that is wedged or already gone must not strand the shutdown.
- */
-function requestReaderLibraryFlush(): Promise<void> {
-  const windows = BrowserWindow.getAllWindows();
-  if (windows.length === 0) {
-    // No renderer left to ask, but one that just closed may have posted its
-    // `pagehide` writes already; give the IPC queue a turn before the worker
-    // closes underneath them.
-    return new Promise<void>((resolve) => { setImmediate(resolve); });
-  }
-
-  const acknowledgements = windows.map((window) => new Promise<void>((resolve) => {
-    if (window.webContents.isDestroyed()) {
-      resolve();
-      return;
-    }
-    const token = randomUUID();
-    pendingReaderLibraryFlushes.set(token, resolve);
-    try {
-      window.webContents.send("reader-library:flush", { token });
-    } catch {
-      // A window can be destroyed between the check and the send.
-      pendingReaderLibraryFlushes.delete(token);
-      resolve();
-    }
-  }));
-  return Promise.race([
-    Promise.all(acknowledgements).then(() => undefined),
-    new Promise<void>((resolve) => { setTimeout(resolve, READER_LIBRARY_FLUSH_TIMEOUT_MS); }),
-  ]).then(() => {
-    pendingReaderLibraryFlushes.clear();
-  });
-}
-
-// Latches the shutdown flag together with the close so no request can slip
-// between the two and reach a worker that is already draining.
-function closeReaderLibraryWorker(): Promise<void> {
-  readerLibraryShuttingDown = true;
-  const worker = readerLibraryWorker;
-  readerLibraryWorker = null;
-  return worker?.close() ?? Promise.resolve();
-}
-
 // Best-effort Qwen model warm-up. At most one
 // warm-up runs per model; a generate request that arrives while one is in
 // flight waits for it (the warm-up is doing exactly the model load the
@@ -1057,75 +966,13 @@ app.whenReady().then(() => {
   registerSessionSecurity(windowOptions);
   createMainWindow(windowOptions);
   const ipc = createTrustedIpc(ipcMain, { allowDevServer: isDev });
-
-  ipc.handle("reader-library:list-documents", () => {
-    return getReaderLibraryWorker().request("listDocuments");
-  });
-
-  ipc.handle("reader-library:get-document", (_event, request) => {
-    return getReaderLibraryWorker().request("getDocument", [requestField(request, "id")]);
-  });
-
-  ipc.handle("reader-library:save-document", (_event, request) => {
-    return getReaderLibraryWorker().request("saveDocument", [requestField(request, "document")]);
-  });
-
-  ipc.handle("reader-library:delete-document", (_event, request) => {
-    return getReaderLibraryWorker().request("deleteDocument", [requestField(request, "id")]);
-  });
-
-  ipc.handle("reader-library:get-active-document-id", () => {
-    return getReaderLibraryWorker().request("getActiveDocumentId");
-  });
-
-  ipc.handle("reader-library:set-active-document-id", (_event, request) => {
-    return getReaderLibraryWorker().request("setActiveDocumentId", [requestField(request, "id")]);
-  });
-
-  ipc.onPort("reader-library:save-audio-stream", (port, request) => {
-    if (readerLibraryShuttingDown) {
-      rejectStreamPort(port, "Reader library is shutting down.");
-      return;
-    }
-    if (!isRecord(request)) {
-      rejectStreamPort(port, "Invalid Reader audio stream request.");
-      return;
-    }
-    try {
-      getReaderLibraryWorker().saveAudio(port, request.metadata, request.chunkCount);
-    } catch (err) {
-      rejectStreamPort(port, err instanceof Error ? err.message : String(err));
-    }
-  });
-
-  ipc.onPort("reader-library:get-audio-stream", (port, request) => {
-    if (readerLibraryShuttingDown) {
-      rejectStreamPort(port, "Reader library is shutting down.");
-      return;
-    }
-    if (!isRecord(request)) {
-      rejectStreamPort(port, "Invalid Reader audio lookup request.");
-      return;
-    }
-    try {
-      getReaderLibraryWorker().getAudio(port, request.documentId, request.sectionId);
-    } catch (err) {
-      rejectStreamPort(port, err instanceof Error ? err.message : String(err));
-    }
-  });
-
-  ipc.on("reader-library:flush-complete", (_event, request) => {
-    if (!isRecord(request) || typeof request.token !== "string") return;
-    const acknowledge = pendingReaderLibraryFlushes.get(request.token);
-    if (!acknowledge) return;
-    pendingReaderLibraryFlushes.delete(request.token);
-    acknowledge();
-  });
-
-  ipc.handle("reader-library:delete-audio", (_event, request) => {
-    if (!isRecord(request)) throw new TypeError("Invalid Reader library audio deletion request.");
-    return getReaderLibraryWorker().request("deleteAudio", [request.documentId, request.sectionId]);
-  });
+  shutdown.register(registerReaderLibraryIpc(ipc, {
+    workerPath: path.join(__dirname, "readerLibraryWorker.js"),
+    databasePath: () => path.join(app.getPath("userData"), "reader-library.sqlite3"),
+  }));
+  for (const participant of [documentShutdown, localRuntimeShutdown, audio8Shutdown]) {
+    shutdown.register(participant);
+  }
 
   ipc.handle("local-tts:probe", async (event, request) => {
     const probe = await runRustBridge("probe", request, event);
@@ -1298,20 +1145,6 @@ app.whenReady().then(() => {
   });
 });
 
-// The renderers are still alive when the quit starts and the barrier holds
-// them open, so collect their debounced Reader edits before the worker stops
-// accepting work; closing it first is what silently dropped the last edit.
-const readerLibraryShutdown: ShutdownParticipant = {
-  name: "reader-library",
-  beginShutdown() {
-    if (readerLibraryWorker || BrowserWindow.getAllWindows().length > 0) {
-      return requestReaderLibraryFlush().then(closeReaderLibraryWorker, closeReaderLibraryWorker);
-    }
-    readerLibraryShuttingDown = true;
-    return null;
-  },
-};
-
 const documentShutdown: ShutdownParticipant = {
   name: "documents",
   beginShutdown() {
@@ -1374,9 +1207,6 @@ const shutdown = createShutdownCoordinator({
   timeoutMs: RUST_CANCEL_KILL_AFTER_MS + 500,
   quit: () => app.quit(),
 });
-for (const participant of [readerLibraryShutdown, documentShutdown, localRuntimeShutdown, audio8Shutdown]) {
-  shutdown.register(participant);
-}
 app.on("before-quit", (event) => shutdown.handleBeforeQuit(event));
 
 app.on("window-all-closed", () => {

@@ -1,6 +1,7 @@
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
+import { fileURLToPath } from "url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { dialog } from "electron";
 import { AUDIO8_MAX_TEXT_CHARACTERS, AUDIO8_MODEL_REVISION } from "./audio8Model";
@@ -348,6 +349,18 @@ describe("Reader library quit-time flush", () => {
     mocks.appListeners.get("before-quit")?.(quitEvent);
     return quitEvent;
   }
+
+  it("starts the SQLite worker beside the main bundle with the library in userData", async () => {
+    startReaderLibraryWorker();
+    const { ReaderLibraryWorkerClient } = await import("./readerLibraryWorkerClient");
+
+    // The test runner gives main.ts its own source directory as __dirname.
+    expect(vi.mocked(ReaderLibraryWorkerClient)).toHaveBeenLastCalledWith(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "readerLibraryWorker.js"),
+      path.join(mocks.userDataPath, "reader-library.sqlite3"),
+      expect.any(Function),
+    );
+  });
 
   it("keeps the worker open until every renderer acknowledges the flush", async () => {
     const window = createWindow();
