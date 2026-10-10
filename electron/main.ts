@@ -12,6 +12,7 @@ import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import path from "path";
 import { createMainWindow, registerAppScheme, registerSessionSecurity } from "./appWindow";
+import { createTrustedIpc } from "./ipc/trusted";
 import {
   MAX_IMPORT_PAGES,
   importDocumentFromDialog,
@@ -57,7 +58,6 @@ import { Audio8NativeClient } from "./audio8NativeClient";
 import {
   BRIDGE_PROGRESS_PREFIX,
   assertLocalModel,
-  assertTrustedIpcSender,
   isRecord,
   parseBridgeEnvelopeResult,
   parseBridgeProgressResult,
@@ -591,7 +591,6 @@ async function handleDownloadQwen3Model(
   event: IpcMainInvokeEvent,
 ): Promise<Qwen3ModelDownloadResult> {
   assertBridgeAcceptingRequests();
-  assertTrustedIpcSender(event, { allowDevServer: isDev });
   return localModelLifecycle.run("qwen3", async (signal) => {
   const profile = getRequestedQwen3Profile(request);
   const modelDir = await resolveQwen3ModelDir(profile);
@@ -1056,48 +1055,33 @@ app.whenReady().then(() => {
   configureApplicationMenu(process.platform, !isDev);
   registerSessionSecurity(windowOptions);
   createMainWindow(windowOptions);
+  const ipc = createTrustedIpc(ipcMain, { allowDevServer: isDev });
 
-  ipcMain.handle("reader-library:list-documents", (event) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("reader-library:list-documents", () => {
     return getReaderLibraryWorker().request("listDocuments");
   });
 
-  ipcMain.handle("reader-library:get-document", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("reader-library:get-document", (_event, request) => {
     return getReaderLibraryWorker().request("getDocument", [requestField(request, "id")]);
   });
 
-  ipcMain.handle("reader-library:save-document", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("reader-library:save-document", (_event, request) => {
     return getReaderLibraryWorker().request("saveDocument", [requestField(request, "document")]);
   });
 
-  ipcMain.handle("reader-library:delete-document", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("reader-library:delete-document", (_event, request) => {
     return getReaderLibraryWorker().request("deleteDocument", [requestField(request, "id")]);
   });
 
-  ipcMain.handle("reader-library:get-active-document-id", (event) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("reader-library:get-active-document-id", () => {
     return getReaderLibraryWorker().request("getActiveDocumentId");
   });
 
-  ipcMain.handle("reader-library:set-active-document-id", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("reader-library:set-active-document-id", (_event, request) => {
     return getReaderLibraryWorker().request("setActiveDocumentId", [requestField(request, "id")]);
   });
 
-  ipcMain.on("reader-library:save-audio-stream", (event, request: unknown) => {
-    const port = event.ports[0];
-    if (!port) return;
-    try {
-      assertTrustedIpcSender(event, { allowDevServer: isDev });
-    } catch {
-      // This throws only for an untrusted sender, so close the port without
-      // telling that sender anything about why it was rejected.
-      port.close();
-      return;
-    }
+  ipc.onPort("reader-library:save-audio-stream", (port, request) => {
     if (readerLibraryShuttingDown) {
       rejectStreamPort(port, "Reader library is shutting down.");
       return;
@@ -1113,17 +1097,7 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.on("reader-library:get-audio-stream", (event, request: unknown) => {
-    const port = event.ports[0];
-    if (!port) return;
-    try {
-      assertTrustedIpcSender(event, { allowDevServer: isDev });
-    } catch {
-      // This throws only for an untrusted sender, so close the port without
-      // telling that sender anything about why it was rejected.
-      port.close();
-      return;
-    }
+  ipc.onPort("reader-library:get-audio-stream", (port, request) => {
     if (readerLibraryShuttingDown) {
       rejectStreamPort(port, "Reader library is shutting down.");
       return;
@@ -1139,12 +1113,7 @@ app.whenReady().then(() => {
     }
   });
 
-  ipcMain.on("reader-library:flush-complete", (event, request: unknown) => {
-    try {
-      assertTrustedIpcSender(event, { allowDevServer: isDev });
-    } catch {
-      return;
-    }
+  ipc.on("reader-library:flush-complete", (_event, request) => {
     if (!isRecord(request) || typeof request.token !== "string") return;
     const acknowledge = pendingReaderLibraryFlushes.get(request.token);
     if (!acknowledge) return;
@@ -1152,60 +1121,49 @@ app.whenReady().then(() => {
     acknowledge();
   });
 
-  ipcMain.handle("reader-library:delete-audio", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("reader-library:delete-audio", (_event, request) => {
     if (!isRecord(request)) throw new TypeError("Invalid Reader library audio deletion request.");
     return getReaderLibraryWorker().request("deleteAudio", [request.documentId, request.sectionId]);
   });
 
-  ipcMain.handle("local-tts:probe", async (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:probe", async (event, request) => {
     const probe = await runRustBridge("probe", request, event);
     return probe;
   });
 
-  ipcMain.handle("local-tts:generate", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:generate", (event, request) => {
     return runRustBridge("generate", request, event);
   });
 
-  ipcMain.handle("local-tts:warm", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:warm", (event, request) => {
     return handleWarm(request, event);
   });
 
-  ipcMain.handle("local-tts:cancel", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:cancel", (event, request) => {
     return handleCancel(request, event);
   });
 
-  ipcMain.handle("local-tts:cache-info", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:cache-info", (_event, request) => {
     return handleCacheInfo(request);
   });
 
-  ipcMain.handle("local-tts:clear-cache", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:clear-cache", (_event, request) => {
     return handleClearCache(request);
   });
 
-  ipcMain.handle("local-tts:qwen3-setup", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:qwen3-setup", (_event, request) => {
     return handleQwen3Setup(request);
   });
 
-  ipcMain.handle("local-tts:download-qwen3-model", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:download-qwen3-model", (event, request) => {
     return handleDownloadQwen3Model(request, event);
   });
 
-  ipcMain.handle("local-tts:choose-qwen3-model-dir", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("local-tts:choose-qwen3-model-dir", (_event, request) => {
     return handleChooseQwen3ModelDir(request);
   });
 
-  ipcMain.handle("audio8:load", async (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("audio8:load", async (event, request) => {
     const requestId = audio8RequestId(request);
     await audio8CacheClear;
     const result = await getAudio8NativeClient().load(requestId, (percent) => {
@@ -1221,8 +1179,7 @@ app.whenReady().then(() => {
     return result;
   });
 
-  ipcMain.handle("audio8:generate", async (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("audio8:generate", async (event, request) => {
     const requestId = audio8RequestId(request);
     if (!isRecord(request) || typeof request.text !== "string" || request.text.trim().length === 0 || [...request.text].length > AUDIO8_MAX_TEXT_CHARACTERS) {
       throw new TypeError("Invalid Audio8 synthesis text.");
@@ -1239,8 +1196,7 @@ app.whenReady().then(() => {
     });
   });
 
-  ipcMain.handle("audio8:cancel", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("audio8:cancel", (_event, request) => {
     const requestId = audio8RequestId(request);
     // Forwarded rather than assumed: `false` covers every way there is nothing
     // to stop — no worker built yet, the request already settled, or it was
@@ -1252,13 +1208,11 @@ app.whenReady().then(() => {
   // Audio8 is not a `LocalModel`, so `local-tts:cache-info`/`clear-cache` cannot
   // address it; these report and reclaim the whole `audio8` namespace — every
   // revision, not just the current one — in the same shape.
-  ipcMain.handle("audio8:cache-info", (event) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("audio8:cache-info", () => {
     return readAudio8CacheInfo(app.getPath("userData"));
   });
 
-  ipcMain.handle("audio8:clear-cache", (event) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("audio8:clear-cache", () => {
     // Join the existing gate before starting another teardown. Two windows can
     // press Clear independently; running both `rm`s at once can reopen the gate
     // while the first clear still owns the old worker.
@@ -1280,8 +1234,7 @@ app.whenReady().then(() => {
     return clear;
   });
 
-  ipcMain.handle("document:import", async (event) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("document:import", async (event) => {
     // Attach the dialog to the requesting window (macOS modal sheet), which
     // also blocks mid-import text edits behind the dialog.
     const owner = BrowserWindow.fromWebContents(event.sender);
@@ -1300,10 +1253,14 @@ app.whenReady().then(() => {
     };
   });
 
-  ipcMain.on("document:read-epub", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
-    const port = event.ports[0];
-    if (!port || !isRecord(request) || typeof request.transferId !== "string") return;
+  ipc.onPort("document:read-epub", (port, request, event) => {
+    if (!isRecord(request) || typeof request.transferId !== "string") {
+      // The port is main's now; answer on it so the renderer is not left
+      // waiting out its transfer timeout.
+      port.postMessage({ error: "The EPUB transfer request was invalid. Import the file again." });
+      port.close();
+      return;
+    }
     const transfer = pendingEpubTransfers.get(request.transferId);
     if (!transfer || transfer.senderId !== event.sender.id) {
       port.postMessage({ error: "The EPUB transfer expired. Import the file again." });
@@ -1332,8 +1289,7 @@ app.whenReady().then(() => {
     sendNextChunk();
   });
 
-  ipcMain.handle("document:import-url", (event, request: unknown) => {
-    assertTrustedIpcSender(event, { allowDevServer: isDev });
+  ipc.handle("document:import-url", (_event, request) => {
     if (!isRecord(request) || typeof request.url !== "string" || request.url.length > 2048) {
       throw new Error("Invalid document URL.");
     }

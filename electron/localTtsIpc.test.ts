@@ -5,7 +5,6 @@ import { MAX_REFERENCE_CODES_BASE64_LENGTH } from "./localTtsLimits";
 import {
   BRIDGE_RESULT_PREFIX,
   assertLocalModel,
-  assertTrustedIpcSender,
   isRecord,
   isStringArray,
   parseBridgeEnvelopeResult,
@@ -27,26 +26,7 @@ import {
   sanitizeWarmRequest,
 } from "./localTtsIpc";
 
-function makeEvent(url: string, frameUrl?: string) {
-  return {
-    senderFrame: frameUrl === undefined ? undefined : { url: frameUrl },
-    sender: {
-      getURL: () => url,
-    },
-  };
-}
-
-describe("localTtsIpc sender and primitive parsers", () => {
-  it("accepts trusted app senders and rejects untrusted IPC senders", () => {
-    expect(() => assertTrustedIpcSender(makeEvent("https://evil.test", "app://-/studio") as never)).not.toThrow();
-    expect(() => assertTrustedIpcSender(makeEvent("http://localhost:5173/qwen3") as never)).not.toThrow();
-    expect(() => assertTrustedIpcSender(
-      makeEvent("http://localhost:5173/qwen3") as never,
-      { allowDevServer: false },
-    )).toThrow("Rejected IPC");
-    expect(() => assertTrustedIpcSender(makeEvent("https://example.com") as never)).toThrow("Rejected IPC");
-  });
-
+describe("localTtsIpc primitive parsers", () => {
   it("validates local model identifiers and records", () => {
     expect(assertLocalModel("neutts")).toBe("neutts");
     expect(assertLocalModel("qwen3")).toBe("qwen3");

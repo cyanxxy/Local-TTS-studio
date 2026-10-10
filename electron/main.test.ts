@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { dialog } from "electron";
 import { AUDIO8_MAX_TEXT_CHARACTERS, AUDIO8_MODEL_REVISION } from "./audio8Model";
 import { getDefaultQwen3Profile } from "./qwen3Profiles";
 
@@ -406,6 +407,131 @@ describe("Reader library quit-time flush", () => {
       ok: false,
       error: "Reader library is shutting down.",
     });
+  });
+});
+
+describe("document IPC", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    mocks.ipcListeners.clear();
+    mocks.invokeHandlers.clear();
+    mocks.appListeners.clear();
+    mocks.windows = [];
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "open-tts-main-documents-"));
+    (globalThis as { __dirname?: string }).__dirname = "/tmp";
+    await import("./main");
+  });
+
+  afterEach(async () => {
+    vi.mocked(dialog.showOpenDialog).mockReset();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Imports an EPUB through the dialog and returns the staged transfer. */
+  async function stageEpub(bytes: Uint8Array): Promise<{ epubTransferId: string; epubByteLength: number }> {
+    const filePath = path.join(tempDir, "book.epub");
+    await fs.writeFile(filePath, bytes);
+    vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: false, filePaths: [filePath] });
+    const result = await mocks.invokeHandlers.get("document:import")!(createEvent(undefined)) as {
+      fileName: string;
+      epubTransferId: string;
+      epubByteLength: number;
+    };
+    expect(result).toMatchObject({ canceled: false, fileName: "book.epub", epubByteLength: bytes.byteLength });
+    expect(result).not.toHaveProperty("epubBytes");
+    return result;
+  }
+
+  async function waitForPortClose(port: ReturnType<typeof createPort>): Promise<void> {
+    for (let turn = 0; turn < 100 && port.close.mock.calls.length === 0; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
+  it("streams a staged EPUB to the importing renderer once, then forgets it", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const { epubTransferId } = await stageEpub(bytes);
+
+    const port = createPort();
+    emitStream("document:read-epub", createEvent(port), { transferId: epubTransferId });
+    await waitForPortClose(port);
+
+    expect(port.postMessage.mock.calls).toEqual([
+      [{ offset: 0, chunk: bytes }],
+      [{ done: true }],
+    ]);
+
+    // A second read of the same transfer finds nothing to send.
+    const replay = createPort();
+    emitStream("document:read-epub", createEvent(replay), { transferId: epubTransferId });
+    expect(replay.postMessage).toHaveBeenCalledWith({ error: "The EPUB transfer expired. Import the file again." });
+    expect(replay.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a transfer staged for a different renderer", async () => {
+    const { epubTransferId } = await stageEpub(new Uint8Array([9]));
+    const port = createPort();
+    const otherRenderer = createEvent(port);
+    otherRenderer.sender.id = 2;
+
+    emitStream("document:read-epub", otherRenderer, { transferId: epubTransferId });
+
+    expect(port.postMessage).toHaveBeenCalledWith({ error: "The EPUB transfer expired. Import the file again." });
+    expect(port.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes an untrusted sender's port silently instead of throwing in the main process", async () => {
+    const { epubTransferId } = await stageEpub(new Uint8Array([7]));
+    const port = createPort();
+
+    expect(() => emitStream(
+      "document:read-epub",
+      createEvent(port, "https://example.com"),
+      { transferId: epubTransferId },
+    )).not.toThrow();
+
+    expect(port.close).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).not.toHaveBeenCalled();
+    // The untrusted read did not consume the transfer.
+    const trusted = createPort();
+    emitStream("document:read-epub", createEvent(trusted), { transferId: epubTransferId });
+    await waitForPortClose(trusted);
+    expect(trusted.postMessage).toHaveBeenLastCalledWith({ done: true });
+  });
+
+  it("answers a malformed read request on the port instead of leaving it open", () => {
+    const port = createPort();
+
+    emitStream("document:read-epub", createEvent(port), { transferId: 42 });
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      error: "The EPUB transfer request was invalid. Import the file again.",
+    });
+    expect(port.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns plain-text imports inline without staging a transfer", async () => {
+    const filePath = path.join(tempDir, "notes.txt");
+    await fs.writeFile(filePath, "Hello from a text file.");
+    vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: false, filePaths: [filePath] });
+
+    await expect(mocks.invokeHandlers.get("document:import")!(createEvent(undefined))).resolves.toEqual({
+      canceled: false,
+      fileName: "notes.txt",
+      text: "Hello from a text file.",
+      pageCount: undefined,
+    });
+  });
+
+  it.each([
+    { name: "a non-string URL", request: { url: 42 } },
+    { name: "an over-long URL", request: { url: `https://example.com/${"a".repeat(2048)}` } },
+    { name: "a missing request", request: undefined },
+  ])("rejects a URL import with $name", ({ request }) => {
+    expect(() => mocks.invokeHandlers.get("document:import-url")!(createEvent(undefined), request))
+      .toThrow("Invalid document URL.");
   });
 });
 

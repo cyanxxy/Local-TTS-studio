@@ -1,4 +1,3 @@
-import type { IpcMainInvokeEvent } from "electron";
 import type { GenerationContinuation } from "./generateRateLimiter";
 import {
   getQwen3Profile,
@@ -18,7 +17,6 @@ import {
   QWEN3_MIN_NEW_TOKENS,
   exceedsUnicodeScalarLimit,
 } from "./localTtsLimits";
-import { isAllowedAppUrl } from "./security";
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
 export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
@@ -133,16 +131,6 @@ export interface BridgeProgressResult {
   phase: string;
   message: string;
   elapsedSec?: number;
-}
-
-export function assertTrustedIpcSender(
-  event: IpcMainInvokeEvent,
-  options: { allowDevServer?: boolean } = { allowDevServer: true },
-): void {
-  const senderUrl = event.senderFrame?.url ?? event.sender.getURL();
-  if (!isAllowedAppUrl(senderUrl, options)) {
-    throw new Error("Rejected IPC from untrusted sender.");
-  }
 }
 
 export function assertLocalModel(model: string): LocalModel {
