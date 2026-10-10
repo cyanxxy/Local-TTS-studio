@@ -63,6 +63,18 @@ import { AudioPlayer, type AudioPlayerPrimaryAction } from "./AudioPlayer";
 import { ModelToggle } from "./ModelToggle";
 import { ReaderLibrarySidebar, type ReaderSidebarTab } from "./ReaderLibrarySidebar";
 import { VoiceSelector } from "./VoiceSelector";
+import { deriveReaderDockState } from "./reader/readerDockState";
+import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
+import { findSegmentForTextOffset } from "./reader/readerSegments";
+import {
+  buildOverlayParts,
+  chapterHeadingBlockStart,
+  clamp,
+  groupPartsByBlock,
+  splitTextBlocks,
+  type OverlayPart,
+  type TextBlock,
+} from "./reader/readerTextLayout";
 
 interface AdvancedReaderPageProps {
   fullScreen?: boolean;
@@ -155,122 +167,6 @@ interface ReaderDesktopModelOption {
   detail: string;
   selected?: boolean;
   onSelect: () => void;
-}
-
-interface OverlayPart {
-  text: string;
-  start: number;
-  isActive: boolean;
-}
-
-interface TextBlock {
-  start: number;
-  end: number;
-  blankLineBefore: boolean;
-}
-
-/**
- * Splits section text into paragraph blocks, one per non-empty line. Newline
- * separators live between blocks and are never rendered as glyphs; every block
- * records its character offset so DOM positions map back to text offsets.
- */
-function splitTextBlocks(text: string): TextBlock[] {
-  const blocks: TextBlock[] = [];
-  const lineMatcher = /[^\n]+/g;
-  let previousEnd = 0;
-  let match: RegExpExecArray | null;
-  while ((match = lineMatcher.exec(text)) !== null) {
-    blocks.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      blankLineBefore: text.slice(previousEnd, match.index).split("\n").length > 2,
-    });
-    previousEnd = match.index + match[0].length;
-  }
-  return blocks;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
-}
-
-function findSegmentForTextOffset(
-  segments: readonly AudioSegment[],
-  targetOffset: number,
-): AudioSegment | undefined {
-  return segments.find((segment) => (
-    typeof segment.textStart === "number"
-    && typeof segment.textEnd === "number"
-    && targetOffset >= segment.textStart
-    && targetOffset < segment.textEnd
-  ))
-    ?? segments.find((segment) => (
-      typeof segment.textStart === "number" && segment.textStart >= targetOffset
-    ))
-    ?? [...segments].reverse().find((segment) => (
-      typeof segment.textEnd === "number" && segment.textEnd <= targetOffset
-    ));
-}
-
-/** "af_heart" → "Heart" */
-function formatVoiceName(id: string): string {
-  const i = id.indexOf("_");
-  if (i === -1) return id;
-  const name = id.slice(i + 1).replace(/_/g, " ");
-  return name.charAt(0).toUpperCase() + name.slice(1);
-}
-
-/**
- * Splits the source text into contiguous spans aligned to paragraph blocks and
- * the active range. Spans carry only background styling (tint + highlight), never
- * inline content, so the overlay stays glyph-for-glyph identical to the textarea
- * beneath it — keeping the caret, highlights, and scrolling in sync.
- *
- * Only the spoken range gets its own span: chunk boundaries are invisible to the
- * reader, so splitting on them would cost dozens to hundreds of identical spans
- * per section for no pixel difference.
- *
- * Deliberately independent of the spoken word: the word moves several times a
- * second and splitting on it here would rebuild every span in the section each
- * time. The word highlight is applied per paragraph at render time instead.
- */
-function buildOverlayParts(
-  text: string,
-  blocks: TextBlock[],
-  activeRange: { start: number; end: number } | null,
-): OverlayPart[] {
-  if (!text) return [];
-
-  const offsets = new Set<number>([0, text.length]);
-  for (const block of blocks) {
-    offsets.add(block.start);
-    offsets.add(block.end);
-  }
-  if (activeRange) {
-    offsets.add(clamp(activeRange.start, 0, text.length));
-    offsets.add(clamp(activeRange.end, 0, text.length));
-  }
-
-  const sorted = [...offsets].sort((a, b) => a - b);
-  const parts: OverlayPart[] = [];
-
-  for (let i = 0; i < sorted.length - 1; i++) {
-    const partStart = sorted[i];
-    const partEnd = sorted[i + 1];
-    if (partEnd <= partStart) continue;
-
-    const isActive = activeRange
-      ? partStart >= activeRange.start && partEnd <= activeRange.end
-      : false;
-
-    parts.push({
-      text: text.slice(partStart, partEnd),
-      start: partStart,
-      isActive,
-    });
-  }
-
-  return parts;
 }
 
 interface ReaderParagraphProps {
@@ -1127,19 +1023,10 @@ export function AdvancedReaderPage({
     [text, textBlocks, activeRange],
   );
 
-  const paragraphs = useMemo(() => {
-    const groups = textBlocks.map((block) => ({ block, parts: [] as OverlayPart[] }));
-    let blockIndex = 0;
-    for (const part of overlayParts) {
-      while (blockIndex < textBlocks.length && part.start >= textBlocks[blockIndex].end) {
-        blockIndex += 1;
-      }
-      if (blockIndex >= textBlocks.length) break;
-      // Parts that fall between blocks are newline separators; they carry no glyphs.
-      if (part.start >= textBlocks[blockIndex].start) groups[blockIndex].parts.push(part);
-    }
-    return groups;
-  }, [overlayParts, textBlocks]);
+  const paragraphs = useMemo(
+    () => groupPartsByBlock(textBlocks, overlayParts),
+    [overlayParts, textBlocks],
+  );
 
   const hasGeneratedSegments = segments.length > 0;
   const meaningfulLength = getMeaningfulTextLength(text);
@@ -1165,43 +1052,28 @@ export function AdvancedReaderPage({
   ) ?? activeDocument?.chapters.at(-1) ?? null;
 
   /* ── Chapter rail labels ──────────────────────────────────── */
-  // Sections are a synthesis-sized window inside a chapter, so the same pair of
-  // arrows turns a page within a long chapter and crosses into the next one.
-  // Saying which it is beats a bare "next section" the reader has to decode.
   const partCount = activeSection?.chapterSectionCount ?? 1;
   const partIndex = activeSection?.chapterSectionIndex ?? 0;
   const isChapterStart = partIndex === 0;
-  const chapterStepLabel = (section: ReaderSection | null, forward: boolean) => {
-    const direction = forward ? "Next" : "Previous";
-    if (!section) return `${direction} page`;
-    if (section.chapterId === currentChapter?.id) {
-      return `${direction} part of this chapter`;
-    }
-    const chapter = activeDocument?.chapters.find((entry) => entry.id === section.chapterId);
-    return chapter ? `${direction} chapter: ${chapter.title}` : `${direction} chapter`;
-  };
-  // Imported chapters usually open with their own title line. Drawing that
-  // line as the heading, instead of adding a second copy above it, keeps the
-  // title once on the page while it is still spoken and highlighted.
-  // A plain document's only "chapter" is named after the book, which the
-  // toolbar already shows, so it gets no chapter heading at all.
+  const chapters = activeDocument?.chapters ?? [];
+  // Imported chapters usually open with their own title line, drawn as the
+  // heading instead of a second copy above it. A plain document's only
+  // "chapter" is named after the book, which the toolbar already shows, so it
+  // gets no chapter heading at all.
   const showChapterHeading = currentChapter !== null && (
-    (activeDocument?.chapters.length ?? 0) > 1 || currentChapter.title !== activeDocument?.title
+    chapters.length > 1 || currentChapter.title !== activeDocument?.title
   );
-  const firstBlock = textBlocks[0];
-  const headingBlockStart = showChapterHeading && currentChapter && isChapterStart && firstBlock
-    && text.slice(firstBlock.start, firstBlock.end).replace(/^\s{0,3}#{1,6}\s+/, "").trim()
-      .localeCompare(currentChapter.title, undefined, { sensitivity: "accent" }) === 0
-    ? firstBlock.start
+  const headingBlockStart = showChapterHeading && currentChapter && isChapterStart
+    ? chapterHeadingBlockStart(text, textBlocks[0], currentChapter.title)
     : null;
-  const previousStepLabel = chapterStepLabel(previousSection, false);
-  const nextStepLabel = chapterStepLabel(nextSection, true);
-  // The ordinal is noise on screen for a 135-entry EPUB, but it is real
-  // orientation for anyone hearing the label instead of seeing the rail.
-  const contentsLabel = currentChapter
-    ? `Contents · Chapter ${currentChapter.order + 1} of ${activeDocument?.chapters.length ?? 1}: ${currentChapter.title}`
-      + (partCount > 1 ? `, part ${partIndex + 1} of ${partCount}` : "")
-    : "Contents";
+  const previousStepLabel = chapterStepLabel(previousSection, false, currentChapter?.id ?? null, chapters);
+  const nextStepLabel = chapterStepLabel(nextSection, true, currentChapter?.id ?? null, chapters);
+  const contentsLabel = contentsButtonLabel(
+    currentChapter,
+    activeDocument?.chapters.length ?? 1,
+    partIndex,
+    partCount,
+  );
   const openContents = useCallback(() => {
     setLibraryTab("contents");
     setLibraryOpen(true);
@@ -1309,27 +1181,18 @@ export function AdvancedReaderPage({
   }, [activeRange, activeWordIndex, followPaused, isPlaying, scrollMarkerIntoView]);
 
   /* ── Player dock actions ──────────────────────────────────── */
-  const showRetry = !modelReady && !!modelError;
-  const isPreparing = !modelReady && !modelError;
-  const displayProgress = clamp(generationProgress, 0, 100);
-
-  const statusLabel = isGenerating
-    ? displayProgress > 0 ? `Generating ${Math.round(displayProgress)}%` : "Generating…"
-    : showRetry
-      ? "Model failed to load"
-      : generationError && !hasAudio
-        ? "Generation failed · try again"
-      : isPreparing
-        ? loadingProgress > 0 ? `Preparing ${Math.round(loadingProgress)}%` : "Preparing…"
-        : hasAudio
-          ? null
-          : canGenerate
-            ? "Ready to generate"
-            : charsRemaining > 0
-              ? `Need ${charsRemaining.toLocaleString()} more character${charsRemaining !== 1 ? "s" : ""}`
-              : "Ready";
-
-  const primaryActionDisabled = !showRetry && (isGenerating || isPreparing || !canGenerate);
+  const dockState = deriveReaderDockState({
+    hasAudio,
+    isGenerating,
+    generationProgress,
+    modelReady,
+    modelError,
+    generationError,
+    canGenerate,
+    charsRemaining,
+    loadingProgress,
+  });
+  const { showRetry, isPreparing, statusLabel } = dockState;
   const handlePrimaryAction = useCallback(() => {
     if (showRetry) {
       onRetryLoad();
@@ -1339,23 +1202,9 @@ export function AdvancedReaderPage({
     if (canGenerate) onGenerate();
   }, [canGenerate, isGenerating, isPreparing, onGenerate, onRetryLoad, showRetry]);
 
-  const primaryAction: AudioPlayerPrimaryAction | undefined = hasAudio
-    ? undefined
-    : {
-        label: showRetry
-          ? "Retry model load"
-          : isGenerating
-            ? "Generating"
-            : isPreparing
-              ? loadingProgress > 0 ? `Preparing ${Math.round(loadingProgress)}%` : "Preparing"
-              : generationError ? "Try generating again" : "Generate speech",
-        onClick: handlePrimaryAction,
-        disabled: primaryActionDisabled,
-        busy: isGenerating || isPreparing,
-        progress: isGenerating ? displayProgress : isPreparing ? loadingProgress : undefined,
-        icon: showRetry ? "retry" : isGenerating || isPreparing ? "loading" : "generate",
-        tone: showRetry || (generationError && !primaryActionDisabled) ? "danger" : primaryActionDisabled ? "neutral" : "accent",
-      };
+  const primaryAction: AudioPlayerPrimaryAction | undefined = dockState.primaryAction
+    ? { ...dockState.primaryAction, onClick: handlePrimaryAction }
+    : undefined;
 
   const canPreviousSegment = activeSegmentIndex > 0;
   const canNextSegment = activeSegmentIndex >= 0 && activeSegmentIndex < segments.length - 1;
