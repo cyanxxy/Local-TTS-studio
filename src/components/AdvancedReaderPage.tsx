@@ -1,5 +1,4 @@
 import {
-  memo,
   useCallback,
   useEffect,
   useId,
@@ -8,10 +7,8 @@ import {
   useRef,
   useState,
   type ReactNode,
-  type RefObject,
   type CSSProperties,
 } from "react";
-import { createPortal } from "react-dom";
 import {
   BookmarkPlus,
   Check,
@@ -63,6 +60,11 @@ import { AudioPlayer, type AudioPlayerPrimaryAction } from "./AudioPlayer";
 import { ModelToggle } from "./ModelToggle";
 import { ReaderLibrarySidebar, type ReaderSidebarTab } from "./ReaderLibrarySidebar";
 import { VoiceSelector } from "./VoiceSelector";
+import { ReaderParagraph } from "./reader/ReaderParagraph";
+import { ReaderShortcutsDialog } from "./reader/ReaderShortcutsDialog";
+import { RemainingTime } from "./reader/RemainingTime";
+import { SegmentedChoice, SwitchRow } from "./reader/ReaderControls";
+import { ViewportPopover } from "./reader/ViewportPopover";
 import { deriveReaderDockState } from "./reader/readerDockState";
 import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
 import { findSegmentForTextOffset } from "./reader/readerSegments";
@@ -72,8 +74,6 @@ import {
   clamp,
   groupPartsByBlock,
   splitTextBlocks,
-  type OverlayPart,
-  type TextBlock,
 } from "./reader/readerTextLayout";
 
 interface AdvancedReaderPageProps {
@@ -169,122 +169,6 @@ interface ReaderDesktopModelOption {
   onSelect: () => void;
 }
 
-interface ReaderParagraphProps {
-  block: TextBlock;
-  parts: OverlayPart[];
-  /** Absolute offsets of the spoken word, or -1 when it is not in this block. */
-  wordStart: number;
-  wordEnd: number;
-  /** The chapter's own title line, drawn as the chapter heading. */
-  heading?: boolean;
-}
-
-// A still wash: a breathing highlight kept moving in the corner of the eye
-// for the whole of every passage.
-function overlayPartClassName(isActive: boolean): string | undefined {
-  return isActive ? "reader-chunk-highlight reader-chunk-highlight-active" : undefined;
-}
-
-/**
- * One paragraph of the reading pane. Memoised on its own parts plus the word
- * offsets, so a word advancing re-renders only the paragraph containing it —
- * the rest of a chapter's spans stay untouched between sections.
- */
-const ReaderParagraph = memo(function ReaderParagraph({
-  block,
-  parts,
-  wordStart,
-  wordEnd,
-  heading = false,
-}: ReaderParagraphProps) {
-  return (
-    <p
-      data-block-start={block.start}
-      role={heading ? "heading" : undefined}
-      aria-level={heading ? 3 : undefined}
-      className={heading
-        ? "reader-chapter-heading"
-        : block.blankLineBefore ? "reader-paragraph-spaced" : undefined}
-    >
-      {parts.map((part) => {
-        const className = overlayPartClassName(part.isActive);
-        const partEnd = part.start + part.text.length;
-        const overlaps = wordStart >= 0 && wordStart < partEnd && wordEnd > part.start;
-
-        if (!overlaps) {
-          return (
-            <span key={`part-${part.start}`} className={className}>
-              {part.text}
-            </span>
-          );
-        }
-
-        // Split around the spoken word rather than re-deriving every span in the
-        // section from scratch. `scrollMarkerIntoView` looks for the
-        // reader-word-highlight-active element, so it must stay in the DOM.
-        const localStart = Math.max(0, wordStart - part.start);
-        const localEnd = Math.min(part.text.length, wordEnd - part.start);
-        const before = part.text.slice(0, localStart);
-        const word = part.text.slice(localStart, localEnd);
-        const after = part.text.slice(localEnd);
-        const wordClassName = className
-          ? `${className} reader-word-highlight-active`
-          : "reader-word-highlight-active";
-
-        return [
-          before && (
-            <span key={`part-${part.start}`} className={className}>
-              {before}
-            </span>
-          ),
-          word && (
-            <span
-              key={`word-${part.start + localStart}`}
-              className={wordClassName}
-              data-reader-active-word="true"
-            >
-              {word}
-            </span>
-          ),
-          after && (
-            <span key={`tail-${part.start + localEnd}`} className={className}>
-              {after}
-            </span>
-          ),
-        ];
-      })}
-    </p>
-  );
-});
-
-/**
- * Time remaining. Subscribes to the playback clock on its own so the whole
- * reader does not re-render for a label that changes once a second.
- */
-function RemainingTime({
-  clock,
-  totalDuration,
-  className,
-}: {
-  clock: PlaybackClock;
-  totalDuration: number;
-  className: string;
-}) {
-  const selectRemaining = useCallback(
-    (timeSec: number) => Math.max(0, Math.ceil(totalDuration - timeSec)),
-    [totalDuration],
-  );
-  const remainingSeconds = usePlaybackSelector(clock, selectRemaining);
-  if (totalDuration <= 0) return null;
-  return (
-    <span className={className}>
-      {remainingSeconds < 60
-        ? `${remainingSeconds} sec left`
-        : `${Math.ceil(remainingSeconds / 60)} min left`}
-    </span>
-  );
-}
-
 /* Shared metrics for the overlay and the transparent textarea beneath it.
    Both must be glyph-for-glyph identical, so they always use this one string. */
 const DOCUMENT_TEXT_CLASSES =
@@ -296,173 +180,6 @@ function documentPadding(fullScreen: boolean): string {
   return fullScreen
     ? "reader-doc-pad pt-8 pb-44 sm:pt-12 sm:pb-48"
     : "reader-doc-pad py-8";
-}
-
-interface ViewportPopoverProps {
-  anchorRef: RefObject<HTMLElement | null>;
-  popoverRef: RefObject<HTMLDivElement | null>;
-  maxWidth: number;
-  className: string;
-  ariaLabel: string;
-  onClose: () => void;
-  children: ReactNode;
-}
-
-const POPOVER_FOCUSABLE_SELECTOR = [
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "textarea:not([disabled])",
-  "select:not([disabled])",
-  "[href]",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
-
-function ViewportPopover({
-  anchorRef,
-  popoverRef,
-  maxWidth,
-  className,
-  ariaLabel,
-  onClose,
-  children,
-}: ViewportPopoverProps) {
-  const [position, setPosition] = useState<{
-    top: number;
-    left: number;
-    width: number;
-    maxHeight: number;
-  } | null>(null);
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-
-  const ready = position !== null;
-
-  useLayoutEffect(() => {
-    const updatePosition = () => {
-      const anchor = anchorRef.current;
-      if (!anchor) return;
-
-      const rect = anchor.getBoundingClientRect();
-      const viewport = window.visualViewport;
-      const viewportLeft = viewport?.offsetLeft ?? 0;
-      const viewportTop = viewport?.offsetTop ?? 0;
-      const viewportWidth = viewport?.width ?? window.innerWidth;
-      const viewportHeight = viewport?.height ?? window.innerHeight;
-      const viewportRight = viewportLeft + viewportWidth;
-      const viewportBottom = viewportTop + viewportHeight;
-      const gutter = 12;
-      const gap = 8;
-      const width = Math.min(maxWidth, Math.max(0, viewportWidth - gutter * 2));
-      const left = Math.min(
-        Math.max(rect.right - width, viewportLeft + gutter),
-        viewportRight - width - gutter,
-      );
-      const availableBelow = viewportBottom - rect.bottom - gap - gutter;
-      const availableAbove = rect.top - viewportTop - gap - gutter;
-      const openAbove = availableBelow < 220 && availableAbove > availableBelow;
-      const maxHeight = Math.max(96, Math.min(672, openAbove ? availableAbove : availableBelow));
-      const top = openAbove
-        ? Math.max(viewportTop + gutter, rect.top - gap - maxHeight)
-        : rect.bottom + gap;
-
-      // The capture-phase scroll listener fires for every reader auto-follow
-      // step, several times a second; handing back the same object keeps an open
-      // popover from re-rendering when nothing about its geometry moved.
-      setPosition((previous) => (
-        previous
-        && previous.top === top
-        && previous.left === left
-        && previous.width === width
-        && previous.maxHeight === maxHeight
-          ? previous
-          : { top, left, width, maxHeight }
-      ));
-    };
-
-    updatePosition();
-    window.addEventListener("resize", updatePosition);
-    window.addEventListener("scroll", updatePosition, true);
-    window.visualViewport?.addEventListener("resize", updatePosition);
-    window.visualViewport?.addEventListener("scroll", updatePosition);
-
-    // Content can change height after the geometry is computed — the settings
-    // popover on a model switch, the URL popover when an import error appears —
-    // and the open-above decision has to be redone when it does.
-    const observer = typeof ResizeObserver !== "undefined"
-      ? new ResizeObserver(updatePosition)
-      : null;
-    if (observer) {
-      if (popoverRef.current) observer.observe(popoverRef.current);
-      if (anchorRef.current) observer.observe(anchorRef.current);
-    }
-
-    return () => {
-      window.removeEventListener("resize", updatePosition);
-      window.removeEventListener("scroll", updatePosition, true);
-      window.visualViewport?.removeEventListener("resize", updatePosition);
-      window.visualViewport?.removeEventListener("scroll", updatePosition);
-      observer?.disconnect();
-    };
-    // `ready` re-runs this once the popover element exists, so it can be observed.
-  }, [anchorRef, maxWidth, popoverRef, ready]);
-
-  useEffect(() => {
-    if (!ready) return;
-    const anchor = anchorRef.current;
-    const frame = window.requestAnimationFrame(() => {
-      const focusable = popoverRef.current?.querySelector<HTMLElement>(POPOVER_FOCUSABLE_SELECTOR);
-      (focusable ?? popoverRef.current)?.focus();
-    });
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || !popoverRef.current) return;
-      const focusable = [...popoverRef.current.querySelectorAll<HTMLElement>(POPOVER_FOCUSABLE_SELECTOR)]
-        .filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        popoverRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable.at(-1)!;
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      document.removeEventListener("keydown", handleKeyDown);
-      if (anchor?.isConnected) anchor.focus();
-    };
-  }, [anchorRef, popoverRef, ready]);
-
-  if (!position) return null;
-
-  return createPortal(
-    <div
-      ref={popoverRef}
-      role="dialog"
-      aria-modal="true"
-      aria-label={ariaLabel}
-      tabIndex={-1}
-      className={`fixed z-[120] overflow-y-auto ${className}`}
-      style={position}
-    >
-      {children}
-    </div>,
-    document.body,
-  );
 }
 
 /** Auto-follow leaves the page alone while the spoken word sits in this band. */
@@ -505,143 +222,6 @@ const SLEEP_TIMER_OPTIONS: ReadonlyArray<{ value: SleepTimerChoice; label: strin
   { value: "60", label: "60m" },
   { value: "chapter", label: "Chapter" },
 ];
-
-const READER_SHORTCUTS: ReadonlyArray<{ keys: string; action: string }> = [
-  { keys: "Space", action: "Play or pause" },
-  { keys: "← / →", action: "Previous or next page" },
-  { keys: "⌥← / ⌥→", action: "Skip back or forward 10 seconds" },
-  { keys: "⌘/Ctrl Enter", action: "Generate speech" },
-  { keys: "⌘/Ctrl .", action: "Stop generating" },
-  { keys: "Double-click", action: "Listen from that word" },
-  { keys: "F", action: "Toggle focus layout" },
-  { keys: "?", action: "Show these shortcuts" },
-];
-
-function SegmentedChoice<T extends string>({
-  legend,
-  value,
-  options,
-  onChange,
-}: {
-  legend: string;
-  value: T;
-  options: ReadonlyArray<{ value: T; label: string }>;
-  onChange: (value: T) => void;
-}) {
-  return (
-    <fieldset>
-      <legend className="mb-2 text-sm font-semibold text-text-secondary">{legend}</legend>
-      <div
-        className="grid gap-1 rounded-xl bg-text-primary/[0.03] p-1"
-        style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
-      >
-        {options.map((option) => (
-          <button
-            key={option.value}
-            type="button"
-            aria-pressed={value === option.value}
-            onClick={() => onChange(option.value)}
-            className={`rounded-lg px-1.5 py-2 text-xs font-medium capitalize transition-colors ${
-              value === option.value
-                ? "bg-panel text-accent shadow-glass-sm"
-                : "text-text-muted hover:text-text-primary"
-            }`}
-          >
-            {option.label}
-          </button>
-        ))}
-      </div>
-    </fieldset>
-  );
-}
-
-/** A native checkbox, so assistive tech still hears a checkbox, drawn as a switch. */
-function SwitchRow({
-  label,
-  checked,
-  onChange,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (checked: boolean) => void;
-}) {
-  return (
-    <label className="flex cursor-pointer items-center justify-between gap-3 text-sm text-text-secondary">
-      {label}
-      <input
-        type="checkbox"
-        className="reader-switch"
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-    </label>
-  );
-}
-
-function ShortcutsDialog({ onClose }: { onClose: () => void }) {
-  const closeRef = useRef<HTMLButtonElement>(null);
-  const onCloseRef = useRef(onClose);
-  useEffect(() => {
-    onCloseRef.current = onClose;
-  }, [onClose]);
-  useEffect(() => {
-    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    closeRef.current?.focus();
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-      } else if (event.key === "Tab") {
-        // The close button is the only control, so focus simply stays on it.
-        event.preventDefault();
-        closeRef.current?.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      if (previous?.isConnected) previous.focus();
-    };
-  }, []);
-
-  return createPortal(
-    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/25 p-4" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Keyboard shortcuts"
-        onClick={(event) => event.stopPropagation()}
-        className="glass-pop w-full max-w-sm rounded-2xl p-5"
-      >
-        <div className="mb-3 flex items-center justify-between">
-          <p className="font-display text-lg font-semibold text-text-primary">Keyboard shortcuts</p>
-          <button
-            ref={closeRef}
-            type="button"
-            onClick={onClose}
-            aria-label="Close keyboard shortcuts"
-            className="flex h-8 w-8 items-center justify-center rounded-full text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary"
-          >
-            <X size={16} />
-          </button>
-        </div>
-        <dl className="space-y-2 text-sm">
-          {READER_SHORTCUTS.map((shortcut) => (
-            <div key={shortcut.keys} className="flex items-center justify-between gap-4">
-              <dt className="text-text-secondary">{shortcut.action}</dt>
-              <dd>
-                <kbd className="rounded-md border border-border bg-text-primary/[0.04] px-1.5 py-0.5 font-mono text-xs text-text-primary">
-                  {shortcut.keys}
-                </kbd>
-              </dd>
-            </div>
-          ))}
-        </dl>
-      </div>
-    </div>,
-    document.body,
-  );
-}
 
 export function AdvancedReaderPage({
   fullScreen = false,
@@ -762,16 +342,12 @@ export function AdvancedReaderPage({
     chapterId: string | null;
   }>({ choice: "off", endsAt: null, chapterId: null });
   const [sleepNow, setSleepNow] = useState(() => Date.now());
-  const settingsRef = useRef<HTMLDivElement>(null);
   const settingsButtonRef = useRef<HTMLButtonElement>(null);
   const settingsPopoverRef = useRef<HTMLDivElement>(null);
   const appearanceButtonRef = useRef<HTMLButtonElement>(null);
   const appearancePopoverRef = useRef<HTMLDivElement>(null);
   const importButtonRef = useRef<HTMLButtonElement>(null);
   const importPopoverRef = useRef<HTMLDivElement>(null);
-  const settingsOpenRef = useRef(settingsOpen);
-  const appearanceOpenRef = useRef(appearanceOpen);
-  const importOpenRef = useRef(importOpen);
   const editingRef = useRef(editing);
   const editDraftRef = useRef(editDraft);
   const onEditEndRef = useRef(onEditEnd);
@@ -791,18 +367,6 @@ export function AdvancedReaderPage({
       editCommitTimerRef.current = null;
     }
   }, []);
-
-  useEffect(() => {
-    settingsOpenRef.current = settingsOpen;
-  }, [settingsOpen]);
-
-  useEffect(() => {
-    appearanceOpenRef.current = appearanceOpen;
-  }, [appearanceOpen]);
-
-  useEffect(() => {
-    importOpenRef.current = importOpen;
-  }, [importOpen]);
 
   useEffect(() => {
     editingRef.current = editing;
@@ -903,42 +467,6 @@ export function AdvancedReaderPage({
     if (textareaRef.current) textareaRef.current.scrollTop = 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reset only on document/section change
   }, [activeDocument?.id, activeSection?.id, editing]);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      const target = e.target as Node;
-      // ModelToggle portals its menu to document.body so it can escape this
-      // scrollable popover. Treat that nested portal as part of Voice settings;
-      // otherwise mousedown closes and unmounts the settings tree before the
-      // model option's click callback can select the new runtime.
-      const inModelPickerMenu = target instanceof Element
-        && target.closest("[data-model-picker-menu]") !== null;
-      if (
-        settingsOpenRef.current
-        && !settingsRef.current?.contains(target)
-        && !settingsPopoverRef.current?.contains(target)
-        && !inModelPickerMenu
-      ) {
-        setSettingsOpen(false);
-      }
-      if (
-        appearanceOpenRef.current
-        && !appearanceButtonRef.current?.contains(target)
-        && !appearancePopoverRef.current?.contains(target)
-      ) {
-        setAppearanceOpen(false);
-      }
-      if (
-        importOpenRef.current
-        && !importButtonRef.current?.contains(target)
-        && !importPopoverRef.current?.contains(target)
-      ) {
-        setImportOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, []);
 
   const previewChunks = useMemo(
     () => selectedDesktopModel?.key === "qwen3"
@@ -1718,7 +1246,7 @@ export function AdvancedReaderPage({
         </div>
 
         {/* Voice & model settings popover */}
-        <div ref={settingsRef} className="relative">
+        <div className="relative">
           <button
             ref={settingsButtonRef}
             type="button"
@@ -1750,6 +1278,11 @@ export function AdvancedReaderPage({
               className="glass-pop animate-scale-in origin-top-right rounded-[26px] p-4"
               ariaLabel="Voice settings"
               onClose={() => setSettingsOpen(false)}
+              // ModelToggle portals its menu to document.body so it can escape
+              // this scrollable popover. A press inside that menu must not close
+              // and unmount the settings tree before the option's click selects
+              // the new runtime.
+              keepOpenWithin="[data-model-picker-menu]"
             >
               <div className="flex flex-col gap-4">
                 <ModelToggle
@@ -2117,7 +1650,7 @@ export function AdvancedReaderPage({
       </section>
 
       {shortcutsOpen && (
-        <ShortcutsDialog onClose={() => setShortcutsOpen(false)} />
+        <ReaderShortcutsDialog onClose={() => setShortcutsOpen(false)} />
       )}
 
       {/* ── Player dock ─────────────────────────────────────── */}

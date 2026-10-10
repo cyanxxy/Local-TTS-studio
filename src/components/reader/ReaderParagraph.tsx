@@ -1,0 +1,90 @@
+import { memo } from "react";
+import type { OverlayPart, TextBlock } from "./readerTextLayout";
+
+interface ReaderParagraphProps {
+  block: TextBlock;
+  parts: OverlayPart[];
+  /** Absolute offsets of the spoken word, or -1 when it is not in this block. */
+  wordStart: number;
+  wordEnd: number;
+  /** The chapter's own title line, drawn as the chapter heading. */
+  heading?: boolean;
+}
+
+// A still wash: a breathing highlight kept moving in the corner of the eye
+// for the whole of every passage.
+function overlayPartClassName(isActive: boolean): string | undefined {
+  return isActive ? "reader-chunk-highlight reader-chunk-highlight-active" : undefined;
+}
+
+/**
+ * One paragraph of the reading pane. Memoised on its own parts plus the word
+ * offsets, so a word advancing re-renders only the paragraph containing it —
+ * the rest of a chapter's spans stay untouched between sections.
+ */
+export const ReaderParagraph = memo(function ReaderParagraph({
+  block,
+  parts,
+  wordStart,
+  wordEnd,
+  heading = false,
+}: ReaderParagraphProps) {
+  return (
+    <p
+      data-block-start={block.start}
+      role={heading ? "heading" : undefined}
+      aria-level={heading ? 3 : undefined}
+      className={heading
+        ? "reader-chapter-heading"
+        : block.blankLineBefore ? "reader-paragraph-spaced" : undefined}
+    >
+      {parts.map((part) => {
+        const className = overlayPartClassName(part.isActive);
+        const partEnd = part.start + part.text.length;
+        const overlaps = wordStart >= 0 && wordStart < partEnd && wordEnd > part.start;
+
+        if (!overlaps) {
+          return (
+            <span key={`part-${part.start}`} className={className}>
+              {part.text}
+            </span>
+          );
+        }
+
+        // Split around the spoken word rather than re-deriving every span in the
+        // section from scratch. Auto-follow looks for the
+        // reader-word-highlight-active element, so it must stay in the DOM.
+        const localStart = Math.max(0, wordStart - part.start);
+        const localEnd = Math.min(part.text.length, wordEnd - part.start);
+        const before = part.text.slice(0, localStart);
+        const word = part.text.slice(localStart, localEnd);
+        const after = part.text.slice(localEnd);
+        const wordClassName = className
+          ? `${className} reader-word-highlight-active`
+          : "reader-word-highlight-active";
+
+        return [
+          before && (
+            <span key={`part-${part.start}`} className={className}>
+              {before}
+            </span>
+          ),
+          word && (
+            <span
+              key={`word-${part.start + localStart}`}
+              className={wordClassName}
+              data-reader-active-word="true"
+            >
+              {word}
+            </span>
+          ),
+          after && (
+            <span key={`tail-${part.start + localEnd}`} className={className}>
+              {after}
+            </span>
+          ),
+        ];
+      })}
+    </p>
+  );
+});

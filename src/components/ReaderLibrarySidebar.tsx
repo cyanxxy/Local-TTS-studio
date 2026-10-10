@@ -13,6 +13,7 @@ import {
 import type { PlaybackClock } from "../lib/playbackClock";
 import { chapterAtOffset, type ReaderChapter, type ReaderDocumentRecord } from "../lib/readerDocument";
 import { findDocumentMatches } from "../lib/readerSearch";
+import { useFocusTrap } from "./reader/useFocusTrap";
 
 export type ReaderSidebarTab = "library" | "contents" | "search" | "bookmarks" | "notes";
 
@@ -24,15 +25,6 @@ const METADATA_COMMIT_MS = 400;
 /** "Just now" only has to become "1m ago" eventually, not precisely. */
 const RELATIVE_TIME_REFRESH_MS = 60_000;
 const BOOKMARK_LABEL_LIMIT = 40;
-
-const SIDEBAR_FOCUSABLE_SELECTOR = [
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "textarea:not([disabled])",
-  "select:not([disabled])",
-  "[href]",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
 
 /** Stable empty array so chapter memos keep their identity without a document. */
 const NO_CHAPTERS: ReaderChapter[] = [];
@@ -236,7 +228,6 @@ export function ReaderLibrarySidebar({
   const sidebarRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
   const keyboardTabNavRef = useRef(false);
   const onCloseRef = useRef(onClose);
   const onOpenDocumentRef = useRef(onOpenDocument);
@@ -368,44 +359,9 @@ export function ReaderLibrarySidebar({
     setAuthorDraft(null);
   };
 
-  useEffect(() => {
-    if (!open) return;
-    restoreFocusRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        handleClose();
-        return;
-      }
-      // The drawer floats above the page, so an untrapped Tab walks into
-      // controls the user cannot see behind it. Mirrors the reader popovers.
-      if (event.key !== "Tab" || !sidebarRef.current) return;
-      const focusable = [...sidebarRef.current.querySelectorAll<HTMLElement>(SIDEBAR_FOCUSABLE_SELECTOR)]
-        .filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        sidebarRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable.at(-1)!;
-      const activeElement = document.activeElement;
-      if (event.shiftKey && (activeElement === first || !sidebarRef.current.contains(activeElement))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (activeElement === last || !sidebarRef.current.contains(activeElement))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      if (restoreFocusRef.current?.isConnected) restoreFocusRef.current.focus();
-    };
-  }, [handleClose, open]);
+  // The drawer floats above the page, so an untrapped Tab walks into controls
+  // the user cannot see behind it. Initial focus is chosen per tab below.
+  useFocusTrap(sidebarRef, { active: open, onEscape: handleClose, autoFocus: false });
 
   useEffect(() => {
     if (!open) return;
