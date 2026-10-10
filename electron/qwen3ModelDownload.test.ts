@@ -366,6 +366,61 @@ describe("setup verification cache", () => {
   });
 });
 
+describe("download progress", () => {
+  function chunkedResponse(chunks: Buffer[], headers: Record<string, string> = {}): IncomingMessage {
+    return Object.assign(Readable.from(chunks) as unknown as IncomingMessage, { statusCode: 200, headers });
+  }
+
+  it("throttles each file at its source but always reports its first and last update", async () => {
+    const chunks = Array.from({ length: 20_000 }, () => Buffer.alloc(8, 2));
+    const weights = Buffer.concat(chunks);
+    const files = new Map([["config.json", FILES.get("config.json")!], ["model.safetensors", weights]]);
+    const hubRequest = fakeHubRequest([], files);
+    const progress: Qwen3ModelDownloadProgress[] = [];
+    const started = performance.now();
+
+    await downloadQwen3Model(PROFILE, makeTempDir(), (entry) => progress.push(entry), (url) => (
+      url.endsWith("/model.safetensors") ? Promise.resolve(chunkedResponse(chunks)) : hubRequest(url)
+    ));
+
+    const config = progress.filter((entry) => entry.fileName === "config.json");
+    const model = progress.filter((entry) => entry.fileName === "model.safetensors");
+    expect(config.map((entry) => entry.downloadedBytes)).toEqual([files.get("config.json")!.byteLength]);
+    // At most 200 half-percent steps and one update per elapsed interval, plus
+    // the file's first update and the one reaching 100%.
+    expect(model.length).toBeLessThanOrEqual(200 + Math.ceil((performance.now() - started) / 100) + 2);
+    expect(model.length).toBeLessThan(chunks.length / 20);
+    expect(model[0]).toMatchObject({ downloadedBytes: 8, totalBytes: weights.byteLength, fileIndex: 2, totalFiles: 2 });
+    expect(model.at(-1)).toMatchObject({ downloadedBytes: weights.byteLength, totalBytes: weights.byteLength });
+  });
+
+  it("delivers a file's final byte count even when no total is known", async () => {
+    const chunks = Array.from({ length: 5_000 }, () => Buffer.alloc(4, 3));
+    const weights = Buffer.concat(chunks);
+    const request: UrlRequest = (url) => {
+      if (url.includes("/api/models/")) {
+        return Promise.resolve(fakeResponse(JSON.stringify({
+          siblings: [
+            { rfilename: "config.json", size: FILES.get("config.json")!.byteLength },
+            // No size and no LFS pointer: nothing pins the length up front.
+            { rfilename: "model.safetensors" },
+          ],
+        })));
+      }
+      if (url.endsWith("/config.json")) return Promise.resolve(fakeResponse(FILES.get("config.json")!));
+      return Promise.resolve(chunkedResponse(chunks));
+    };
+    const progress: Qwen3ModelDownloadProgress[] = [];
+
+    await downloadQwen3Model(PROFILE, makeTempDir(), (entry) => progress.push(entry), request);
+
+    const model = progress.filter((entry) => entry.fileName === "model.safetensors");
+    expect(model.at(-1)).toMatchObject({ downloadedBytes: weights.byteLength });
+    expect(model.at(-1)).not.toHaveProperty("totalBytes");
+    expect(model.length).toBeLessThan(chunks.length / 20);
+  });
+});
+
 describe("download stream integrity", () => {
   const url = "https://huggingface.co/x/resolve/revision/model.safetensors";
 

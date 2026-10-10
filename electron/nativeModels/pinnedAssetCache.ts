@@ -11,6 +11,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { isVerifiedFile, type FileDigest } from "./fileDigest";
 import { requestUrl, type UrlRequest } from "./hubHttps";
+import { createProgressThrottle } from "./progressThrottle";
 import { SharedTaskGroup } from "./sharedTask";
 import { downloadVerifiedFile, type DownloadFailure } from "./verifiedDownload";
 
@@ -62,7 +63,8 @@ export class PinnedAssetCache<TAsset extends PinnedAsset> {
    * Downloads whatever is missing, in table order, reporting bytes completed
    * against the byte total of `assets`. Assets are fetched one at a time so a
    * cold start does not open every connection at once and so progress stays
-   * monotonic.
+   * monotonic. Byte progress is throttled here, at its source; every asset
+   * that becomes ready is still reported, so the last report is the total.
    */
   async ensure(
     assets: readonly TAsset[],
@@ -70,14 +72,17 @@ export class PinnedAssetCache<TAsset extends PinnedAsset> {
     signal?: AbortSignal,
   ): Promise<void> {
     const totalBytes = assets.reduce((total, asset) => total + asset.size, 0);
+    const progress = createProgressThrottle(onProgress, {
+      fraction: ({ receivedBytes }) => (totalBytes > 0 ? receivedBytes / totalBytes : undefined),
+    });
     let completedBytes = 0;
     for (const asset of assets) {
       if (signal?.aborted) throw this.#options.cancelledError();
       await this.#ensureAsset(asset, (receivedBytes) => {
-        onProgress({ receivedBytes: completedBytes + receivedBytes, totalBytes });
+        progress.push({ receivedBytes: completedBytes + receivedBytes, totalBytes });
       }, signal);
       completedBytes += asset.size;
-      onProgress({ receivedBytes: completedBytes, totalBytes });
+      progress.push({ receivedBytes: completedBytes, totalBytes }, true);
     }
   }
 

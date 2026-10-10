@@ -73,6 +73,33 @@ describe("PinnedAssetCache", () => {
     expect(failures).toEqual([["model.bin", { kind: "status", statusCode: 503 }]]);
   });
 
+  it("throttles byte progress at its source but reports every finished asset", async () => {
+    const chunks = Array.from({ length: 20_000 }, () => Buffer.alloc(10, 1));
+    const large = Buffer.concat(chunks);
+    const small = Buffer.from("tokenizer");
+    const { cache } = createCache((url) => Promise.resolve(url.endsWith("large.bin")
+      ? Object.assign(Readable.from(chunks) as unknown as IncomingMessage, { statusCode: 200, headers: {} })
+      : respond(small)));
+    const totalBytes = large.byteLength + small.byteLength;
+    const seen: number[] = [];
+    const started = performance.now();
+
+    await cache.ensure([asset("large.bin", large), asset("small.bin", small)], ({ receivedBytes, totalBytes: total }) => {
+      expect(total).toBe(totalBytes);
+      seen.push(receivedBytes);
+    });
+
+    // At most 200 half-percent steps and one update per elapsed interval, plus
+    // the first update, the one reaching 100%, and the two finished assets.
+    const bound = 200 + Math.ceil((performance.now() - started) / 100) + 4;
+    expect(seen.length).toBeLessThanOrEqual(bound);
+    expect(seen.length).toBeLessThan(chunks.length / 20);
+    expect(seen[0]).toBe(10);
+    expect(seen).toContain(large.byteLength);
+    expect(seen.at(-1)).toBe(totalBytes);
+    expect(seen.every((value, index) => index === 0 || value >= seen[index - 1])).toBe(true);
+  });
+
   it("refuses to start for a caller that has already cancelled", async () => {
     const { cache } = createCache(() => Promise.reject(new Error("must not be called")));
 

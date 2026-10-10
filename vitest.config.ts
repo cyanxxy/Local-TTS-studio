@@ -27,6 +27,7 @@ export default defineConfig({
       // denominator for an enforceable 100% threshold.
       include: [
         "electron/generateRateLimiter.ts",
+        "electron/nativeModels/progressThrottle.ts",
         "src/constants.ts",
         "src/components/TextInput.tsx",
         "src/lib/audio.ts",

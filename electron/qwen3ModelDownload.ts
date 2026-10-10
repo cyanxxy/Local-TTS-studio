@@ -2,6 +2,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { FileDigestCache } from "./nativeModels/fileDigest";
 import { readHubJson, requestUrl, type UrlRequest } from "./nativeModels/hubHttps";
+import { createProgressThrottle } from "./nativeModels/progressThrottle";
 import { downloadVerifiedFile, type DownloadFailure } from "./nativeModels/verifiedDownload";
 import { QWEN3_OPTIONAL_MODEL_FILES, type Qwen3Profile } from "./qwen3Profiles";
 
@@ -401,8 +402,14 @@ export async function downloadQwen3Model(
       continue;
     }
     const url = `https://huggingface.co/${profile.repo}/resolve/${profile.revision}/${encodeHuggingFacePath(file.path)}`;
+    // One throttle per file: a file's first and last updates always reach the
+    // renderer, and the flush below delivers the final count even when neither
+    // the pin nor the server stated a total.
+    const fileProgress = createProgressThrottle(onProgress, {
+      fraction: ({ downloadedBytes, totalBytes }) => (totalBytes ? downloadedBytes / totalBytes : undefined),
+    });
     const reportProgress = (downloadedBytes: number, totalBytes?: number) => {
-      onProgress({
+      fileProgress.push({
         modelRepo: profile.repo,
         revision: profile.revision,
         modelDir,
@@ -441,6 +448,7 @@ export async function downloadQwen3Model(
       }
       result = { downloaded, ...verified };
     }
+    fileProgress.flush();
     downloadedFiles += result.downloaded ? 1 : 0;
     manifestFiles.push({ path: file.path, sizeBytes: result.sizeBytes, sha256: result.sha256 });
   }
