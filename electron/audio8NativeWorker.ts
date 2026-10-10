@@ -262,44 +262,92 @@ export function createSeededRandom(seed: number): () => number {
 }
 
 /**
+ * Indices of the `k` largest logits, largest first, in exactly the order a
+ * stable descending sort leaves them: equal logits keep ascending index order.
+ *
+ * A row holds ~4,096 logits and each audio frame draws eleven times, so fully
+ * sorting the row on every draw cost about a sixth of generation time. A
+ * bounded insertion buffer only ever shifts within the top `k`, and once it is
+ * full most logits are rejected by a single comparison against its smallest
+ * entry. Candidates only displace strictly smaller entries, which is what
+ * keeps ties in index order. NaN never ranks: comparisons against it are always
+ * false, so it could otherwise freeze the buffer with a value no real logit
+ * displaces.
+ */
+export function topKLogitIndices(logits: Float64Array, k: number): Int32Array {
+  const capacity = Math.max(0, Math.min(Math.trunc(k), logits.length));
+  const indices = new Int32Array(capacity);
+  const values = new Float64Array(capacity);
+  let size = 0;
+  for (let index = 0; index < logits.length; index += 1) {
+    const value = logits[index];
+    if (size === capacity ? !(value > values[capacity - 1]) : Number.isNaN(value)) continue;
+    let slot = size < capacity ? size++ : capacity - 1;
+    while (slot > 0 && values[slot - 1] < value) {
+      values[slot] = values[slot - 1];
+      indices[slot] = indices[slot - 1];
+      slot -= 1;
+    }
+    values[slot] = value;
+    indices[slot] = index;
+  }
+  return indices.subarray(0, size);
+}
+
+/**
  * Top-k, then nucleus (top-p), then temperature, then an exponential race for
  * the winner: each surviving candidate draws `weight / -ln(u)` and the largest
  * draw wins, which is the Gumbel-max trick in multiplicative form. The race is
  * equivalent to sampling from the softmax, and keeps the whole step branch-free
  * of cumulative-sum edge cases.
+ *
+ * Every floating-point operation below runs in the same order as the original
+ * sort-based implementation and consumes one random draw per nucleus member,
+ * so a seeded stream reproduces the same tokens bit for bit. The golden tests
+ * in `audio8NativeWorker.test.ts` pin that equivalence.
  */
 export function sampleTokenId(
   logits: Float64Array,
   { temperature, topP, topK }: SamplingOptions,
   random: () => number,
 ): number {
-  const ranked = Array.from({ length: logits.length }, (_unused, index) => index)
-    .sort((left, right) => logits[right] - logits[left])
-    .slice(0, topK);
+  const ranked = topKLogitIndices(logits, topK);
+  if (ranked.length === 0) throw new Error("Audio8 sampler received no usable logits.");
   const highest = logits[ranked[0]];
-  const unscaled = ranked.map((index) => Math.exp(logits[index] - highest));
-  const unscaledTotal = unscaled.reduce((total, weight) => total + weight, 0);
-
-  // The candidate that crosses `topP` is kept, so the nucleus is never empty.
-  const nucleus: number[] = [];
-  let cumulative = 0;
+  const unscaled = new Float64Array(ranked.length);
+  let unscaledTotal = 0;
   for (let rank = 0; rank < ranked.length; rank += 1) {
-    if (rank && cumulative > topP) break;
-    nucleus.push(ranked[rank]);
-    cumulative += unscaled[rank] / unscaledTotal;
+    unscaled[rank] = Math.exp(logits[ranked[rank]] - highest);
+    unscaledTotal += unscaled[rank];
   }
 
-  const scaledHighest = Math.max(...nucleus.map((index) => logits[index] / temperature));
-  const weights = nucleus.map((index) => Math.exp(logits[index] / temperature - scaledHighest));
-  const weightTotal = weights.reduce((total, weight) => total + weight, 0);
+  // The candidate that crosses `topP` is kept, so the nucleus is never empty.
+  // It is always a prefix of `ranked`.
+  let nucleusSize = 0;
+  let cumulative = 0;
+  for (; nucleusSize < ranked.length; nucleusSize += 1) {
+    if (nucleusSize && cumulative > topP) break;
+    cumulative += unscaled[nucleusSize] / unscaledTotal;
+  }
 
-  let winner = nucleus[0];
+  let scaledHighest = -Infinity;
+  for (let rank = 0; rank < nucleusSize; rank += 1) {
+    scaledHighest = Math.max(scaledHighest, logits[ranked[rank]] / temperature);
+  }
+  const weights = new Float64Array(nucleusSize);
+  let weightTotal = 0;
+  for (let rank = 0; rank < nucleusSize; rank += 1) {
+    weights[rank] = Math.exp(logits[ranked[rank]] / temperature - scaledHighest);
+    weightTotal += weights[rank];
+  }
+
+  let winner = ranked[0];
   let bestScore = -Infinity;
-  for (let candidate = 0; candidate < nucleus.length; candidate += 1) {
-    const score = weights[candidate] / weightTotal / -Math.log(Math.max(1e-12, random()));
+  for (let rank = 0; rank < nucleusSize; rank += 1) {
+    const score = weights[rank] / weightTotal / -Math.log(Math.max(1e-12, random()));
     if (score > bestScore) {
       bestScore = score;
-      winner = nucleus[candidate];
+      winner = ranked[rank];
     }
   }
   return winner;

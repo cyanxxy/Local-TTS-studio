@@ -12,6 +12,7 @@ import {
   readTrailingValues,
   sampleTokenId,
   startAudio8Worker,
+  topKLogitIndices,
   type Audio8WorkerPort,
   type SamplingOptions,
 } from "./audio8NativeWorker";
@@ -126,6 +127,148 @@ describe("sampleTokenId", () => {
     const drawn = drawMany(32, () => sampleTokenId(pseudoLogits(), { temperature: 0.01, topP: 0, topK: 50 }, random));
 
     expect(new Set(drawn)).toEqual(new Set([12]));
+  });
+
+  it("ignores NaN logits instead of letting them displace real ones", () => {
+    const logits = Float64Array.from([NaN, 1, NaN, 3, 2]);
+
+    expect([...topKLogitIndices(logits, 2)]).toEqual([3, 4]);
+    expect(sampleTokenId(logits, { temperature: 0.01, topP: 0, topK: 50 }, createSeededRandom(1))).toBe(3);
+  });
+
+  it("refuses a row with nothing to rank rather than returning no token", () => {
+    expect(() => sampleTokenId(Float64Array.from([NaN, NaN]), NUCLEUS, createSeededRandom(1)))
+      .toThrow("Audio8 sampler received no usable logits.");
+  });
+});
+
+describe("topKLogitIndices", () => {
+  it("ranks largest first and keeps ties in index order", () => {
+    const logits = Float64Array.from([2, 5, 5, -1, 5, 2, Infinity, -Infinity]);
+
+    expect([...topKLogitIndices(logits, 5)]).toEqual([6, 1, 2, 4, 0]);
+  });
+
+  it("returns the whole row when k exceeds it, and nothing for an empty request", () => {
+    const logits = Float64Array.from([0, -Infinity, 1]);
+
+    expect([...topKLogitIndices(logits, 50)]).toEqual([2, 0, 1]);
+    expect([...topKLogitIndices(logits, 0)]).toEqual([]);
+  });
+});
+
+/**
+ * The sort-based sampler this file shipped with, kept verbatim as the
+ * reference the optimised `sampleTokenId` must reproduce. Every token Audio8
+ * has ever generated came from this procedure, so any divergence — a
+ * different winner, or a different number of random draws consumed — is a
+ * change in generated audio.
+ */
+function referenceSampleTokenId(
+  logits: Float64Array,
+  { temperature, topP, topK }: SamplingOptions,
+  random: () => number,
+): number {
+  const ranked = Array.from({ length: logits.length }, (_unused, index) => index)
+    .sort((left, right) => logits[right] - logits[left])
+    .slice(0, topK);
+  const highest = logits[ranked[0]];
+  const unscaled = ranked.map((index) => Math.exp(logits[index] - highest));
+  const unscaledTotal = unscaled.reduce((total, weight) => total + weight, 0);
+  const nucleus: number[] = [];
+  let cumulative = 0;
+  for (let rank = 0; rank < ranked.length; rank += 1) {
+    if (rank && cumulative > topP) break;
+    nucleus.push(ranked[rank]);
+    cumulative += unscaled[rank] / unscaledTotal;
+  }
+  const scaledHighest = Math.max(...nucleus.map((index) => logits[index] / temperature));
+  const weights = nucleus.map((index) => Math.exp(logits[index] / temperature - scaledHighest));
+  const weightTotal = weights.reduce((total, weight) => total + weight, 0);
+  let winner = nucleus[0];
+  let bestScore = -Infinity;
+  for (let candidate = 0; candidate < nucleus.length; candidate += 1) {
+    const score = weights[candidate] / weightTotal / -Math.log(Math.max(1e-12, random()));
+    if (score > bestScore) {
+      bestScore = score;
+      winner = nucleus[candidate];
+    }
+  }
+  return winner;
+}
+
+/**
+ * Logit rows shaped like the real graphs' output: the slow head is 4,097 wide
+ * and the fast heads 4,096, values come back through FP16 (so many exact ties),
+ * and a masked entry can be -Infinity. The small rows exercise k > length.
+ */
+function goldenLogitRows(): Float64Array[] {
+  const random = createSeededRandom(20_260_710);
+  const rows: Float64Array[] = [];
+  for (const size of [4097, 4096, 4097, 4096, 512, 64, 50, 7, 1]) {
+    for (const shape of ["continuous", "fp16", "coarse", "masked"] as const) {
+      const row = new Float64Array(size);
+      for (let index = 0; index < size; index += 1) {
+        const value = (random() - 0.5) * 24;
+        row[index] = shape === "continuous"
+          ? value
+          : shape === "fp16"
+            ? decodeFloat16(encodeFloat16(value))
+            : shape === "coarse"
+              ? Math.round(value / 4) * 4
+              : random() < 0.2 ? -Infinity : value;
+      }
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+/**
+ * FP16 bit pattern for a finite value in half range, rounding half up and
+ * flushing subnormals to zero. Only used to give the golden rows the coarse,
+ * tie-heavy grid real FP16 logits land on, so exact IEEE rounding is moot.
+ */
+function encodeFloat16(value: number): number {
+  const buffer = new DataView(new ArrayBuffer(4));
+  buffer.setFloat32(0, value);
+  const bits = buffer.getUint32(0);
+  const sign = (bits >>> 16) & 0x8000;
+  const exponent = ((bits >>> 23) & 0xff) - 127 + 15;
+  const mantissa = bits & 0x7fffff;
+  if (exponent <= 0) return sign;
+  const rounded = (exponent << 10) + (mantissa >>> 13) + ((mantissa >>> 12) & 1);
+  return sign | Math.min(rounded, 0x7bff);
+}
+
+describe("sampleTokenId golden equivalence", () => {
+  const settings: SamplingOptions[] = [
+    NUCLEUS,
+    REPEAT_ESCAPE,
+    { temperature: 0.1, topP: 0.9, topK: 50 },
+    { temperature: 0.3, topP: 1, topK: 4097 },
+    { temperature: 0.3, topP: 0, topK: 50 },
+    { temperature: 1, topP: 0.5, topK: 1 },
+  ];
+
+  it("draws the same tokens and consumes the same randomness as the full-sort reference", () => {
+    let draws = 0;
+    for (const [rowIndex, logits] of goldenLogitRows().entries()) {
+      for (const [settingIndex, options] of settings.entries()) {
+        const seed = rowIndex * 31 + settingIndex;
+        const expectedStream = createSeededRandom(seed);
+        const actualStream = createSeededRandom(seed);
+        for (let draw = 0; draw < 4; draw += 1) {
+          const expected = referenceSampleTokenId(logits, options, expectedStream);
+          expect(sampleTokenId(logits, options, actualStream), `row ${rowIndex}, settings ${settingIndex}, draw ${draw}`)
+            .toBe(expected);
+          draws += 1;
+        }
+        // Equal next values prove both consumed exactly as many draws.
+        expect(actualStream()).toBe(expectedStream());
+      }
+    }
+    expect(draws).toBe(36 * settings.length * 4);
   });
 });
 
