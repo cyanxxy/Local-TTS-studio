@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ChevronDown, RefreshCw, Trash2 } from "lucide-react";
 import type { ModelType } from "../types";
-import { MODELS } from "../constants";
+import { getEngine } from "../models/registry";
 
 type StatusType = "success" | "error" | "info";
 
@@ -21,7 +21,7 @@ export function SettingsPanel({
   onRedownloadActive,
 }: SettingsPanelProps) {
   const [open, setOpen] = useState(false);
-  const modelLabel = activeModel === "kokoro" ? MODELS.kokoro.label : MODELS.supertonic.label;
+  const modelLabel = getEngine(activeModel).label;
 
   return (
     <div className="glass rounded-[20px] overflow-hidden">

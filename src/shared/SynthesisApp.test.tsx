@@ -370,7 +370,7 @@ vi.mock("../components/ControlsContext", () => ({
     onStop: () => void;
     onQualityChange: (value: number) => void;
     quality: number;
-    activeModel: string;
+    qualityRange: { min: number; max: number } | null;
     canGenerate: boolean;
     isGenerating: boolean;
     modelReady: boolean;
@@ -385,7 +385,9 @@ vi.mock("../components/ControlsContext", () => ({
       <button type="button" onClick={() => value.onQualityChange(value.quality + 1)}>quality-up</button>
       {/* Every field Studio hands to Controls is rendered so a test can tell
           which runtime each one came from. */}
-      <div data-testid="controls-active-model">{value.activeModel}</div>
+      <div data-testid="controls-quality-range">
+        {value.qualityRange ? `${value.qualityRange.min}-${value.qualityRange.max}` : "none"}
+      </div>
       <div data-testid="controls-can-generate">{String(value.canGenerate)}</div>
       <div data-testid="controls-is-generating">{String(value.isGenerating)}</div>
       <div data-testid="controls-model-ready">{String(value.modelReady)}</div>
@@ -802,8 +804,10 @@ describe("SynthesisApp", () => {
     expect(mock.generation.cancelActiveGeneration).toHaveBeenCalledWith();
     expect(mock.generation.resetGeneratedAudio).toHaveBeenCalled();
 
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("none");
     fireEvent.click(screen.getByRole("button", { name: "switch-supertonic" }));
     expect(mock.modelLoader.loadModel).toHaveBeenCalledWith("supertonic");
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("1-20");
 
     fireEvent.click(screen.getByRole("button", { name: "voice-bella" }));
     fireEvent.click(screen.getByRole("button", { name: "quality-up" }));
@@ -974,7 +978,8 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("controls-loading-progress")).toHaveTextContent("100");
     expect(screen.getByTestId("controls-generation-progress")).toHaveTextContent("7");
     expect(screen.getByTestId("controls-is-generating")).toHaveTextContent("false");
-    expect(screen.getByTestId("controls-active-model")).toHaveTextContent("kokoro");
+    // Kokoro has no quality range, so Studio shows no quality slider.
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("none");
     expect(screen.getByTestId("player-processing-time")).toHaveTextContent("11");
     expect(screen.getByText("browser generation failed")).toBeInTheDocument();
 
@@ -986,8 +991,8 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("controls-generation-progress")).toHaveTextContent("42");
     expect(screen.getByTestId("controls-is-generating")).toHaveTextContent("true");
     expect(screen.getByTestId("controls-can-generate")).toHaveTextContent("false");
-    // Audio8 has no quality control, so it presents as Kokoro to Controls.
-    expect(screen.getByTestId("controls-active-model")).toHaveTextContent("kokoro");
+    // Audio8 ignores quality, so the slider stays hidden.
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("none");
     expect(screen.getByText("audio8 generation failed")).toBeInTheDocument();
     expect(screen.queryByText("browser generation failed")).not.toBeInTheDocument();
 
@@ -1214,6 +1219,7 @@ describe("SynthesisApp", () => {
     expect(createSupertonic3Worker).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-supertonic3" }));
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("1-20");
 
     await waitFor(() => expect(createSupertonic3Worker).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1])

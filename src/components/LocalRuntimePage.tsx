@@ -49,8 +49,8 @@ interface LocalRuntimePageProps {
   name: string;
   releaseDate: string;
   params: string;
-  highlights: string[];
-  links: Array<{ label: string; href: string }>;
+  highlights: readonly string[];
+  links: ReadonlyArray<{ label: string; href: string }>;
   initialText?: string;
 }
 

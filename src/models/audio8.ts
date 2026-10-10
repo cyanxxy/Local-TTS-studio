@@ -7,7 +7,8 @@ import type { EngineCapabilities, EngineDescriptor } from "./types";
 export type Audio8VoiceId = typeof AUDIO8_VOICES[number]["id"];
 
 export interface Audio8Settings {
-  voice: Audio8VoiceId;
+  /** One of the `AUDIO8_VOICES` ids; `parseSettings` guarantees it. */
+  voice: string;
 }
 
 // Audio8 re-prefills the voice-reference prompt before every chunk emits its

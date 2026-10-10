@@ -13,7 +13,8 @@ export const NEUTTS_MODEL_OPTIONS = [
 export type NeuttsModelRepo = typeof NEUTTS_MODEL_OPTIONS[number]["value"];
 
 export interface NeuttsSettings {
-  modelRepo: NeuttsModelRepo;
+  /** One of `NEUTTS_MODEL_OPTIONS`; `parseSettings` guarantees it. */
+  modelRepo: string;
 }
 
 const NEUTTS_PARAMS = "Nano ~0.2B / Air ~0.7B";

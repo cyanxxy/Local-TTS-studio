@@ -91,7 +91,7 @@ function signature(id: SurfaceEngineId, tuning: GenerationTuningSettings, qualit
 describe("engine registry", () => {
   it("registers every engine once under its own id", () => {
     expect(new Set(ENGINE_IDS).size).toBe(ENGINE_IDS.length);
-    expect(ENGINE_IDS).toEqual(["kokoro", "supertonic", "audio8", "supertonic3", "qwen3", "neutts"]);
+    expect(ENGINE_IDS).toEqual(["kokoro", "supertonic", "audio8", "supertonic3", "neutts", "qwen3"]);
     for (const id of ENGINE_IDS) {
       expect(ENGINES[id].id).toBe(id);
       expect(getEngine(id)).toBe(ENGINES[id]);
@@ -108,12 +108,12 @@ describe("engine registry", () => {
     expectTypeOf<SetupPageEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
     expectTypeOf<RustBridgeEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
     expectTypeOf<ModelType>().toEqualTypeOf<BrowserEngineId>();
-    expectTypeOf<EngineSettings<"supertonic3">>().toEqualTypeOf<{ voice: typeof SURFACE_SETTINGS.supertonic3.voice; language: typeof SURFACE_SETTINGS.supertonic3.language }>();
+    expectTypeOf<EngineSettings<"supertonic3">>().toEqualTypeOf<{ voice: string; language: string }>();
     expectTypeOf<EngineLiveSettings<"qwen3">>().toEqualTypeOf<Qwen3LiveSettings>();
 
     expect(BROWSER_ENGINE_IDS).toEqual(["kokoro", "supertonic"]);
     expect(DESKTOP_INLINE_ENGINE_IDS).toEqual(["audio8", "supertonic3", "qwen3"]);
-    expect(SETUP_PAGE_ENGINE_IDS).toEqual(["qwen3", "neutts"]);
+    expect(SETUP_PAGE_ENGINE_IDS).toEqual(["neutts", "qwen3"]);
   });
 
   it("narrows unknown values to registered ids", () => {

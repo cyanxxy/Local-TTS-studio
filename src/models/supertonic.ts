@@ -24,8 +24,10 @@ export const SUPERTONIC_LANGUAGE_NAMES: Readonly<Record<SupertonicLanguage, stri
 };
 
 export interface SupertonicSettings {
-  voice: SupertonicVoice;
-  language: SupertonicLanguage;
+  /** One of `MODELS.supertonic.voices`; `parseSettings` guarantees it. */
+  voice: string;
+  /** One of `SUPERTONIC_LANGUAGES`; `parseSettings` guarantees it. */
+  language: string;
 }
 
 const SUPERTONIC_PARAMS = "300M";

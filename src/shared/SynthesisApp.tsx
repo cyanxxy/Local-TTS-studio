@@ -1,7 +1,7 @@
 import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { Settings2, X } from "lucide-react";
 import type { ChunkPauseKind, GenerationStats, ModelState, ModelType } from "../types";
-import { AUDIO8_VOICES, MIN_TEXT_LENGTH } from "../constants";
+import { MIN_TEXT_LENGTH } from "../constants";
 import { useModelLoader } from "../hooks/useModelLoader";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { useTTS } from "../hooks/useTTS";
@@ -29,7 +29,7 @@ import { DownloadProgress } from "../components/DownloadProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { SupertonicLanguageSettings } from "../components/SupertonicLanguageSettings";
 import { CreatorToolsPanel } from "../components/CreatorToolsPanel";
-import { getPagePath, type AppPage } from "../lib/appRouting";
+import { getPagePath, isSetupPage, type AppPage } from "../lib/appRouting";
 import {
   getDefaultSupportedModel,
   getLocalBrowserSupport,
@@ -65,9 +65,16 @@ import {
   type ReaderSection,
 } from "../lib/readerDocument";
 import { isReaderLibraryShutdownError } from "../lib/readerLibrary";
-
-type LocalRuntimePageKey = Extract<AppPage, "neutts" | "qwen3">;
-type InlineModelKey = "audio8" | "qwen3" | "supertonic3";
+import {
+  DESKTOP_INLINE_ENGINE_IDS,
+  ENGINES,
+  getEngine,
+  surfaceEngineDetail,
+  surfaceEngineVoiceLabel,
+  type DesktopInlineEngineId,
+  type SurfaceEngineId,
+  type SurfaceEngineSettings,
+} from "../models/registry";
 
 interface SynthesisAppProps {
   enableDesktopRuntimes: boolean;
@@ -86,8 +93,6 @@ const LocalRuntimePage = lazy(() => import("../components/LocalRuntimePage")
 const AppSettingsDialog = lazy(() => import("../components/AppSettingsDialog")
   .then((module) => ({ default: module.AppSettingsDialog })));
 
-const LOCAL_RUNTIME_PAGE_KEYS = ["neutts", "qwen3"] as const satisfies readonly LocalRuntimePageKey[];
-
 // Document import pulls in Readability and a zip reader — roughly a tenth of the
 // entry chunk — but is only ever reached from a user-initiated import, which is
 // already asynchronous. Load it on demand instead of at startup.
@@ -96,128 +101,35 @@ const loadReaderImport = () => import("../lib/readerImport");
 /** How often the Reader samples playback position to persist reading progress. */
 const READER_PROGRESS_SAMPLE_MS = 750;
 
-const LOCAL_RUNTIME_PAGE_CONFIG: Record<LocalRuntimePageKey, {
-  name: string;
-  releaseDate: string;
-  params: string;
-  highlights: string[];
-  links: Array<{ label: string; href: string }>;
-}> = {
-  neutts: {
-    name: "NeuTTS Nano / Air (Neuphonic)",
-    releaseDate: "February 12, 2026",
-    params: "Nano ~0.2B / Air ~0.7B",
-    highlights: [
-      "CPU-friendly speech with instant voice cloning from short references.",
-      "Nano variants for English, German, French, and Spanish.",
-      "Air Q4 and Q8 add richer English prosody and higher naturalness.",
-      "Runs on the Rust bridge with GGUF models and .npy reference codes.",
-    ],
-    links: [
-      { label: "HF Model", href: "https://huggingface.co/neuphonic/neutts-nano" },
-      { label: "HF Collection", href: "https://huggingface.co/collections/neuphonic/neutts-nano-multilingual-collection" },
-      { label: "HF Air Q4", href: "https://huggingface.co/neuphonic/neutts-air-q4-gguf" },
-      { label: "HF Air Q8", href: "https://huggingface.co/neuphonic/neutts-air-q8-gguf" },
-      { label: "GitHub", href: "https://github.com/neuphonic/neutts" },
-    ],
-  },
-  qwen3: {
-    name: "Qwen3-TTS 12Hz Native",
-    releaseDate: "January 29, 2026",
-    params: "0.6B / 1.7B",
-    highlights: [
-      "Defaults to the fastest native 0.6B CustomVoice profile for this platform.",
-      "Voice cloning available via the Base profile with a reference WAV and transcript.",
-      "VoiceDesign 1.7B creates a voice from a natural-language description.",
-      "Runs on the resident Rust bridge — these models ship as local runtime formats, not browser ONNX.",
-    ],
-    links: [
-      { label: "MLX CustomVoice 0.6B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit" },
-      { label: "MLX CustomVoice 1.7B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit" },
-      { label: "MLX Base 0.6B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit" },
-      { label: "MLX VoiceDesign 1.7B", href: "https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-1.7B-VoiceDesign-6bit" },
-      { label: "HF 0.6B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice" },
-      { label: "HF 1.7B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice" },
-      { label: "HF VoiceDesign 1.7B", href: "https://huggingface.co/Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign" },
-      { label: "HF Tokenizer", href: "https://huggingface.co/Qwen/Qwen3-TTS-Tokenizer-12Hz" },
-      { label: "GitHub", href: "https://github.com/QwenLM/Qwen3-TTS" },
-    ],
-  },
-};
-
-function isLocalRuntimePage(page: AppPage): page is LocalRuntimePageKey {
-  return (LOCAL_RUNTIME_PAGE_KEYS as readonly AppPage[]).includes(page);
-}
-
 /**
- * `badge` and `detail` are optional on `ModelToggleDesktopOption`, but this
- * builder always supplies both — and it has to, because `AdvancedReaderPage`
+ * `badge` and `detail` are optional on `ModelToggleDesktopOption`, but desktop
+ * engines always supply both — and have to, because `AdvancedReaderPage`
  * redeclares the same option shape privately with both fields required. Stating
  * the guarantee here is what lets one list feed the toggle and the Reader.
  */
-type DesktopModelOption = ModelToggleDesktopOption
-  & Required<Pick<ModelToggleDesktopOption, "badge" | "detail">>;
-
-interface DesktopModelOptionsInput {
-  audio8Available: boolean;
-  audio8Voice: string;
-  supertonic3Available: boolean;
-  supertonic3Language: string;
-  supertonic3Voice: string;
-  qwen3Available: boolean;
-  qwen3ProviderDetail: string;
-  selected: InlineModelKey | null;
-  onSelect: (model: InlineModelKey) => void;
-}
+type DesktopModelOptionData = Omit<ModelToggleDesktopOption, "onSelect">
+  & Required<Pick<ModelToggleDesktopOption, "badge" | "detail">>
+  & { key: DesktopInlineEngineId };
 
 /**
  * Studio and the Reader offer the identical desktop model list; they differ
- * only in which entry is selected and where the selection is recorded.
+ * only in which entry is selected and where the selection is recorded, so the
+ * caller attaches its own select handler.
  */
-function buildDesktopModelOptions({
-  audio8Available,
-  audio8Voice,
-  supertonic3Available,
-  supertonic3Language,
-  supertonic3Voice,
-  qwen3Available,
-  qwen3ProviderDetail,
-  selected,
-  onSelect,
-}: DesktopModelOptionsInput): DesktopModelOption[] {
-  const options: DesktopModelOption[] = [];
-  if (audio8Available) {
-    const selectedVoice = AUDIO8_VOICES.find((item) => item.id === audio8Voice);
-    options.push({
-      key: "audio8",
-      label: "Audio8 TTS",
-      badge: "Local",
-      detail: `0.6B · ONNX INT4 · ${selectedVoice?.name ?? audio8Voice}`,
-      selected: selected === "audio8",
-      onSelect: () => onSelect("audio8"),
-    });
-  }
-  if (supertonic3Available) {
-    options.push({
-      key: "supertonic3",
-      label: "Supertonic 3",
-      badge: "Electron",
-      detail: `99M · ${supertonic3Language.toUpperCase()} · ${supertonic3Voice}`,
-      selected: selected === "supertonic3",
-      onSelect: () => onSelect("supertonic3"),
-    });
-  }
-  if (qwen3Available) {
-    options.push({
-      key: "qwen3",
-      label: "Qwen3-TTS",
-      badge: "Electron",
-      detail: qwen3ProviderDetail,
-      selected: selected === "qwen3",
-      onSelect: () => onSelect("qwen3"),
-    });
-  }
-  return options;
+function describeDesktopModelOptions(
+  available: Readonly<Record<DesktopInlineEngineId, boolean>>,
+  settings: SurfaceEngineSettings,
+  selected: DesktopInlineEngineId | null,
+): DesktopModelOptionData[] {
+  return DESKTOP_INLINE_ENGINE_IDS
+    .filter((engine) => available[engine])
+    .map((engine) => ({
+      key: engine,
+      label: ENGINES[engine].label,
+      badge: ENGINES[engine].badge,
+      detail: surfaceEngineDetail(engine, settings),
+      selected: selected === engine,
+    }));
 }
 
 /**
@@ -250,12 +162,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   // The error banner is dismissible; a new, different error shows again.
   const [dismissedError, setDismissedError] = useState<string | null>(null);
   const qwen3Settings = useQwen3Runtime();
-  const qwenModeDetail = qwen3Settings.profile.mode === "customVoice"
-    ? qwen3Settings.speaker
-    : qwen3Settings.profile.mode === "voiceDesign"
-      ? "VoiceDesign"
-      : "Voice clone";
-  const qwen3ProviderDetail = `${qwen3Settings.profile.parameters} ${qwenModeDetail} · ${qwen3Settings.profile.provider === "mlx" ? "Apple MLX" : "LibTorch"}`;
   const debugProfiling = useMemo(
     () => typeof window !== "undefined"
       && import.meta.env.DEV
@@ -329,8 +235,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const [exportError, setExportError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [isImportingDocument, setIsImportingDocument] = useState(false);
-  const [studioDesktopModel, setStudioDesktopModel] = useState<InlineModelKey | null>(null);
-  const [readerDesktopModel, setReaderDesktopModel] = useState<InlineModelKey | null>(null);
+  const [studioDesktopModel, setStudioDesktopModel] = useState<DesktopInlineEngineId | null>(null);
+  const [readerDesktopModel, setReaderDesktopModel] = useState<DesktopInlineEngineId | null>(null);
   const [supertonic3Voice, setSupertonic3Voice] = useState("M1");
   const [supertonicLanguage, setSupertonicLanguage] = useState("en");
   const [supertonic3Language, setSupertonic3Language] = useState("en");
@@ -444,6 +350,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const isUsingQwen3Inline = isReaderUsingQwen3 || isStudioUsingQwen3;
   const isUsingSupertonic3Inline = isReaderUsingSupertonic3 || isStudioUsingSupertonic3;
   const isUsingAudio8Inline = isReaderUsingAudio8 || isStudioUsingAudio8;
+  const studioEngineId: SurfaceEngineId = studioDesktopModel ?? activeModel;
+  const readerEngineId: SurfaceEngineId = readerDesktopModel ?? activeModel;
 
   const {
     kokoroState,
@@ -579,6 +487,23 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     return resolveKokoroVoice(voicesByModel.kokoro, kokoroVoices) ?? voicesByModel.kokoro;
   }, [kokoroVoices, voicesByModel.kokoro]);
   const voice = activeModel === "kokoro" ? kokoroVoice : voicesByModel.supertonic;
+  // What every engine a surface can select reads right now, keyed by engine.
+  // Picker rows, voice labels and Reader cache signatures all derive from it.
+  const surfaceEngineSettings = useMemo<SurfaceEngineSettings>(() => ({
+    kokoro: { voice: kokoroVoice },
+    supertonic: { voice: voicesByModel.supertonic, language: supertonicLanguage },
+    audio8: { voice: audio8Voice },
+    supertonic3: { voice: supertonic3Voice, language: supertonic3Language },
+    qwen3: qwen3Settings,
+  }), [
+    audio8Voice,
+    kokoroVoice,
+    qwen3Settings,
+    supertonic3Language,
+    supertonic3Voice,
+    supertonicLanguage,
+    voicesByModel.supertonic,
+  ]);
   const {
     isRetakingSegment,
     isGenerationBusy,
@@ -640,7 +565,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
   const selectBrowserModel = useCallback((
     model: ModelType,
-    currentDesktopModel: InlineModelKey | null,
+    currentDesktopModel: DesktopInlineEngineId | null,
     clearDesktopModel: () => void,
   ) => {
     if (!isModelSupportedInBrowser(model, browserSupport)) return;
@@ -986,9 +911,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   }, [isReaderPage, navigateToPage]);
 
   const selectInlineDesktopModel = useCallback((
-    page: InlineModelKey,
-    currentDesktopModel: InlineModelKey | null,
-    setDesktopModel: (model: InlineModelKey) => void,
+    page: DesktopInlineEngineId,
+    currentDesktopModel: DesktopInlineEngineId | null,
+    setDesktopModel: (model: DesktopInlineEngineId) => void,
   ) => {
     if (currentDesktopModel === page) return;
     cancelActiveGeneration();
@@ -1009,39 +934,33 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     supertonic3Runtime,
   ]);
 
-  const handleStudioDesktopModelSelect = useCallback((page: InlineModelKey) => {
+  const handleStudioDesktopModelSelect = useCallback((page: DesktopInlineEngineId) => {
     selectInlineDesktopModel(page, studioDesktopModel, setStudioDesktopModel);
   }, [selectInlineDesktopModel, studioDesktopModel]);
 
-  const handleReaderDesktopModelSelect = useCallback((page: InlineModelKey) => {
+  const handleReaderDesktopModelSelect = useCallback((page: DesktopInlineEngineId) => {
     flushReaderAudioRef.current();
     selectInlineDesktopModel(page, readerDesktopModel, setReaderDesktopModel);
   }, [readerDesktopModel, selectInlineDesktopModel]);
 
-  const sharedDesktopModelOptions = useMemo(() => ({
-    audio8Available: desktopRuntimesAvailable,
-    audio8Voice,
-    supertonic3Available,
-    supertonic3Language,
-    supertonic3Voice,
-    qwen3Available: qwen3Settings.available,
-    qwen3ProviderDetail,
-  }), [audio8Voice, desktopRuntimesAvailable, qwen3ProviderDetail, qwen3Settings.available, supertonic3Available, supertonic3Language, supertonic3Voice]);
+  const desktopEngineAvailability = useMemo<Record<DesktopInlineEngineId, boolean>>(() => ({
+    audio8: desktopRuntimesAvailable,
+    supertonic3: supertonic3Available,
+    qwen3: qwen3Settings.available,
+  }), [desktopRuntimesAvailable, qwen3Settings.available, supertonic3Available]);
 
-  const studioDesktopModelOptions = useMemo(() => buildDesktopModelOptions({
-    ...sharedDesktopModelOptions,
-    selected: studioDesktopModel,
-    onSelect: handleStudioDesktopModelSelect,
-  }), [handleStudioDesktopModelSelect, sharedDesktopModelOptions, studioDesktopModel]);
+  const studioDesktopModelOptions = useMemo(() => (
+    describeDesktopModelOptions(desktopEngineAvailability, surfaceEngineSettings, studioDesktopModel)
+      .map((option) => ({ ...option, onSelect: () => handleStudioDesktopModelSelect(option.key) }))
+  ), [desktopEngineAvailability, handleStudioDesktopModelSelect, studioDesktopModel, surfaceEngineSettings]);
 
-  const readerDesktopModelOptions = useMemo(() => buildDesktopModelOptions({
-    ...sharedDesktopModelOptions,
-    selected: readerDesktopModel,
-    onSelect: handleReaderDesktopModelSelect,
-  }), [handleReaderDesktopModelSelect, readerDesktopModel, sharedDesktopModelOptions]);
+  const readerDesktopModelOptions = useMemo(() => (
+    describeDesktopModelOptions(desktopEngineAvailability, surfaceEngineSettings, readerDesktopModel)
+      .map((option) => ({ ...option, onSelect: () => handleReaderDesktopModelSelect(option.key) }))
+  ), [desktopEngineAvailability, handleReaderDesktopModelSelect, readerDesktopModel, surfaceEngineSettings]);
 
   const mountedLocalRuntimePages = useMemo(() => {
-    if (!enableDesktopRuntimes || !isLocalRuntimePage(activePage)) return [];
+    if (!enableDesktopRuntimes || !isSetupPage(activePage)) return [];
     // Local runtime pages own model/audio buffers and an active native request.
     // Unmounting the inactive page releases those resources immediately instead
     // of retaining every runtime visited during the session.
@@ -1214,7 +1133,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
         return;
       }
 
-      if (isLocalRuntimePage(activePage) || isEditableShortcutTarget(event.target)) return;
+      if (isSetupPage(activePage) || isEditableShortcutTarget(event.target)) return;
 
       // A focused control keeps Space for itself: Space on Download should
       // download, not toggle playback behind the user's back.
@@ -1773,9 +1692,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           localInferenceSupported ? (
             <>
             <DownloadProgress
-              kokoroState={kokoroState}
-              supertonicState={supertonicState}
-              supertonic3State={isStudioUsingSupertonic3 ? supertonic3Runtime.modelState : undefined}
+              states={{
+                kokoro: kokoroState,
+                supertonic: supertonicState,
+                ...(isStudioUsingSupertonic3 ? { supertonic3: supertonic3Runtime.modelState } : {}),
+              }}
             />
 
             <div className="mt-6 surface rounded-[24px]">
@@ -1843,16 +1764,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
                   <ControlsProvider
                     value={{
-                      // `Controls` reads this for one decision only: whether to
-                      // render the Supertonic quality slider. The desktop
-                      // runtimes have no `ModelType` of their own, so they map
-                      // onto whichever browser model wants the same control —
-                      // Supertonic 3 exposes quality, Audio8 and Qwen3 do not.
-                      activeModel: isStudioUsingQwen3 || isStudioUsingAudio8
-                        ? "kokoro"
-                        : isStudioUsingSupertonic3
-                          ? "supertonic"
-                          : activeModel,
+                      // Only engines with a quality range get the slider.
+                      qualityRange: getEngine(studioEngineId).capabilities.quality,
                       quality,
                       onQualityChange: handleQualityChange,
                       onGenerate: handleGenerate,
@@ -1960,14 +1873,14 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onModelChange={handleReaderModelChange}
               desktopModelOptions={readerDesktopModelOptions}
               desktopQwenMode={isReaderUsingQwen3 ? qwen3Settings.profile.mode : undefined}
-              estimatedWordTrackingStable={!isReaderUsingQwen3 || !readerRuntime.isGenerating}
-              desktopVoiceLabel={isReaderUsingAudio8
-                ? AUDIO8_VOICES.find((item) => item.id === audio8Voice)?.name ?? audio8Voice
-                : isReaderUsingQwen3
-                ? qwen3Settings.profile.mode === "customVoice"
-                  ? qwen3Settings.speaker.replace(/_/g, " ")
-                  : qwenModeDetail
-                : isReaderUsingSupertonic3 ? supertonic3Voice : undefined}
+              // Unit-streaming engines keep extending a segment's duration while
+              // it generates, so estimated word timing settles only afterwards.
+              estimatedWordTrackingStable={
+                getEngine(readerEngineId).capabilities.streamingGranularity !== "unit" || !readerRuntime.isGenerating
+              }
+              desktopVoiceLabel={readerDesktopModel
+                ? surfaceEngineVoiceLabel(readerDesktopModel, surfaceEngineSettings)
+                : undefined}
               desktopModelSettings={isReaderUsingAudio8
                 ? (
                   <Audio8InlineSettings
@@ -2024,9 +1937,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onSkipBackward={() => player.skip(-10)}
               onSkipForward={() => player.skip(10)}
               onDownload={handleDownloadAudio}
-              isRetaking={isReaderUsingAudio8 || isReaderUsingQwen3 || isReaderUsingSupertonic3 ? false : isRetakingSegment}
+              isRetaking={getEngine(readerEngineId).capabilities.retake && isRetakingSegment}
               onRetakeSegment={handleRetakeSegment}
-              canRetakeSegments={!isReaderUsingAudio8 && !isReaderUsingQwen3 && !isReaderUsingSupertonic3}
+              canRetakeSegments={getEngine(readerEngineId).capabilities.retake}
               onJumpToSegment={handleJumpToSegment}
               generationError={readerRuntime.error}
               immersive={readerImmersive}
@@ -2038,7 +1951,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
         </div>
 
         {mountedLocalRuntimePages.map((page) => {
-          const config = LOCAL_RUNTIME_PAGE_CONFIG[page];
+          const config = ENGINES[page].setupPage;
           const isActive = activePage === page;
           return (
             <section

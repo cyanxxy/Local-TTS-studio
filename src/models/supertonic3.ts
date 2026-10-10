@@ -33,8 +33,10 @@ export const SUPERTONIC3_CHUNK_LIMITS = {
 };
 
 export interface Supertonic3Settings {
-  voice: Supertonic3Voice;
-  language: Supertonic3Language;
+  /** One of `SUPERTONIC3_VOICES`; `parseSettings` guarantees it. */
+  voice: string;
+  /** One of `SUPERTONIC3_LANGUAGES`; `parseSettings` guarantees it. */
+  language: string;
 }
 
 const SUPERTONIC3_PARAMS = "99M";

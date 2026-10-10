@@ -53,8 +53,10 @@ type Qwen3InstructMode = Extract<Qwen3EngineMode, "customVoice" | "voiceDesign">
 export interface Qwen3Settings {
   /** Null keeps the platform's default profile. */
   profileRepo: string | null;
-  speaker: Qwen3EngineSpeaker;
-  language: Qwen3EngineLanguage;
+  /** One of `QWEN3_ENGINE_SPEAKERS`; `parseSettings` guarantees it. */
+  speaker: string;
+  /** One of `QWEN3_ENGINE_LANGUAGES`; `parseSettings` guarantees it. */
+  language: string;
   /** VoiceDesign describes a whole voice and CustomVoice only styles one, so each keeps its own text. */
   instructByMode: Record<Qwen3InstructMode, string>;
   temperature: number;

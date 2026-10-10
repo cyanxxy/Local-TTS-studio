@@ -12,6 +12,8 @@ import type {
   EngineSetupPage,
   EngineSignatureContext,
   EngineSignatureParts,
+  EngineVoice,
+  EngineVoiceContext,
 } from "./types";
 
 /**
@@ -30,8 +32,8 @@ export const ENGINES = defineEngineRegistry({
   supertonic: supertonicEngine,
   audio8: audio8Engine,
   supertonic3: supertonic3Engine,
-  qwen3: qwen3Engine,
   neutts: neuttsEngine,
+  qwen3: qwen3Engine,
 });
 
 function defineEngineRegistry<const Engines extends Record<string, AnyEngineDescriptor>>(
@@ -108,6 +110,10 @@ export function isBrowserEngineId(value: unknown): value is BrowserEngineId {
 
 export function isDesktopInlineEngineId(value: unknown): value is DesktopInlineEngineId {
   return typeof value === "string" && (DESKTOP_INLINE_ENGINE_IDS as readonly string[]).includes(value);
+}
+
+export function engineVoices(id: EngineId, context?: EngineVoiceContext): readonly EngineVoice[] {
+  return TYPED_ENGINES[id].voices(context);
 }
 
 export function engineVoiceLabel<Id extends EngineId>(id: Id, settings: EngineLiveSettings<Id>): string {

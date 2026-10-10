@@ -8,7 +8,7 @@ interface LocalRuntimeSidebarProps {
   busy: boolean;
   cacheInfo: LocalTtsCacheInfo | null;
   electronAvailable: boolean;
-  links: Array<{ label: string; href: string }>;
+  links: ReadonlyArray<{ label: string; href: string }>;
   onClearCache: () => void;
   onRedownload: () => void;
   showRedownload?: boolean;

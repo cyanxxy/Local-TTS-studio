@@ -2,7 +2,7 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 import type { ModelType, ModelState } from "../types";
-import { MODELS } from "../constants";
+import { BROWSER_ENGINE_IDS, getEngine } from "../models/registry";
 
 interface ModelToggleProps {
   activeModel: ModelType;
@@ -41,11 +41,6 @@ interface MenuPosition {
   maxHeight: number;
 }
 
-const MODEL_PARAMS: Record<ModelType, string> = {
-  kokoro: "82M",
-  supertonic: "300M",
-};
-const DEFAULT_VISIBLE_MODELS: readonly ModelType[] = ["kokoro", "supertonic"];
 const EMPTY_DESKTOP_MODEL_OPTIONS: ModelToggleDesktopOption[] = [];
 
 const FOCUSABLE_SELECTOR = [
@@ -89,7 +84,7 @@ export function ModelToggle({
   onModelChange,
   kokoroState,
   supertonicState,
-  visibleModels = DEFAULT_VISIBLE_MODELS,
+  visibleModels = BROWSER_ENGINE_IDS,
   unavailableModels,
   desktopModelOptions = EMPTY_DESKTOP_MODEL_OPTIONS,
 }: ModelToggleProps) {
@@ -104,22 +99,26 @@ export function ModelToggle({
   const hasSelectedDesktopModel = desktopModelOptions.some((option) => option.selected);
 
   const choices = useMemo<ModelChoice[]>(() => {
-    const browserModels: Array<{ key: ModelType; label: string; state: ModelState }> = [
-      { key: "kokoro", label: MODELS.kokoro.label, state: kokoroState },
-      { key: "supertonic", label: MODELS.supertonic.label, state: supertonicState },
-    ];
+    const browserStates: Record<ModelType, ModelState> = {
+      kokoro: kokoroState,
+      supertonic: supertonicState,
+    };
     return [
-      ...browserModels
-        .filter(({ key }) => visibleModels.includes(key))
-        .map(({ key, label, state }) => ({
-          id: key,
-          label,
-          detail: `${MODEL_PARAMS[key]} · ${statusText(state)}`,
-          selected: !hasSelectedDesktopModel && activeModel === key,
-          state,
-          unavailableReason: unavailableModels?.[key],
-          onSelect: () => onModelChange(key),
-        })),
+      ...BROWSER_ENGINE_IDS
+        .filter((id) => visibleModels.includes(id))
+        .map((id) => {
+          const engine = getEngine(id);
+          const state = browserStates[id];
+          return {
+            id,
+            label: engine.label,
+            detail: `${engine.params} · ${statusText(state)}`,
+            selected: !hasSelectedDesktopModel && activeModel === id,
+            state,
+            unavailableReason: unavailableModels?.[id],
+            onSelect: () => onModelChange(id),
+          };
+        }),
       ...desktopModelOptions.map((option) => ({
         id: `desktop-${option.key}`,
         label: option.label,
