@@ -206,8 +206,10 @@ describe("pin-hf-assets manifests", () => {
     ]);
   });
 
-  it("keeps the committed Supertonic 3 manifest identical to what its regenerate command renders", () => {
-    const path = "src/workers/manifests/supertonic3.ts";
+  it.each([
+    "src/workers/manifests/kokoro.ts",
+    "src/workers/manifests/supertonic3.ts",
+  ])("keeps the committed %s identical to what its regenerate command renders", (path) => {
     const text = readFileSync(path, "utf8");
     const command = /^\/\/ {3}(node scripts\/pin-hf-assets\.mjs .+)$/m.exec(text)?.[1];
     expect(command).toBeDefined();
