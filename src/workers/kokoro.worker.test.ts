@@ -35,6 +35,42 @@ function createInstance(responses: unknown[], voices?: Record<string, unknown>):
   };
 }
 
+interface FromPretrainedOptions {
+  dtype?: string;
+  device?: string;
+  progress_callback?: (info: unknown) => void;
+}
+
+// Pinned sizes from src/workers/manifests/kokoro.ts.
+const FILE_SIZES: Record<string, number> = {
+  "config.json": 44,
+  "tokenizer.json": 3_497,
+  "tokenizer_config.json": 113,
+  "onnx/model.onnx": 325_532_232,
+  "onnx/model_quantized.onnx": 92_361_116,
+};
+
+function modelFile(dtype: string | undefined): string {
+  return dtype === "fp32" ? "onnx/model.onnx" : "onnx/model_quantized.onnx";
+}
+
+/** What Transformers.js 3 reports while kokoro-js downloads a model and its tokenizer. */
+function downloadEvents(dtype: string | undefined): unknown[] {
+  const model = modelFile(dtype);
+  return [
+    { status: "initiate", file: "config.json" },
+    { status: "progress", file: "config.json", loaded: 44, total: 44 },
+    { status: "done", file: "config.json" },
+    { status: "initiate", file: model },
+    { status: "progress", file: model, loaded: FILE_SIZES[model] / 2, total: FILE_SIZES[model] },
+    { status: "done", file: model },
+    { status: "initiate", file: "tokenizer.json" },
+    { status: "done", file: "tokenizer.json" },
+    { status: "initiate", file: "tokenizer_config.json" },
+    { status: "done", file: "tokenizer_config.json" },
+  ];
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -68,9 +104,8 @@ async function loadWorkerModule({
   vi.stubGlobal("self", workerGlobal);
 
   const queue = instances ?? [createInstance([createRawAudio()], { af_heart: {}, am_echo: {} })];
-  const fromPretrained = vi.fn(async (_modelId: string, options: { progress_callback?: (info: unknown) => void }) => {
-    options.progress_callback?.({ file: "model.onnx", status: "progress", loaded: 5, total: 10 });
-    options.progress_callback?.({ file: "model.onnx", status: "done" });
+  const fromPretrained = vi.fn(async (_modelId: string, options: FromPretrainedOptions) => {
+    for (const event of downloadEvents(options.dtype)) options.progress_callback?.(event);
     const next = queue.shift();
     if (!next) throw new Error("No Kokoro instance queued.");
     return next;
@@ -89,21 +124,9 @@ async function loadWorkerModule({
   vi.doMock("../lib/onnxRuntime", () => ({
     configureKokoroOnnxRuntime: vi.fn(),
   }));
-  vi.doMock("../constants", () => ({
+  vi.doMock("../constants", async (importOriginal) => ({
+    ...await importOriginal<typeof import("../constants")>(),
     KOKORO_FALLBACK_VOICES: fallbackVoices,
-    KOKORO_MODEL_ID: "onnx-community/Kokoro-82M-v1.0-ONNX",
-    KOKORO_MODEL_REVISION: "1939ad2a8e416c0acfeecc08a694d14ef25f2231",
-    KOKORO_WEBGPU_MAX_INFERENCE_CHARS: 520,
-    KOKORO_WASM_MAX_INFERENCE_CHARS: 280,
-    MAX_CHUNK_LENGTH: 1000,
-    SUPERTONIC_MIN_CHUNK_LENGTH: 100,
-    MODELS: {
-      kokoro: {
-        defaultVoice: "af_heart",
-      },
-    },
-    SPEED_MAX: 2,
-    SPEED_MIN: 0.5,
   }));
   vi.doMock("../lib/webgpu", () => ({
     canInitializeWebGPU: vi.fn(async () => canUseWebGPU),
@@ -144,8 +167,14 @@ describe("kokoro.worker", () => {
       dtype: "q8",
       device: "wasm",
     }));
-    expect(postedMessages).toContainEqual({ type: "LOAD_PROGRESS", percent: 0 });
-    expect(postedMessages).toContainEqual({ type: "LOAD_PROGRESS", percent: 50 });
+    // Byte-weighted over the pinned file sizes: the 44-byte config barely
+    // registers, half of the 92 MB q8 model is half of the 94% download span,
+    // and READY covers session creation.
+    expect(postedMessages.filter((message) => message.type === "LOAD_PROGRESS")).toEqual([
+      { type: "LOAD_PROGRESS", percent: 0 },
+      { type: "LOAD_PROGRESS", percent: 47 },
+      { type: "LOAD_PROGRESS", percent: 94 },
+    ]);
     expect(postedMessages.at(-1)).toEqual({
       type: "READY",
       voices: ["af_heart", "af_bella"],
@@ -341,11 +370,11 @@ describe("kokoro.worker", () => {
     noVoice.list_voices = vi.fn(() => []);
     const loaded = await loadWorkerModule({ instances: [noVoice] });
     loaded.dispatch({ type: "GENERATE", text: "No model yet.", voice: "af_heart", speed: 1, quality: 5 });
-    expect(loaded.postedMessages.at(-1)).toEqual({
+    await vi.waitFor(() => expect(loaded.postedMessages.at(-1)).toEqual({
       type: "ERROR",
       message: "Model not loaded yet",
       scope: "generate",
-    });
+    }));
 
     loaded.dispatch({ type: "LOAD" });
     await vi.waitFor(() => expect(loaded.postedMessages.some((message) => message.type === "READY")).toBe(true));
@@ -400,5 +429,59 @@ describe("Kokoro load timeout cleanup", () => {
       vi.useRealTimers();
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("Kokoro soft abort", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("stops after the in-flight unit and keeps the model loaded for the next generation", async () => {
+    const pending = deferred<ReturnType<typeof createRawAudio>>();
+    const instance = createInstance([pending.promise], { af_heart: {} });
+    const { dispatch, fromPretrained, postedMessages, workerGlobal } = await loadWorkerModule({ instances: [instance] });
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+    const afterLoad = postedMessages.length;
+
+    // Units never cross a line break, so this is two units.
+    dispatch({ type: "GENERATE", generationId: "a", text: "First line.\nSecond line.", voice: "af_heart", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(instance.generate).toHaveBeenCalledOnce());
+    dispatch({ type: "ABORT", generationId: "a" });
+    dispatch({ type: "GENERATE", generationId: "b", text: "Only line.", voice: "af_heart", speed: 1, quality: 5 });
+    await flushPromises();
+    // "b" waits for the aborted inference instead of running beside it.
+    expect(instance.generate).toHaveBeenCalledOnce();
+
+    pending.resolve(createRawAudio());
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "b" }));
+
+    expect(postedMessages.slice(afterLoad).map((message) => [message.type, "generationId" in message ? message.generationId : undefined]))
+      .toEqual([["ABORTED", "a"], ["AUDIO_CHUNK", "b"], ["GENERATION_COMPLETE", "b"]]);
+    expect(instance.generate).toHaveBeenCalledTimes(2);
+    expect(fromPretrained).toHaveBeenCalledOnce();
+    expect(workerGlobal.close).not.toHaveBeenCalled();
+  });
+
+  it("waits for the running inference before a forced reload disposes the model", async () => {
+    const pending = deferred<ReturnType<typeof createRawAudio>>();
+    const first = createInstance([pending.promise]);
+    first.dispose = vi.fn(async () => undefined);
+    const second = createInstance([]);
+    const { dispatch, postedMessages } = await loadWorkerModule({ instances: [first, second] });
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "Only sentence.", voice: "af_heart", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(first.generate).toHaveBeenCalledOnce());
+    dispatch({ type: "LOAD", forceReload: true });
+    await flushPromises();
+    expect(first.dispose).not.toHaveBeenCalled();
+
+    pending.resolve(createRawAudio());
+    await vi.waitFor(() => expect(postedMessages.filter((message) => message.type === "READY")).toHaveLength(2));
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect(postedMessages.some((message) => message.type === "AUDIO_CHUNK")).toBe(false);
   });
 });
