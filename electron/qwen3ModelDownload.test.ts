@@ -1,11 +1,11 @@
 // @vitest-environment node
 
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import fs from "fs";
 import type { IncomingMessage } from "http";
 import os from "os";
 import path from "path";
-import { Readable } from "stream";
+import { PassThrough, Readable } from "stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Qwen3Profile } from "./qwen3Profiles";
 import {
@@ -321,6 +321,35 @@ describe("download stream integrity", () => {
       { sha256: "0".repeat(64) },
     )).rejects.toThrow(/digest mismatch/);
     expect(fs.existsSync(destination)).toBe(false);
+    expect(fs.readdirSync(path.dirname(destination))).toEqual([]);
+  });
+
+  it("writes through a process-unique partial and leaves another instance's transfer alone", async () => {
+    const destination = path.join(makeTempDir(), "model.safetensors");
+    // The fixed name older builds used, and a live transfer by another instance.
+    fs.writeFileSync(`${destination}.download`, "stale half body");
+    const foreign = `${destination}.${process.ppid}.${randomUUID()}.partial`;
+    fs.writeFileSync(foreign, "another instance's bytes");
+    const body = FILES.get("model.safetensors")!;
+
+    await expect(downloadHuggingFaceFile(url, destination, () => {}, () => Promise.resolve(fakeResponse(body)), {
+      sizeBytes: body.byteLength,
+      sha256: digest(body),
+    })).resolves.toEqual({ downloaded: true, sizeBytes: body.byteLength, sha256: digest(body) });
+    expect(fs.readdirSync(path.dirname(destination)).sort())
+      .toEqual(["model.safetensors", path.basename(foreign)].sort());
+  });
+
+  it("stops a body as soon as it overruns the pinned size", async () => {
+    const destination = path.join(makeTempDir(), "model.safetensors");
+    const stream = new PassThrough();
+    const response = Object.assign(stream, { statusCode: 200, headers: {} }) as unknown as IncomingMessage;
+    const pending = downloadHuggingFaceFile(url, destination, () => {}, () => Promise.resolve(response), { sizeBytes: 4 });
+    stream.write(Buffer.alloc(16, 1));
+
+    await expect(pending).rejects.toThrow(`Download size mismatch for ${url}: received 16 of 4 bytes.`);
+    expect(stream.destroyed).toBe(true);
+    expect(fs.readdirSync(path.dirname(destination))).toEqual([]);
   });
 
   it("fails a stalled response on the inactivity deadline", async () => {
