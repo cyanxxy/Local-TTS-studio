@@ -64,11 +64,13 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
   const loadAttempt = useRef<LoadAttempt | null>(null);
   const mounted = useRef(true);
   const bridge = window.electron?.audio8;
-  const bridgeRef = useRef(bridge);
-  const playerRef = useRef(player);
-  bridgeRef.current = bridge;
-  playerRef.current = player;
+  // The player's functions are stable for its lifetime, so depending on them
+  // (rather than on the player object, which changes with its state) keeps
+  // every callback below stable while audio streams.
+  const { beginStream, endStream, reset: resetPlayer, scheduleChunk, stopAll } = player;
 
+  // The preload bridge and the player's functions never change while the page
+  // is open, so this runs its cleanup on unmount only.
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -77,10 +79,10 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
       const requestId = activeRequest.current;
       activeRequest.current = null;
       generationAttempt.current = null;
-      if (requestId && bridgeRef.current) void bridgeRef.current.cancel({ requestId }).catch(() => undefined);
-      playerRef.current.endStream();
+      if (requestId && bridge) void bridge.cancel({ requestId }).catch(() => undefined);
+      endStream();
     };
-  }, []);
+  }, [bridge, endStream]);
 
   const refreshCacheInfo = useCallback(async () => {
     if (!bridge) return;
@@ -153,8 +155,8 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
     generationAttempt.current = null;
     if (requestId && bridge) void bridge.cancel({ requestId }).catch(() => undefined);
     setIsGenerating(false);
-    player.endStream();
-  }, [bridge, player]);
+    endStream();
+  }, [bridge, endStream]);
 
   useEffect(() => {
     if (!active && activeRequest.current) cancelActiveGeneration();
@@ -162,12 +164,12 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
 
   const resetGeneratedAudio = useCallback(() => {
     cancelActiveGeneration();
-    player.reset();
+    resetPlayer();
     setShowPlayer(false);
     setGenerationProgress(0);
     setStats(INITIAL_STATS);
     setError(null);
-  }, [cancelActiveGeneration, player, setShowPlayer]);
+  }, [cancelActiveGeneration, resetPlayer, setShowPlayer]);
 
   const canGenerate = modelState.ready && !isGenerating && text.trim().length >= MIN_TEXT_LENGTH;
   const handleGenerate = useCallback(() => {
@@ -182,8 +184,8 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
     setGenerationProgress(0);
     setStats(INITIAL_STATS);
     setError(null);
-    player.reset();
-    player.beginStream();
+    resetPlayer();
+    beginStream();
     setShowPlayer(true);
     // The same passages the Reader previews for Audio8.
     const chunks = chunkAudio8Text(text);
@@ -209,7 +211,7 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
           const generated = new Float32Array(result.audio);
           const pauseSec = index + 1 === chunks.length ? 0 : resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec, generationSettings.pauseOverridesSec);
           const audio = pauseSec > 0 ? concatFloat32Arrays([generated, createSilence(pauseSec, result.sampleRate)]) : generated;
-          await player.scheduleChunk({ audio, samplingRate: result.sampleRate, text: chunk.text, index: index + 1, total: chunks.length, textStart: chunk.start, textEnd: chunk.end, pauseAfterSec: pauseSec, pauseKind: chunk.pauseKind });
+          await scheduleChunk({ audio, samplingRate: result.sampleRate, text: chunk.text, index: index + 1, total: chunks.length, textStart: chunk.start, textEnd: chunk.end, pauseAfterSec: pauseSec, pauseKind: chunk.pauseKind });
           synthesizedSeconds += generated.length / result.sampleRate;
           playbackSeconds += audio.length / result.sampleRate;
           processedCharacters += chunk.text.length;
@@ -222,23 +224,34 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
           activeRequest.current = null;
           generationAttempt.current = null;
           setIsGenerating(false);
-          player.endStream({ completed: true });
+          endStream({ completed: true });
         }
       } catch (cause) {
         if (version !== generationVersion.current) return;
         activeRequest.current = null;
         generationAttempt.current = null;
         setIsGenerating(false);
-        player.endStream();
+        endStream();
         setError(errorMessage(cause));
       }
     })();
-  }, [bridge, canGenerate, generationSettings, player, setShowPlayer, text, voice]);
+  }, [
+    beginStream,
+    bridge,
+    canGenerate,
+    endStream,
+    generationSettings,
+    resetPlayer,
+    scheduleChunk,
+    setShowPlayer,
+    text,
+    voice,
+  ]);
 
   const handleStop = useCallback(() => {
     cancelActiveGeneration();
-    player.stopAll();
-  }, [cancelActiveGeneration, player]);
+    stopAll();
+  }, [cancelActiveGeneration, stopAll]);
   const retryLoad = useCallback(() => setLoadRevision((revision) => revision + 1), []);
 
   const clearCache = useCallback(() => {

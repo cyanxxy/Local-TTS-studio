@@ -56,8 +56,16 @@ export function useGenerationControl({
 }: UseGenerationControlOptions): UseGenerationControlReturn {
   const [isRetakingSegment, setIsRetakingSegment] = useState(false);
   const [retakeError, setRetakeError] = useState<string | null>(null);
-  const beginStream = player.beginStream;
-  const endStream = player.endStream;
+  // The player's functions are stable for its lifetime; the object is not.
+  const {
+    beginStream,
+    endStream,
+    replaceSegment,
+    reset: resetPlayer,
+    segments,
+    stopAll,
+  } = player;
+  const { cancel: cancelTts, generate: generateTts, isGenerating: isTtsGenerating } = tts;
 
   const retakeWorkerRef = useRef<Worker | null>(null);
   const retakeListenerRef = useRef<((event: MessageEvent<WorkerOutMessage>) => void) | null>(null);
@@ -89,10 +97,10 @@ export function useGenerationControl({
   }, [clearRetakeListener]);
 
   useEffect(() => {
-    if (!tts.isGenerating) {
+    if (!isTtsGenerating) {
       endStream();
     }
-  }, [endStream, tts.isGenerating]);
+  }, [endStream, isTtsGenerating]);
 
   const cancelRetake = useCallback((notifyWorker: boolean) => {
     const retakeModel = retakeModelRef.current;
@@ -105,40 +113,40 @@ export function useGenerationControl({
 
   const resetGeneratedAudio = useCallback(() => {
     setRetakeError(null);
-    player.reset();
+    resetPlayer();
     setShowPlayer(false);
-  }, [player, setShowPlayer]);
+  }, [resetPlayer, setShowPlayer]);
 
   const cancelActiveGeneration = useCallback((forceCancelTts: boolean = false) => {
     const hadRetake = retakeWorkerRef.current !== null;
     cancelRetake(true);
-    if (forceCancelTts || tts.isGenerating) {
-      tts.cancel();
+    if (forceCancelTts || isTtsGenerating) {
+      cancelTts();
       if (!hadRetake) hardRestartModel(activeModel);
     }
-  }, [activeModel, cancelRetake, hardRestartModel, tts]);
+  }, [activeModel, cancelRetake, cancelTts, hardRestartModel, isTtsGenerating]);
 
-  const isGenerationBusy = tts.isGenerating || isRetakingSegment;
+  const isGenerationBusy = isTtsGenerating || isRetakingSegment;
 
   const handleGenerate = useCallback(() => {
     if (!canGenerate || isGenerationBusy) return;
     cancelRetake(false);
     setRetakeError(null);
-    player.reset();
+    resetPlayer();
     beginStream();
     setShowPlayer(true);
-    tts.generate(text, activeModel, voice, generationSettings);
+    generateTts(text, activeModel, voice, generationSettings);
   }, [
     activeModel,
     beginStream,
     canGenerate,
     cancelRetake,
+    generateTts,
     generationSettings,
     isGenerationBusy,
-    player,
+    resetPlayer,
     setShowPlayer,
     text,
-    tts,
     voice,
   ]);
 
@@ -146,13 +154,13 @@ export function useGenerationControl({
     // Only a running generation needs its worker torn down; forcing it here
     // also reloaded the model every time Stop merely ended playback.
     cancelActiveGeneration();
-    player.stopAll();
-  }, [cancelActiveGeneration, player]);
+    stopAll();
+  }, [cancelActiveGeneration, stopAll]);
 
   const handleRetakeSegment = useCallback((segmentId: string) => {
     if (!segmentId || isGenerationBusy) return;
 
-    const segment = player.segments.find((entry) => entry.id === segmentId);
+    const segment = segments.find((entry) => entry.id === segmentId);
     const worker = activeModel === "kokoro" ? kokoroWorker.current : supertonicWorker.current;
 
     if (!segment || !worker) return;
@@ -184,7 +192,7 @@ export function useGenerationControl({
           if (chunks.length === 0) return;
           const samplingRate = chunks[0].samplingRate;
           const merged = concatFloat32Arrays(chunks.map((chunk) => chunk.audio));
-          player.replaceSegment(segment.id, {
+          replaceSegment(segment.id, {
             audio: merged,
             samplingRate,
             text: segment.text,
@@ -241,7 +249,8 @@ export function useGenerationControl({
     generationSettings,
     isGenerationBusy,
     kokoroWorker,
-    player,
+    replaceSegment,
+    segments,
     setShowPlayer,
     supertonicWorker,
     voice,

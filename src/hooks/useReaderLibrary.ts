@@ -604,7 +604,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     if (persistent) await deleteCachedReaderAudio(documentId, sectionId);
   }, [persistent]);
 
-  return {
+  return useMemo(() => ({
     documents,
     activeDocument,
     loading,
@@ -625,5 +625,26 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     saveAudio,
     loadAudio,
     clearAudio,
-  };
+  }), [
+    activeDocument,
+    addBookmark,
+    addNote,
+    clearAudio,
+    createDocument,
+    deleteDocument,
+    documents,
+    error,
+    finalizeActiveTextEdit,
+    loadAudio,
+    loading,
+    openDocument,
+    persistent,
+    removeBookmark,
+    removeNote,
+    saveAudio,
+    updateActiveMetadata,
+    updateActiveText,
+    updateNote,
+    updateProgress,
+  ]);
 }

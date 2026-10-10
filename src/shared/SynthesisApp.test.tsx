@@ -120,6 +120,7 @@ const mock = vi.hoisted(() => {
       getContentEpoch: vi.fn(() => 0),
       truncateAudioChunks: vi.fn(),
       getAudioCacheSnapshot: vi.fn((): CachedReaderAudio["chunks"] => []),
+      getPlaybackSnapshot: vi.fn(() => ({ playbackRate: 1, totalDuration: 4, synthesisComplete: false })),
       restoreAudioCache: vi.fn(),
       beginStream: vi.fn(),
       endStream: vi.fn(),
@@ -655,6 +656,12 @@ function resetMockState() {
     getContentEpoch: vi.fn(() => 0),
     truncateAudioChunks: vi.fn(),
     getAudioCacheSnapshot: vi.fn(() => []),
+    // Read from the latest mocked player state, as the real one reads its refs.
+    getPlaybackSnapshot: vi.fn(() => ({
+      playbackRate: mock.player.playbackRate,
+      totalDuration: mock.player.totalDuration,
+      synthesisComplete: mock.player.isSynthesisComplete,
+    })),
     restoreAudioCache: vi.fn(),
     beginStream: vi.fn(),
     endStream: vi.fn(),
@@ -1306,6 +1313,30 @@ describe("SynthesisApp", () => {
 
     expect(screen.getByRole("button", { name: "reader-desktop-supertonic3-selected" })).toBeInTheDocument();
     await waitFor(() => expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false }));
+  });
+
+  it("attaches its keyboard shortcut listener once however often it re-renders", () => {
+    const addListener = vi.spyOn(document, "addEventListener");
+    const keydownSubscriptions = () => addListener.mock.calls.filter(([type]) => type === "keydown").length;
+    const { rerender } = render(<WebApp />);
+    const subscribed = keydownSubscriptions();
+    expect(subscribed).toBeGreaterThan(0);
+
+    // A new player state or a different runtime state each used to replace
+    // the document listener.
+    mock.player = { ...mock.player, totalDuration: 9, isPlaying: true };
+    rerender(<WebApp />);
+    mock.generation.isGenerationBusy = true;
+    mock.player = { ...mock.player, totalDuration: 12 };
+    rerender(<WebApp />);
+
+    expect(keydownSubscriptions()).toBe(subscribed);
+    // The one listener still acts on the latest state.
+    fireEvent.keyDown(document, { key: ".", ctrlKey: true });
+    expect(mock.generation.handleStop).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(document, { key: " ", code: "Space" });
+    expect(mock.player.togglePlay).toHaveBeenCalledTimes(1);
+    addListener.mockRestore();
   });
 
   it("supports macOS and Windows keyboard shortcuts without hijacking text entry", async () => {

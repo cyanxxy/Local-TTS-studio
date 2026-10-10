@@ -798,6 +798,32 @@ describe("useQwen3LocalRuntime long-text batching", () => {
 
 });
 
+describe("useQwen3LocalRuntime identity", () => {
+  it("keeps its identity across renders until its state changes", () => {
+    let settings = runtimeSettings();
+    vi.mocked(useQwen3Runtime).mockImplementation(() => settings as never);
+    const { player } = audioPlayer();
+    const setShowPlayer = vi.fn();
+    const { result, rerender } = renderHook(() => useQwen3LocalRuntime({
+      enabled: false,
+      text: "A local sentence with enough text.",
+      player,
+      setShowPlayer,
+    }));
+    const initial = result.current;
+
+    rerender();
+    expect(result.current).toBe(initial);
+
+    settings = { ...settings, error: "Qwen3 setup failed." as never };
+    rerender();
+    expect(result.current).not.toBe(initial);
+    expect(result.current.error).toBe("Qwen3 setup failed.");
+    expect(result.current.handleStop).toBe(initial.handleStop);
+    expect(result.current.resetGeneratedAudio).toBe(initial.resetGeneratedAudio);
+  });
+});
+
 describe("useQwen3LocalRuntime settings changes", () => {
   /** A bridge whose generate call streams one chunk and then resolves. */
   function installCompletingBridge() {

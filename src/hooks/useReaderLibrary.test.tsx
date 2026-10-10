@@ -100,6 +100,21 @@ describe("useReaderLibrary", () => {
     await waitFor(async () => expect(await listReaderDocuments()).toHaveLength(1));
   });
 
+  it("keeps its identity across renders until its state changes", async () => {
+    const { result, rerender } = renderHook(() => useReaderLibrary("A library that settles."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const settled = result.current;
+
+    rerender();
+    expect(result.current).toBe(settled);
+
+    act(() => result.current.updateActiveMetadata({ title: "Renamed" }));
+    expect(result.current).not.toBe(settled);
+    expect(result.current.activeDocument?.title).toBe("Renamed");
+    expect(result.current.updateProgress).toBe(settled.updateProgress);
+    expect(result.current.saveAudio).toBe(settled.saveAudio);
+  });
+
   it("does not let a delayed progress write overwrite a newer text save", async () => {
     const { result } = renderHook(() => useReaderLibrary("Original reader text."));
     await waitFor(() => expect(result.current.loading).toBe(false));

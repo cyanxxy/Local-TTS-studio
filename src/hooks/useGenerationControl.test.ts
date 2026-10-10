@@ -57,6 +57,7 @@ function createPlayerMock(overrides: Partial<UseAudioPlayerReturn> = {}): UseAud
     getContentEpoch: vi.fn(() => 0),
     truncateAudioChunks: vi.fn(),
     getAudioCacheSnapshot: vi.fn(() => []),
+    getPlaybackSnapshot: vi.fn(() => ({ playbackRate: 1, totalDuration: 0, synthesisComplete: false })),
     restoreAudioCache: vi.fn(),
     beginStream: vi.fn(),
     endStream: vi.fn(),

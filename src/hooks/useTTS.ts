@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type {
   ChunkPauseKind,
   GenerationStats,
@@ -261,12 +261,12 @@ export function useTTS({
     cleanup();
   }, [cleanup]);
 
-  return {
+  return useMemo(() => ({
     isGenerating,
     error,
     stats,
     generationProgress,
     generate,
     cancel,
-  };
+  }), [cancel, error, generate, generationProgress, isGenerating, stats]);
 }

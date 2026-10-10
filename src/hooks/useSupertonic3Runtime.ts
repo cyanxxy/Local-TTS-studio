@@ -49,10 +49,12 @@ export function useSupertonic3Runtime({
   const activeRef = useRef(active);
   activeRef.current = active;
 
+  // Depend on the player's stable functions, not on the object, which changes
+  // identity with every player state update while audio streams.
+  const { beginStream, endStream, reset: resetPlayer, scheduleChunk, stopAll } = player;
   const onAudioChunk = useCallback((chunk: Parameters<UseAudioPlayerReturn["scheduleChunk"]>[0]) => {
-    void player.scheduleChunk(chunk);
-  }, [player]);
-  const endStream = player.endStream;
+    void scheduleChunk(chunk);
+  }, [scheduleChunk]);
   const onComplete = useCallback(() => endStream({ completed: true }), [endStream]);
   const tts = useTTS({
     kokoroWorker: emptyWorkerRef,
@@ -61,6 +63,7 @@ export function useSupertonic3Runtime({
     onComplete,
   });
   const cancelTts = tts.cancel;
+  const generateTts = tts.generate;
 
   const hardCancelGeneration = useCallback((recreate: boolean) => {
     cancelTts();
@@ -207,25 +210,25 @@ export function useSupertonic3Runtime({
     }
     if (!tts.isGenerating && streamStartedRef.current) {
       streamStartedRef.current = false;
-      player.endStream();
+      endStream();
     }
-  }, [active, player, tts.isGenerating]);
+  }, [active, endStream, tts.isGenerating]);
 
   const canGenerate = modelState.ready
     && !tts.isGenerating
     && text.trim().length >= MIN_TEXT_LENGTH;
   const handleGenerate = useCallback(() => {
     if (!canGenerate) return;
-    player.reset();
-    player.beginStream();
+    resetPlayer();
+    beginStream();
     streamStartedRef.current = true;
     setShowPlayer(true);
-    tts.generate(text, "supertonic", voice, { ...generationSettings, language });
-  }, [canGenerate, generationSettings, language, player, setShowPlayer, text, tts, voice]);
+    generateTts(text, "supertonic", voice, { ...generationSettings, language });
+  }, [beginStream, canGenerate, generateTts, generationSettings, language, resetPlayer, setShowPlayer, text, voice]);
   const handleStop = useCallback(() => {
     hardCancelGeneration(true);
-    player.stopAll();
-  }, [hardCancelGeneration, player]);
+    stopAll();
+  }, [hardCancelGeneration, stopAll]);
   const cancelActiveGeneration = useCallback(() => {
     if (tts.isGenerating) {
       hardCancelGeneration(activeRef.current);
@@ -234,9 +237,9 @@ export function useSupertonic3Runtime({
   const resetGeneratedAudio = useCallback(() => {
     streamStartedRef.current = false;
     cancelActiveGeneration();
-    player.reset();
+    resetPlayer();
     setShowPlayer(false);
-  }, [cancelActiveGeneration, player, setShowPlayer]);
+  }, [cancelActiveGeneration, resetPlayer, setShowPlayer]);
   const retryLoad = useCallback(() => {
     if (!available || !createWorker) return;
     if (!workerRef.current || workerCrashedRef.current) {

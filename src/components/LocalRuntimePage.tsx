@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type {
   LocalTtsCacheInfo,
   LocalTtsAudioChunkEvent,
@@ -185,9 +185,13 @@ export function LocalRuntimePage({
     beginStream: beginAudioStream,
     download: downloadAudio,
     endStream: endAudioStream,
+    getCurrentTime: getPlaybackTime,
     reset: resetAudioPlayer,
     scheduleChunk: scheduleAudioChunk,
+    skip: skipPlayback,
     stopAll: stopAudioPlayer,
+    togglePlay,
+    totalDuration: playerTotalDuration,
   } = audioPlayer;
 
   const electronAvailable = !!window.electron?.localTts;
@@ -848,61 +852,53 @@ export function LocalRuntimePage({
   const busy = runtimeBusy || cacheBusy || qwen3.setupBusy || qwen3.downloadBusy || generateBusy;
   const runtimeReady = runtime?.ready ?? false;
 
+  // An effect event always sees the latest runtime and player state, so the
+  // document listener below changes only when the page is shown or hidden.
+  const handleLocalRuntimeShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+    const primaryModifier = hasPrimaryShortcutModifier(event);
+
+    if (primaryModifier && event.key === "Enter") {
+      if (electronAvailable && runtimeReady && canGenerate && !busy) {
+        event.preventDefault();
+        void runGeneration();
+      }
+      return;
+    }
+
+    if (primaryModifier && event.key === ".") {
+      if (generateBusy) {
+        event.preventDefault();
+        void cancelActiveGeneration();
+      }
+      return;
+    }
+
+    if (isEditableShortcutTarget(event.target)) return;
+
+    if (!primaryModifier && !event.altKey && event.code === "Space" && playerTotalDuration > 0) {
+      event.preventDefault();
+      void togglePlay();
+      return;
+    }
+
+    if (!primaryModifier && event.altKey && playerTotalDuration > 0) {
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        skipPlayback(-10);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        skipPlayback(10);
+      }
+    }
+  });
+
   useEffect(() => {
     if (!active) return;
-
-    const handleLocalRuntimeShortcut = (event: KeyboardEvent) => {
-      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
-      const primaryModifier = hasPrimaryShortcutModifier(event);
-
-      if (primaryModifier && event.key === "Enter") {
-        if (electronAvailable && runtimeReady && canGenerate && !busy) {
-          event.preventDefault();
-          void runGeneration();
-        }
-        return;
-      }
-
-      if (primaryModifier && event.key === ".") {
-        if (generateBusy) {
-          event.preventDefault();
-          void cancelActiveGeneration();
-        }
-        return;
-      }
-
-      if (isEditableShortcutTarget(event.target)) return;
-
-      if (!primaryModifier && !event.altKey && event.code === "Space" && audioPlayer.totalDuration > 0) {
-        event.preventDefault();
-        void audioPlayer.togglePlay();
-        return;
-      }
-
-      if (!primaryModifier && event.altKey && audioPlayer.totalDuration > 0) {
-        if (event.key === "ArrowLeft") {
-          event.preventDefault();
-          audioPlayer.skip(-10);
-        } else if (event.key === "ArrowRight") {
-          event.preventDefault();
-          audioPlayer.skip(10);
-        }
-      }
-    };
-
-    document.addEventListener("keydown", handleLocalRuntimeShortcut);
-    return () => document.removeEventListener("keydown", handleLocalRuntimeShortcut);
-  }, [
-    active,
-    audioPlayer,
-    busy,
-    canGenerate,
-    cancelActiveGeneration,
-    electronAvailable,
-    generateBusy,
-    runGeneration,
-    runtimeReady,
-  ]);
+    const listener = (event: KeyboardEvent) => handleLocalRuntimeShortcut(event);
+    document.addEventListener("keydown", listener);
+    return () => document.removeEventListener("keydown", listener);
+  }, [active]);
 
   const activeSegmentNumber = useMemo(() => {
     if (!audioPlayer.activeSegmentId) return null;
@@ -911,7 +907,7 @@ export function LocalRuntimePage({
   }, [audioPlayer.activeSegmentId, audioPlayer.segments]);
   const playerStats = useMemo<GenerationStats>(() => {
     const processingTime = result?.elapsedSec ?? 0;
-    const duration = audioPlayer.totalDuration || result?.durationSec || 0;
+    const duration = playerTotalDuration || result?.durationSec || 0;
     return {
       firstLatency: null,
       processingTime,
@@ -920,9 +916,9 @@ export function LocalRuntimePage({
       totalDuration: duration,
       // See the note in useQwen3LocalRuntime: sampled, not tracked, so the stats
       // object does not churn on every animation frame.
-      currentDuration: audioPlayer.getCurrentTime(),
+      currentDuration: getPlaybackTime(),
     };
-  }, [audioPlayer, result, text]);
+  }, [getPlaybackTime, playerTotalDuration, result, text]);
   const handleDownloadAudio = useCallback(() => {
     const url = audioUrlRef.current;
     if (url) {
@@ -1100,10 +1096,10 @@ export function LocalRuntimePage({
               activeSegmentNumber={activeSegmentNumber}
               stats={playerStats}
               isGenerating={generateBusy}
-              onTogglePlay={audioPlayer.togglePlay}
+              onTogglePlay={togglePlay}
               onSeek={audioPlayer.seek}
-              onSkipBackward={() => audioPlayer.skip(-10)}
-              onSkipForward={() => audioPlayer.skip(10)}
+              onSkipBackward={() => skipPlayback(-10)}
+              onSkipForward={() => skipPlayback(10)}
               onDownload={handleDownloadAudio}
               onStop={generateBusy ? () => { void cancelActiveGeneration(); } : stopAudioPlayer}
             />

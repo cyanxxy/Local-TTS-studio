@@ -1,4 +1,14 @@
-import { lazy, Suspense, useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import {
+  lazy,
+  Suspense,
+  useState,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+} from "react";
 import { Settings2, X } from "lucide-react";
 import type { ChunkPauseKind, GenerationStats, ModelState, ModelType } from "../types";
 import { MIN_TEXT_LENGTH } from "../constants";
@@ -371,6 +381,20 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   });
 
   const player = useAudioPlayer();
+  // The player object changes identity with its state; its functions never do.
+  // Callbacks below depend on the functions so they stay stable while streaming.
+  const {
+    download: downloadPlayerAudio,
+    downloadCaptions: downloadPlayerCaptions,
+    getAudioCacheSnapshot: getReaderAudioSnapshot,
+    getCurrentTime,
+    getPlaybackSnapshot,
+    jumpToSegment,
+    restoreAudioCache: restoreReaderAudio,
+    scheduleChunk,
+    skip: skipPlayback,
+    togglePlay,
+  } = player;
   const qwen3LocalRuntime = useQwen3LocalRuntime({
     enabled: desktopRuntimesAvailable && qwen3Settings.available && isUsingQwen3Inline,
     text: synthesisText,
@@ -391,7 +415,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       pauseAfterSec?: number;
       pauseKind?: ChunkPauseKind;
     }) => {
-      void player.scheduleChunk({
+      void scheduleChunk({
         audio: chunk.audio,
         samplingRate: chunk.samplingRate,
         text: chunk.text,
@@ -403,7 +427,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
         pauseKind: chunk.pauseKind,
       });
     },
-    [player],
+    [scheduleChunk],
   );
 
   const endStream = player.endStream;
@@ -948,9 +972,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
   const handleJumpToSegment = useCallback((segmentId: string) => {
     if (!segmentId) return;
-    player.jumpToSegment(segmentId);
+    jumpToSegment(segmentId);
     setShowPlayer(true);
-  }, [player]);
+  }, [jumpToSegment]);
 
   // The browser path is spread across `useModelLoader`, `useTTS` and
   // `useGenerationControl`; the three desktop runtimes each expose the whole
@@ -1017,14 +1041,17 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
   const handleDownloadAudio = useCallback(() => {
     setExportError(null);
-    void player.download(creator.exportOptions).catch((error: unknown) => {
+    void downloadPlayerAudio(creator.exportOptions).catch((error: unknown) => {
       setExportError(error instanceof Error ? error.message : String(error));
     });
-  }, [creator.exportOptions, player]);
+  }, [creator.exportOptions, downloadPlayerAudio]);
 
   const handleDownloadCaptions = useCallback((format: "srt" | "vtt" | "json") => {
-    player.downloadCaptions(format);
-  }, [player]);
+    downloadPlayerCaptions(format);
+  }, [downloadPlayerCaptions]);
+
+  const handleSkipBackward = useCallback(() => skipPlayback(-10), [skipPlayback]);
+  const handleSkipForward = useCallback(() => skipPlayback(10), [skipPlayback]);
 
   const creatorEngineSupport = useMemo<CreatorEngineSupport>(() => {
     const { label, capabilities } = getEngine(studioEngineId);
@@ -1074,94 +1101,82 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
   const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
 
+  // An effect event always sees the latest page, runtime and player state, so
+  // the document listener below is attached once rather than on every render.
+  const handleAppShortcut = useEffectEvent((event: KeyboardEvent) => {
+    const primaryModifier = hasPrimaryShortcutModifier(event);
+
+    if (primaryModifier && event.key === ",") {
+      event.preventDefault();
+      setAppSettingsOpen(true);
+      return;
+    }
+
+    if (appSettingsOpen) return;
+
+    if (primaryModifier && event.key === "1") {
+      event.preventDefault();
+      handlePageNavigation("studio");
+      return;
+    }
+
+    if (primaryModifier && event.key === "2") {
+      event.preventDefault();
+      handlePageNavigation("reader");
+      return;
+    }
+
+    if (primaryModifier && event.key === "Enter") {
+      if (isStudioPage && studioRuntime.canGenerate && !studioRuntime.isGenerating) {
+        event.preventDefault();
+        handleGenerate();
+      } else if (isReaderPage && readerRuntime.canGenerate && !readerRuntime.isGenerating) {
+        event.preventDefault();
+        handleReaderGenerate();
+      }
+      return;
+    }
+
+    if (primaryModifier && event.key === ".") {
+      if (isStudioPage && studioRuntime.isGenerating) {
+        event.preventDefault();
+        handleStudioStop();
+      } else if (isReaderPage && readerRuntime.isGenerating) {
+        event.preventDefault();
+        handleReaderStop();
+      }
+      return;
+    }
+
+    if (isSetupPage(activePage) || isEditableShortcutTarget(event.target)) return;
+
+    // A focused control keeps Space for itself: Space on Download should
+    // download, not toggle playback behind the user's back.
+    const onInteractiveControl = event.target instanceof Element
+      && event.target.closest("button, a[href], [role='button'], [role='slider'], [role='menuitem']") !== null;
+    const canTogglePlayback = player.totalDuration > 0;
+    if (!primaryModifier && !event.altKey && event.code === "Space" && canTogglePlayback && !onInteractiveControl) {
+      event.preventDefault();
+      void togglePlay();
+      return;
+    }
+
+    if (!primaryModifier && event.altKey && player.totalDuration > 0) {
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        skipPlayback(-10);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        skipPlayback(10);
+      }
+    }
+  });
+
   useEffect(() => {
-    const handleAppShortcut = (event: KeyboardEvent) => {
-      const primaryModifier = hasPrimaryShortcutModifier(event);
-
-      if (primaryModifier && event.key === ",") {
-        event.preventDefault();
-        setAppSettingsOpen(true);
-        return;
-      }
-
-      if (appSettingsOpen) return;
-
-      if (primaryModifier && event.key === "1") {
-        event.preventDefault();
-        handlePageNavigation("studio");
-        return;
-      }
-
-      if (primaryModifier && event.key === "2") {
-        event.preventDefault();
-        handlePageNavigation("reader");
-        return;
-      }
-
-      if (primaryModifier && event.key === "Enter") {
-        if (isStudioPage && studioRuntime.canGenerate && !studioRuntime.isGenerating) {
-          event.preventDefault();
-          handleGenerate();
-        } else if (isReaderPage && readerRuntime.canGenerate && !readerRuntime.isGenerating) {
-          event.preventDefault();
-          handleReaderGenerate();
-        }
-        return;
-      }
-
-      if (primaryModifier && event.key === ".") {
-        if (isStudioPage && studioRuntime.isGenerating) {
-          event.preventDefault();
-          handleStudioStop();
-        } else if (isReaderPage && readerRuntime.isGenerating) {
-          event.preventDefault();
-          handleReaderStop();
-        }
-        return;
-      }
-
-      if (isSetupPage(activePage) || isEditableShortcutTarget(event.target)) return;
-
-      // A focused control keeps Space for itself: Space on Download should
-      // download, not toggle playback behind the user's back.
-      const onInteractiveControl = event.target instanceof Element
-        && event.target.closest("button, a[href], [role='button'], [role='slider'], [role='menuitem']") !== null;
-      const canTogglePlayback = player.totalDuration > 0;
-      if (!primaryModifier && !event.altKey && event.code === "Space" && canTogglePlayback && !onInteractiveControl) {
-        event.preventDefault();
-        void player.togglePlay();
-        return;
-      }
-
-      if (!primaryModifier && event.altKey && player.totalDuration > 0) {
-        if (event.key === "ArrowLeft") {
-          event.preventDefault();
-          player.skip(-10);
-        } else if (event.key === "ArrowRight") {
-          event.preventDefault();
-          player.skip(10);
-        }
-      }
-    };
-
-    document.addEventListener("keydown", handleAppShortcut);
-    return () => document.removeEventListener("keydown", handleAppShortcut);
-  }, [
-    activePage,
-    appSettingsOpen,
-    handleGenerate,
-    handlePageNavigation,
-    handleReaderGenerate,
-    handleReaderStop,
-    handleStudioStop,
-    isReaderPage,
-    isStudioPage,
-    player,
-    readerRuntime.canGenerate,
-    readerRuntime.isGenerating,
-    studioRuntime.canGenerate,
-    studioRuntime.isGenerating,
-  ]);
+    const listener = (event: KeyboardEvent) => handleAppShortcut(event);
+    document.addEventListener("keydown", listener);
+    return () => document.removeEventListener("keydown", listener);
+  }, []);
 
   const visibleModelError = isReaderPage
     // Desktop Reader models render an inline recovery card beside the toolbar.
@@ -1189,8 +1204,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const saveReaderAudio = readerLibrary.saveAudio;
   const clearReaderAudio = readerLibrary.clearAudio;
   const updateReaderProgress = readerLibrary.updateProgress;
-  const restoreReaderAudio = player.restoreAudioCache;
-  const getReaderAudioSnapshot = player.getAudioCacheSnapshot;
   const readerAudioActionsRef = useRef({
     cancel: cancelActiveGeneration,
     clear: clearReaderAudio,
@@ -1243,23 +1256,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       supertonic3Runtime.resetGeneratedAudio();
     },
   };
-  // Read at call time rather than snapshotted per render: the playback position
-  // is not React state, so a render-time snapshot would go stale immediately.
-  const getCurrentTime = player.getCurrentTime;
-  const readerPlaybackSnapshotRef = useRef({
-    playbackRate: player.playbackRate,
-    totalDuration: player.totalDuration,
-    synthesisComplete: player.isSynthesisComplete,
-  });
-  readerPlaybackSnapshotRef.current = {
-    playbackRate: player.playbackRate,
-    totalDuration: player.totalDuration,
-    synthesisComplete: player.isSynthesisComplete,
-  };
   const readerGenerateRef = useRef(handleReaderGenerate);
   readerGenerateRef.current = handleReaderGenerate;
-  const readerTogglePlayRef = useRef(player.togglePlay);
-  readerTogglePlayRef.current = player.togglePlay;
 
   const persistActiveReaderAudio = useCallback(() => {
     if (readerAudioSaveTimerRef.current !== null) {
@@ -1274,7 +1272,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     if (chunks.length === 0) return;
     readerAudioClearedForEditRef.current = null;
 
-    const playback = readerPlaybackSnapshotRef.current;
+    // Read at call time from the buffers just snapshotted: neither the
+    // position nor the streamed duration is current in React state.
+    const playback = getPlaybackSnapshot();
     const updatedAt = Math.max(Date.now(), readerAudioSaveVersionRef.current + 1);
     readerAudioSaveVersionRef.current = updatedAt;
     void saveReaderAudio({
@@ -1293,6 +1293,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     }).catch(reportReaderError);
   }, [
     getCurrentTime,
+    getPlaybackSnapshot,
     getReaderAudioSnapshot,
     reportReaderError,
     saveReaderAudio,
@@ -1358,7 +1359,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           });
           setShowPlayer(cache.chunks.length > 0);
           if (continuation?.autoPlay && cache.chunks.length > 0) {
-            window.setTimeout(() => readerTogglePlayRef.current(), 0);
+            window.setTimeout(() => void togglePlay(), 0);
           }
         } else {
           if (cache) void readerAudioActionsRef.current.clear(document.id, section.id);
@@ -1391,6 +1392,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     isReaderPage,
     readerSignatureKnown,
     reportReaderError,
+    togglePlay,
   ]);
 
   const recordReaderProgress = useCallback(() => {
@@ -1778,10 +1780,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     allowPlaybackDuringGeneration
                     playbackRate={player.playbackRate}
                     onPlaybackRateChange={player.setPlaybackRate}
-                    onTogglePlay={player.togglePlay}
+                    onTogglePlay={togglePlay}
                     onSeek={player.seek}
-                    onSkipBackward={() => player.skip(-10)}
-                    onSkipForward={() => player.skip(10)}
+                    onSkipBackward={handleSkipBackward}
+                    onSkipForward={handleSkipForward}
                     onDownload={handleDownloadAudio}
                     onStop={handleStudioStop}
                   />
@@ -1912,10 +1914,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onPlaybackRateChange={player.setPlaybackRate}
               segments={player.segments}
               activeSegmentId={player.activeSegmentId}
-              onTogglePlay={player.togglePlay}
+              onTogglePlay={togglePlay}
               onSeek={player.seek}
-              onSkipBackward={() => player.skip(-10)}
-              onSkipForward={() => player.skip(10)}
+              onSkipBackward={handleSkipBackward}
+              onSkipForward={handleSkipForward}
               onDownload={handleDownloadAudio}
               isRetaking={getEngine(readerEngineId).capabilities.retake && isRetakingSegment}
               onRetakeSegment={handleRetakeSegment}

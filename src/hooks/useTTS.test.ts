@@ -204,4 +204,25 @@ describe("useTTS", () => {
     expect(result.current.isGenerating).toBe(false);
     expect(worker.listenerCount()).toBe(0);
   });
+
+  it("keeps its identity across renders until its state changes", () => {
+    const worker = new MockWorker();
+    const options = {
+      kokoroWorker: { current: worker as unknown as Worker },
+      supertonicWorker: { current: null },
+      onAudioChunk: vi.fn(),
+      onComplete: vi.fn(),
+    };
+    const { result, rerender } = renderHook(() => useTTS(options));
+    const initial = result.current;
+
+    rerender();
+    expect(result.current).toBe(initial);
+
+    act(() => result.current.generate("Hello", "kokoro", "af_heart", SETTINGS));
+    expect(result.current).not.toBe(initial);
+    expect(result.current.isGenerating).toBe(true);
+    expect(result.current.generate).toBe(initial.generate);
+    expect(result.current.cancel).toBe(initial.cancel);
+  });
 });

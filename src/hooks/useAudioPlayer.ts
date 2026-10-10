@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import type { AudioExportOptions, CaptionExportFormat } from "../types";
 import type { CachedReaderAudioChunk } from "../lib/readerDocument";
 import {
@@ -25,6 +25,19 @@ import {
 
 export type { AudioChunkData, AudioSegment } from "../lib/audioTimeline";
 
+/** What a saved Reader section records alongside its PCM. */
+export interface AudioPlaybackSnapshot {
+  playbackRate: number;
+  totalDuration: number;
+  synthesisComplete: boolean;
+}
+
+/**
+ * The player's state and controls. The object keeps its identity until a state
+ * field changes; every function keeps its identity for the player's lifetime,
+ * so callbacks and effects should depend on the functions they call rather
+ * than on the whole object.
+ */
 export interface UseAudioPlayerReturn {
   isPlaying: boolean;
   /** True only after the entire synthesis succeeds, not merely when transport ends. */
@@ -61,6 +74,11 @@ export interface UseAudioPlayerReturn {
   getContentEpoch: () => number;
   truncateAudioChunks: (count: number) => void;
   getAudioCacheSnapshot: () => CachedReaderAudioChunk[];
+  /**
+   * Read at call time from the same buffers as `getAudioCacheSnapshot`, so a
+   * saved section never pairs its PCM with a duration one UI frame stale.
+   */
+  getPlaybackSnapshot: () => AudioPlaybackSnapshot;
   restoreAudioCache: (
     chunks: readonly CachedReaderAudioChunk[],
     options?: { currentTime?: number; playbackRate?: number; synthesisComplete?: boolean },
@@ -123,6 +141,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const segmentCounterRef = useRef(0);
   const autoPlayOnChunkRef = useRef(true);
   const streamCompleteRef = useRef(true);
+  // Mirrors `isSynthesisComplete` for imperative reads.
+  const synthesisCompleteRef = useRef(false);
   const playbackOperationRef = useRef(0);
   const contentEpochRef = useRef(0);
   // Lowest chunk index that may still hold a decoded AudioBuffer. Pruning walks
@@ -138,6 +158,11 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       audioContextRef.current = new AudioContext();
     }
     return audioContextRef.current;
+  }, []);
+
+  const commitSynthesisComplete = useCallback((complete: boolean) => {
+    synthesisCompleteRef.current = complete;
+    setIsSynthesisComplete(complete);
   }, []);
 
   const failPlaybackStart = useCallback(() => {
@@ -812,13 +837,19 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }))
   ), []);
 
+  const getPlaybackSnapshot = useCallback((): AudioPlaybackSnapshot => ({
+    playbackRate: playbackRateRef.current,
+    totalDuration: totalDurationRef.current,
+    synthesisComplete: synthesisCompleteRef.current,
+  }), []);
+
   const getAudioChunkCount = useCallback(() => allChunksRef.current.length, []);
   const getContentEpoch = useCallback(() => contentEpochRef.current, []);
 
   const truncateAudioChunks = useCallback((count: number) => {
     const retainedCount = clamp(Math.floor(Number.isFinite(count) ? count : 0), 0, allChunksRef.current.length);
     if (retainedCount >= allChunksRef.current.length) return;
-    setIsSynthesisComplete(false);
+    commitSynthesisComplete(false);
 
     const wasPlaying = isPlayingRef.current;
     const playbackSnapshot = wasPlaying ? getLiveTimelineTime() : currentTimeRef.current;
@@ -835,6 +866,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     decodedLowIndexRef.current = 0;
     pruneBufferedAudio(nextTime);
   }, [
+    commitSynthesisComplete,
     getLiveTimelineTime,
     pruneBufferedAudio,
     rebuildSegmentState,
@@ -895,7 +927,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     activeSegmentCursorRef.current = Math.max(0, scheduleCursorRef.current);
     autoPlayOnChunkRef.current = false;
     streamCompleteRef.current = true;
-    setIsSynthesisComplete(options.synthesisComplete === true);
+    commitSynthesisComplete(options.synthesisComplete === true);
     interruptedRef.current = false;
     isPlayingRef.current = false;
     setIsPlaying(false);
@@ -907,18 +939,26 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     updateActiveSegment(restoredTime);
     decodedLowIndexRef.current = 0;
     pruneBufferedAudio(restoredTime);
-  }, [cancelTimelineStateFlush, clock, findChunkIndexAtTime, pruneBufferedAudio, stopAllNodes, updateActiveSegment]);
+  }, [
+    cancelTimelineStateFlush,
+    clock,
+    commitSynthesisComplete,
+    findChunkIndexAtTime,
+    pruneBufferedAudio,
+    stopAllNodes,
+    updateActiveSegment,
+  ]);
 
   const beginStream = useCallback(() => {
     streamCompleteRef.current = false;
-    setIsSynthesisComplete(false);
-  }, []);
+    commitSynthesisComplete(false);
+  }, [commitSynthesisComplete]);
 
   const endStream = useCallback((options: { completed?: boolean } = {}) => {
     streamCompleteRef.current = true;
     // Generic end calls also run after successful callbacks and when playback
     // stops. Only a new stream/reset may clear a previously completed result.
-    if (options.completed) setIsSynthesisComplete(true);
+    if (options.completed) commitSynthesisComplete(true);
 
     if (
       isPlayingRef.current
@@ -932,7 +972,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       syncCurrentTime(totalDurationRef.current);
       stopAllNodes();
     }
-  }, [stopAllNodes, syncCurrentTime]);
+  }, [commitSynthesisComplete, stopAllNodes, syncCurrentTime]);
 
   const reset = useCallback(() => {
     playbackOperationRef.current += 1;
@@ -950,7 +990,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     interruptedRef.current = false;
     autoPlayOnChunkRef.current = true;
     streamCompleteRef.current = true;
-    setIsSynthesisComplete(false);
+    commitSynthesisComplete(false);
     setError(null);
 
     setSegments([]);
@@ -961,7 +1001,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     syncCurrentTime(0);
     syncTotalDuration(0);
-  }, [cancelTimelineStateFlush, commitActiveSegmentId, stopAllNodes, syncCurrentTime, syncTotalDuration]);
+  }, [
+    cancelTimelineStateFlush,
+    commitActiveSegmentId,
+    commitSynthesisComplete,
+    stopAllNodes,
+    syncCurrentTime,
+    syncTotalDuration,
+  ]);
 
   const stopAll = useCallback(() => {
     playbackOperationRef.current += 1;
@@ -994,7 +1041,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     };
   }, [cancelTimelineStateFlush, stopAllNodes]);
 
-  return {
+  return useMemo(() => ({
     isPlaying,
     isSynthesisComplete,
     error,
@@ -1018,10 +1065,41 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     getContentEpoch,
     truncateAudioChunks,
     getAudioCacheSnapshot,
+    getPlaybackSnapshot,
     restoreAudioCache,
     beginStream,
     endStream,
     reset,
     stopAll,
-  };
+  }), [
+    activeSegmentId,
+    beginStream,
+    clock,
+    download,
+    downloadCaptions,
+    endStream,
+    error,
+    getAudioCacheSnapshot,
+    getAudioChunkCount,
+    getContentEpoch,
+    getCurrentTime,
+    getPlaybackSnapshot,
+    isPlaying,
+    isSynthesisComplete,
+    jumpToSegment,
+    playbackRate,
+    replaceSegment,
+    reset,
+    restoreAudioCache,
+    scheduleChunk,
+    seek,
+    seekTo,
+    segments,
+    setPlaybackRate,
+    skip,
+    stopAll,
+    togglePlay,
+    totalDuration,
+    truncateAudioChunks,
+  ]);
 }

@@ -160,6 +160,8 @@ export function useQwen3LocalRuntime({
   const endStream = player.endStream;
   const getAudioChunkCount = player.getAudioChunkCount;
   const getContentEpoch = player.getContentEpoch;
+  const getPlaybackTime = player.getCurrentTime;
+  const playerTotalDuration = player.totalDuration;
   const resetPlayer = player.reset;
   const scheduleChunk = player.scheduleChunk;
   const stopAll = player.stopAll;
@@ -510,13 +512,13 @@ export function useQwen3LocalRuntime({
       processingTime,
       charsPerSec: processingTime > 0 ? text.trim().length / processingTime : 0,
       rtf: result && result.durationSec > 0 ? result.elapsedSec / result.durationSec : 0,
-      totalDuration: player.totalDuration || result?.durationSec || 0,
+      totalDuration: playerTotalDuration || result?.durationSec || 0,
       // Sampled rather than tracked: the live position ticks every frame and no
       // consumer renders this field, so depending on it would rebuild the stats
       // object (and re-render every consumer) 60 times a second for nothing.
-      currentDuration: player.getCurrentTime(),
+      currentDuration: getPlaybackTime(),
     };
-  }, [player, result, text]);
+  }, [getPlaybackTime, playerTotalDuration, result, text]);
 
   const handleGenerate = useCallback(() => {
     if (!canGenerate || !bridge) return;
@@ -759,7 +761,7 @@ export function useQwen3LocalRuntime({
     stopAll,
   ]);
 
-  return {
+  return useMemo(() => ({
     modelState,
     canGenerate,
     isGenerating: generateBusy,
@@ -771,5 +773,17 @@ export function useQwen3LocalRuntime({
     retryLoad,
     resetGeneratedAudio,
     cancelActiveGeneration,
-  };
+  }), [
+    canGenerate,
+    cancelActiveGeneration,
+    combinedError,
+    generateBusy,
+    generationProgress,
+    handleGenerate,
+    handleStop,
+    modelState,
+    resetGeneratedAudio,
+    retryLoad,
+    stats,
+  ]);
 }

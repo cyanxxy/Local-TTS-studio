@@ -250,6 +250,28 @@ describe("LocalRuntimePage", () => {
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
   });
 
+  it("keeps one shortcut listener while the page re-renders", async () => {
+    const addListener = vi.spyOn(document, "addEventListener");
+    const keydownSubscriptions = () => addListener.mock.calls.filter(([type]) => type === "keydown").length;
+    renderPage();
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    const subscribed = keydownSubscriptions();
+
+    // Every keystroke re-renders the page and hands it a new player object.
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
+      target: { value: "A different sentence for the local runtime." },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
+      target: { value: "Another different sentence for the local runtime." },
+    });
+
+    expect(keydownSubscriptions()).toBe(subscribed);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Generate" })).toBeEnabled());
+    fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    addListener.mockRestore();
+  });
+
   it("rejects oversized local-runtime text before IPC generation", async () => {
     renderPage();
     await screen.findByRole("heading", { name: "Qwen model ready" });

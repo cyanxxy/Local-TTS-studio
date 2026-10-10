@@ -215,6 +215,7 @@ describe("useAudioPlayer", () => {
     for (const rate of [...PLAYBACK_RATES].reverse()) {
       act(() => result.current.setPlaybackRate(rate));
       expect(result.current.playbackRate).toBe(rate);
+      expect(result.current.getPlaybackSnapshot().playbackRate).toBe(rate);
     }
 
     act(() => result.current.restoreAudioCache([{
@@ -225,6 +226,69 @@ describe("useAudioPlayer", () => {
       total: 1,
     }], { playbackRate: MIN_PLAYBACK_RATE }));
     expect(result.current.playbackRate).toBe(MIN_PLAYBACK_RATE);
+  });
+
+  it("keeps its identity until its state changes and its functions for its lifetime", async () => {
+    const { result, rerender } = renderHook(() => useAudioPlayer());
+    const initial = result.current;
+
+    rerender();
+    expect(result.current).toBe(initial);
+
+    act(() => result.current.setPlaybackRate(1.5));
+    expect(result.current).not.toBe(initial);
+    expect(result.current.playbackRate).toBe(1.5);
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Streamed", 4, 4));
+    });
+    flushNextAnimationFrame();
+    act(() => result.current.reset());
+
+    const functionNames = (Object.keys(initial) as Array<keyof typeof initial>)
+      .filter((key) => typeof initial[key] === "function");
+    expect(functionNames.length).toBeGreaterThan(20);
+    for (const name of functionNames) expect(result.current[name], name).toBe(initial[name]);
+    expect(result.current.clock).toBe(initial.clock);
+  });
+
+  it("reports the playback snapshot from the buffers it would save, not from render state", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    act(() => result.current.beginStream());
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Streamed", 6, 4));
+    });
+    // The duration reaches React state only on the next frame; the snapshot
+    // already describes the chunk that a save would include.
+    expect(result.current.totalDuration).toBe(0);
+    expect(result.current.getPlaybackSnapshot()).toEqual({
+      playbackRate: 1,
+      totalDuration: 1.5,
+      synthesisComplete: false,
+    });
+
+    act(() => result.current.endStream({ completed: true }));
+    expect(result.current.getPlaybackSnapshot().synthesisComplete).toBe(true);
+    act(() => result.current.truncateAudioChunks(0));
+    expect(result.current.getPlaybackSnapshot()).toEqual({
+      playbackRate: 1,
+      totalDuration: 0,
+      synthesisComplete: false,
+    });
+    act(() => result.current.restoreAudioCache([{
+      audio: new Float32Array(8).buffer,
+      samplingRate: 4,
+      text: "Restored",
+      index: 1,
+      total: 1,
+    }], { synthesisComplete: true, playbackRate: 1.25 }));
+    expect(result.current.getPlaybackSnapshot()).toEqual({
+      playbackRate: 1.25,
+      totalDuration: 2,
+      synthesisComplete: true,
+    });
+    act(() => result.current.reset());
+    expect(result.current.getPlaybackSnapshot().synthesisComplete).toBe(false);
   });
 
   it("can roll back streamed chunks to a section checkpoint", async () => {
