@@ -620,6 +620,14 @@ export function createReaderNote(input: Omit<ReaderNote, "id" | "createdAt" | "u
 }
 
 /**
+ * Version 2 hashes only the inputs the selected engine reads (see
+ * `EngineDescriptor.signatureParts`). Older entries carry no version prefix, so
+ * after the upgrade they never compare equal: each one misses once and is
+ * replaced, instead of being restored under a meaning it no longer has.
+ */
+export const READER_AUDIO_SIGNATURE_VERSION = 2;
+
+/**
  * The tuning inputs that shape an engine's audio, already narrowed to the ones
  * it reads. An omitted field is one the engine ignores, so changing it can
  * never invalidate cached audio.
@@ -638,31 +646,32 @@ export function buildAudioSignature(parts: {
   text: string;
   model: string;
   voice: string;
-  quality: number;
-  tuning?: GenerationTuningSettings;
+  tuning: AudioSignatureTuning;
 }): string {
   let hash = 2166136261;
-  const tuning = parts.tuning;
-  const tuningKey = tuning
-    ? JSON.stringify({
-        speed: tuning.speed,
-        quality: tuning.quality,
-        language: tuning.language ?? "en",
-        pauseOverridesSec: {
-          none: tuning.pauseOverridesSec?.none ?? null,
-          comma: tuning.pauseOverridesSec?.comma ?? null,
-          sentence: tuning.pauseOverridesSec?.sentence ?? null,
-          paragraph: tuning.pauseOverridesSec?.paragraph ?? null,
-        },
-        sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
-        pronunciationRules: tuning.pronunciationRules ?? [],
-        emphasisStrength: tuning.emphasisStrength ?? null,
-      })
-    : "";
-  const value = `${parts.model}\u0000${parts.voice}\u0000${parts.quality}\u0000${tuningKey}\u0000${parts.text}`;
+  const { tuning } = parts;
+  // A fixed key order with null for anything absent keeps equal inputs equal
+  // regardless of how the caller assembled the object.
+  const tuningKey = JSON.stringify({
+    speed: tuning.speed ?? null,
+    sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
+    quality: tuning.quality ?? null,
+    language: tuning.language ?? null,
+    pauseOverridesSec: tuning.pauseOverridesSec
+      ? {
+          none: tuning.pauseOverridesSec.none ?? null,
+          comma: tuning.pauseOverridesSec.comma ?? null,
+          sentence: tuning.pauseOverridesSec.sentence ?? null,
+          paragraph: tuning.pauseOverridesSec.paragraph ?? null,
+        }
+      : null,
+    pronunciationRules: tuning.pronunciationRules?.map(({ from, to }) => ({ from, to })) ?? null,
+    emphasisStrength: tuning.emphasisStrength ?? null,
+  });
+  const value = `${parts.model}\u0000${parts.voice}\u0000${tuningKey}\u0000${parts.text}`;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
-  return `${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
+  return `v${READER_AUDIO_SIGNATURE_VERSION}.${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
 }

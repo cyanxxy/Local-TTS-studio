@@ -28,7 +28,7 @@ import { AudioPlayer } from "../components/AudioPlayer";
 import { DownloadProgress } from "../components/DownloadProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { SupertonicLanguageSettings } from "../components/SupertonicLanguageSettings";
-import { CreatorToolsPanel } from "../components/CreatorToolsPanel";
+import { CreatorToolsPanel, type CreatorEngineSupport } from "../components/CreatorToolsPanel";
 import { getPagePath, isSetupPage, type AppPage } from "../lib/appRouting";
 import {
   getDefaultSupportedModel,
@@ -70,6 +70,7 @@ import {
   ENGINES,
   getEngine,
   surfaceEngineDetail,
+  surfaceEngineSignatureParts,
   surfaceEngineVoiceLabel,
   type DesktopInlineEngineId,
   type SurfaceEngineId,
@@ -370,42 +371,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   });
 
   const player = useAudioPlayer();
-  // The SHA-256 is calculated asynchronously from the selected file once.
-  // Avoid re-scanning a potentially 60 MB Base64 string on the render thread.
-  const qwenReferenceAudioSignature = qwen3Settings.profile.mode === "voiceClone"
-    ? qwen3Settings.referenceAudioSignature
-    : "";
-  const qwenPlaybackSignature = useMemo(() => JSON.stringify({
-    repo: qwen3Settings.profile.repo,
-    revision: qwen3Settings.profile.revision,
-    modelPath: qwen3Settings.modelPath.trim(),
-    mode: qwen3Settings.profile.mode,
-    speaker: qwen3Settings.profile.mode === "customVoice" ? qwen3Settings.speaker : null,
-    language: qwen3Settings.language,
-    instruct: qwen3Settings.profile.mode !== "voiceClone" ? qwen3Settings.instruct : null,
-    temperature: qwen3Settings.temperature,
-    topK: qwen3Settings.topK,
-    maxNewTokens: qwen3Settings.maxNewTokens,
-    seed: qwen3Settings.seed,
-    referenceAudio: qwenReferenceAudioSignature,
-    referenceText: qwen3Settings.profile.mode === "voiceClone"
-      ? qwen3Settings.referenceText.trim()
-      : null,
-  }), [
-    qwen3Settings.instruct,
-    qwen3Settings.language,
-    qwen3Settings.maxNewTokens,
-    qwen3Settings.modelPath,
-    qwen3Settings.profile.mode,
-    qwen3Settings.profile.repo,
-    qwen3Settings.profile.revision,
-    qwen3Settings.referenceText,
-    qwen3Settings.seed,
-    qwen3Settings.speaker,
-    qwen3Settings.temperature,
-    qwen3Settings.topK,
-    qwenReferenceAudioSignature,
-  ]);
   const qwen3LocalRuntime = useQwen3LocalRuntime({
     enabled: desktopRuntimesAvailable && qwen3Settings.available && isUsingQwen3Inline,
     text: synthesisText,
@@ -1049,13 +1014,23 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     player.downloadCaptions(format);
   }, [player]);
 
+  const creatorEngineSupport = useMemo<CreatorEngineSupport>(() => {
+    const { label, capabilities } = getEngine(studioEngineId);
+    return {
+      engineLabel: label,
+      speed: capabilities.speed,
+      pauses: capabilities.pauses,
+      pronunciationLexicon: capabilities.pronunciationLexicon,
+    };
+  }, [studioEngineId]);
+
   const creatorPanel = (
     <CreatorToolsPanel
       preset={creator.creatorPreset}
       onPresetChange={creator.onCreatorPresetChange}
       speed={creator.speed}
       onSpeedChange={creator.onSpeedChange}
-      speedDisabled={isUsingAudio8Inline}
+      engineSupport={creatorEngineSupport}
       pauseCommaSec={creator.pauseCommaSec}
       onPauseCommaSecChange={creator.onPauseCommaChange}
       pauseSentenceSec={creator.pauseSentenceSec}
@@ -1218,41 +1193,26 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     reset: resetGeneratedAudio,
     restore: restoreReaderAudio,
   };
+  // The inputs that shape the Reader engine's audio — only those it reads, so
+  // a control the engine ignores never discards its cached sections. Null
+  // while one of them is still unknown (Qwen3 before its model is located).
+  const readerSignatureParts = useMemo(() => surfaceEngineSignatureParts(
+    readerEngineId,
+    surfaceEngineSettings,
+    { tuning: creator.generationSettings, quality },
+  ), [creator.generationSettings, quality, readerEngineId, surfaceEngineSettings]);
+  const readerSignatureKnown = readerSignatureParts !== null;
   // Signatures are section-local: editing one passage or moving chapter
   // boundaries does not invalidate hours of unrelated generated audio.
   const activeReaderAudioSignature = useMemo(() => (
-    activeReaderSection
+    activeReaderSection && readerSignatureParts
       ? buildAudioSignature({
           text: activeReaderSectionText,
-          model: isReaderUsingAudio8
-            ? "audio8"
-            : isReaderUsingQwen3 ? "qwen3" : isReaderUsingSupertonic3 ? "supertonic3" : activeModel,
-          voice: isReaderUsingAudio8
-            ? audio8Voice
-            : isReaderUsingQwen3
-              ? qwenPlaybackSignature
-              : isReaderUsingSupertonic3 ? `${supertonic3Voice}:${supertonic3Language}` : voice,
-          quality,
-          tuning: isReaderUsingAudio8
-            ? { ...creator.generationSettings, speed: 1 }
-            : creator.generationSettings,
+          model: readerEngineId,
+          ...readerSignatureParts,
         })
       : null
-  ), [
-    activeModel,
-    activeReaderSection,
-    activeReaderSectionText,
-    audio8Voice,
-    creator.generationSettings,
-    isReaderUsingAudio8,
-    isReaderUsingQwen3,
-    isReaderUsingSupertonic3,
-    quality,
-    qwenPlaybackSignature,
-    supertonic3Language,
-    supertonic3Voice,
-    voice,
-  ]);
+  ), [activeReaderSection, activeReaderSectionText, readerEngineId, readerSignatureParts]);
   const activeReaderAudioSignatureRef = useRef(activeReaderAudioSignature);
   activeReaderAudioSignatureRef.current = activeReaderAudioSignature;
   const desktopReaderControlsRef = useRef({
@@ -1352,6 +1312,13 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     desktopReaderControlsRef.current.reset();
     setExportError(null);
     setImportError(null);
+    // An engine whose inputs are not known yet has no signature to compare a
+    // cache entry against. Restoring or discarding the entry now would act on
+    // a guess; this effect runs again once the signature is known.
+    if (!readerSignatureKnown) {
+      readerRestorePendingRef.current = false;
+      return;
+    }
 
     const restore = async () => {
       try {
@@ -1410,6 +1377,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     activeReaderDocumentId,
     activeReaderSection?.id,
     isReaderPage,
+    readerSignatureKnown,
     reportReaderError,
   ]);
 

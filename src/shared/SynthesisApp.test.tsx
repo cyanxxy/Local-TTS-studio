@@ -7,6 +7,8 @@ import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelLoader } from "../hooks/useModelLoader";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { ModelState } from "../types";
+import { getDefaultQwen3Profile, type Qwen3Profile } from "../../electron/qwen3Profiles";
+import { engineSignatureParts } from "../models/registry";
 import {
   buildAudioSignature,
   buildReaderSections,
@@ -420,13 +422,18 @@ vi.mock("../components/SettingsPanel", () => ({
 }));
 
 vi.mock("../components/CreatorToolsPanel", () => ({
-  CreatorToolsPanel: ({ onDownloadAudio, onDownloadCaptions, speedDisabled }: {
+  CreatorToolsPanel: ({ onDownloadAudio, onDownloadCaptions, engineSupport }: {
     onDownloadAudio: () => void;
     onDownloadCaptions: (format: "srt" | "vtt" | "json") => void;
-    speedDisabled?: boolean;
+    engineSupport?: { engineLabel: string; speed: boolean; pauses: boolean; pronunciationLexicon: boolean };
   }) => (
     <div>
-      <div data-testid="creator-speed-disabled">{String(speedDisabled ?? false)}</div>
+      <div data-testid="creator-engine">{engineSupport?.engineLabel ?? "none"}</div>
+      <div data-testid="creator-speed-disabled">{String(engineSupport ? !engineSupport.speed : false)}</div>
+      <div data-testid="creator-pauses-disabled">{String(engineSupport ? !engineSupport.pauses : false)}</div>
+      <div data-testid="creator-lexicon-disabled">
+        {String(engineSupport ? !engineSupport.pronunciationLexicon : false)}
+      </div>
       <button type="button" onClick={onDownloadAudio}>creator-audio</button>
       <button type="button" onClick={() => onDownloadCaptions("vtt")}>creator-vtt</button>
     </div>
@@ -658,6 +665,15 @@ function resetMockState() {
     error: null,
     generationProgress: 0,
   };
+  mock.creator = {
+    ...mock.creator,
+    generationSettings: {
+      speed: 1,
+      quality: 5,
+      pauseOverridesSec: { none: 0, comma: 0.1, sentence: 0.2, paragraph: 0.3 },
+      pronunciationRules: [],
+    },
+  };
   mock.generation = {
     ...mock.generation,
     isRetakingSegment: false,
@@ -760,6 +776,17 @@ function resetMockState() {
   mock.localTts.subscribeProgress.mockReturnValue(() => undefined);
   mock.localTts.subscribeAudioChunk.mockReturnValue(() => undefined);
   mock.getWebGPUStatus.mockResolvedValue({ available: false, message: "No GPU available" });
+}
+
+/** The signature the Reader stores for Kokoro audio made with the mocked Creator settings. */
+function kokoroReaderSignature(text: string, voice = "af_heart"): string {
+  const parts = engineSignatureParts("kokoro", {
+    settings: { voice },
+    tuning: mock.creator.generationSettings,
+    quality: 5,
+  });
+  if (!parts) throw new Error("Kokoro always has a signature.");
+  return buildAudioSignature({ text, model: "kokoro", ...parts });
 }
 
 function showOptionalDesktopModels() {
@@ -891,7 +918,10 @@ describe("SynthesisApp", () => {
     expect(screen.getByRole("button", { name: "studio-desktop-audio8-selected" })).toBeInTheDocument();
     expect(screen.getByText(/Audio8 ONNX INT4 synthesis runs locally/i)).toBeInTheDocument();
     expect(screen.getByText(/Text and generated audio stay local/i)).toBeInTheDocument();
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Audio8 TTS");
     expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("true");
+    expect(screen.getByTestId("creator-pauses-disabled")).toHaveTextContent("false");
+    expect(screen.getByTestId("creator-lexicon-disabled")).toHaveTextContent("false");
     fireEvent.click(screen.getByRole("button", { name: "generate" }));
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(1);
 
@@ -1631,13 +1661,7 @@ describe("SynthesisApp", () => {
       documentId: document.id,
       chapterId: section.chapterId,
       sectionId: section.id,
-      signature: buildAudioSignature({
-        text: document.text,
-        model: "kokoro",
-        voice: "af_heart",
-        quality: 5,
-        tuning: mock.creator.generationSettings,
-      }),
+      signature: kokoroReaderSignature(document.text),
       chunks: [{
         audio: cachedAudio,
         samplingRate: 24_000,
@@ -1703,13 +1727,7 @@ describe("SynthesisApp", () => {
         documentId: document.id,
         chapterId: sections[1].chapterId,
         sectionId: sections[1].id,
-        signature: buildAudioSignature({
-          text: sectionText,
-          model: "kokoro",
-          voice: "af_heart",
-          quality: 5,
-          tuning: mock.creator.generationSettings,
-        }),
+        signature: kokoroReaderSignature(sectionText),
         chunks: [{
           audio: cachedAudio,
           samplingRate: 24_000,
@@ -1919,6 +1937,145 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("link", { name: "Studio" }));
     const changedSignature = (mock.readerLibrary.saveAudio.mock.calls.at(-1) as unknown as [CachedReaderAudio])[0].signature;
     expect(changedSignature).not.toBe(originalSignature);
+  });
+
+  it("keeps Qwen3 Reader audio when a Creator control it ignores changes, unlike Kokoro", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({
+      id: "capability-cache",
+      text: "Reader audio depends only on what its engine reads.",
+    });
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    mock.player.getAudioCacheSnapshot.mockReturnValue([{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000, text: document.text, index: 1, total: 1,
+    }]);
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    const flushedSignature = () => {
+      fireEvent.click(screen.getByRole("link", { name: "Studio" }));
+      return (mock.readerLibrary.saveAudio.mock.calls.at(-1) as unknown as [CachedReaderAudio])[0].signature;
+    };
+    const nudgeCreatorSpeed = () => {
+      const { generationSettings } = mock.creator;
+      mock.creator = { ...mock.creator, generationSettings: { ...generationSettings, speed: generationSettings.speed + 0.05 } };
+      view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    };
+
+    // Kokoro reads the Creator speed, so changing it invalidates the section.
+    await screen.findByRole("button", { name: "reader-desktop-qwen3" });
+    const kokoroSignature = flushedSignature();
+    expect(kokoroSignature).toBe(kokoroReaderSignature(document.text));
+    nudgeCreatorSpeed();
+    expect(flushedSignature()).not.toBe(kokoroSignature);
+
+    // Qwen3 never receives Creator speed or quality, so its audio survives both.
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-qwen3" }));
+    await waitFor(() => expect(screen.getByTestId("reader-can-generate")).toHaveTextContent("true"));
+    const qwenSignature = flushedSignature();
+    nudgeCreatorSpeed();
+    expect(flushedSignature()).toBe(qwenSignature);
+    fireEvent.click(screen.getByRole("button", { name: "reader-quality" }));
+    expect(flushedSignature()).toBe(qwenSignature);
+  });
+
+  it("waits until Qwen3 knows its model directory before restoring or discarding a Reader section", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({
+      id: "qwen-pending-setup",
+      text: "A paragraph with enough words for bounded Reader sections. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    expect(sections.length).toBeGreaterThan(1);
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+
+    const setup = await mock.localTts.getQwen3Setup();
+    let resolveSetup: (value: unknown) => void = () => undefined;
+    mock.localTts.getQwen3Setup.mockReturnValue(new Promise((resolve) => { resolveSetup = resolve; }));
+    const profile: Qwen3Profile = getDefaultQwen3Profile("darwin", "arm64");
+    const sectionText = getReaderSectionText(document.text, sections[1]);
+    const parts = engineSignatureParts("qwen3", {
+      settings: {
+        profile,
+        modelPath: setup.profiles[0].modelDir,
+        speaker: "Aiden",
+        language: "English",
+        instruct: "",
+        temperature: 0.9,
+        topK: 50,
+        maxNewTokens: 384,
+        seed: null,
+        referenceAudioSignature: "",
+        referenceText: "",
+      },
+      tuning: mock.creator.generationSettings,
+      quality: 5,
+    });
+    if (!parts) throw new Error("A located Qwen3 model has a signature.");
+    const cachedChunks = [{
+      audio: new Float32Array([0.3, -0.3]).buffer,
+      samplingRate: 24_000, text: sectionText, index: 1, total: 1,
+    }];
+    // Arguments are (documentId, sectionId); only the second section is cached.
+    mock.readerLibrary.loadAudio.mockImplementation(async (...args: unknown[]) => (
+      args[1] === sections[1].id
+        ? {
+            cacheKey: createReaderAudioCacheKey(document.id, sections[1].id),
+            documentId: document.id,
+            chapterId: sections[1].chapterId,
+            sectionId: sections[1].id,
+            signature: buildAudioSignature({ text: sectionText, model: "qwen3", ...parts }),
+            chunks: cachedChunks,
+            byteLength: cachedChunks[0].audio.byteLength,
+            currentTime: 0,
+            playbackRate: 1,
+            totalDuration: 1,
+            synthesisComplete: true,
+            updatedAt: Date.now(),
+          }
+        : null
+    ));
+
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-qwen3" }));
+    fireEvent.click(screen.getByRole("button", { name: "reader-next-section" }));
+    const revisited: ReaderDocumentRecord = {
+      ...document,
+      progress: {
+        ...document.progress,
+        textOffset: sections[1].start,
+        chapterId: sections[1].chapterId,
+        sectionId: sections[1].id,
+      },
+    };
+    mock.readerLibrary.documents = [revisited];
+    mock.readerLibrary.activeDocument = revisited;
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    await act(async () => { await Promise.resolve(); });
+
+    // Without a model directory there is no signature to judge the entry by:
+    // it is neither restored nor thrown away.
+    expect(mock.readerLibrary.loadAudio).not.toHaveBeenCalledWith(document.id, sections[1].id);
+    expect(mock.readerLibrary.clearAudio).not.toHaveBeenCalled();
+    expect(mock.player.restoreAudioCache).not.toHaveBeenCalled();
+
+    await act(async () => { resolveSetup(setup); });
+    await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
+      cachedChunks,
+      expect.objectContaining({ synthesisComplete: true }),
+    ));
+    expect(mock.readerLibrary.clearAudio).not.toHaveBeenCalled();
   });
 
   it("runs Qwen3 from the reader model option without leaving the reader tab", async () => {
@@ -2212,8 +2369,15 @@ describe("SynthesisApp", () => {
 
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Kokoro");
+    expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("false");
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+    // Qwen3 receives the script as written and paces itself.
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Qwen3-TTS");
+    expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("true");
+    expect(screen.getByTestId("creator-pauses-disabled")).toHaveTextContent("true");
+    expect(screen.getByTestId("creator-lexicon-disabled")).toHaveTextContent("true");
     fireEvent.click(screen.getByRole("button", { name: "Serena" }));
     expect(screen.getByRole("button", { name: "Serena" })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());

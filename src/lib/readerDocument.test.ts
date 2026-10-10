@@ -11,6 +11,7 @@ import {
   normalizeReaderTextFragment,
   rebaseReaderChapters,
   rebaseReaderTextOffset,
+  READER_AUDIO_SIGNATURE_VERSION,
   READER_SECTION_MAX_CHARS,
   readerSectionAtOffset,
   structureTextChapters,
@@ -152,15 +153,39 @@ describe("readerDocument", () => {
   });
 
   it("changes audio signatures when generation inputs change", () => {
-    const base = { text: "hello", model: "kokoro", voice: "heart", quality: 5 };
-    expect(buildAudioSignature(base)).toMatch(/^5-/);
+    const base = { text: "hello", model: "kokoro", voice: "heart", tuning: {} };
+    expect(buildAudioSignature(base)).toMatch(new RegExp(`^v${READER_AUDIO_SIGNATURE_VERSION}\\.5-`));
     expect(buildAudioSignature(base)).toBe(buildAudioSignature(base));
     expect(buildAudioSignature({ ...base, tuning: { speed: 1, quality: 5, language: "en" } }))
       .not.toBe(buildAudioSignature({ ...base, tuning: { speed: 1, quality: 5, language: "fr" } }));
     expect(buildAudioSignature(base)).not.toBe(buildAudioSignature({ ...base, voice: "bella" }));
+    expect(buildAudioSignature(base)).not.toBe(buildAudioSignature({ ...base, model: "supertonic" }));
     expect(buildAudioSignature(base)).not.toBe(buildAudioSignature({ ...base, text: "hello!" }));
     expect(buildAudioSignature({ ...base, tuning: { speed: 1, quality: 5 } }))
       .not.toBe(buildAudioSignature({ ...base, tuning: { speed: 1.1, quality: 5 } }));
+    expect(buildAudioSignature({ ...base, tuning: { pronunciationRules: [] } }))
+      .not.toBe(buildAudioSignature({ ...base, tuning: { pronunciationRules: [{ from: "GIF", to: "jif" }] } }));
+    expect(buildAudioSignature({ ...base, tuning: { pauseOverridesSec: { comma: 0.1 } } }))
+      .not.toBe(buildAudioSignature({ ...base, tuning: { pauseOverridesSec: { comma: 0.2 } } }));
+  });
+
+  it("hashes absent and explicitly undefined tuning fields alike, in any key order", () => {
+    const base = { text: "hello", model: "kokoro", voice: "heart" };
+    expect(buildAudioSignature({ ...base, tuning: { speed: 1, sentenceSpeedVariance: undefined } }))
+      .toBe(buildAudioSignature({ ...base, tuning: { speed: 1 } }));
+    expect(buildAudioSignature({ ...base, tuning: { quality: 5, speed: 1 } }))
+      .toBe(buildAudioSignature({ ...base, tuning: { speed: 1, quality: 5 } }));
+    // An engine that ignores a field omits it, which must differ from reading it.
+    expect(buildAudioSignature({ ...base, tuning: {} }))
+      .not.toBe(buildAudioSignature({ ...base, tuning: { speed: 1 } }));
+  });
+
+  it("never matches a signature written before the version bump", () => {
+    // Version 1 signatures were `${length.toString(36)}-${hash.toString(36)}`.
+    // Base 36 has no ".", so even a text whose length encodes as "v2" (1118)
+    // cannot produce a legacy signature equal to a prefixed one.
+    const current = buildAudioSignature({ text: "x".repeat(1118), model: "kokoro", voice: "heart", tuning: {} });
+    expect(current).toMatch(/^v2\.v2-[0-9a-z]+$/);
   });
 
   it("normalizes chapter gaps and resolves offsets to the preceding range", () => {

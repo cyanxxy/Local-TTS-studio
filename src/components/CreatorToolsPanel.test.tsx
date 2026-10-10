@@ -83,10 +83,55 @@ describe("CreatorToolsPanel", () => {
   });
 
   it("disables the speed control when the selected model has a fixed speaking rate", () => {
-    renderPanel({ speedDisabled: true });
+    renderPanel({
+      engineSupport: { engineLabel: "Audio8 TTS", speed: false, pauses: true, pronunciationLexicon: true },
+    });
 
-    expect(screen.getByLabelText("Base Speed")).toBeDisabled();
-    expect(screen.getByText("Audio8 uses its model-native speaking rate.")).toBeInTheDocument();
+    const speed = screen.getByLabelText("Base Speed");
+    expect(speed).toBeDisabled();
+    expect(speed).toHaveAccessibleDescription("Audio8 TTS uses its model-native speaking rate.");
+    expect(screen.getByLabelText("Comma pause")).toBeEnabled();
+    expect(screen.getByLabelText("Pronunciation")).toBeEnabled();
+  });
+
+  it("explains every Creator control an engine ignores and keeps exports usable", () => {
+    const props = renderPanel({
+      pronunciationLexicon: "GIF=jif",
+      engineSupport: { engineLabel: "Qwen3-TTS", speed: false, pauses: false, pronunciationLexicon: false },
+    });
+
+    expect(screen.getByLabelText("Base Speed")).toHaveAccessibleDescription(
+      "Qwen3-TTS uses its model-native speaking rate.",
+    );
+    for (const label of ["Comma pause", "Sentence pause", "Paragraph pause"]) {
+      expect(screen.getByLabelText(label)).toBeDisabled();
+      expect(screen.getByLabelText(label)).toHaveAccessibleDescription(
+        "Qwen3-TTS paces its own pauses, so these lengths are not applied.",
+      );
+    }
+    const lexicon = screen.getByLabelText("Pronunciation");
+    expect(lexicon).toBeDisabled();
+    expect(lexicon).toHaveAccessibleDescription(
+      "Qwen3-TTS reads the script as written, so pronunciation rules are not applied. 1 active rule.",
+    );
+    expect(screen.getByLabelText("Test pronunciation rules")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Clear rules" })).toBeDisabled();
+
+    // Presets and exports apply to every engine.
+    expect(screen.getByLabelText("Platform Preset")).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: /Audio/i }));
+    expect(props.onDownloadAudio).toHaveBeenCalledOnce();
+  });
+
+  it("enables every Creator control for an engine that reads them all", () => {
+    renderPanel({
+      engineSupport: { engineLabel: "Kokoro", speed: true, pauses: true, pronunciationLexicon: true },
+    });
+
+    expect(screen.getByLabelText("Base Speed")).toBeEnabled();
+    expect(screen.getByLabelText("Paragraph pause")).toBeEnabled();
+    expect(screen.getByLabelText("Pronunciation")).toBeEnabled();
+    expect(screen.queryByText(/not applied|model-native/)).not.toBeInTheDocument();
   });
 
   it("downloads audio and captions when audio exists", () => {
