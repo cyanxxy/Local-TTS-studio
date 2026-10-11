@@ -1,5 +1,5 @@
 import { SUPERTONIC3_LANGUAGES, SUPERTONIC3_VOICES } from "../constants";
-import { chunkWithConstraintsDetailed } from "../lib/chunking";
+import { chunkForSupertonicDetailed } from "../lib/chunking";
 import { asRecord, pickAllowed } from "./settings";
 import { audibleTuning } from "./signature";
 import { SUPERTONIC_QUALITY_RANGE } from "./supertonic";
@@ -82,7 +82,7 @@ export const supertonic3Engine = {
     voice: settings.voice,
     tuning: audibleTuning(capabilities, tuning, quality, settings.language),
   }),
-  previewChunks: (text, { settings, backend, quality }) => chunkWithConstraintsDetailed(text, {
+  previewChunks: (text, { settings, backend, quality }) => chunkForSupertonicDetailed(text, {
     minCharacters: SUPERTONIC3_CHUNK_LIMITS.minCharacters,
     maxCharacters: (SUPERTONIC3_CHUNK_LIMITS.denseScriptLanguages as readonly string[]).includes(settings.language)
       ? SUPERTONIC3_CHUNK_LIMITS.denseScriptMaxCharacters

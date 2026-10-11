@@ -5,7 +5,7 @@ import {
   QUALITY_MIN,
   QUALITY_STEP,
 } from "../constants";
-import { chunkWithConstraintsDetailed } from "../lib/chunking";
+import { chunkForSupertonicDetailed } from "../lib/chunking";
 import { asRecord, pickAllowed } from "./settings";
 import { audibleTuning } from "./signature";
 import type { EngineCapabilities, EngineDescriptor, EngineQualityRange } from "./types";
@@ -86,7 +86,7 @@ export const supertonicEngine = {
     tuning: audibleTuning(capabilities, tuning, quality, settings.language),
   }),
   // supertonic.worker.ts chunks with its resolved backend and the request quality.
-  previewChunks: (text, { backend, quality }) => chunkWithConstraintsDetailed(text, {
+  previewChunks: (text, { backend, quality }) => chunkForSupertonicDetailed(text, {
     runtime: { backend, quality },
   }),
 } as const satisfies EngineDescriptor<SupertonicSettings>;

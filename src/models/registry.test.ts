@@ -1,6 +1,11 @@
 import { describe, expect, expectTypeOf, it } from "vitest";
 import type { GenerationTuningSettings, ModelType } from "../types";
-import { chunkForKokoroDetailed, chunkWithConstraintsDetailed } from "../lib/chunking";
+import {
+  chunkForKokoroDetailed,
+  chunkForSupertonicDetailed,
+  chunkWithConstraintsDetailed,
+  SUPERTONIC_FIRST_CHUNK_MAX_CHARS,
+} from "../lib/chunking";
 import { buildQwen3RequestPlan } from "../lib/qwenChunking";
 import { audio8Engine, chunkAudio8Text } from "./audio8";
 import { formatKokoroVoiceName, kokoroEngine, kokoroVoiceGroup } from "./kokoro";
@@ -379,9 +384,9 @@ describe("preview chunkers", () => {
         .toEqual(chunkForKokoroDetailed(PREVIEW_TEXT, { backend }));
       for (const quality of [2, 5, 15]) {
         expect(surfaceEnginePreviewChunks("supertonic", PREVIEW_TEXT, SURFACE_SETTINGS, { backend, quality }))
-          .toEqual(chunkWithConstraintsDetailed(PREVIEW_TEXT, { runtime: { backend, quality } }));
+          .toEqual(chunkForSupertonicDetailed(PREVIEW_TEXT, { runtime: { backend, quality } }));
         expect(surfaceEnginePreviewChunks("supertonic3", PREVIEW_TEXT, SURFACE_SETTINGS, { backend, quality }))
-          .toEqual(chunkWithConstraintsDetailed(PREVIEW_TEXT, {
+          .toEqual(chunkForSupertonicDetailed(PREVIEW_TEXT, {
             minCharacters: 30,
             maxCharacters: 280,
             runtime: { backend, quality },
@@ -390,7 +395,7 @@ describe("preview chunkers", () => {
     }
     const japanese = { ...SURFACE_SETTINGS, supertonic3: { voice: "M1", language: "ja" } } as const;
     expect(surfaceEnginePreviewChunks("supertonic3", PREVIEW_TEXT, japanese, { backend: "wasm", quality: 5 }))
-      .toEqual(chunkWithConstraintsDetailed(PREVIEW_TEXT, {
+      .toEqual(chunkForSupertonicDetailed(PREVIEW_TEXT, {
         minCharacters: 30,
         maxCharacters: 120,
         runtime: { backend: "wasm", quality: 5 },
@@ -405,6 +410,14 @@ describe("preview chunkers", () => {
       .toEqual(buildQwen3RequestPlan(PREVIEW_TEXT).units);
     expect(enginePreviewChunks("neutts", PREVIEW_TEXT, { settings: neuttsEngine.defaultSettings, backend: null, quality: 5 }))
       .toEqual([{ text: PREVIEW_TEXT, start: 0, end: PREVIEW_TEXT.length, pauseAfterSec: 0, pauseKind: "none" }]);
+  });
+
+  it("cap the first Supertonic passage the way both Supertonic workers do", () => {
+    const longOpening = `${"An opening sentence that keeps running on, clause after clause, ".repeat(6)}until it ends. Then more.`;
+    for (const id of ["supertonic", "supertonic3"] as const) {
+      const chunks = surfaceEnginePreviewChunks(id, longOpening, SURFACE_SETTINGS, { backend: "wasm", quality: 5 });
+      expect(chunks[0].text.length).toBeLessThanOrEqual(SUPERTONIC_FIRST_CHUNK_MAX_CHARS);
+    }
   });
 
   it.each(ENGINE_IDS)("previews no passages for blank %s text", (id) => {
