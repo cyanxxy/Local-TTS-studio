@@ -333,11 +333,9 @@ export function createGenerationHistoryStore(options: GenerationHistoryStoreOpti
     return runTransaction(open, stores, mode, operation);
   }
 
-
   function emitChange(): void {
     changes.emit();
   }
-
 
   async function readEntries(transaction: IDBTransaction): Promise<GenerationHistoryEntry[]> {
     const raws = await requestResult(transaction.objectStore(ENTRIES_STORE).getAll()) as unknown[];
@@ -490,7 +488,6 @@ export function createGenerationHistoryStore(options: GenerationHistoryStoreOpti
     subscribe(listener) {
       return changes.subscribe(listener);
     },
-
 
     async destroy() {
       await deleteIndexedDatabase(databaseName);
