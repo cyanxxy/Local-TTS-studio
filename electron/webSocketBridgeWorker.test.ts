@@ -1805,9 +1805,14 @@ describe("native failure diagnostics", () => {
   it("settles a Stop at once while a crashed request collects its last output", async () => {
     let markCrashed!: () => void;
     const crashed = new Promise<void>((resolve) => { markCrashed = resolve; });
-    const { pool, children, servers } = makePool(() => {
-      children[0].emit("exit", 1, null);
-      markCrashed();
+    const { pool, children, servers, spawn } = makePool((message, server) => {
+      if (message.requestId === "r1") {
+        children[0].emit("exit", 1, null);
+        markCrashed();
+        return;
+      }
+      sendAudioChunk(server, message.requestId);
+      server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: SUCCESS_RESULT });
     });
     const outcome = runRequest(pool).then(() => "resolved", (error: Error) => error.message);
     await crashed;
@@ -1817,7 +1822,10 @@ describe("native failure diagnostics", () => {
     // Well inside the output grace period: the cancel itself settled the run.
     await expect(Promise.race([outcome, delay(150).then(() => "still pending")]))
       .resolves.toBe("Generation cancelled.");
-    servers[0].close();
+    // Stop then Play: the settled crash no longer holds the model.
+    await expect(runRequest(pool, "r2")).resolves.toMatchObject({ response: { ok: true, requestId: "r2" } });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    for (const server of servers) server.close();
   });
 
   it("keeps the model busy until a crashed request has settled", async () => {

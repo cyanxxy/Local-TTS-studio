@@ -670,6 +670,9 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     worker.active = null;
     requestModel.delete(active.requestId);
     cancelledRequests.delete(active.requestId);
+    // A settled request can no longer be cancelled, so a crashed worker stops
+    // holding the model; a Stop settles it before the output grace ends.
+    if (failingWorkers.get(model) === worker) failingWorkers.delete(model);
 
     if (outcome.ok) {
       active.resolve({ response: outcome.response });
@@ -742,7 +745,6 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     clearActiveTimers(active);
     failingWorkers.set(model, worker);
     void Promise.race([worker.outputClosed, delay(OUTPUT_DRAIN_GRACE_MS)]).then(() => {
-      if (failingWorkers.get(model) === worker) failingWorkers.delete(model);
       settleActive(model, worker, {
         ok: false,
         error: cancelledRequests.has(active.requestId)
