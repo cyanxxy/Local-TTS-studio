@@ -1,311 +1,411 @@
-import type { AudioExportOptions } from "../types";
-import { concatFloat32Arrays, createWavBlob, floatToPcm16Array } from "./audio";
+import type { AudioExportOptions, ExportAudioFormat, MasteringOptions } from "../types";
+import { buildWavHeader, floatToPcm16Array, floatToPcm16Sample, type WavEncoding } from "./audio";
+import { FlacEncoder } from "./audio/flac";
+import { buildId3Tag, chaptersFromStarts, type Id3Metadata } from "./audio/id3";
+import { TruePeakLimiter } from "./audio/limiter";
+import { LoudnessMeter, dbToGain, type LoudnessReport } from "./audio/loudness";
+import { ChunkPostProcessor, type PostProcessTiming, type PostProcessingOptions } from "./audio/postProcess";
+import { PolyphaseResampler, resampleAudio } from "./audio/resample";
+
+/** Every export format: the persisted ones plus lossless FLAC. */
+export type ExportFormat = ExportAudioFormat | "flac-16" | "flac-24";
 
 export interface ExportChunk {
   audio: Float32Array;
   samplingRate: number;
+  /** Silence the engine appended after the speech; post-processing keeps it exact. */
+  pauseAfterSec?: number;
+}
+
+export interface ExportMasteringOptions extends MasteringOptions {
+  /**
+   * "lufs" (default) matches integrated loudness to `targetLufs`; "rms"
+   * matches the unweighted RMS level instead, as ACX audiobook specs require.
+   */
+  measure?: "lufs" | "rms";
+}
+
+export interface ExportChapter {
+  title: string;
+  /** Start in the exported timeline, or `chunkIndex` to start where that chunk's audio starts. */
+  startSec?: number;
+  chunkIndex?: number;
+}
+
+export interface ExportOptions extends Omit<AudioExportOptions, "format" | "mastering"> {
+  format: ExportFormat;
+  mastering: ExportMasteringOptions;
+  /** Edge-silence trimming, padding, fades and join de-clicking; omitted leaves chunks as generated. */
+  post?: PostProcessingOptions;
+  /** Tags written into MP3 exports (ID3v2.4). */
+  metadata?: Omit<Id3Metadata, "durationMs">;
+  /** Chapters written into MP3 exports. */
+  chapters?: ExportChapter[];
+}
+
+export type ExportPhase = "analyzing" | "encoding";
+
+export interface ExportProgress {
+  phase: ExportPhase;
+  /** Overall progress from 0 to 1. */
+  fraction: number;
+}
+
+export interface ExportHooks {
+  onProgress?: (progress: ExportProgress) => void;
+  signal?: AbortSignal;
 }
 
 export interface ExportResult {
   blob: Blob;
   extension: string;
+  /** Measured on the exported audio. */
+  report: LoudnessReport;
+  /** Where each chunk landed in the exported timeline. */
+  timings: PostProcessTiming[];
+  /** Gain applied by mastering, in dB (0 without mastering). */
+  gainDb: number;
+  /** Deepest limiter gain reduction, in dB (0 when the limiter never engaged). */
+  limiterReductionDb: number;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.max(min, Math.min(max, value));
+export interface LoudnessPreset {
+  id: string;
+  label: string;
+  mastering: Omit<ExportMasteringOptions, "enabled">;
 }
 
-interface BiquadCoefficients {
-  b0: number;
-  b1: number;
-  b2: number;
-  a1: number;
-  a2: number;
-}
+/** Common delivery targets. Podcasts: -16 LUFS stereo / -19 LUFS mono (Apple); ACX: RMS -20 dBFS, peaks -3 dB. */
+export const LOUDNESS_PRESETS: readonly LoudnessPreset[] = Object.freeze([
+  { id: "streaming", label: "Streaming (YouTube, Spotify) -14 LUFS", mastering: { targetLufs: -14, truePeakDb: -1 } },
+  { id: "podcast", label: "Podcast -16 LUFS", mastering: { targetLufs: -16, truePeakDb: -1 } },
+  { id: "podcast-mono", label: "Mono podcast -19 LUFS", mastering: { targetLufs: -19, truePeakDb: -1 } },
+  { id: "ebu-r128", label: "Broadcast EBU R 128 -23 LUFS", mastering: { targetLufs: -23, truePeakDb: -1 } },
+  { id: "atsc-a85", label: "Broadcast ATSC A/85 -24 LUFS", mastering: { targetLufs: -24, truePeakDb: -2 } },
+  { id: "acx", label: "Audiobook (ACX) -20 dB RMS", mastering: { targetLufs: -20, truePeakDb: -3, measure: "rms" } },
+]);
 
-const LUFS_OFFSET_DB = -0.691;
-const LUFS_ABSOLUTE_GATE_DB = -70;
-const LUFS_RELATIVE_GATE_DB = -10;
-const LUFS_BLOCK_DURATION_SEC = 0.4;
-const LUFS_BLOCK_HOP_SEC = 0.1;
-const SINC_UPSAMPLE_RADIUS = 12;
-const SINC_DOWNSAMPLE_RADIUS = 24;
-const MIN_MP3_BITRATE_KBPS = 128;
+const FORMAT_EXTENSIONS: Readonly<Record<ExportFormat, string>> = {
+  "wav-f32": "wav",
+  "wav-pcm24": "wav",
+  "wav-pcm16": "wav",
+  mp3: "mp3",
+  "flac-16": "flac",
+  "flac-24": "flac",
+};
+
+const MIN_MP3_BITRATE_KBPS = 64;
 const MAX_MP3_BITRATE_KBPS = 320;
+/** Below 32 kHz MP3 is MPEG-2, which tops out at 160 kbps. */
+const MAX_MPEG2_BITRATE_KBPS = 160;
+const MP3_FRAME_SAMPLES = 1152;
+/** Mastering stops correcting once within this many LU of the target. */
+const MASTERING_TOLERANCE_LU = 0.3;
+const MAX_MASTERING_CORRECTIONS = 2;
 
-function highShelfCoefficients(sampleRate: number, frequency: number, gainDb: number, q: number): BiquadCoefficients {
-  const a = 10 ** (gainDb / 40);
-  const omega = (2 * Math.PI * frequency) / sampleRate;
-  const sin = Math.sin(omega);
-  const cos = Math.cos(omega);
-  const alpha = sin / (2 * q);
-  const sqrtA = Math.sqrt(a);
-  const a0 = (a + 1) - ((a - 1) * cos) + (2 * sqrtA * alpha);
+/** Bitrate an MP3 export really uses at `sampleRate`. */
+export function resolveMp3Bitrate(sampleRate: number, requestedKbps: number): number {
+  const max = sampleRate < 32000 ? MAX_MPEG2_BITRATE_KBPS : MAX_MP3_BITRATE_KBPS;
+  const requested = Number.isFinite(requestedKbps) ? requestedKbps : max;
+  return Math.round(Math.min(max, Math.max(MIN_MP3_BITRATE_KBPS, requested)));
+}
 
+function abortError(): DOMException {
+  return new DOMException("The export was cancelled.", "AbortError");
+}
+
+// ---------------------------------------------------------------------------
+// Encoders: each takes the final samples in order and builds the file at the end.
+
+interface Encoder {
+  write(samples: Float32Array): void;
+  /** Builds the file; `outcome` describes the rendered audio (duration, timeline). */
+  finish(outcome: RenderOutcome): Blob;
+}
+
+function wavEncoder(sampleRate: number, encoding: WavEncoding): Encoder {
+  const parts: BlobPart[] = [];
+  let frames = 0;
   return {
-    b0: (a * ((a + 1) + ((a - 1) * cos) + (2 * sqrtA * alpha))) / a0,
-    b1: (-2 * a * ((a - 1) + ((a + 1) * cos))) / a0,
-    b2: (a * ((a + 1) + ((a - 1) * cos) - (2 * sqrtA * alpha))) / a0,
-    a1: (2 * ((a - 1) - ((a + 1) * cos))) / a0,
-    a2: ((a + 1) - ((a - 1) * cos) - (2 * sqrtA * alpha)) / a0,
+    write(samples) {
+      frames += samples.length;
+      if (encoding === "float32") {
+        parts.push(samples.slice().buffer);
+        return;
+      }
+      const bytes = encoding === "pcm16" ? 2 : 3;
+      const view = new DataView(new ArrayBuffer(samples.length * bytes));
+      for (let index = 0; index < samples.length; index += 1) {
+        if (encoding === "pcm16") {
+          view.setInt16(index * 2, floatToPcm16Sample(samples[index]), true);
+        } else {
+          const clamped = Math.max(-1, Math.min(1, samples[index]));
+          const sample = clamped < 0 ? Math.round(clamped * 0x800000) : Math.round(clamped * 0x7fffff);
+          view.setUint8(index * 3, sample & 0xff);
+          view.setUint8(index * 3 + 1, (sample >> 8) & 0xff);
+          view.setUint8(index * 3 + 2, (sample >> 16) & 0xff);
+        }
+      }
+      parts.push(view.buffer);
+    },
+    finish() {
+      return new Blob([buildWavHeader(frames, sampleRate, encoding), ...parts], { type: "audio/wav" });
+    },
   };
 }
 
-function highPassCoefficients(sampleRate: number, frequency: number, q: number): BiquadCoefficients {
-  const omega = (2 * Math.PI * frequency) / sampleRate;
-  const sin = Math.sin(omega);
-  const cos = Math.cos(omega);
-  const alpha = sin / (2 * q);
-  const a0 = 1 + alpha;
+interface Mp3EncoderLike {
+  encodeBuffer(left: Int16Array): Uint8Array | Int8Array;
+  flush(): Uint8Array | Int8Array;
+}
 
+function copyBytes(data: Uint8Array | Int8Array): ArrayBuffer {
+  const bytes = new Uint8Array(data.length);
+  bytes.set(data);
+  return bytes.buffer;
+}
+
+function mp3Encoder(encoder: Mp3EncoderLike, id3Tag: (outcome: RenderOutcome) => Uint8Array | null): Encoder {
+  const parts: BlobPart[] = [];
+  let pending = new Float32Array(0);
+  const encode = (samples: Float32Array) => {
+    const encoded = encoder.encodeBuffer(floatToPcm16Array(samples));
+    if (encoded.length > 0) parts.push(copyBytes(encoded));
+  };
   return {
-    b0: ((1 + cos) / 2) / a0,
-    b1: (-(1 + cos)) / a0,
-    b2: ((1 + cos) / 2) / a0,
-    a1: (-2 * cos) / a0,
-    a2: (1 - alpha) / a0,
+    write(samples) {
+      const combined = new Float32Array(pending.length + samples.length);
+      combined.set(pending);
+      combined.set(samples, pending.length);
+      const whole = combined.length - (combined.length % MP3_FRAME_SAMPLES);
+      for (let offset = 0; offset < whole; offset += MP3_FRAME_SAMPLES) encode(combined.subarray(offset, offset + MP3_FRAME_SAMPLES));
+      pending = combined.slice(whole);
+    },
+    finish(outcome) {
+      if (pending.length > 0) encode(pending);
+      const final = encoder.flush();
+      if (final.length > 0) parts.push(copyBytes(final));
+      const tag = id3Tag(outcome);
+      return new Blob(tag ? [tag.slice().buffer, ...parts] : parts, { type: "audio/mpeg" });
+    },
   };
 }
 
-function applyBiquad(audio: Float32Array, coefficients: BiquadCoefficients): Float32Array {
-  const output = new Float32Array(audio.length);
-  let x1 = 0;
-  let x2 = 0;
-  let y1 = 0;
-  let y2 = 0;
+function flacEncoder(sampleRate: number, bitsPerSample: 16 | 24): Encoder {
+  const encoder = new FlacEncoder({ sampleRate, bitsPerSample });
+  const parts: Uint8Array[] = [];
+  return {
+    write(samples) {
+      parts.push(...encoder.encode(samples));
+    },
+    finish() {
+      parts.push(...encoder.finish());
+      // The first part is the marker plus the placeholder STREAMINFO.
+      parts[0].set(encoder.streamInfo(), FlacEncoder.STREAMINFO_OFFSET);
+      return new Blob(parts.map((part) => part.slice().buffer), { type: "audio/flac" });
+    },
+  };
+}
 
-  for (let i = 0; i < audio.length; i += 1) {
-    const x0 = audio[i];
-    const y0 = (coefficients.b0 * x0)
-      + (coefficients.b1 * x1)
-      + (coefficients.b2 * x2)
-      - (coefficients.a1 * y1)
-      - (coefficients.a2 * y2);
+// ---------------------------------------------------------------------------
+// Rendering
 
-    output[i] = y0;
-    x2 = x1;
-    x1 = x0;
-    y2 = y1;
-    y1 = y0;
+interface RenderSettings {
+  gain: number;
+  ceilingDb: number | null;
+}
+
+interface RenderOutcome {
+  report: LoudnessReport;
+  timings: PostProcessTiming[];
+  limiterReductionDb: number;
+}
+
+/** Plain timings when chunks are exported as generated. */
+function chunkTimings(chunks: readonly ExportChunk[], sampleRate: number): PostProcessTiming[] {
+  let cursor = 0;
+  return chunks.map((chunk) => {
+    const length = chunk.audio.length;
+    const pause = Math.min(length, Math.round(Math.max(0, chunk.pauseAfterSec ?? 0) * sampleRate));
+    const timing = {
+      startSec: cursor / sampleRate,
+      endSec: (cursor + length) / sampleRate,
+      speechStartSec: cursor / sampleRate,
+      speechEndSec: (cursor + length - pause) / sampleRate,
+    };
+    cursor += length;
+    return timing;
+  });
+}
+
+/**
+ * Streams every chunk through post-processing, resampling, gain and the
+ * limiter into `sink`, measuring the result. Only one chunk's worth of
+ * intermediate audio exists at a time.
+ */
+function render(
+  chunks: readonly ExportChunk[],
+  options: ExportOptions,
+  settings: RenderSettings,
+  targetRate: number,
+  sink: ((samples: Float32Array) => void) | null,
+  onChunk: (done: number) => void,
+  signal: AbortSignal | undefined,
+): RenderOutcome {
+  const sourceRate = chunks[0].samplingRate;
+  const post = options.post ? new ChunkPostProcessor(sourceRate, options.post) : null;
+  const resampler = new PolyphaseResampler(sourceRate, targetRate);
+  const limiter = settings.ceilingDb === null ? null : new TruePeakLimiter(targetRate, { ceilingDb: settings.ceilingDb });
+  const meter = new LoudnessMeter(targetRate);
+
+  const emit = (samples: Float32Array) => {
+    if (samples.length === 0) return;
+    if (settings.gain !== 1) {
+      for (let index = 0; index < samples.length; index += 1) samples[index] *= settings.gain;
+    }
+    const limited = limiter ? limiter.process(samples) : samples;
+    meter.process(limited);
+    sink?.(limited);
+  };
+
+  let done = 0;
+  for (const chunk of chunks) {
+    if (signal?.aborted) throw abortError();
+    const audio = chunk.samplingRate === sourceRate ? chunk.audio : resampleAudio(chunk.audio, chunk.samplingRate, sourceRate);
+    const processed = post ? post.process({ audio, pauseAfterSec: chunk.pauseAfterSec }) : audio;
+    emit(resampler.process(processed));
+    done += chunk.audio.length;
+    onChunk(done);
   }
-
-  return output;
-}
-
-function applyKWeighting(audio: Float32Array, sampleRate: number): Float32Array {
-  if (sampleRate <= 0 || audio.length === 0) return audio;
-
-  const shelf = highShelfCoefficients(sampleRate, 1500, 4, Math.SQRT1_2);
-  const highPass = highPassCoefficients(sampleRate, 38, 0.5);
-  return applyBiquad(applyBiquad(audio, shelf), highPass);
-}
-
-function meanSquare(audio: Float32Array, start: number = 0, length: number = audio.length): number {
-  if (length <= 0) return 0;
-  let sumSquares = 0;
-  for (let i = start; i < start + length; i += 1) {
-    const sample = audio[i];
-    sumSquares += sample * sample;
+  if (post) emit(resampler.process(post.flush()));
+  emit(resampler.flush());
+  if (limiter) {
+    const tail = limiter.flush();
+    meter.process(tail);
+    sink?.(tail);
   }
-  return sumSquares / length;
+  return {
+    report: meter.result(),
+    timings: post ? post.timings : chunkTimings(chunks, sourceRate),
+    limiterReductionDb: limiter ? limiter.maxReductionDb : 0,
+  };
 }
 
-function loudnessFromMeanSquare(energy: number): number {
-  return energy > 0 ? LUFS_OFFSET_DB + (10 * Math.log10(energy)) : -Infinity;
+function measuredLevel(report: LoudnessReport, measure: ExportMasteringOptions["measure"]): number {
+  return measure === "rms" ? report.rmsDbfs : report.integratedLufs;
 }
 
-function integratedLoudnessFromEnergies(energies: number[]): number {
-  if (energies.length === 0) return -Infinity;
-  const energy = energies.reduce((sum, value) => sum + value, 0) / energies.length;
-  return loudnessFromMeanSquare(energy);
-}
-
-function measureIntegratedLufs(audio: Float32Array, sampleRate: number): number {
-  if (audio.length === 0 || sampleRate <= 0) return -Infinity;
-
-  const weighted = applyKWeighting(audio, sampleRate);
-  const blockSize = Math.max(1, Math.round(sampleRate * LUFS_BLOCK_DURATION_SEC));
-  const hopSize = Math.max(1, Math.round(sampleRate * LUFS_BLOCK_HOP_SEC));
-  const energies: number[] = [];
-
-  if (weighted.length <= blockSize) {
-    energies.push(meanSquare(weighted));
-  } else {
-    for (let start = 0; start + blockSize <= weighted.length; start += hopSize) {
-      energies.push(meanSquare(weighted, start, blockSize));
+function validateChunks(chunks: readonly ExportChunk[]): void {
+  if (chunks.length === 0) throw new Error("No audio is available to export.");
+  for (const chunk of chunks) {
+    if (!Number.isInteger(chunk.samplingRate) || chunk.samplingRate <= 0) {
+      throw new Error(`Audio chunk has an invalid sample rate: ${chunk.samplingRate}.`);
     }
   }
-
-  const absoluteGated = energies.filter((energy) => (
-    loudnessFromMeanSquare(energy) > LUFS_ABSOLUTE_GATE_DB
-  ));
-  if (absoluteGated.length === 0) return -Infinity;
-
-  const preliminaryLoudness = integratedLoudnessFromEnergies(absoluteGated);
-  const relativeGate = Math.max(LUFS_ABSOLUTE_GATE_DB, preliminaryLoudness + LUFS_RELATIVE_GATE_DB);
-  const gated = absoluteGated.filter((energy) => loudnessFromMeanSquare(energy) > relativeGate);
-
-  return integratedLoudnessFromEnergies(gated);
 }
 
-function applyMastering(
-  audio: Float32Array,
-  sampleRate: number,
-  options: AudioExportOptions["mastering"],
-): Float32Array {
-  if (!options.enabled || audio.length === 0) {
-    return audio;
-  }
-
-  const mastered = new Float32Array(audio);
-  const integratedLufs = measureIntegratedLufs(mastered, sampleRate);
-  if (Number.isFinite(integratedLufs)) {
-    const targetGainDb = options.targetLufs - integratedLufs;
-    const gain = 10 ** (targetGainDb / 20);
-    for (let i = 0; i < mastered.length; i += 1) {
-      mastered[i] *= gain;
-    }
-  }
-
-  let peak = 0;
-  for (let i = 0; i < mastered.length; i += 1) {
-    const abs = Math.abs(mastered[i]);
-    if (abs > peak) peak = abs;
-  }
-
-  const peakLimit = 10 ** (options.truePeakDb / 20);
-  if (peak > peakLimit && peak > 0) {
-    const limiterGain = peakLimit / peak;
-    for (let i = 0; i < mastered.length; i += 1) {
-      mastered[i] *= limiterGain;
-    }
-  }
-
-  for (let i = 0; i < mastered.length; i += 1) {
-    mastered[i] = clamp(mastered[i], -1, 1);
-  }
-
-  return mastered;
+/** Chapter starts on the exported timeline; a chapter at the first chunk also covers the head padding. */
+function resolveChapterStarts(chapters: readonly ExportChapter[], timings: readonly PostProcessTiming[]) {
+  return chapters.flatMap((chapter) => {
+    const startSec = chapter.chunkIndex === 0
+      ? 0
+      : chapter.chunkIndex !== undefined ? timings[chapter.chunkIndex]?.startSec : chapter.startSec;
+    return startSec === undefined ? [] : [{ title: chapter.title, startSec }];
+  });
 }
 
-function sinc(value: number): number {
-  if (Math.abs(value) < 1e-8) return 1;
-  const x = Math.PI * value;
-  return Math.sin(x) / x;
-}
-
-function blackmanWindow(distance: number, radius: number): number {
-  const normalized = Math.abs(distance) / radius;
-  if (normalized >= 1) return 0;
-  return 0.42 + (0.5 * Math.cos(Math.PI * normalized)) + (0.08 * Math.cos(2 * Math.PI * normalized));
-}
-
-function resampleWindowedSinc(audio: Float32Array, fromRate: number, toRate: number): Float32Array {
-  if (fromRate === toRate || audio.length === 0) return audio;
-  if (fromRate <= 0 || toRate <= 0) return audio;
-
-  const ratio = toRate / fromRate;
-  const targetLength = Math.max(1, Math.round(audio.length * ratio));
-  const output = new Float32Array(targetLength);
-  const filterScale = Math.min(1, ratio);
-  const radius = ratio < 1 ? SINC_DOWNSAMPLE_RADIUS : SINC_UPSAMPLE_RADIUS;
-
-  for (let i = 0; i < targetLength; i += 1) {
-    const center = i / ratio;
-    const left = Math.ceil(center - radius);
-    const right = Math.floor(center + radius);
-    let weightedSum = 0;
-    let weightTotal = 0;
-
-    for (let sampleIndex = left; sampleIndex <= right; sampleIndex += 1) {
-      const clampedIndex = clamp(sampleIndex, 0, audio.length - 1);
-      const distance = center - sampleIndex;
-      const weight = filterScale * sinc(distance * filterScale) * blackmanWindow(distance, radius);
-      weightedSum += audio[clampedIndex] * weight;
-      weightTotal += weight;
-    }
-
-    output[i] = weightTotal === 0 ? 0 : weightedSum / weightTotal;
-  }
-
-  return output;
-}
-
-async function encodeMp3(audio: Float32Array, sampleRate: number, bitrateKbps: number): Promise<Blob> {
-  const lamejsModule = await import("@breezystack/lamejs");
-  const encoder = new lamejsModule.default.Mp3Encoder(
-    1,
-    sampleRate,
-    Math.round(clamp(bitrateKbps, MIN_MP3_BITRATE_KBPS, MAX_MP3_BITRATE_KBPS)),
-  );
-  const pcm = floatToPcm16Array(audio);
-  const blockSize = 1152;
-  const chunks: ArrayBuffer[] = [];
-
-  for (let i = 0; i < pcm.length; i += blockSize) {
-    const block = pcm.subarray(i, i + blockSize);
-    const encoded = encoder.encodeBuffer(block);
-    if (encoded.length > 0) {
-      const buffer = new Uint8Array(encoded.length);
-      buffer.set(encoded);
-      chunks.push(buffer.buffer);
-    }
-  }
-
-  const final = encoder.flush();
-  if (final.length > 0) {
-    const buffer = new Uint8Array(final.length);
-    buffer.set(final);
-    chunks.push(buffer.buffer);
-  }
-
-  return new Blob(chunks, { type: "audio/mpeg" });
-}
-
-
+/**
+ * Renders chunks into an audio file. Without mastering this is one streaming
+ * pass. With mastering, a first pass measures the loudness, then gain and the
+ * true-peak limiter are applied; when the limiter pulls the level more than
+ * 0.3 LU off target, up to two correction passes refine the gain before the
+ * final encoding pass.
+ */
 export async function buildExportAudio(
   chunks: ExportChunk[],
-  options: AudioExportOptions,
+  options: ExportOptions,
+  hooks: ExportHooks = {},
 ): Promise<ExportResult> {
-  if (chunks.length === 0) {
-    throw new Error("No audio is available to export.");
+  validateChunks(chunks);
+  const format = options.format;
+  if (!Object.hasOwn(FORMAT_EXTENSIONS, format)) throw new Error(`Unsupported export format: ${format}`);
+  const targetRate = options.sampleRate === "source" ? chunks[0].samplingRate : options.sampleRate;
+  const totalSamples = chunks.reduce((sum, chunk) => sum + chunk.audio.length, 0);
+  const mastering = options.mastering;
+  const passes = mastering.enabled ? 2 + MAX_MASTERING_CORRECTIONS : 1;
+  let passIndex = 0;
+  const progress = (phase: ExportPhase) => (done: number) => {
+    const fraction = totalSamples > 0 ? done / totalSamples : 1;
+    hooks.onProgress?.({ phase, fraction: Math.min(1, (passIndex + fraction) / passes) });
+  };
+
+  let settings: RenderSettings = { gain: 1, ceilingDb: null };
+  if (mastering.enabled) {
+    const analysis = render(chunks, options, settings, targetRate, null, progress("analyzing"), hooks.signal);
+    passIndex += 1;
+    const measured = measuredLevel(analysis.report, mastering.measure);
+    if (Number.isFinite(measured)) {
+      let gainDb = mastering.targetLufs - measured;
+      settings = { gain: dbToGain(gainDb), ceilingDb: mastering.truePeakDb };
+      // The limiter only lowers the level when the boosted peaks exceed the ceiling.
+      for (
+        let correction = 0;
+        correction < MAX_MASTERING_CORRECTIONS && analysis.report.truePeakDbtp + gainDb > mastering.truePeakDb;
+        correction += 1
+      ) {
+        const trial = render(chunks, options, settings, targetRate, null, progress("analyzing"), hooks.signal);
+        passIndex += 1;
+        const error = mastering.targetLufs - measuredLevel(trial.report, mastering.measure);
+        if (Math.abs(error) <= MASTERING_TOLERANCE_LU) break;
+        gainDb += error;
+        settings = { gain: dbToGain(gainDb), ceilingDb: mastering.truePeakDb };
+      }
+    }
+    passIndex = passes - 1;
   }
 
-  const sourceRate = chunks[0].samplingRate;
-  const targetRate = options.sampleRate === "source" ? sourceRate : options.sampleRate;
-  const normalizedChunks = chunks.map((chunk) => (
-    chunk.samplingRate === targetRate
-      ? chunk.audio
-      : resampleWindowedSinc(chunk.audio, chunk.samplingRate, targetRate)
-  ));
+  const id3Tag = (outcome: RenderOutcome): Uint8Array | null => {
+    if (!options.metadata && !options.chapters?.length) return null;
+    const { durationSec } = outcome.report;
+    const chapters = chaptersFromStarts(resolveChapterStarts(options.chapters ?? [], outcome.timings), durationSec);
+    return buildId3Tag({ ...options.metadata, durationMs: durationSec * 1000 }, chapters);
+  };
 
-  const merged = concatFloat32Arrays(normalizedChunks);
-  const mastered = applyMastering(merged, targetRate, options.mastering);
-
-  switch (options.format) {
+  let encoder: Encoder;
+  switch (format) {
     case "wav-f32":
-      return {
-        blob: createWavBlob([mastered], targetRate, { encoding: "float32" }),
-        extension: "wav",
-      };
+      encoder = wavEncoder(targetRate, "float32");
+      break;
     case "wav-pcm24":
-      return {
-        blob: createWavBlob([mastered], targetRate, { encoding: "pcm24" }),
-        extension: "wav",
-      };
+      encoder = wavEncoder(targetRate, "pcm24");
+      break;
     case "wav-pcm16":
-      return {
-        blob: createWavBlob([mastered], targetRate, { encoding: "pcm16" }),
-        extension: "wav",
-      };
-    case "mp3":
-      return {
-        blob: await encodeMp3(mastered, targetRate, options.bitrateKbps),
-        extension: "mp3",
-      };
-    default:
-      throw new Error(`Unsupported export format: ${options.format}`);
+      encoder = wavEncoder(targetRate, "pcm16");
+      break;
+    case "flac-16":
+      encoder = flacEncoder(targetRate, 16);
+      break;
+    case "flac-24":
+      encoder = flacEncoder(targetRate, 24);
+      break;
+    default: {
+      const lamejs = await import("@breezystack/lamejs");
+      const mp3 = new lamejs.default.Mp3Encoder(1, targetRate, resolveMp3Bitrate(targetRate, options.bitrateKbps));
+      encoder = mp3Encoder(mp3, id3Tag);
+    }
   }
+
+  const outcome = render(chunks, options, settings, targetRate, (samples) => encoder.write(samples), progress("encoding"), hooks.signal);
+  const blob = encoder.finish(outcome);
+  hooks.onProgress?.({ phase: "encoding", fraction: 1 });
+  return {
+    blob,
+    extension: FORMAT_EXTENSIONS[format],
+    report: outcome.report,
+    timings: outcome.timings,
+    gainDb: settings.gain === 1 ? 0 : 20 * Math.log10(settings.gain),
+    limiterReductionDb: outcome.limiterReductionDb,
+  };
 }
 
 export function downloadBlob(blob: Blob, filename: string): void {
