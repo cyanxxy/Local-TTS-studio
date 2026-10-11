@@ -88,6 +88,14 @@ describe("useVoiceLibrary", () => {
       await result.current.deleteVoice("voice-1");
     });
     await waitFor(() => expect(result.current.voices).toHaveLength(2));
+
+    await act(async () => {
+      await result.current.createVoices([
+        { kind: "preset", name: "Batch A", preset: { engineId: "kokoro", voiceId: "af_bella", settings: {} } },
+        { kind: "preset", name: "Batch B", preset: { engineId: "kokoro", voiceId: "am_adam", settings: {} } },
+      ]);
+    });
+    await waitFor(() => expect(result.current.voices).toHaveLength(4));
   });
 
   it("reports load failures and recovers on refresh", async () => {
