@@ -42,6 +42,8 @@ export interface Qwen3SetupOptions {
   lifecycle: LocalModelLifecycle<LocalModel>;
   /** Throws once the quit has started. */
   assertAcceptingRequests: () => void;
+  /** Told whenever setup or a download may have changed a managed model folder. */
+  onModelDirsChanged: () => void;
 }
 
 export interface Qwen3SetupHandlers {
@@ -55,6 +57,7 @@ export function createQwen3SetupHandlers({
   environment,
   lifecycle,
   assertAcceptingRequests,
+  onModelDirsChanged,
 }: Qwen3SetupOptions): Qwen3SetupHandlers {
   function getQwen3ModelDir(profile: Qwen3Profile): string {
     const dirName = profile.repo.split("/").at(-1);
@@ -68,8 +71,13 @@ export function createQwen3SetupHandlers({
     return path.join(environment.cacheDir("qwen3"), profile.provider, dirName);
   }
 
+  // Adoption may move a legacy folder into place.
   async function resolveQwen3ModelDir(profile: Qwen3Profile): Promise<string> {
-    return adoptLegacyQwen3ModelDir(profile, getQwen3ModelDir(profile), getLegacyQwen3ModelDir(profile));
+    try {
+      return await adoptLegacyQwen3ModelDir(profile, getQwen3ModelDir(profile), getLegacyQwen3ModelDir(profile));
+    } finally {
+      onModelDirsChanged();
+    }
   }
 
   function getRequestedQwen3Profile(request: unknown): Qwen3Profile {
@@ -133,12 +141,17 @@ export function createQwen3SetupHandlers({
       return lifecycle.run("qwen3", async (signal) => {
         const profile = getRequestedQwen3Profile(request);
         const modelDir = await resolveQwen3ModelDir(profile);
-        return qwen3ModelDownloads.download(
-          profile,
-          modelDir,
-          createSafeProgressSender(sender, "local-tts:qwen3-download-progress"),
-          signal,
-        );
+        try {
+          return await qwen3ModelDownloads.download(
+            profile,
+            modelDir,
+            createSafeProgressSender(sender, "local-tts:qwen3-download-progress"),
+            signal,
+          );
+        } finally {
+          // Files were written, replaced or removed whatever the outcome.
+          onModelDirsChanged();
+        }
       });
     },
 

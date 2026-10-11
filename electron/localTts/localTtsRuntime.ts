@@ -47,6 +47,7 @@ import {
   createBridgeEnvironment,
   type BridgeEnvironmentOptions,
 } from "./bridgeEnvironment";
+import { createModelDirValidationCache } from "./modelDirValidationCache";
 import { createProbeRunner } from "./probeRunner";
 import { createQwen3SetupHandlers, type Qwen3ModelDirChoice, type Qwen3SetupResult } from "./qwen3Setup";
 import { BridgeRequestRegistry } from "./requestRegistry";
@@ -121,6 +122,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
     maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
   });
   const registry = new BridgeRequestRegistry(stopRequestNow);
+  const qwen3ModelDirs = createModelDirValidationCache({ validate: isStructurallyValidQwen3ModelDir });
   let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
   let shuttingDown = false;
 
@@ -216,7 +218,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
   async function assertQwen3ModelDir(payload: Record<string, unknown>): Promise<void> {
     const profile = getQwen3Profile(String(payload.modelRepo));
     const modelPath = String(payload.modelPath);
-    if (!profile || !(await isStructurallyValidQwen3ModelDir(modelPath, profile))) {
+    if (!profile || !(await qwen3ModelDirs.isValid(modelPath, profile))) {
       throw new Error("The selected Qwen3 model directory is missing required files or does not match the selected profile.");
     }
   }
@@ -295,7 +297,12 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
     return parseBridgeEnvelopeResult(response);
   }
 
-  const qwen3 = createQwen3SetupHandlers({ environment, lifecycle, assertAcceptingRequests });
+  const qwen3 = createQwen3SetupHandlers({
+    environment,
+    lifecycle,
+    assertAcceptingRequests,
+    onModelDirsChanged: () => qwen3ModelDirs.invalidate(),
+  });
 
   return {
     probe(request, event) {
@@ -352,7 +359,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
           if (model === "qwen3") {
             const profile = modelRepo ? getQwen3Profile(modelRepo) : undefined;
             const modelPath = String(payload.modelPath ?? "");
-            if (!profile || !(await isStructurallyValidQwen3ModelDir(modelPath, profile))) {
+            if (!profile || !(await qwen3ModelDirs.isValid(modelPath, profile))) {
               return { warmed: false, message: "The selected Qwen3 model directory is incomplete or incompatible." };
             }
           }
@@ -427,7 +434,13 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
       const cachePath = environment.cacheDir(model);
       return lifecycle.clear(model, async () => {
         await webSocketBridgeWorkers?.shutdown(model);
-        await fs.rm(cachePath, { recursive: true, force: true });
+        try {
+          await fs.rm(cachePath, { recursive: true, force: true });
+        } finally {
+          // Managed Qwen3 folders live inside this cache; even a partial
+          // removal must be noticed by the next request.
+          if (model === "qwen3") qwen3ModelDirs.invalidate();
+        }
         return { path: cachePath, cleared: true };
       });
     },

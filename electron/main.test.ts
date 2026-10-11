@@ -1408,6 +1408,98 @@ describe("local model cache lifecycle IPC", () => {
     await waitForQuit();
     expect(mocks.localWsRun).not.toHaveBeenCalled();
   });
+
+  describe("Qwen3 model folder checks", () => {
+    async function writeModelDir(directory: string): Promise<void> {
+      for (const file of qwenProfile.requiredFiles) {
+        const target = path.join(directory, ...file.split("/"));
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.writeFile(target, file === "config.json" ? JSON.stringify({ tts_model_type: "custom_voice" }) : "x");
+      }
+    }
+
+    // Consecutive sections of one read, as the Reader sends them, so the
+    // generation cooldown does not refuse the second request.
+    function qwenGenerate(modelPath: string, sectionIndex: number) {
+      return {
+        model: "qwen3",
+        requestId: `qwen-${sectionIndex}`,
+        payload: { text: "hello", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath },
+        continuation: { jobId: "qwen-read", sectionIndex, sectionCount: 8 },
+      };
+    }
+
+    /** Counts reads of the folder's config.json, which every structural check parses. */
+    function countConfigReads(modelPath: string) {
+      const originalReadFile = fs.readFile.bind(fs);
+      const reads = vi.fn();
+      vi.spyOn(fs, "readFile").mockImplementation(((target: Parameters<typeof fs.readFile>[0], options) => {
+        if (target === path.join(modelPath, "config.json")) reads();
+        return originalReadFile(target, options);
+      }) as typeof fs.readFile);
+      return reads;
+    }
+
+    it("checks a model folder once for back-to-back generations", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      await writeModelDir(modelPath);
+      const reads = countConfigReads(modelPath);
+
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 0));
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 1));
+      await expect(invoke("local-tts:warm", { model: "qwen3", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath }))
+        .resolves.toEqual({ warmed: true });
+
+      expect(reads).toHaveBeenCalledTimes(1);
+      expect(mocks.localWsRun).toHaveBeenCalledTimes(3);
+    });
+
+    it("checks an incomplete folder again on every request, so fixing it works at once", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const missing = "The selected Qwen3 model directory is missing required files";
+
+      await expect(invoke("local-tts:generate", qwenGenerate(modelPath, 0))).rejects.toThrow(missing);
+      await writeModelDir(modelPath);
+      await expect(invoke("local-tts:generate", qwenGenerate(modelPath, 1)))
+        .resolves.toMatchObject({ audioChunkCount: 1 });
+      expect(mocks.localWsRun).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { action: "clearing the Qwen3 cache", run: () => invoke("local-tts:clear-cache", { model: "qwen3" }) },
+      { action: "a model download", run: () => invoke("local-tts:download-qwen3-model", { modelRepo: qwenProfile.repo }) },
+      {
+        action: "a failed model download",
+        run: () => {
+          mocks.qwenDownload.mockRejectedValueOnce(new Error("Download failed."));
+          return invoke("local-tts:download-qwen3-model", { modelRepo: qwenProfile.repo }).catch(() => undefined);
+        },
+      },
+      { action: "a setup refresh", run: () => invoke("local-tts:qwen3-setup", { modelRepo: qwenProfile.repo }) },
+    ])("checks the folder again after $action", async ({ run }) => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      await writeModelDir(modelPath);
+      const reads = countConfigReads(modelPath);
+
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 0));
+      await run();
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 1));
+
+      expect(reads).toHaveBeenCalledTimes(2);
+    });
+
+    it("refuses a folder deleted by clearing the cache instead of trusting the earlier pass", async () => {
+      const modelPath = path.join(mocks.userDataPath, "local-model-cache", "qwen3", "managed");
+      await writeModelDir(modelPath);
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 0));
+
+      await invoke("local-tts:clear-cache", { model: "qwen3" });
+
+      await expect(invoke("local-tts:generate", qwenGenerate(modelPath, 1)))
+        .rejects.toThrow("The selected Qwen3 model directory is missing required files");
+      expect(mocks.localWsRun).toHaveBeenCalledTimes(1);
+    });
+  });
 });
 
 describe("main-process diagnostics", () => {
