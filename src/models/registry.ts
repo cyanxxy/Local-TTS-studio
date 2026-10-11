@@ -112,6 +112,11 @@ export function isDesktopInlineEngineId(value: unknown): value is DesktopInlineE
   return typeof value === "string" && (DESKTOP_INLINE_ENGINE_IDS as readonly string[]).includes(value);
 }
 
+/** Validates untrusted (stored) settings for `id`, falling back field by field to its defaults. */
+export function parseEngineSettings<Id extends EngineId>(id: Id, raw: unknown): EngineSettings<Id> {
+  return TYPED_ENGINES[id].parseSettings(raw);
+}
+
 export function engineVoices(id: EngineId, context?: EngineVoiceContext): readonly EngineVoice[] {
   return TYPED_ENGINES[id].voices(context);
 }

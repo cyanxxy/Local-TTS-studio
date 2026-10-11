@@ -55,8 +55,10 @@ import {
 import {
   getInitialAppState,
   getInitialCreatorState,
+  getInitialEngineSettings,
   persistAppState,
   persistCreatorState,
+  persistEngineSettings,
   type PersistedAppState,
 } from "../lib/appState";
 import { resolveKokoroVoice } from "../lib/voices";
@@ -83,6 +85,7 @@ import {
   surfaceEngineSignatureParts,
   surfaceEngineVoiceLabel,
   type DesktopInlineEngineId,
+  type EngineSettings,
   type SurfaceEngineId,
   type SurfaceEngineSettings,
 } from "../models/registry";
@@ -144,6 +147,19 @@ function describeDesktopModelOptions(
 }
 
 /**
+ * The engines whose settings Studio owns and persists. Qwen3's settings live
+ * in `Qwen3RuntimeProvider`, which persists them itself.
+ */
+type AppEngineId = Exclude<SurfaceEngineId, "qwen3">;
+type AppEngineSettings = { [Id in AppEngineId]: EngineSettings<Id> };
+
+/** Stops an engine's generation, and clears the audio it put in the shared player. */
+interface RuntimeControls {
+  cancel: () => void;
+  reset: () => void;
+}
+
+/**
  * The fields every surface reads off whichever runtime is currently driving it.
  * The browser path is assembled from several hooks rather than one object, so
  * it is adapted into this shape instead of the shape being bent to fit it.
@@ -188,6 +204,16 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     root.classList.toggle("is-mac", isMac);
   }, [isElectronRuntime]);
   const initialState = useMemo(() => getInitialAppState(), []);
+  // The desktop entry owns this capability by supplying the worker factory.
+  // Do not also gate it on the preload bridge: Supertonic 3 runs entirely in
+  // the renderer worker, and a delayed/stale preload must not hide the model.
+  const supertonic3Available = enableDesktopRuntimes
+    && typeof createSupertonic3Worker === "function";
+  const desktopEngineAvailability = useMemo<Record<DesktopInlineEngineId, boolean>>(() => ({
+    audio8: desktopRuntimesAvailable,
+    supertonic3: supertonic3Available,
+    qwen3: qwen3Settings.available,
+  }), [desktopRuntimesAvailable, qwen3Settings.available, supertonic3Available]);
   const initialCreatorState = useMemo(() => getInitialCreatorState(), []);
   const browserSupport = useMemo(
     () => getLocalBrowserSupport(typeof navigator === "undefined" ? undefined : navigator, isElectronRuntime),
@@ -239,19 +265,30 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
       ? initialState.model
       : getDefaultSupportedModel(browserSupport)
   ));
-  const [voicesByModel, setVoicesByModel] = useState<Record<ModelType, string>>(initialState.voicesByModel);
+  const [engineSettings, setEngineSettings] = useState<AppEngineSettings>(() => {
+    const { kokoro, supertonic, audio8, supertonic3 } = getInitialEngineSettings();
+    return { kokoro, supertonic, audio8, supertonic3 };
+  });
   const [quality, setQuality] = useState(initialState.quality);
   const [showPlayer, setShowPlayer] = useState(false);
   const [webgpuStatus, setWebgpuStatus] = useState<WebGPUStatus | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
   const [isImportingDocument, setIsImportingDocument] = useState(false);
-  const [studioDesktopModel, setStudioDesktopModel] = useState<DesktopInlineEngineId | null>(null);
-  const [readerDesktopModel, setReaderDesktopModel] = useState<DesktopInlineEngineId | null>(null);
-  const [supertonic3Voice, setSupertonic3Voice] = useState("M1");
-  const [supertonicLanguage, setSupertonicLanguage] = useState("en");
-  const [supertonic3Language, setSupertonic3Language] = useState("en");
-  const [audio8Voice, setAudio8Voice] = useState<string>(initialState.audio8Voice);
+  // The desktop engine each surface last chose, persisted across launches. A
+  // surface uses it only while that engine is available and otherwise runs the
+  // browser model, without forgetting the choice for when it returns.
+  const [chosenStudioDesktopModel, setStudioDesktopModel] = useState(initialState.desktopModels.studio);
+  const [chosenReaderDesktopModel, setReaderDesktopModel] = useState(initialState.desktopModels.reader);
+  const studioDesktopModel = chosenStudioDesktopModel && desktopEngineAvailability[chosenStudioDesktopModel]
+    ? chosenStudioDesktopModel
+    : null;
+  const readerDesktopModel = chosenReaderDesktopModel && desktopEngineAvailability[chosenReaderDesktopModel]
+    ? chosenReaderDesktopModel
+    : null;
+  const { voice: audio8Voice } = engineSettings.audio8;
+  const { voice: supertonic3Voice, language: supertonic3Language } = engineSettings.supertonic3;
+  const { voice: supertonicVoice, language: supertonicLanguage } = engineSettings.supertonic;
   const readerLibrary = useReaderLibrary(initialState.text);
   // Quitting holds the window open while the Reader worker drains, so a cache
   // write that loses that race is expected and must not surface as an error.
@@ -346,10 +383,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   }, [activePage, navigateToPage, preferences.showNeuTTS]);
 
   useEffect(() => {
-    if (qwen3Settings.available) return;
-    setStudioDesktopModel((current) => current === "qwen3" ? null : current);
-    setReaderDesktopModel((current) => current === "qwen3" ? null : current);
-    if (activePage === "qwen3") navigateToPage("studio");
+    if (activePage === "qwen3" && !qwen3Settings.available) navigateToPage("studio");
   }, [activePage, navigateToPage, qwen3Settings.available]);
 
   const isReaderUsingQwen3 = isReaderPage && readerDesktopModel === "qwen3";
@@ -363,6 +397,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const isUsingAudio8Inline = isReaderUsingAudio8 || isStudioUsingAudio8;
   const studioEngineId: SurfaceEngineId = studioDesktopModel ?? activeModel;
   const readerEngineId: SurfaceEngineId = readerDesktopModel ?? activeModel;
+  // The engine whose audio the visible surface plays and saves.
+  const visibleEngineId: SurfaceEngineId = isReaderPage ? readerEngineId : studioEngineId;
 
   const {
     kokoroState,
@@ -375,7 +411,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     reloadModel,
   } = useModelLoader(activeModel, {
     enabled: localInferenceSupported && !isUsingQwen3Inline && !isUsingSupertonic3Inline && !isUsingAudio8Inline,
-    preferredSupertonicVoice: voicesByModel.supertonic,
+    preferredSupertonicVoice: supertonicVoice,
     debugProfiling,
     supportedModels: browserSupport.supportedModels,
   });
@@ -446,11 +482,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     quality,
     language: supertonicLanguage,
   });
-  // The desktop entry owns this capability by supplying the worker factory.
-  // Do not also gate it on the preload bridge: Supertonic 3 runs entirely in
-  // the renderer worker, and a delayed/stale preload must not hide the model.
-  const supertonic3Available = enableDesktopRuntimes
-    && typeof createSupertonic3Worker === "function";
   const supertonic3Runtime = useSupertonic3Runtime({
     available: supertonic3Available,
     active: isUsingSupertonic3Inline,
@@ -471,16 +502,17 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setShowPlayer,
   });
 
+  const savedKokoroVoice = engineSettings.kokoro.voice;
   const kokoroVoice = useMemo(() => {
-    if (kokoroVoices.length === 0) return voicesByModel.kokoro;
-    return resolveKokoroVoice(voicesByModel.kokoro, kokoroVoices) ?? voicesByModel.kokoro;
-  }, [kokoroVoices, voicesByModel.kokoro]);
-  const voice = activeModel === "kokoro" ? kokoroVoice : voicesByModel.supertonic;
+    if (kokoroVoices.length === 0) return savedKokoroVoice;
+    return resolveKokoroVoice(savedKokoroVoice, kokoroVoices) ?? savedKokoroVoice;
+  }, [kokoroVoices, savedKokoroVoice]);
+  const voice = activeModel === "kokoro" ? kokoroVoice : supertonicVoice;
   // What every engine a surface can select reads right now, keyed by engine.
   // Picker rows, voice labels and Reader cache signatures all derive from it.
   const surfaceEngineSettings = useMemo<SurfaceEngineSettings>(() => ({
     kokoro: { voice: kokoroVoice },
-    supertonic: { voice: voicesByModel.supertonic, language: supertonicLanguage },
+    supertonic: { voice: supertonicVoice, language: supertonicLanguage },
     audio8: { voice: audio8Voice },
     supertonic3: { voice: supertonic3Voice, language: supertonic3Language },
     qwen3: qwen3Settings,
@@ -491,7 +523,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     supertonic3Language,
     supertonic3Voice,
     supertonicLanguage,
-    voicesByModel.supertonic,
+    supertonicVoice,
   ]);
   const {
     isRetakingSegment,
@@ -529,20 +561,65 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     reloadModel,
   });
 
+  const {
+    cancelActiveGeneration: cancelAudio8Generation,
+    resetGeneratedAudio: resetAudio8Audio,
+  } = audio8Runtime;
+  const {
+    cancelActiveGeneration: cancelSupertonic3Generation,
+    resetGeneratedAudio: resetSupertonic3Audio,
+  } = supertonic3Runtime;
+  const {
+    cancelActiveGeneration: cancelQwen3Generation,
+    resetGeneratedAudio: resetQwen3Audio,
+  } = qwen3LocalRuntime;
+  // How to stop each engine's generation and clear what it put in the shared
+  // player. Kokoro and Supertonic 2 share the browser path.
+  const engineRuntimeControls = useMemo<Readonly<Record<SurfaceEngineId, RuntimeControls>>>(() => {
+    const browser: RuntimeControls = {
+      // Unforced: only a running browser generation restarts its worker.
+      cancel: () => cancelActiveGeneration(),
+      reset: resetGeneratedAudio,
+    };
+    return {
+      kokoro: browser,
+      supertonic: browser,
+      audio8: { cancel: cancelAudio8Generation, reset: resetAudio8Audio },
+      supertonic3: { cancel: cancelSupertonic3Generation, reset: resetSupertonic3Audio },
+      qwen3: { cancel: cancelQwen3Generation, reset: resetQwen3Audio },
+    };
+  }, [
+    cancelActiveGeneration,
+    cancelAudio8Generation,
+    cancelQwen3Generation,
+    cancelSupertonic3Generation,
+    resetAudio8Audio,
+    resetGeneratedAudio,
+    resetQwen3Audio,
+    resetSupertonic3Audio,
+  ]);
+  // A model switch or a text edit retires every runtime's audio, each once.
+  const cancelAllRuntimes = useCallback(() => {
+    for (const controls of new Set(Object.values(engineRuntimeControls))) controls.cancel();
+  }, [engineRuntimeControls]);
+  const resetAllRuntimes = useCallback(() => {
+    for (const controls of new Set(Object.values(engineRuntimeControls))) controls.reset();
+  }, [engineRuntimeControls]);
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       const persisted: PersistedAppState = {
         model: activeModel,
         text,
-        voicesByModel,
         quality,
-        audio8Voice,
+        desktopModels: { studio: chosenStudioDesktopModel, reader: chosenReaderDesktopModel },
       };
       persistAppState(persisted);
+      persistEngineSettings(engineSettings);
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeModel, audio8Voice, quality, text, voicesByModel]);
+  }, [activeModel, chosenReaderDesktopModel, chosenStudioDesktopModel, engineSettings, quality, text]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -559,14 +636,8 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   ) => {
     if (!isModelSupportedInBrowser(model, browserSupport)) return;
     if (model === activeModel && currentDesktopModel === null) return;
-    cancelActiveGeneration();
-    audio8Runtime.cancelActiveGeneration();
-    qwen3LocalRuntime.cancelActiveGeneration();
-    supertonic3Runtime.cancelActiveGeneration();
-    resetGeneratedAudio();
-    audio8Runtime.resetGeneratedAudio();
-    qwen3LocalRuntime.resetGeneratedAudio();
-    supertonic3Runtime.resetGeneratedAudio();
+    cancelAllRuntimes();
+    resetAllRuntimes();
     clearDesktopModel();
     if (model !== activeModel) {
       setActiveModel(model);
@@ -575,13 +646,10 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setExportError(null);
   }, [
     activeModel,
-    audio8Runtime,
     browserSupport,
-    cancelActiveGeneration,
+    cancelAllRuntimes,
     loadModel,
-    qwen3LocalRuntime,
-    resetGeneratedAudio,
-    supertonic3Runtime,
+    resetAllRuntimes,
   ]);
 
   const handleStudioModelChange = useCallback((model: ModelType) => {
@@ -604,24 +672,18 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     if (hasActiveAudioState) {
       // Unforced: finished audio only needs clearing, and a forced cancel
       // would reload the model on the first keystroke after listening.
-      cancelActiveGeneration();
-      audio8Runtime.cancelActiveGeneration();
-      qwen3LocalRuntime.cancelActiveGeneration();
-      supertonic3Runtime.cancelActiveGeneration();
-      resetGeneratedAudio();
-      audio8Runtime.resetGeneratedAudio();
-      qwen3LocalRuntime.resetGeneratedAudio();
-      supertonic3Runtime.resetGeneratedAudio();
+      cancelAllRuntimes();
+      resetAllRuntimes();
     }
   }, [
-    cancelActiveGeneration,
-    audio8Runtime,
+    audio8Runtime.isGenerating,
+    cancelAllRuntimes,
     isRetakingSegment,
     player.segments.length,
     player.totalDuration,
-    qwen3LocalRuntime,
-    resetGeneratedAudio,
-    supertonic3Runtime,
+    qwen3LocalRuntime.isGenerating,
+    resetAllRuntimes,
+    supertonic3Runtime.isGenerating,
     tts.isGenerating,
   ]);
 
@@ -832,62 +894,68 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     navigateReaderToOffset(textOffset, positionSec);
   }, [navigateReaderToOffset]);
 
+  /**
+   * Changes an input that shapes `engine`'s audio. When that engine drives the
+   * visible surface, the audio made with the old input is first saved under
+   * the old Reader signature, then its generation is cancelled and its audio
+   * cleared, so it is never presented (or cached) as the new input's. Another
+   * engine's input changes nothing audible, so the player keeps its audio.
+   */
+  const changeEngineInput = useCallback((engine: SurfaceEngineId, apply: () => void) => {
+    if (engine === visibleEngineId) {
+      if (isReaderPage) flushReaderAudioRef.current();
+      const controls = engineRuntimeControls[engine];
+      controls.cancel();
+      controls.reset();
+    }
+    apply();
+    setExportError(null);
+  }, [engineRuntimeControls, isReaderPage, visibleEngineId]);
+
+  const patchEngineSettings = useCallback(<Id extends AppEngineId>(
+    engine: Id,
+    patch: Partial<AppEngineSettings[Id]>,
+  ) => {
+    setEngineSettings((current) => ({ ...current, [engine]: { ...current[engine], ...patch } }));
+  }, []);
+
   const handleVoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === voice) return;
-    if (isReaderPage) flushReaderAudioRef.current();
-    cancelActiveGeneration();
-    resetGeneratedAudio();
-    setVoicesByModel((prev) => ({ ...prev, [activeModel]: nextVoice }));
-    setExportError(null);
-  }, [activeModel, cancelActiveGeneration, isReaderPage, resetGeneratedAudio, voice]);
+    changeEngineInput(activeModel, () => patchEngineSettings(activeModel, { voice: nextVoice }));
+  }, [activeModel, changeEngineInput, patchEngineSettings, voice]);
 
   const handleAudio8VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === audio8Voice) return;
-    if (isReaderPage) flushReaderAudioRef.current();
-    audio8Runtime.cancelActiveGeneration();
-    audio8Runtime.resetGeneratedAudio();
-    setAudio8Voice(nextVoice);
-    setExportError(null);
-  }, [audio8Runtime, audio8Voice, isReaderPage]);
+    changeEngineInput("audio8", () => patchEngineSettings("audio8", { voice: nextVoice }));
+  }, [audio8Voice, changeEngineInput, patchEngineSettings]);
 
   const handleSupertonic3VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === supertonic3Voice) return;
-    if (isReaderPage) flushReaderAudioRef.current();
-    supertonic3Runtime.cancelActiveGeneration();
-    supertonic3Runtime.resetGeneratedAudio();
-    setSupertonic3Voice(nextVoice);
-    setExportError(null);
-  }, [isReaderPage, supertonic3Runtime, supertonic3Voice]);
+    changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { voice: nextVoice }));
+  }, [changeEngineInput, patchEngineSettings, supertonic3Voice]);
 
-  // The language shapes Supertonic 2 audio like its voice does, so the audio
-  // made in the old language is saved under the old signature first and then
-  // cleared, rather than being presented (and cached) as the new language.
+  // The language shapes Supertonic 2 audio like its voice does, so it goes
+  // through the same save-then-clear path rather than being set directly.
   const handleSupertonicLanguageChange = useCallback((nextLanguage: string) => {
     if (nextLanguage === supertonicLanguage) return;
-    if (isReaderPage) flushReaderAudioRef.current();
-    cancelActiveGeneration();
-    resetGeneratedAudio();
-    setSupertonicLanguage(nextLanguage);
-    setExportError(null);
-  }, [cancelActiveGeneration, isReaderPage, resetGeneratedAudio, supertonicLanguage]);
+    changeEngineInput("supertonic", () => patchEngineSettings("supertonic", { language: nextLanguage }));
+  }, [changeEngineInput, patchEngineSettings, supertonicLanguage]);
 
   const handleSupertonic3LanguageChange = useCallback((nextLanguage: string) => {
     if (nextLanguage === supertonic3Language) return;
-    if (isReaderPage) flushReaderAudioRef.current();
-    supertonic3Runtime.cancelActiveGeneration();
-    supertonic3Runtime.resetGeneratedAudio();
-    setSupertonic3Language(nextLanguage);
-    setExportError(null);
-  }, [isReaderPage, supertonic3Language, supertonic3Runtime]);
+    changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { language: nextLanguage }));
+  }, [changeEngineInput, patchEngineSettings, supertonic3Language]);
 
   const handleQualityChange = useCallback((nextQuality: number) => {
     if (nextQuality === quality) return;
-    if (isReaderPage) flushReaderAudioRef.current();
-    cancelActiveGeneration();
-    resetGeneratedAudio();
-    setQuality(nextQuality);
-    setExportError(null);
-  }, [cancelActiveGeneration, isReaderPage, quality, resetGeneratedAudio]);
+    // Both Supertonic engines read the shared quality. Audio from an engine
+    // that ignores it stays valid, so it is neither saved nor cleared.
+    if (!getEngine(visibleEngineId).capabilities.quality) {
+      setQuality(nextQuality);
+      return;
+    }
+    changeEngineInput(visibleEngineId, () => setQuality(nextQuality));
+  }, [changeEngineInput, quality, visibleEngineId]);
 
   useEffect(() => {
     if (!localInferenceSupported) return;
@@ -917,23 +985,11 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     setDesktopModel: (model: DesktopInlineEngineId) => void,
   ) => {
     if (currentDesktopModel === page) return;
-    cancelActiveGeneration();
-    audio8Runtime.cancelActiveGeneration();
-    qwen3LocalRuntime.cancelActiveGeneration();
-    supertonic3Runtime.cancelActiveGeneration();
-    resetGeneratedAudio();
-    audio8Runtime.resetGeneratedAudio();
-    qwen3LocalRuntime.resetGeneratedAudio();
-    supertonic3Runtime.resetGeneratedAudio();
+    cancelAllRuntimes();
+    resetAllRuntimes();
     setDesktopModel(page);
     setExportError(null);
-  }, [
-    audio8Runtime,
-    cancelActiveGeneration,
-    qwen3LocalRuntime,
-    resetGeneratedAudio,
-    supertonic3Runtime,
-  ]);
+  }, [cancelAllRuntimes, resetAllRuntimes]);
 
   const handleStudioDesktopModelSelect = useCallback((page: DesktopInlineEngineId) => {
     selectInlineDesktopModel(page, studioDesktopModel, setStudioDesktopModel);
@@ -943,12 +999,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     flushReaderAudioRef.current();
     selectInlineDesktopModel(page, readerDesktopModel, setReaderDesktopModel);
   }, [readerDesktopModel, selectInlineDesktopModel]);
-
-  const desktopEngineAvailability = useMemo<Record<DesktopInlineEngineId, boolean>>(() => ({
-    audio8: desktopRuntimesAvailable,
-    supertonic3: supertonic3Available,
-    qwen3: qwen3Settings.available,
-  }), [desktopRuntimesAvailable, qwen3Settings.available, supertonic3Available]);
 
   const studioDesktopModelOptions = useMemo(() => (
     describeDesktopModelOptions(desktopEngineAvailability, surfaceEngineSettings, studioDesktopModel)
@@ -1204,20 +1254,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const saveReaderAudio = readerLibrary.saveAudio;
   const clearReaderAudio = readerLibrary.clearAudio;
   const updateReaderProgress = readerLibrary.updateProgress;
-  const readerAudioActionsRef = useRef({
-    cancel: cancelActiveGeneration,
-    clear: clearReaderAudio,
-    load: loadReaderAudio,
-    reset: resetGeneratedAudio,
-    restore: restoreReaderAudio,
-  });
-  readerAudioActionsRef.current = {
-    cancel: cancelActiveGeneration,
-    clear: clearReaderAudio,
-    load: loadReaderAudio,
-    reset: resetGeneratedAudio,
-    restore: restoreReaderAudio,
-  };
   // The inputs that shape the Reader engine's audio — only those it reads, so
   // a control the engine ignores never discards its cached sections. Null
   // while one of them is still unknown (Qwen3 before its model is located).
@@ -1240,24 +1276,21 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   ), [activeReaderSection, activeReaderSectionText, readerEngineId, readerSignatureParts]);
   const activeReaderAudioSignatureRef = useRef(activeReaderAudioSignature);
   activeReaderAudioSignatureRef.current = activeReaderAudioSignature;
-  const desktopReaderControlsRef = useRef({
-    cancel: qwen3LocalRuntime.cancelActiveGeneration,
-    reset: qwen3LocalRuntime.resetGeneratedAudio,
+  // The restore effect below runs once per section. These effect events reach
+  // the latest runtimes and library functions from it, and from the async
+  // work it starts, without re-running it whenever their identities change.
+  // (The library's audio functions change when its storage backend settles.)
+  const resetRuntimesForSection = useEffectEvent(() => {
+    cancelAllRuntimes();
+    resetAllRuntimes();
   });
-  desktopReaderControlsRef.current = {
-    cancel: () => {
-      audio8Runtime.cancelActiveGeneration();
-      qwen3LocalRuntime.cancelActiveGeneration();
-      supertonic3Runtime.cancelActiveGeneration();
-    },
-    reset: () => {
-      audio8Runtime.resetGeneratedAudio();
-      qwen3LocalRuntime.resetGeneratedAudio();
-      supertonic3Runtime.resetGeneratedAudio();
-    },
-  };
-  const readerGenerateRef = useRef(handleReaderGenerate);
-  readerGenerateRef.current = handleReaderGenerate;
+  const loadSectionAudio = useEffectEvent((documentId: string, sectionId: string) => (
+    loadReaderAudio(documentId, sectionId)
+  ));
+  const clearSectionAudio = useEffectEvent((documentId: string, sectionId: string) => (
+    clearReaderAudio(documentId, sectionId)
+  ));
+  const generateRestoredSection = useEffectEvent(() => handleReaderGenerate());
 
   const persistActiveReaderAudio = useCallback(() => {
     if (readerAudioSaveTimerRef.current !== null) {
@@ -1319,10 +1352,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     // nothing is generating, which reloaded Kokoro/Supertonic on every page
     // turn. An in-flight generation is still cancelled (and its worker
     // restarted) because `cancel` checks the live generating state itself.
-    readerAudioActionsRef.current.cancel();
-    desktopReaderControlsRef.current.cancel();
-    readerAudioActionsRef.current.reset();
-    desktopReaderControlsRef.current.reset();
+    resetRuntimesForSection();
     setExportError(null);
     setImportError(null);
     // An engine whose inputs are not known yet has no signature to compare a
@@ -1335,7 +1365,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
     const restore = async () => {
       try {
-        const cache = await readerAudioActionsRef.current.load(document.id, section.id);
+        const cache = await loadSectionAudio(document.id, section.id);
         if (cancelled) return;
         const continuation = readerContinuationRef.current?.sectionId === section.id
           ? readerContinuationRef.current
@@ -1351,7 +1381,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               ? document.progress.positionSec
               : cache.currentTime;
           const maximumTime = Math.max(0, cache.totalDuration);
-          readerAudioActionsRef.current.restore(cache.chunks, {
+          restoreReaderAudio(cache.chunks, {
             // A saved 0 is meaningful (the user stopped or rewound).
             currentTime: Math.max(0, Math.min(maximumTime, preferredTime)),
             playbackRate: cache.playbackRate,
@@ -1362,9 +1392,9 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
             window.setTimeout(() => void togglePlay(), 0);
           }
         } else {
-          if (cache) void readerAudioActionsRef.current.clear(document.id, section.id);
+          if (cache) void clearSectionAudio(document.id, section.id);
           if (continuation?.autoGenerate) {
-            window.setTimeout(() => readerGenerateRef.current(), 0);
+            window.setTimeout(() => generateRestoredSection(), 0);
           }
         }
       } finally {
@@ -1392,6 +1422,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     isReaderPage,
     readerSignatureKnown,
     reportReaderError,
+    restoreReaderAudio,
     togglePlay,
   ]);
 

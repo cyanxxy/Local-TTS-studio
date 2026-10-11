@@ -4,7 +4,7 @@ import type { EngineCapabilities, EngineDescriptor } from "./types";
 
 // The speaker, language, and sampling tables below mirror
 // `electron/qwen3Profiles.ts` and `electron/localTtsLimits.ts`, which the
-// registry may not import. `qwen3.test.ts` pins every value to its source.
+// registry may not import. `registry.parity.test.ts` pins every value to its source.
 
 export const QWEN3_ENGINE_LANGUAGES = [
   "Auto",

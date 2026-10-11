@@ -8,7 +8,8 @@ import { useModelLoader } from "../hooks/useModelLoader";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { ModelState } from "../types";
 import { getDefaultQwen3Profile, type Qwen3Profile } from "../../electron/qwen3Profiles";
-import { engineSignatureParts } from "../models/registry";
+import { ENGINES, engineSignatureParts, type DesktopInlineEngineId } from "../models/registry";
+import type { PersistedEngineSettings } from "../lib/appState";
 import {
   buildAudioSignature,
   buildReaderSections,
@@ -68,13 +69,14 @@ const mock = vi.hoisted(() => {
     initialAppState: {
       model: "kokoro",
       text: "Initial script with enough text.",
-      voicesByModel: {
-        kokoro: "af_heart",
-        supertonic: "Female",
-      },
       quality: 5,
-      audio8Voice: "clara",
+      desktopModels: {
+        studio: null as DesktopInlineEngineId | null,
+        reader: null as DesktopInlineEngineId | null,
+      },
     },
+    // Filled from the real descriptor defaults by resetMockState.
+    initialEngineSettings: {} as PersistedEngineSettings,
     initialCreatorState: {
       preset: "youtube-shorts",
       speed: 1,
@@ -227,6 +229,7 @@ const mock = vi.hoisted(() => {
     },
     persistAppState: vi.fn(),
     persistCreatorState: vi.fn(),
+    persistEngineSettings: vi.fn(),
     getWebGPUStatus: vi.fn(),
     readerLibrary: {
       documents: [] as ReaderDocumentRecord[],
@@ -306,8 +309,10 @@ vi.mock("../hooks/useModelCacheControls", () => ({
 vi.mock("../lib/appState", () => ({
   getInitialAppState: () => mock.initialAppState,
   getInitialCreatorState: () => mock.initialCreatorState,
+  getInitialEngineSettings: () => mock.initialEngineSettings,
   persistAppState: mock.persistAppState,
   persistCreatorState: mock.persistCreatorState,
+  persistEngineSettings: mock.persistEngineSettings,
 }));
 
 vi.mock("../lib/browserSupport", () => ({
@@ -618,12 +623,16 @@ function resetMockState() {
   mock.initialAppState = {
     model: "kokoro",
     text: "Initial script with enough text.",
-    voicesByModel: {
-      kokoro: "af_heart",
-      supertonic: "Female",
-    },
     quality: 5,
-    audio8Voice: "clara",
+    desktopModels: { studio: null, reader: null },
+  };
+  mock.initialEngineSettings = {
+    kokoro: ENGINES.kokoro.defaultSettings,
+    supertonic: { ...ENGINES.supertonic.defaultSettings, voice: "Female" },
+    audio8: ENGINES.audio8.defaultSettings,
+    supertonic3: ENGINES.supertonic3.defaultSettings,
+    neutts: ENGINES.neutts.defaultSettings,
+    qwen3: ENGINES.qwen3.defaultSettings,
   };
   mock.modelLoader = {
     ...mock.modelLoader,
@@ -960,7 +969,7 @@ describe("SynthesisApp", () => {
   });
 
   it("restores and persists the selected Audio8 voice", async () => {
-    mock.initialAppState.audio8Voice = "iris";
+    mock.initialEngineSettings = { ...mock.initialEngineSettings, audio8: { voice: "iris" } };
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
       configurable: true,
@@ -969,9 +978,91 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
 
     expect(screen.getByRole("button", { name: /IrisEnglish/i })).toHaveAttribute("aria-pressed", "true");
-    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
-      expect.objectContaining({ audio8Voice: "iris" }),
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ audio8: { voice: "iris" } }),
     ));
+  });
+
+  it("reopens each surface on its last desktop model and persists the selection", async () => {
+    mock.initialAppState = {
+      ...mock.initialAppState,
+      desktopModels: { studio: "audio8", reader: "supertonic3" },
+    };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    const view = render(
+      <SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />,
+    );
+
+    expect(screen.getByRole("button", { name: "studio-desktop-audio8-selected" })).toBeInTheDocument();
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Audio8 TTS");
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+      expect.objectContaining({ desktopModels: { studio: "audio8", reader: "supertonic3" } }),
+    ));
+
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(
+      <SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />,
+    );
+    expect(await screen.findByRole("button", { name: "reader-desktop-supertonic3-selected" })).toBeInTheDocument();
+
+    mock.persistAppState.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-audio8" }));
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+      expect.objectContaining({ desktopModels: { studio: "audio8", reader: "audio8" } }),
+    ));
+  });
+
+  it("runs the browser model while a surface's saved desktop model is unavailable, keeping the choice", async () => {
+    mock.initialAppState = {
+      ...mock.initialAppState,
+      desktopModels: { studio: "supertonic3", reader: "qwen3" },
+    };
+    const view = render(<WebApp />);
+
+    expect(screen.queryByRole("button", { name: /studio-desktop-/ })).not.toBeInTheDocument();
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Kokoro");
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<WebApp />);
+    expect(await screen.findByTestId("reader-text-value")).toBeInTheDocument();
+    expect(screen.queryByTestId("reader-desktop-voice")).not.toBeInTheDocument();
+    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ enabled: true }));
+    // A launch where the engine is available again reopens on it.
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+      expect.objectContaining({ desktopModels: { studio: "supertonic3", reader: "qwen3" } }),
+    ));
+  });
+
+  it("restores and persists the Supertonic 3 voice and language", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "supertonic3", reader: null } };
+    mock.initialEngineSettings = {
+      ...mock.initialEngineSettings,
+      supertonic3: { voice: "F2", language: "ja" },
+    };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />);
+
+    expect(screen.getByLabelText("Supertonic 3 voice")).toHaveValue("F2");
+    expect(screen.getByLabelText("Supertonic 3 language")).toHaveValue("ja");
+    fireEvent.change(screen.getByLabelText("Supertonic 3 language"), { target: { value: "de" } });
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ supertonic3: { voice: "F2", language: "de" } }),
+    ));
+    // Qwen3's settings are persisted by its own provider, never by Studio.
+    expect(mock.persistEngineSettings.mock.calls.every(([settings]) => !("qwen3" in settings))).toBe(true);
   });
 
   it("shows the Audio8 cache row and clears it from the inline settings", async () => {
@@ -1791,6 +1882,21 @@ describe("SynthesisApp", () => {
     expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
     expect(mock.generation.resetGeneratedAudio).toHaveBeenCalledTimes(1);
     expect(screen.getByLabelText("Supertonic 2 language")).toHaveValue("fr");
+  });
+
+  it("restores and persists the Supertonic 2 language", async () => {
+    mock.initialAppState = { ...mock.initialAppState, model: "supertonic" };
+    mock.initialEngineSettings = {
+      ...mock.initialEngineSettings,
+      supertonic: { voice: "Male 2", language: "pt" },
+    };
+    render(<WebApp />);
+
+    expect(screen.getByLabelText("Supertonic 2 language")).toHaveValue("pt");
+    fireEvent.change(screen.getByLabelText("Supertonic 2 language"), { target: { value: "ko" } });
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ supertonic: { voice: "Male 2", language: "ko" } }),
+    ));
   });
 
   it("restores a revisited section from its clamped cached time instead of another section's progress", async () => {

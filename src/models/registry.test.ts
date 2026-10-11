@@ -21,6 +21,7 @@ import {
   isBrowserEngineId,
   isDesktopInlineEngineId,
   isEngineId,
+  parseEngineSettings,
   surfaceEngineDetail,
   surfaceEnginePreviewChunks,
   surfaceEngineSignatureParts,
@@ -156,6 +157,7 @@ describe("engine settings", () => {
     for (const garbage of [undefined, null, "kokoro", 42, [], { voice: 7, language: {} }]) {
       expect(engine.parseSettings(garbage)).toEqual(engine.defaultSettings);
     }
+    expect(parseEngineSettings(id, undefined)).toEqual(engine.defaultSettings);
   });
 
   it("keeps valid stored values and replaces invalid ones field by field", () => {

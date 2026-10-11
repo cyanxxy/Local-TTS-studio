@@ -1,19 +1,28 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AUDIO8_DEFAULT_VOICE, CREATOR_PRESETS, MODELS, QUALITY_MAX, QUALITY_MIN } from "../constants";
+import { CREATOR_PRESETS, QUALITY_MAX, QUALITY_MIN } from "../constants";
+import { ENGINES } from "../models/registry";
 import {
   analyzePronunciationLexicon,
   DEFAULT_TEXT,
   getCreatorPresetDefaults,
   getInitialAppState,
   getInitialCreatorState,
+  getInitialEngineSettings,
   parsePronunciationRules,
   persistAppState,
   persistCreatorState,
+  persistEngineSettings,
 } from "./appState";
 
 const LEGACY_MODEL_STORAGE_KEY = "tts-app-model";
-const APP_STATE_STORAGE_KEY = "tts-app-state-v1";
+const LEGACY_APP_STATE_STORAGE_KEY = "tts-app-state-v1";
+const APP_STATE_STORAGE_KEY = "tts-app-state-v2";
+const ENGINE_SETTINGS_STORAGE_KEY = "tts-engine-settings-v1";
 const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
+
+const DEFAULT_ENGINE_SETTINGS = Object.fromEntries(
+  Object.values(ENGINES).map((engine) => [engine.id, engine.defaultSettings]),
+);
 
 describe("appState", () => {
   beforeEach(() => {
@@ -21,49 +30,22 @@ describe("appState", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns defaults and honors a valid legacy model when no v1 state exists", () => {
+  it("returns defaults and honors a valid legacy model when no saved state exists", () => {
     expect(getInitialAppState()).toEqual({
       model: "kokoro",
       text: DEFAULT_TEXT,
-      voicesByModel: {
-        kokoro: MODELS.kokoro.defaultVoice,
-        supertonic: MODELS.supertonic.defaultVoice,
-      },
       quality: 5,
-      audio8Voice: AUDIO8_DEFAULT_VOICE,
+      desktopModels: { studio: null, reader: null },
     });
+    expect(getInitialEngineSettings()).toEqual(DEFAULT_ENGINE_SETTINGS);
 
     localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, "supertonic");
 
     expect(getInitialAppState().model).toBe("supertonic");
   });
 
-  it("normalizes persisted app state and falls back from invalid values", () => {
-    localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, "supertonic");
-    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({
-      model: "invalid",
-      text: 42,
-      voicesByModel: {
-        kokoro: "  ",
-        supertonic: "Robot",
-      },
-      quality: QUALITY_MAX + 99,
-    }));
-
-    expect(getInitialAppState()).toEqual({
-      model: "supertonic",
-      text: DEFAULT_TEXT,
-      voicesByModel: {
-        kokoro: MODELS.kokoro.defaultVoice,
-        supertonic: MODELS.supertonic.defaultVoice,
-      },
-      quality: QUALITY_MAX,
-      audio8Voice: AUDIO8_DEFAULT_VOICE,
-    });
-  });
-
-  it("reads valid persisted app state and clamps low quality", () => {
-    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({
+  it("migrates the v1 app state, including its voices, until v2 is written", () => {
+    localStorage.setItem(LEGACY_APP_STATE_STORAGE_KEY, JSON.stringify({
       model: "supertonic",
       text: "Saved script",
       voicesByModel: {
@@ -77,30 +59,106 @@ describe("appState", () => {
     expect(getInitialAppState()).toEqual({
       model: "supertonic",
       text: "Saved script",
-      voicesByModel: {
-        kokoro: "custom_kokoro",
-        supertonic: "Male 2",
-      },
       quality: QUALITY_MIN,
-      audio8Voice: "iris",
+      desktopModels: { studio: null, reader: null },
+    });
+    expect(getInitialEngineSettings()).toMatchObject({
+      kokoro: { voice: "custom_kokoro" },
+      supertonic: { voice: "Male 2", language: "en" },
+      audio8: { voice: "iris" },
+      supertonic3: ENGINES.supertonic3.defaultSettings,
+      qwen3: ENGINES.qwen3.defaultSettings,
+    });
+
+    persistAppState({ model: "kokoro", text: "Newer script", quality: 7 });
+    persistEngineSettings({ kokoro: { voice: "bf_emma" } });
+
+    expect(getInitialAppState()).toMatchObject({ model: "kokoro", text: "Newer script", quality: 7 });
+    // Engines v2 has not stored yet still read their v1 voices.
+    expect(getInitialEngineSettings()).toMatchObject({
+      kokoro: { voice: "bf_emma" },
+      supertonic: { voice: "Male 2" },
+      audio8: { voice: "iris" },
     });
   });
 
-  it("falls back from an unknown persisted Audio8 voice", () => {
-    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({ audio8Voice: "not-a-voice" }));
+  it("normalizes persisted app state and falls back from invalid values", () => {
+    localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, "supertonic");
+    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({
+      version: 2,
+      model: "invalid",
+      text: 42,
+      quality: QUALITY_MAX + 99,
+      desktopModels: { studio: "neutts", reader: 3 },
+    }));
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({
+      kokoro: { voice: "  " },
+      supertonic: { voice: "Robot", language: "xx" },
+      audio8: { voice: "not-a-voice" },
+      supertonic3: "M1",
+      qwen3: { temperature: 99, profileRepo: "../../etc" },
+      kitten: { voice: "ignored" },
+    }));
 
-    expect(getInitialAppState().audio8Voice).toBe(AUDIO8_DEFAULT_VOICE);
+    expect(getInitialAppState()).toEqual({
+      model: "supertonic",
+      text: DEFAULT_TEXT,
+      quality: QUALITY_MAX,
+      desktopModels: { studio: null, reader: null },
+    });
+    const settings = getInitialEngineSettings();
+    expect(settings).toMatchObject({
+      kokoro: ENGINES.kokoro.defaultSettings,
+      supertonic: ENGINES.supertonic.defaultSettings,
+      audio8: ENGINES.audio8.defaultSettings,
+      supertonic3: ENGINES.supertonic3.defaultSettings,
+      qwen3: { ...ENGINES.qwen3.defaultSettings, temperature: 2, profileRepo: null },
+    });
+    expect(settings).not.toHaveProperty("kitten");
+  });
+
+  it("round-trips each surface's desktop model and every engine's settings", () => {
+    persistAppState({
+      model: "supertonic",
+      text: "Saved",
+      quality: 4,
+      desktopModels: { studio: "qwen3", reader: "supertonic3" },
+    });
+    persistEngineSettings({
+      supertonic: { voice: "Male 3", language: "fr" },
+      supertonic3: { voice: "F4", language: "ja" },
+    });
+    persistEngineSettings({
+      qwen3: { ...ENGINES.qwen3.defaultSettings, speaker: "Ryan", seed: 42 },
+    });
+
+    expect(JSON.parse(localStorage.getItem(APP_STATE_STORAGE_KEY) ?? "{}")).toMatchObject({ version: 2 });
+    expect(getInitialAppState()).toEqual({
+      model: "supertonic",
+      text: "Saved",
+      quality: 4,
+      desktopModels: { studio: "qwen3", reader: "supertonic3" },
+    });
+    // The second write kept the engines the first one stored.
+    expect(getInitialEngineSettings()).toMatchObject({
+      supertonic: { voice: "Male 3", language: "fr" },
+      supertonic3: { voice: "F4", language: "ja" },
+      qwen3: { speaker: "Ryan", seed: 42 },
+    });
   });
 
   it("falls back to defaults when stored app JSON or localStorage access fails", () => {
     localStorage.setItem(APP_STATE_STORAGE_KEY, "{not json");
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, "[1, 2]");
     expect(getInitialAppState().model).toBe("kokoro");
+    expect(getInitialEngineSettings()).toEqual(DEFAULT_ENGINE_SETTINGS);
 
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("blocked");
     });
 
     expect(getInitialAppState().text).toBe(DEFAULT_TEXT);
+    expect(getInitialEngineSettings()).toEqual(DEFAULT_ENGINE_SETTINGS);
   });
 
   it("builds preset defaults, resolving custom from the default creator preset", () => {
@@ -236,6 +294,7 @@ describe("appState", () => {
     });
 
     expect(() => persistAppState({ model: "kokoro" })).not.toThrow();
+    expect(() => persistEngineSettings({ audio8: { voice: "iris" } })).not.toThrow();
     expect(() => persistCreatorState({ preset: "youtube-long" })).not.toThrow();
   });
 });
