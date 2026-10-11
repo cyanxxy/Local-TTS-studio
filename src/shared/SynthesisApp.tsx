@@ -10,7 +10,7 @@ import {
   useRef,
 } from "react";
 import { Settings2, X } from "lucide-react";
-import type { ChunkPauseKind, GenerationStats, ModelState, ModelType } from "../types";
+import type { ChunkPauseKind, ModelType } from "../types";
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useModelLoader } from "../hooks/useModelLoader";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
@@ -30,7 +30,7 @@ import { Audio8InlineSettings } from "../components/Audio8InlineSettings";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
 import { TextInput } from "../components/TextInput";
-import { ModelToggle, type ModelToggleDesktopOption } from "../components/ModelToggle";
+import { ModelToggle } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
 import { Controls } from "../components/Controls";
 import { ControlsProvider } from "../components/ControlsContext";
@@ -78,10 +78,8 @@ import {
 } from "../lib/readerDocument";
 import { isReaderLibraryShutdownError } from "../lib/readerLibrary";
 import {
-  DESKTOP_INLINE_ENGINE_IDS,
   ENGINES,
   getEngine,
-  surfaceEngineDetail,
   surfaceEngineSignatureParts,
   surfaceEngineVoiceLabel,
   type DesktopInlineEngineId,
@@ -89,6 +87,8 @@ import {
   type SurfaceEngineId,
   type SurfaceEngineSettings,
 } from "../models/registry";
+import { describeDesktopModelOptions } from "./desktopModelOptions";
+import type { RuntimeControls, SurfaceRuntime } from "./engineRuntime";
 
 interface SynthesisAppProps {
   enableDesktopRuntimes: boolean;
@@ -116,65 +116,11 @@ const loadReaderImport = () => import("../lib/readerImport");
 const READER_PROGRESS_SAMPLE_MS = 750;
 
 /**
- * `badge` and `detail` are optional on `ModelToggleDesktopOption`, but desktop
- * engines always supply both — and have to, because `AdvancedReaderPage`
- * redeclares the same option shape privately with both fields required. Stating
- * the guarantee here is what lets one list feed the toggle and the Reader.
- */
-type DesktopModelOptionData = Omit<ModelToggleDesktopOption, "onSelect">
-  & Required<Pick<ModelToggleDesktopOption, "badge" | "detail">>
-  & { key: DesktopInlineEngineId };
-
-/**
- * Studio and the Reader offer the identical desktop model list; they differ
- * only in which entry is selected and where the selection is recorded, so the
- * caller attaches its own select handler.
- */
-function describeDesktopModelOptions(
-  available: Readonly<Record<DesktopInlineEngineId, boolean>>,
-  settings: SurfaceEngineSettings,
-  selected: DesktopInlineEngineId | null,
-): DesktopModelOptionData[] {
-  return DESKTOP_INLINE_ENGINE_IDS
-    .filter((engine) => available[engine])
-    .map((engine) => ({
-      key: engine,
-      label: ENGINES[engine].label,
-      badge: ENGINES[engine].badge,
-      detail: surfaceEngineDetail(engine, settings),
-      selected: selected === engine,
-    }));
-}
-
-/**
  * The engines whose settings Studio owns and persists. Qwen3's settings live
  * in `Qwen3RuntimeProvider`, which persists them itself.
  */
 type AppEngineId = Exclude<SurfaceEngineId, "qwen3">;
 type AppEngineSettings = { [Id in AppEngineId]: EngineSettings<Id> };
-
-/** Stops an engine's generation, and clears the audio it put in the shared player. */
-interface RuntimeControls {
-  cancel: () => void;
-  reset: () => void;
-}
-
-/**
- * The fields every surface reads off whichever runtime is currently driving it.
- * The browser path is assembled from several hooks rather than one object, so
- * it is adapted into this shape instead of the shape being bent to fit it.
- */
-interface SurfaceRuntime {
-  modelState: ModelState;
-  canGenerate: boolean;
-  isGenerating: boolean;
-  generationProgress: number;
-  stats: GenerationStats;
-  error: string | null;
-  handleGenerate: () => void;
-  handleStop: () => void;
-  retryLoad: () => void;
-}
 
 function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", createSupertonic3Worker }: SynthesisAppProps) {
   const isElectronRuntime = Boolean(window.electron?.isElectron);
