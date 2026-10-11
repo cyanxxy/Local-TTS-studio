@@ -1,5 +1,6 @@
 import { useEffect, useEffectEvent, type RefObject } from "react";
 import type { ReaderSection } from "../../lib/readerDocument";
+import type { ReaderStepDirection, ReaderStepUnit } from "./readerNavigation";
 
 interface UseReaderKeyboardOptions {
   editing: boolean;
@@ -8,6 +9,8 @@ interface UseReaderKeyboardOptions {
   previousSection: ReaderSection | null;
   nextSection: ReaderSection | null;
   onJumpToOffset: (offset: number) => void;
+  /** Steps to the previous or next sentence or paragraph. */
+  onStep: (unit: ReaderStepUnit, direction: ReaderStepDirection) => void;
   onToggleShortcuts: () => void;
   immersive: boolean;
   onImmersiveChange?: (immersive: boolean) => void;
@@ -22,10 +25,25 @@ function isInDialog(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && target.closest("[role='dialog']") !== null;
 }
 
+/** A selection in the reading pane, which Shift+arrow keys extend instead of stepping. */
+function hasSelectionIn(root: HTMLElement | null): boolean {
+  const selection = window.getSelection();
+  return !!root && !!selection && !selection.isCollapsed && selection.rangeCount > 0
+    && root.contains(selection.getRangeAt(0).commonAncestorContainer);
+}
+
+const STEP_KEYS: Readonly<Record<string, [ReaderStepUnit, ReaderStepDirection]>> = {
+  ArrowLeft: ["sentence", "previous"],
+  ArrowRight: ["sentence", "next"],
+  ArrowUp: ["paragraph", "previous"],
+  ArrowDown: ["paragraph", "next"],
+};
+
 /**
  * Reader-level keys. Arrow keys page through reading sections while the
  * reader itself has focus — the book-reader equivalent of turning pages —
- * "?" lists the shortcuts and "F" toggles the focus layout. Playback keys
+ * Shift+←/→ step by sentence and Shift+↑/↓ by paragraph, "?" lists the
+ * shortcuts and "F" toggles the focus layout. Playback keys
  * (Space, ⌥←/⌥→) and generation shortcuts belong to the app shell.
  */
 export function useReaderKeyboard({
@@ -34,6 +52,7 @@ export function useReaderKeyboard({
   previousSection,
   nextSection,
   onJumpToOffset,
+  onStep,
   onToggleShortcuts,
   immersive,
   onImmersiveChange,
@@ -55,15 +74,22 @@ export function useReaderKeyboard({
       return;
     }
 
-    if (event.shiftKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight")) return;
-    // Each page turn flushes, saves, and re-sections upstream, so a held key
-    // must not fire one per repeat.
+    const step = event.shiftKey ? STEP_KEYS[event.key] : undefined;
+    if (!step && (event.shiftKey || (event.key !== "ArrowLeft" && event.key !== "ArrowRight"))) return;
+    // Each page turn flushes, saves, and re-sections upstream, and each step
+    // reschedules playback, so a held key must not fire one per repeat.
     if (event.repeat || editing || isInDialog(target)) return;
     // Toolbar buttons keep focus after use; paging from there is surprising.
     // Only the unfocused page and the reading pane itself turn pages.
     const inReader = target === document.body
       || (target instanceof Node && !!scrollerRef.current?.contains(target));
     if (!inReader) return;
+    if (step) {
+      if (hasSelectionIn(scrollerRef.current)) return;
+      event.preventDefault();
+      onStep(...step);
+      return;
+    }
     const section = event.key === "ArrowRight" ? nextSection : previousSection;
     if (!section) return;
     event.preventDefault();

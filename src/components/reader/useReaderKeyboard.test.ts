@@ -31,6 +31,7 @@ function setup(overrides: Partial<Parameters<typeof useReaderKeyboard>[0]> = {})
     previousSection: section("section-1", 0),
     nextSection: section("section-3", 200),
     onJumpToOffset: vi.fn(),
+    onStep: vi.fn(),
     onToggleShortcuts: vi.fn(),
     immersive: false,
     onImmersiveChange: vi.fn(),
@@ -77,6 +78,43 @@ describe("useReaderKeyboard", () => {
     fireEvent.keyDown(document.body, { key: "ArrowLeft" });
     fireEvent.keyDown(document.body, { key: "ArrowRight" });
 
+    expect(options.onJumpToOffset).not.toHaveBeenCalled();
+  });
+
+  it("steps by sentence with Shift+←/→ and by paragraph with Shift+↑/↓", () => {
+    const { options, scroller } = setup();
+
+    fireEvent.keyDown(document.body, { key: "ArrowRight", shiftKey: true });
+    fireEvent.keyDown(scroller, { key: "ArrowLeft", shiftKey: true });
+    fireEvent.keyDown(scroller, { key: "ArrowDown", shiftKey: true });
+    fireEvent.keyDown(document.body, { key: "ArrowUp", shiftKey: true });
+
+    expect(vi.mocked(options.onStep).mock.calls).toEqual([
+      ["sentence", "next"],
+      ["sentence", "previous"],
+      ["paragraph", "next"],
+      ["paragraph", "previous"],
+    ]);
+    expect(options.onJumpToOffset).not.toHaveBeenCalled();
+  });
+
+  it("leaves Shift+arrows to the browser while they extend a selection, and outside the reader", () => {
+    const { options, scroller, toolbarButton } = setup();
+    scroller.textContent = "Some selectable words.";
+    const range = document.createRange();
+    range.setStart(scroller.firstChild!, 0);
+    range.setEnd(scroller.firstChild!, 4);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+
+    fireEvent.keyDown(scroller, { key: "ArrowRight", shiftKey: true });
+    window.getSelection()?.removeAllRanges();
+    fireEvent.keyDown(toolbarButton, { key: "ArrowRight", shiftKey: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", shiftKey: true, repeat: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown", shiftKey: true, altKey: true });
+    fireEvent.keyDown(document.body, { key: "ArrowDown" });
+
+    expect(options.onStep).not.toHaveBeenCalled();
     expect(options.onJumpToOffset).not.toHaveBeenCalled();
   });
 

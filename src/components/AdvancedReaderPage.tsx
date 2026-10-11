@@ -40,6 +40,15 @@ import { ReaderTextPane, type SectionHighlight } from "./reader/ReaderTextPane";
 import { ReaderToolbar } from "./reader/ReaderToolbar";
 import { ReaderVoiceMenu, type ReaderDesktopModelOption } from "./reader/ReaderVoiceMenu";
 import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
+import {
+  offsetAtTime,
+  paragraphStarts,
+  sentenceStarts,
+  stepBoundary,
+  timeAtOffset,
+  type ReaderStepDirection,
+  type ReaderStepUnit,
+} from "./reader/readerNavigation";
 import { findSegmentForTextOffset } from "./reader/readerSegments";
 import { TOOL_BUTTON } from "./reader/readerStyles";
 import { chapterHeadingBlockStart, clamp, splitTextBlocks } from "./reader/readerTextLayout";
@@ -398,8 +407,13 @@ export function AdvancedReaderPage({
       return;
     }
     const localOffset = clamp(targetOffset - sectionStart, 0, text.length);
-    if (typeof positionSec === "number" && totalDuration > 0) {
-      onSeek(clamp(positionSec / totalDuration, 0, 1));
+    // Listening starts at the word itself, not at the start of the passage
+    // the model generated it in.
+    const targetSec = typeof positionSec === "number"
+      ? positionSec
+      : timeAtOffset(segments, localOffset, estimatedWordTrackingStable);
+    if (targetSec !== null && totalDuration > 0) {
+      onSeek(clamp(targetSec / totalDuration, 0, 1));
     } else {
       const targetSegment = findSegmentForTextOffset(segments, localOffset);
       if (targetSegment) onJumpToSegment(targetSegment.id);
@@ -408,6 +422,7 @@ export function AdvancedReaderPage({
   }, [
     activeDocument?.text.length,
     activeSection?.end,
+    estimatedWordTrackingStable,
     finishEditing,
     onJumpToSegment,
     onNavigateToOffset,
@@ -426,6 +441,38 @@ export function AdvancedReaderPage({
     const targetSegment = findSegmentForTextOffset(segments, localOffset);
     if (targetSegment) onJumpToSegment(targetSegment.id);
   }, [onJumpToSegment, segments]);
+
+  // Sentence and paragraph steps start from the spoken word (read from the
+  // clock when the step is taken, not subscribed to) or, without audio, from
+  // where the reader last navigated. A step past the section's edge turns the
+  // page like the arrow keys do.
+  const documentLanguage = activeDocument?.language;
+  const stepReading = useStableCallback((unit: ReaderStepUnit, direction: ReaderStepDirection) => {
+    const nowSec = clock.getTime();
+    const spokenOffset = hasAudio ? offsetAtTime(segments, nowSec, estimatedWordTrackingStable) : null;
+    const currentOffset = clamp(spokenOffset ?? currentLocalTextOffset, 0, text.length);
+    const boundaries = unit === "sentence"
+      ? sentenceStarts(text, textBlocks, documentLanguage)
+      : paragraphStarts(textBlocks);
+    let target = stepBoundary(boundaries, currentOffset, direction);
+    if (target !== null && direction === "next" && hasAudio && !estimatedWordTrackingStable) {
+      // Without word timing a step seeks to its passage's start, which may be
+      // behind the voice; step to the next passage instead of going back.
+      const landingSec = timeAtOffset(segments, target, false);
+      if (landingSec !== null && landingSec <= nowSec) {
+        const nextPassage = segments.find((segment) => (
+          segment.startSec > nowSec && typeof segment.textStart === "number"
+        ));
+        target = nextPassage?.textStart ?? null;
+      }
+    }
+    if (target !== null) {
+      handleJumpToOffset(sectionStart + target);
+      return;
+    }
+    const section = direction === "next" ? nextSection : previousSection;
+    if (section) handleJumpToOffset(section.start);
+  });
 
   const goToPreviousSection = useMemo(
     () => (previousSection ? () => handleJumpToOffset(previousSection.start) : undefined),
@@ -542,6 +589,7 @@ export function AdvancedReaderPage({
     previousSection,
     nextSection,
     onJumpToOffset: handleJumpToOffset,
+    onStep: stepReading,
     onToggleShortcuts: toggleShortcuts,
     immersive,
     onImmersiveChange,
@@ -778,6 +826,7 @@ export function AdvancedReaderPage({
         onSkipForward={skipForward}
         onDownload={onDownload}
         onStop={onStop}
+        onStep={text.length > 0 ? stepReading : undefined}
       />
     </div>
   );

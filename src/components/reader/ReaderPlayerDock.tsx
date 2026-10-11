@@ -5,6 +5,8 @@ import type { ReaderTone } from "../../lib/readerPreferences";
 import type { GenerationStats } from "../../types";
 import { AudioPlayer } from "../AudioPlayer";
 import { deriveReaderDockState } from "./readerDockState";
+import type { ReaderStepDirection, ReaderStepUnit } from "./readerNavigation";
+import { ReaderStepControls } from "./ReaderStepControls";
 
 /** The shared player re-renders only when its own props change. */
 const DockAudioPlayer = memo(AudioPlayer);
@@ -42,6 +44,8 @@ interface ReaderPlayerDockProps {
   onSkipForward: () => void;
   onDownload: () => void;
   onStop: () => void;
+  /** Sentence and paragraph steps; the controls are hidden without it. */
+  onStep?: (unit: ReaderStepUnit, direction: ReaderStepDirection) => void;
 }
 
 /** The Reader's floating transport: the shared audio player in its dock variant. */
@@ -77,6 +81,7 @@ export const ReaderPlayerDock = memo(function ReaderPlayerDock({
   onSkipForward,
   onDownload,
   onStop,
+  onStep,
 }: ReaderPlayerDockProps) {
   const hasAudio = totalDuration > 0;
   const dockState = useMemo(() => deriveReaderDockState({
@@ -137,6 +142,7 @@ export const ReaderPlayerDock = memo(function ReaderPlayerDock({
           : "w-full"
       }`}
     >
+      {onStep && <ReaderStepControls onStep={onStep} />}
       <DockAudioPlayer
         variant="dock"
         embedded

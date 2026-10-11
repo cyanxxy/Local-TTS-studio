@@ -7,6 +7,8 @@ export interface ReaderShortcut {
 export const READER_SHORTCUTS: readonly ReaderShortcut[] = [
   { keys: "Space", action: "Play or pause" },
   { keys: "← / →", action: "Previous or next page" },
+  { keys: "⇧← / ⇧→", action: "Previous or next sentence" },
+  { keys: "⇧↑ / ⇧↓", action: "Previous or next paragraph" },
   { keys: "⌥← / ⌥→", action: "Skip back or forward 10 seconds" },
   { keys: "⌘/Ctrl Enter", action: "Generate speech" },
   { keys: "⌘/Ctrl .", action: "Stop generating" },

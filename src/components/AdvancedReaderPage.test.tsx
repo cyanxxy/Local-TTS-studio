@@ -13,6 +13,7 @@ import { DEFAULT_READER_VIEW_PREFERENCES } from "../lib/readerPreferences";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import { chunkTextForModelDetailed } from "../lib/chunking";
 import { PlaybackClock } from "../lib/playbackClock";
+import { estimateSegmentWords } from "./reader/readerSegments";
 
 function clockAt(seconds: number): PlaybackClock {
   const clock = new PlaybackClock();
@@ -342,6 +343,95 @@ describe("AdvancedReaderPage", () => {
     fireEvent.doubleClick(article);
     expect(onJumpToSegment).toHaveBeenCalledWith("segment-1");
     selection.removeAllRanges();
+  });
+
+  describe("exact seeking and sentence steps", () => {
+    const text = "First sentence here. Second one follows.\nA new paragraph starts. It ends.";
+    const segment = createSegment({ text, textStart: 0, textEnd: text.length, startSec: 0, endSec: 8 });
+    const words = estimateSegmentWords(segment);
+    const wordAt = (needle: string) => words.find((word) => word.start === text.indexOf(needle))!;
+
+    function renderTimed(timeSec: number, overrides: Partial<ComponentProps<typeof AdvancedReaderPage>> = {}) {
+      return renderReader({
+        text,
+        segments: [segment],
+        activeSegmentId: segment.id,
+        totalDuration: 8,
+        clock: clockAt(timeSec),
+        ...overrides,
+      });
+    }
+
+    it("listens from the exact double-clicked word, not the start of its passage", () => {
+      const { container, props } = renderTimed(0);
+      const offset = text.indexOf("Second") + 2;
+      selectArticleText(container, offset, offset);
+
+      fireEvent.doubleClick(container.querySelector("article")!);
+
+      expect(props.onSeek).toHaveBeenCalledWith(wordAt("Second").startSec / 8);
+      expect(props.onJumpToSegment).not.toHaveBeenCalled();
+    });
+
+    it("steps to the next sentence or paragraph from the spoken word", () => {
+      const { props } = renderTimed(wordAt("here.").startSec);
+
+      fireEvent.click(screen.getByRole("button", { name: "Next sentence" }));
+      expect(props.onSeek).toHaveBeenLastCalledWith(wordAt("Second").startSec / 8);
+
+      fireEvent.click(screen.getByRole("button", { name: "Next paragraph" }));
+      expect(props.onSeek).toHaveBeenLastCalledWith(wordAt("A new").startSec / 8);
+    });
+
+    it("restarts the spoken sentence, and goes to the one before from its first word", () => {
+      const midSentence = renderTimed(wordAt("follows.").startSec);
+      fireEvent.click(screen.getByRole("button", { name: "Previous sentence" }));
+      expect(midSentence.props.onSeek).toHaveBeenLastCalledWith(wordAt("Second").startSec / 8);
+      midSentence.unmount();
+
+      const firstWord = renderTimed(wordAt("Second").startSec);
+      fireEvent.click(screen.getByRole("button", { name: "Previous sentence" }));
+      expect(firstWord.props.onSeek).toHaveBeenLastCalledWith(0);
+    });
+
+    it("steps with Shift+arrow keys", () => {
+      const { props } = renderTimed(wordAt("Second").startSec);
+
+      fireEvent.keyDown(document.body, { key: "ArrowDown", shiftKey: true });
+      expect(props.onSeek).toHaveBeenLastCalledWith(wordAt("A new").startSec / 8);
+    });
+
+    it("turns the page when a step leaves the section", () => {
+      const book = createReaderDocument({
+        id: "stepping",
+        text: "A paragraph with enough words for a reading section. ".repeat(700),
+      });
+      const sections = buildReaderSections(book.text, book.chapters);
+      const onNavigateToOffset = vi.fn();
+      renderReader({
+        text: getReaderSectionText(book.text, sections[1]),
+        documents: [book],
+        activeDocument: { ...book, progress: { ...book.progress, textOffset: sections[1].start } },
+        activeChapter: book.chapters[0],
+        activeSection: sections[1],
+        previousSection: sections[0],
+        nextSection: sections[2] ?? null,
+        onNavigateToOffset,
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Previous paragraph" }));
+      expect(onNavigateToOffset).toHaveBeenLastCalledWith(sections[0].start, undefined);
+    });
+
+    it("moves the reading position without audio", () => {
+      const onNavigateToOffset = vi.fn();
+      renderReader({ text, onNavigateToOffset });
+
+      fireEvent.click(screen.getByRole("button", { name: "Next sentence" }));
+      expect(onNavigateToOffset).toHaveBeenLastCalledWith(text.indexOf("Second"), undefined);
+      fireEvent.click(screen.getByRole("button", { name: "Next sentence" }));
+      expect(onNavigateToOffset).toHaveBeenLastCalledWith(text.indexOf("A new"), undefined);
+    });
   });
 
   it("pages between reading sections with the arrow keys", () => {
@@ -843,7 +933,7 @@ describe("AdvancedReaderPage", () => {
       author: "Local Author",
       text: "# Opening\nFirst text.\n\n# Ending\nFinal text.",
     });
-    renderReader({
+    const { props } = renderReader({
       text: document.text,
       documents: [document],
       activeDocument: document,
@@ -876,7 +966,9 @@ describe("AdvancedReaderPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
     fireEvent.click(screen.getByRole("tab", { name: "Contents" }));
     fireEvent.click(screen.getByRole("button", { name: /Ending/ }));
-    expect(onJumpToSegment).toHaveBeenCalledWith("segment-2");
+    // The chapter's first word starts its passage, two seconds in.
+    expect(props.onSeek).toHaveBeenCalledWith(0.5);
+    expect(onJumpToSegment).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("tab", { name: "Bookmarks" }));
     fireEvent.click(screen.getByRole("button", { name: "Bookmark this position" }));
