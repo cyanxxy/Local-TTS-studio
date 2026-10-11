@@ -8,11 +8,13 @@ import {
   createReaderHighlight,
   createReaderOffsetRebaser,
   estimateWordRanges,
+  isReaderDocumentCover,
   isReaderHighlightAnchored,
   isReaderHighlightColor,
   unwrapHardLineBreaks,
   normalizeReaderDocumentRecord,
   normalizeReaderTextFragment,
+  READER_COVER_MAX_DATA_URL_CHARS,
   READER_HIGHLIGHT_QUOTE_LIMIT,
   rebaseReaderChapters,
   rebaseReaderHighlights,
@@ -331,6 +333,37 @@ describe("reader highlights", () => {
     const next = text.replace(" Some years ago,", "");
 
     expect(rebaseReaderHighlights(text, next, [highlightOf("Some years ago")])).toEqual([]);
+  });
+});
+
+describe("reader covers", () => {
+  const cover = { dataUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==" };
+
+  it("keeps a valid raster cover from the import", () => {
+    expect(createReaderDocument({ text: "Body.", cover }).cover).toEqual(cover);
+    expect("cover" in createReaderDocument({ text: "Body." })).toBe(false);
+  });
+
+  it("drops covers that are not small base64 raster images", () => {
+    const rejected = [
+      { dataUrl: "data:image/svg+xml;base64,PHN2Zz4=" },
+      { dataUrl: "https://example.com/cover.jpg" },
+      { dataUrl: "data:image/png;base64,not base64!" },
+      { dataUrl: `data:image/png;base64,${"A".repeat(READER_COVER_MAX_DATA_URL_CHARS)}` },
+      { dataUrl: 42 },
+      "data:image/png;base64,AAAA",
+    ];
+    for (const value of rejected) {
+      expect(isReaderDocumentCover(value)).toBe(false);
+      expect("cover" in createReaderDocument({ text: "Body.", cover: value as never })).toBe(false);
+    }
+  });
+
+  it("normalizes stored covers without adding one to older records", () => {
+    const document = createReaderDocument({ id: "covered", text: "Body.", cover });
+
+    expect(normalizeReaderDocumentRecord(JSON.parse(JSON.stringify(document))).cover).toEqual(cover);
+    expect("cover" in normalizeReaderDocumentRecord({ ...document, cover: { dataUrl: "javascript:alert(1)" } })).toBe(false);
   });
 });
 

@@ -300,5 +300,36 @@ describe("ReaderLibrarySidebar", () => {
 
       expect(screen.queryByRole("group", { name: "Export annotations" })).toBeNull();
     });
+
+    it("shows a book's cover on its library card", () => {
+      const cover = { dataUrl: "data:image/png;base64,iVBORw0KGgo=" };
+      const { container } = render(
+        <ReaderLibrarySidebar
+          open
+          documents={[{ ...annotated, cover }, readerDocument]}
+          activeDocument={null}
+          currentTextOffset={0}
+          clock={new PlaybackClock()}
+          onClose={vi.fn()}
+          onOpenDocument={vi.fn()}
+          onNewDocument={vi.fn()}
+          onDeleteDocument={vi.fn()}
+          onUpdateMetadata={vi.fn()}
+          onJumpToOffset={vi.fn()}
+          onAddBookmark={vi.fn()}
+          onRemoveBookmark={vi.fn()}
+          onAddNote={vi.fn()}
+          onUpdateNote={vi.fn()}
+          onRemoveNote={vi.fn()}
+          tab="library"
+          onTabChange={vi.fn()}
+        />,
+      );
+
+      const images = container.querySelectorAll("img");
+      expect(images).toHaveLength(1);
+      expect(images[0]).toHaveAttribute("src", cover.dataUrl);
+      expect(images[0]).toHaveAttribute("alt", "");
+    });
   });
 });

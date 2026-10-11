@@ -81,6 +81,23 @@ export interface ReaderHighlight {
   updatedAt: number;
 }
 
+/** Largest cover image kept in a record, as a base64 data URL. */
+export const READER_COVER_MAX_DATA_URL_CHARS = 384 * 1024;
+const READER_COVER_DATA_URL = /^data:image\/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+export interface ReaderDocumentCover {
+  /** A base64 `data:image/...` URL of a raster image. */
+  dataUrl: string;
+}
+
+export function isReaderDocumentCover(value: unknown): value is ReaderDocumentCover {
+  if (typeof value !== "object" || value === null) return false;
+  const { dataUrl } = value as Partial<ReaderDocumentCover>;
+  return typeof dataUrl === "string"
+    && dataUrl.length <= READER_COVER_MAX_DATA_URL_CHARS
+    && READER_COVER_DATA_URL.test(dataUrl);
+}
+
 export interface ReaderDocumentRecord {
   id: string;
   title: string;
@@ -97,6 +114,8 @@ export interface ReaderDocumentRecord {
   notes: ReaderNote[];
   /** Absent on records saved before highlights existed. */
   highlights?: ReaderHighlight[];
+  /** The book's cover, when its source had one. */
+  cover?: ReaderDocumentCover;
   createdAt: number;
   updatedAt: number;
   lastOpenedAt: number;
@@ -113,6 +132,7 @@ export interface ReaderDocumentInput {
   sourceUrl?: string;
   text: string;
   chapters?: ReaderChapter[];
+  cover?: ReaderDocumentCover;
   now?: number;
 }
 
@@ -604,6 +624,7 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
     },
     bookmarks: [],
     notes: [],
+    ...(isReaderDocumentCover(input.cover) ? { cover: { dataUrl: input.cover.dataUrl } } : {}),
     createdAt: now,
     updatedAt: now,
     lastOpenedAt: now,
@@ -612,7 +633,7 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
 
 /** Add fields introduced by newer Reader versions without rewriting book text. */
 export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): ReaderDocumentRecord {
-  const { highlights, ...record } = document;
+  const { highlights, cover, ...record } = document;
   const chapters = normalizeReaderChapters(document.text, document.chapters ?? [], document.title);
   const sections = buildReaderSections(document.text, chapters);
   const progressOffset = Math.max(0, Math.min(document.text.length, document.progress?.textOffset ?? 0));
@@ -644,6 +665,7 @@ export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): R
     })),
     // Records from before highlights existed stay without the field.
     ...(Array.isArray(highlights) ? { highlights: normalizeReaderHighlights(document.text, highlights) } : {}),
+    ...(isReaderDocumentCover(cover) ? { cover } : {}),
   };
 }
 

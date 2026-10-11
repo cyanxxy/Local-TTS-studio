@@ -152,7 +152,14 @@ const DocumentCard = memo(function DocumentCard({
         className="w-full text-left active:scale-[0.99]"
       >
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
+          {record.cover && (
+            <img
+              src={record.cover.dataUrl}
+              alt=""
+              className="h-14 w-10 shrink-0 rounded-md object-cover shadow-sm ring-1 ring-black/10"
+            />
+          )}
+          <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold text-text-primary">{record.title}</p>
             <p className="mt-0.5 truncate text-xs text-text-muted">
               {record.author || record.sourceName || "Personal document"}
