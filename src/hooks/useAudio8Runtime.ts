@@ -44,6 +44,7 @@ export interface Audio8Runtime extends EngineRuntime<"audio8"> {
 const INITIAL_STATE: ModelState = { ready: false, loading: false, downloadProgress: 0, error: null, backend: null };
 const INITIAL_STATS: GenerationStats = { firstLatency: null, processingTime: 0, charsPerSec: 0, rtf: 0, totalDuration: 0, currentDuration: 0 };
 const BRIDGE_MISSING = "Audio8 local inference requires the Electron app.";
+const BRIDGE_MISSING_STATE: ModelState = { ...INITIAL_STATE, error: BRIDGE_MISSING };
 
 export function useAudio8Runtime({ active, text, voice, generationSettings, player, setShowPlayer }: Options): Audio8Runtime {
   const [modelState, setModelState] = useState<ModelState>(INITIAL_STATE);
@@ -111,11 +112,7 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
   }, [bridge]);
 
   useEffect(() => {
-    if (!active) return;
-    if (!bridge) {
-      setModelState({ ...INITIAL_STATE, error: BRIDGE_MISSING });
-      return;
-    }
+    if (!active || !bridge) return;
     // Reusing the in-flight (or settled) attempt is what makes reactivation
     // free. Switching to another model and back re-runs this effect, and
     // StrictMode double-invokes it in development; starting over each time
@@ -141,8 +138,16 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
   }, [active, bridge, loadRevision, refreshCacheInfo]);
 
   useEffect(() => {
-    if (active) void refreshCacheInfo();
-  }, [active, refreshCacheInfo]);
+    if (!active || !bridge) return;
+    let current = true;
+    // The size readout is informational, so a failed stat is ignored.
+    bridge.getCacheInfo().then((info) => {
+      if (current && mounted.current) setCacheInfo(info);
+    }, () => undefined);
+    return () => {
+      current = false;
+    };
+  }, [active, bridge]);
 
   const cancelActiveGeneration = useCallback(() => {
     activeGeneration.current?.abort();
@@ -165,7 +170,9 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
     setError(null);
   }, [cancelActiveGeneration, resetPlayer, setShowPlayer]);
 
-  const canGenerate = modelState.ready
+  // Without the preload bridge there is nothing to load; say why.
+  const visibleModelState = bridge ? modelState : BRIDGE_MISSING_STATE;
+  const canGenerate = visibleModelState.ready
     && !isGenerating
     && !synthesisBusy
     && text.trim().length >= MIN_TEXT_LENGTH;
@@ -278,5 +285,5 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
       });
   }, [bridge, cacheBusy, cancelActiveGeneration, refreshCacheInfo]);
 
-  return useMemo(() => ({ id: "audio8", modelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, synthesize, cacheInfo, cacheBusy, cacheStatus, clearCache }), [modelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, synthesize, cacheInfo, cacheBusy, cacheStatus, clearCache]);
+  return useMemo(() => ({ id: "audio8", modelState: visibleModelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, synthesize, cacheInfo, cacheBusy, cacheStatus, clearCache }), [visibleModelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, synthesize, cacheInfo, cacheBusy, cacheStatus, clearCache]);
 }

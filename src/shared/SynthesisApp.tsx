@@ -867,8 +867,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     readerSections.length,
     updateReaderProgress,
   ]);
-  const recordReaderProgressRef = useRef(recordReaderProgress);
-  recordReaderProgressRef.current = recordReaderProgress;
 
   // Transport-shape changes (a new active segment, pausing, the stream ending)
   // are React state, so they still drive a progress write directly.
@@ -911,8 +909,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     readerRuntime.isGenerating,
     readerViewPreferences.autoAdvance,
   ]);
-  const maybeAutoAdvanceSectionRef = useRef(maybeAutoAdvanceSection);
-  maybeAutoAdvanceSectionRef.current = maybeAutoAdvanceSection;
 
   useEffect(() => {
     maybeAutoAdvanceSection();
@@ -924,12 +920,13 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   // per-section latch) and only touch state when they actually do something.
   // Listening rather than polling also keeps a scrub-while-paused both
   // recording its resume point and honouring auto-advance at the end.
+  const onPlaybackTick = useEffectEvent(() => {
+    recordReaderProgress();
+    maybeAutoAdvanceSection();
+  });
   useEffect(() => {
     if (!isReaderPage) return;
-    return player.clock.subscribe(() => {
-      recordReaderProgressRef.current();
-      maybeAutoAdvanceSectionRef.current();
-    });
+    return player.clock.subscribe(() => onPlaybackTick());
   }, [isReaderPage, player.clock]);
 
   useEffect(() => {
