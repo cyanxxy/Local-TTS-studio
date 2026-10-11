@@ -31,6 +31,8 @@ xet = { package = "hf-xet", version = "1.6" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# build.rs sets `cfg(qwen3_native)` for exactly these two targets; change both
+# together.
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 qwen3-tts-rs = { path = "../vendor/qwen3-tts-rs", default-features = false, features = ["mlx"] }
 
