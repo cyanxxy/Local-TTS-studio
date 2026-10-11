@@ -223,10 +223,10 @@ const RUN_DEFAULTS = {
 
 function makePool(
   onMessage?: (message: Record<string, unknown>, server: FakeWebSocketServer) => void,
-  poolOverrides: Pick<
+  poolOverrides: Partial<Pick<
     CreateWebSocketBridgeWorkerPoolOptions<TestModel>,
-    "cancelDrainMs" | "connectTimeoutMs" | "onListenerError"
-  > = {},
+    "cancelDrainMs" | "connectTimeoutMs" | "onListenerError" | "idleEvictMs" | "onWorkerExit"
+  >> = {},
   handshakeDelayMs = 0,
 ) {
   const children: FakeChild[] = [];
@@ -1977,5 +1977,127 @@ describe("native failure diagnostics", () => {
       [audioFailure, { requestId: "r1", listener: "audioChunk" }],
     ]);
     servers[0].close();
+  });
+});
+
+describe("worker residency", () => {
+  // Warm commands succeed or fail on request; anything else is a generation.
+  function residencyPool(
+    poolOverrides: Parameters<typeof makePool>[1] = {},
+    { failWarm = false }: { failWarm?: boolean } = {},
+  ) {
+    return makePool((message, server) => {
+      server.sendJson(failWarm
+        ? { type: "result", requestId: message.requestId, ok: false, error: "No such model." }
+        : { type: "result", requestId: message.requestId, ok: true, result: {} });
+    }, poolOverrides);
+  }
+
+  function warm(pool: ReturnType<typeof makePool>["pool"], requestId: string, residencyKey?: string) {
+    return pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId,
+      command: "warm",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+      ...(residencyKey ? { residencyKey } : {}),
+    });
+  }
+
+  it("times idle eviction by what the last successful request left loaded", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children } = residencyPool({ idleEvictMs });
+
+    await warm(pool, "w1", "model-a");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", "model-a");
+
+    // A request without a key says nothing about what is loaded.
+    await warm(pool, "w2");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", null);
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+  });
+
+  it("forgets what a worker holds once a request fails", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children } = residencyPool({ idleEvictMs }, { failWarm: true });
+
+    await expect(warm(pool, "w1", "model-a")).rejects.toThrow("No such model.");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", null);
+    children[0].exit();
+  });
+
+  it("re-times an idle worker's eviction from now when asked", async () => {
+    let evictAfterMs = 60_000;
+    const onWorkerExit = vi.fn();
+    const { pool, children } = residencyPool({ idleEvictMs: () => evictAfterMs, onWorkerExit });
+
+    await warm(pool, "w1", "model-a");
+    evictAfterMs = 20;
+    pool.refreshIdleEviction("neutts");
+    pool.refreshIdleEviction("qwen3");
+
+    await waitFor(() => onWorkerExit.mock.calls.length === 1);
+    expect(onWorkerExit).toHaveBeenCalledWith("qwen3", { reason: "idle" });
+    expect(children[0].killed).toBe(true);
+  });
+
+  it("leaves a busy worker's clock alone until it is idle again", async () => {
+    const onWorkerExit = vi.fn();
+    let evictAfterMs = 60_000;
+    const { pool, children, servers } = makePool(undefined, { idleEvictMs: () => evictAfterMs, onWorkerExit });
+
+    const run = pool.run("qwen3", { ...RUN_DEFAULTS, requestId: "r1", payload: {}, spawnConfig: SPAWN_CONFIG });
+    await waitFor(() => servers[0]?.messages.length === 1);
+    evictAfterMs = 0;
+    pool.refreshIdleEviction("qwen3");
+    await delay(30);
+    expect(onWorkerExit).not.toHaveBeenCalled();
+
+    servers[0].sendJson({ type: "result", requestId: "r1", ok: false, error: "Nope." });
+    await expect(run).rejects.toThrow("Nope.");
+    await waitFor(() => onWorkerExit.mock.calls.length === 1);
+    expect(children[0].killed).toBe(true);
+  });
+
+  it("reports why each connected worker went away, once", async () => {
+    const onWorkerExit = vi.fn();
+    const { pool, children } = residencyPool({ onWorkerExit });
+
+    await warm(pool, "w1");
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+    expect(onWorkerExit.mock.calls).toEqual([["qwen3", { reason: "stopped" }]]);
+
+    await warm(pool, "w2");
+    children[1].exit(1);
+    await waitFor(() => onWorkerExit.mock.calls.length === 2);
+    expect(onWorkerExit).toHaveBeenLastCalledWith("qwen3", { reason: "failed" });
+  });
+
+  it("says nothing about a worker that never finished starting", async () => {
+    const onWorkerExit = vi.fn();
+    const { pool, children } = makePool(undefined, { onWorkerExit });
+    const spawned = pool.run("qwen3", { ...RUN_DEFAULTS, requestId: "r1", payload: {}, spawnConfig: SPAWN_CONFIG });
+    expect(pool.cancel("r1")).toBe(true);
+    children[0].exit(null as unknown as number);
+    await expect(spawned).rejects.toThrow(/cancelled/i);
+
+    expect(onWorkerExit).not.toHaveBeenCalled();
+  });
+
+  it("keeps tearing down when the exit observer throws", async () => {
+    const { pool, children } = residencyPool({
+      onWorkerExit: () => {
+        throw new Error("observer bug");
+      },
+    });
+    await warm(pool, "w1");
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+
+    await expect(shutdown).resolves.toBe(true);
   });
 });
