@@ -17,8 +17,6 @@ import {
   getDefaultQwen3Profile,
   getQwen3Profile,
   getQwen3Profiles,
-  QWEN3_DEFAULT_LANGUAGE,
-  QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
   QWEN3_SPEAKERS,
   type Qwen3Mode,
@@ -29,6 +27,7 @@ import {
   QWEN3_MAX_SEED,
   QWEN3_MIN_NEW_TOKENS,
 } from "../../electron/localTtsLimits";
+import { getInitialEngineSettings, persistEngineSettings } from "../lib/appState";
 
 export const QWEN3_DEFAULT_MAX_NEW_TOKENS = QWEN3_MAX_NEW_TOKENS_PER_PASSAGE;
 
@@ -120,26 +119,31 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const platform = window.electron?.platform;
   const arch = window.electron?.arch;
   const profiles = useMemo(() => getQwen3Profiles(platform, arch), [arch, platform]);
-  const initialProfile = useMemo(() => {
+  const defaultProfile = useMemo(() => {
     try {
       return getDefaultQwen3Profile(platform, arch);
     } catch {
       return getDefaultQwen3Profile("darwin", "arm64");
     }
   }, [arch, platform]);
-  const [profile, setProfile] = useState<Qwen3Profile>(initialProfile);
+  // What the last session chose, already validated and clamped. The model
+  // path and the clone reference are never stored: the path is re-resolved
+  // from the setup inventory and a reference clip stays in memory only.
+  const [saved] = useState(() => getInitialEngineSettings().qwen3);
+  const [profile, setProfile] = useState<Qwen3Profile>(() => {
+    const repo = saved.profileRepo;
+    const restored = repo && profiles.some((candidate) => candidate.repo === repo) ? getQwen3Profile(repo) : null;
+    return restored ?? defaultProfile;
+  });
   const [modelPath, setModelPathState] = useState("");
   const [readiness, setReadiness] = useState<Qwen3RuntimeSettings["readiness"]>("missing");
-  const [speaker, setSpeakerState] = useState<string>(QWEN3_DEFAULT_SPEAKER);
-  const [language, setLanguageState] = useState<string>(QWEN3_DEFAULT_LANGUAGE);
-  const [instructByMode, setInstructByMode] = useState<Record<Qwen3InstructMode, string>>({
-    customVoice: "",
-    voiceDesign: "",
-  });
-  const [temperature, setTemperatureState] = useState(0.9);
-  const [topK, setTopKState] = useState(50);
-  const [maxNewTokens, setMaxNewTokensState] = useState(QWEN3_DEFAULT_MAX_NEW_TOKENS);
-  const [seed, setSeedState] = useState<number | null>(null);
+  const [speaker, setSpeakerState] = useState<string>(saved.speaker);
+  const [language, setLanguageState] = useState<string>(saved.language);
+  const [instructByMode, setInstructByMode] = useState<Record<Qwen3InstructMode, string>>(saved.instructByMode);
+  const [temperature, setTemperatureState] = useState(saved.temperature);
+  const [topK, setTopKState] = useState(saved.topK);
+  const [maxNewTokens, setMaxNewTokensState] = useState(saved.maxNewTokens);
+  const [seed, setSeedState] = useState<number | null>(saved.seed);
   const [referenceAudioName, setReferenceAudioName] = useState("");
   const [referenceAudioBase64, setReferenceAudioBase64] = useState<string | null>(null);
   const [referenceAudioSignature, setReferenceAudioSignature] = useState("");
@@ -207,6 +211,26 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (available) void refreshSetup();
   }, [available, refreshSetup]);
+
+  useEffect(() => {
+    if (!available) return;
+    const timeoutId = window.setTimeout(() => {
+      persistEngineSettings({
+        qwen3: {
+          // The platform default is stored as null so it follows the default.
+          profileRepo: profile.repo === defaultProfile.repo ? null : profile.repo,
+          speaker,
+          language,
+          instructByMode,
+          temperature,
+          topK,
+          maxNewTokens,
+          seed,
+        },
+      });
+    }, 200);
+    return () => window.clearTimeout(timeoutId);
+  }, [available, defaultProfile.repo, instructByMode, language, maxNewTokens, profile.repo, seed, speaker, temperature, topK]);
 
   useEffect(() => {
     const subscribe = window.electron?.localTts?.subscribeQwen3DownloadProgress;

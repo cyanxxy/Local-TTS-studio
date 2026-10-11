@@ -43,8 +43,27 @@ function Consumer({ name }: { name: string }) {
   );
 }
 
+const ENGINE_SETTINGS_STORAGE_KEY = "tts-engine-settings-v1";
+
+function storedQwen3Settings(): Record<string, unknown> | undefined {
+  return JSON.parse(localStorage.getItem(ENGINE_SETTINGS_STORAGE_KEY) ?? "{}").qwen3;
+}
+
+function installBridge(platform = "darwin", arch = "arm64") {
+  window.electron = {
+    isElectron: true,
+    platform,
+    arch,
+    localTts: {
+      getQwen3Setup: vi.fn().mockResolvedValue(setupResult()),
+      subscribeQwen3DownloadProgress: vi.fn(() => () => undefined),
+    },
+  } as never;
+}
+
 afterEach(() => {
   delete window.electron;
+  localStorage.clear();
 });
 
 describe("Qwen3RuntimeProvider", () => {
@@ -174,6 +193,87 @@ describe("Qwen3RuntimeProvider", () => {
     expect(screen.getByRole("status")).toHaveTextContent("64|42");
     fireEvent.click(screen.getByText("clear"));
     expect(screen.getByRole("status")).toHaveTextContent("64|random");
+  });
+
+  it("restores the last session's settings, but never a clone reference", async () => {
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({
+      kokoro: { voice: "bf_emma" },
+      qwen3: {
+        profileRepo: DESIGN_REPO,
+        speaker: "Sohee",
+        language: "Korean",
+        instructByMode: { customVoice: "Warm.", voiceDesign: "A bright young host." },
+        temperature: 0.4,
+        topK: 12,
+        maxNewTokens: 9_999,
+        seed: 7,
+        referenceText: "should be ignored",
+      },
+    }));
+    installBridge();
+    function SavedConsumer() {
+      const state = useQwen3Runtime();
+      return (
+        <output>
+          {[
+            state.profile.repo, state.speaker, state.language, state.instruct, state.temperature,
+            state.topK, state.maxNewTokens, state.seed, state.referenceText || "no-reference",
+          ].join("|")}
+        </output>
+      );
+    }
+    render(<Qwen3RuntimeProvider><SavedConsumer /></Qwen3RuntimeProvider>);
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      `${DESIGN_REPO}|Sohee|Korean|A bright young host.|0.4|12|384|7|no-reference`,
+    );
+    await waitFor(() => expect(storedQwen3Settings()).toMatchObject({ profileRepo: DESIGN_REPO, maxNewTokens: 384 }));
+    // Writing Qwen3 settings keeps the entries other engines stored.
+    expect(JSON.parse(localStorage.getItem(ENGINE_SETTINGS_STORAGE_KEY) ?? "{}").kokoro).toEqual({ voice: "bf_emma" });
+    expect(storedQwen3Settings()).not.toHaveProperty("referenceText");
+  });
+
+  it("persists changes and stores the platform default profile as null", async () => {
+    installBridge();
+    render(
+      <Qwen3RuntimeProvider>
+        <Consumer name="studio" />
+      </Qwen3RuntimeProvider>,
+    );
+    await waitFor(() => expect(storedQwen3Settings()).toMatchObject({ profileRepo: null, speaker: "Aiden" }));
+
+    fireEvent.click(screen.getByText("Ryan"));
+    fireEvent.click(screen.getByText("Base"));
+    await waitFor(() => expect(storedQwen3Settings()).toMatchObject({ profileRepo: BASE_REPO, speaker: "Ryan" }));
+  });
+
+  it("falls back to the platform default for a saved profile this platform cannot run", async () => {
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({
+      qwen3: { profileRepo: "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign", speaker: "Ryan" },
+    }));
+    installBridge("darwin", "arm64");
+    render(
+      <Qwen3RuntimeProvider>
+        <Consumer name="studio" />
+      </Qwen3RuntimeProvider>,
+    );
+
+    expect(screen.getByLabelText("studio")).toHaveTextContent(`${CUSTOM_REPO}|Ryan|English`);
+    await waitFor(() => expect(screen.getByLabelText("studio")).toHaveTextContent("/models/custom"));
+  });
+
+  it("does not store anything when Qwen3 is unavailable", async () => {
+    function Availability() {
+      return <output>{String(useQwen3Runtime().available)}</output>;
+    }
+    vi.useFakeTimers();
+    try {
+      render(<Qwen3RuntimeProvider><Availability /></Qwen3RuntimeProvider>);
+      act(() => vi.advanceTimersByTime(1_000));
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(localStorage.getItem(ENGINE_SETTINGS_STORAGE_KEY)).toBeNull();
   });
 
   it("stays inert when the Electron bridge is absent", async () => {

@@ -208,6 +208,9 @@ describe("LocalRuntimePage", () => {
   afterEach(() => {
     delete window.electron;
     vi.restoreAllMocks();
+    // The Qwen3 provider persists its settings; one test's profile must not
+    // become the next test's starting profile.
+    localStorage.clear();
   });
 
   it("shows the native provider and immutable runtime revision", async () => {
