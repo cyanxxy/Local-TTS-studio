@@ -40,11 +40,18 @@ export const GENERATION_HISTORY_MIGRATIONS: readonly IndexedDbMigration[] = [
   },
 ];
 
+/**
+ * Favorites are never evicted, so they get their own share of the budget:
+ * at most `maxFavoriteEntries`, and at most the bytes left after reserving
+ * room for one maximum-size new entry. Saving can then always evict down to
+ * the limits, and the store never grows past them.
+ */
 export const GENERATION_HISTORY_LIMITS = {
   maxEntries: 200,
   maxTotalBytes: 512 * 1024 * 1024,
   /** Matches the Reader's per-entry audio cap. */
   maxEntryBytes: 256 * 1024 * 1024,
+  maxFavoriteEntries: 50,
   maxTextLength: 200_000,
   maxSettingsJsonLength: 64 * 1024,
   maxTitleLength: 80,
@@ -115,6 +122,10 @@ export interface GenerationHistoryStoreOptions {
   maxEntries?: number;
   maxTotalBytes?: number;
   maxEntryBytes?: number;
+  /** Capped below maxEntries. */
+  maxFavoriteEntries?: number;
+  /** Capped at maxTotalBytes - maxEntryBytes. */
+  maxFavoriteBytes?: number;
 }
 
 export interface GenerationHistoryStore {
@@ -125,6 +136,7 @@ export interface GenerationHistoryStore {
   saveGeneration(input: NewGenerationEntry): Promise<{ entry: GenerationHistoryEntry; evictedIds: string[] }>;
   /** Audio for replay, marking the entry as recently used. */
   getAudio(id: string): Promise<GenerationAudioChunk[] | null>;
+  /** Refuses with GenerationHistoryError once the favorites budget is full. */
   setFavorite(id: string, favorite: boolean): Promise<GenerationHistoryEntry>;
   rename(id: string, title: string): Promise<GenerationHistoryEntry>;
   deleteEntry(id: string): Promise<void>;
@@ -313,7 +325,15 @@ export function createGenerationHistoryStore(options: GenerationHistoryStoreOpti
     maxEntries: options.maxEntries ?? GENERATION_HISTORY_LIMITS.maxEntries,
     maxTotalBytes: options.maxTotalBytes ?? GENERATION_HISTORY_LIMITS.maxTotalBytes,
   };
-  const maxEntryBytes = options.maxEntryBytes ?? GENERATION_HISTORY_LIMITS.maxEntryBytes;
+  const maxEntryBytes = Math.min(options.maxEntryBytes ?? GENERATION_HISTORY_LIMITS.maxEntryBytes, limits.maxTotalBytes);
+  const maxFavoriteEntries = Math.max(0, Math.min(
+    options.maxFavoriteEntries ?? GENERATION_HISTORY_LIMITS.maxFavoriteEntries,
+    limits.maxEntries - 1,
+  ));
+  const maxFavoriteBytes = Math.max(0, Math.min(
+    options.maxFavoriteBytes ?? Number.POSITIVE_INFINITY,
+    limits.maxTotalBytes - maxEntryBytes,
+  ));
   const changes = createChangeNotifier(CHANGE_CHANNEL);
 
   function open(): Promise<IDBDatabase> {
@@ -416,6 +436,13 @@ export function createGenerationHistoryStore(options: GenerationHistoryStoreOpti
         audio.put({ id: entry.id, chunks });
         const existing = await readEntries(transaction);
         const evictions = selectHistoryEvictions(existing, limits, entry.id);
+        // Only favorites written before their budget existed, or by another
+        // tab at the same moment, can leave the store over its limits.
+        const kept = existing.filter((item) => !evictions.includes(item.id));
+        const keptBytes = kept.reduce((total, item) => total + item.byteLength, 0);
+        if (kept.length > limits.maxEntries || keptBytes > limits.maxTotalBytes) {
+          fail("History is full of favorites. Unfavorite or delete some generations first.");
+        }
         for (const id of evictions) {
           entries.delete(id);
           audio.delete(id);
@@ -439,8 +466,28 @@ export function createGenerationHistoryStore(options: GenerationHistoryStoreOpti
       return chunks;
     },
 
-    setFavorite(id, favorite) {
-      return updateEntry(id, (entry) => ({ ...entry, favorite }));
+    async setFavorite(id, favorite) {
+      const updated = await withTransaction([ENTRIES_STORE], "readwrite", async (transaction) => {
+        const store = transaction.objectStore(ENTRIES_STORE);
+        const entries = await readEntries(transaction);
+        const current = entries.find((entry) => entry.id === id);
+        if (!current) fail("That generation is no longer in history.");
+        if (favorite && !current.favorite) {
+          const favorites = entries.filter((entry) => entry.favorite);
+          const favoriteBytes = favorites.reduce((total, entry) => total + entry.byteLength, 0);
+          if (favorites.length + 1 > maxFavoriteEntries) {
+            fail(`History keeps at most ${maxFavoriteEntries} favorites. Unfavorite one first.`);
+          }
+          if (favoriteBytes + current.byteLength > maxFavoriteBytes) {
+            fail("Favorites have used their share of history storage. Unfavorite or download and delete some first.");
+          }
+        }
+        const next = { ...current, favorite };
+        store.put(next);
+        return next;
+      });
+      emitChange();
+      return updated;
     },
 
     rename(id, title) {

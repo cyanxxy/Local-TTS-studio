@@ -155,6 +155,56 @@ describe("generation history store", () => {
     expect((await bounded.getUsage()).entryCount).toBe(1);
   });
 
+  it("caps favorites by count and bytes so history stays within its limits", async () => {
+    // 100,000 total minus a 40,000 max entry leaves 60,000 for favorites; entries are 28,800 bytes.
+    const capped = createGenerationHistoryStore({
+      databaseName: "favorites",
+      now: () => clock,
+      createId: () => `f-${++ids}`,
+      maxEntries: 4,
+      maxTotalBytes: 100_000,
+      maxEntryBytes: 40_000,
+    });
+    const [a, b, c] = [
+      (await capped.saveGeneration(generation())).entry,
+      (await capped.saveGeneration(generation())).entry,
+      (await capped.saveGeneration(generation())).entry,
+    ];
+    await capped.setFavorite(a.id, true);
+    await capped.setFavorite(b.id, true);
+    await expect(capped.setFavorite(c.id, true)).rejects.toThrow(/share of history storage/);
+    expect((await capped.setFavorite(a.id, true)).favorite).toBe(true);
+    await capped.setFavorite(a.id, false);
+    await capped.setFavorite(c.id, true);
+    await expect(capped.setFavorite("missing", true)).rejects.toThrow(/no longer in history/);
+    for (let index = 0; index < 4; index += 1) {
+      clock += 1_000;
+      await capped.saveGeneration(generation());
+      const usage = await capped.getUsage();
+      expect(usage.entryCount).toBeLessThanOrEqual(4);
+      expect(usage.totalBytes).toBeLessThanOrEqual(100_000);
+    }
+
+    const counted = createGenerationHistoryStore({ databaseName: "favorite-count", createId: () => `c-${++ids}`, maxEntries: 3 });
+    const first = (await counted.saveGeneration(generation())).entry;
+    const second = (await counted.saveGeneration(generation())).entry;
+    const third = (await counted.saveGeneration(generation())).entry;
+    await counted.setFavorite(first.id, true);
+    await counted.setFavorite(second.id, true);
+    // maxEntries - 1 favorites leave room for every new save.
+    await expect(counted.setFavorite(third.id, true)).rejects.toThrow(/at most 2 favorites/);
+  });
+
+  it("refuses a save that favorites from an earlier budget would push over the limits", async () => {
+    for (let index = 0; index < 3; index += 1) {
+      const { entry } = await store.saveGeneration(generation());
+      await store.setFavorite(entry.id, true);
+    }
+    const strict = createGenerationHistoryStore({ createId: () => `s-${++ids}`, maxEntries: 2 });
+    await expect(strict.saveGeneration(generation())).rejects.toThrow(/full of favorites/);
+    expect(await strict.listEntries()).toHaveLength(3);
+  });
+
   it("validates input", async () => {
     await expect(store.saveGeneration(generation({ text: "  " }))).rejects.toThrow(/needs its text/);
     await expect(store.saveGeneration(generation({ text: "x".repeat(200_001) }))).rejects.toThrow(/too long/);
