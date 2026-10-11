@@ -302,6 +302,35 @@ describe("reader highlights", () => {
     ]);
   });
 
+  it("drops stored highlights with impossible offsets or a repeated id", () => {
+    const document = createReaderDocument({ id: "whale", text });
+    const stored = {
+      ...document,
+      highlights: [
+        highlightOf("went to sea"),
+        { ...highlightOf("went to sea"), color: "blue" },
+        { ...highlightOf("Ishmael"), id: "negative", start: -3 },
+        { ...highlightOf("Ishmael"), id: "fractional", end: 14.5 },
+        { ...highlightOf("Ishmael"), id: "empty", end: text.indexOf("Ishmael") },
+      ],
+    } as unknown as typeof document;
+
+    expect(normalizeReaderDocumentRecord(stored).highlights).toEqual([highlightOf("went to sea")]);
+  });
+
+  it("re-anchors a short quote over its own length, whatever end the record claims", () => {
+    const shifted = `Prologue. ${text}`;
+    const stored = {
+      ...createReaderDocument({ id: "whale", text: shifted }),
+      highlights: [highlightOf("Call me", { end: 1_000_000_000 })],
+    };
+
+    expect(normalizeReaderDocumentRecord(stored).highlights?.[0]).toMatchObject({
+      start: shifted.indexOf("Call me"),
+      end: shifted.indexOf("Call me") + "Call me".length,
+    });
+  });
+
   it("survives the JSON round trip both storage backends load records through", () => {
     const document = { ...createReaderDocument({ id: "whale", text }), highlights: [highlightOf("went to sea")] };
 
@@ -327,6 +356,16 @@ describe("reader highlights", () => {
     expect(next.slice(after.start, after.end)).toBe("went to sea");
     expect(untouched).toBe(detached);
     expect(rebaseReaderHighlights(text, next, [])).toEqual([]);
+  });
+
+  it("leaves text typed right after a highlight outside it", () => {
+    const next = text.replace("Call me Ishmael", "Call me Ishmael, sailor");
+    const [highlight] = rebaseReaderHighlights(text, next, [highlightOf("Call me Ishmael")]);
+
+    expect(highlight).toEqual(highlightOf("Call me Ishmael"));
+    const [before] = rebaseReaderHighlights(text, `The story. ${text}`, [highlightOf("Call me Ishmael")]);
+    expect(before.quote).toBe("Call me Ishmael");
+    expect(before.start).toBe("The story. ".length);
   });
 
   it("drops a highlight whose words were all deleted", () => {
@@ -413,8 +452,11 @@ describe("createReaderOffsetRebaser", () => {
       const replacement = word(Math.floor(random() * 8));
       const next = previous.slice(0, start) + replacement + previous.slice(previousEnd);
       const hint = { start, previousEnd, nextEnd: start + replacement.length };
-      const rebase = createReaderOffsetRebaser(previous, next);
+      // The hinted rebaser goes first: once the unhinted scan of this pair is
+      // remembered it would answer for the hint, and the hinted search would
+      // never run.
       const hinted = createReaderOffsetRebaser(previous, next, hint);
+      const rebase = createReaderOffsetRebaser(previous, next);
 
       for (let offset = -2; offset <= previous.length + 2; offset += 1) {
         const expected = referenceRebase(previous, next, offset);
@@ -455,6 +497,19 @@ describe("createReaderOffsetRebaser", () => {
       // Alternate pairs so the remembered scan cannot answer for the hint.
       expect(createReaderOffsetRebaser(next, previous)(0)).toBe(0);
     }
+  });
+
+  it("ignores a well-formed hint that misplaces the edit, and never remembers its answer", () => {
+    const previous = "abXdef";
+    const next = "abYYdef";
+    // Lengths agree with the texts, but the edit is at 2, not 5.
+    const wrongHint = { start: 5, previousEnd: 5, nextEnd: 6 };
+    const hinted = createReaderOffsetRebaser(previous, next, wrongHint);
+    for (let offset = 0; offset <= previous.length; offset += 1) {
+      expect(hinted(offset)).toBe(referenceRebase(previous, next, offset));
+      expect(rebaseReaderTextOffset(previous, next, offset)).toBe(referenceRebase(previous, next, offset));
+    }
+    expect(rebaseReaderTextOffset(previous, next, 3)).toBe(4);
   });
 
   it("never answers one text pair with the scan of another", () => {

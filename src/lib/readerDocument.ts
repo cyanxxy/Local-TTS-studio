@@ -363,8 +363,9 @@ interface ReaderTextChangeRange {
 
 /**
  * Where an edit is already known to fall, e.g. the section a draft replaced.
- * The texts must be identical before `start` and after the two ends; the scan
- * for the exact change then only covers the edited span.
+ * The texts must be identical before `start` and after the two ends; the
+ * character scan for the exact change then only covers the edited span. A
+ * hint that does not hold is ignored, so it can never skew an offset.
  */
 export interface ReaderTextChangeHint {
   start: number;
@@ -383,7 +384,11 @@ function isUsableChangeHint(previousText: string, nextText: string, hint: Reader
     && hint.previousEnd <= previousText.length
     && hint.start <= hint.nextEnd
     && hint.nextEnd <= nextText.length
-    && previousText.length - hint.previousEnd === nextText.length - hint.nextEnd;
+    && previousText.length - hint.previousEnd === nextText.length - hint.nextEnd
+    // Native comparisons confirm the claimed-equal ends far faster than the
+    // character scan they let the change search skip.
+    && previousText.slice(0, hint.start) === nextText.slice(0, hint.start)
+    && previousText.slice(hint.previousEnd) === nextText.slice(hint.nextEnd);
 }
 
 function getReaderTextChangeRange(
@@ -819,7 +824,11 @@ export function resolveReaderHighlightRange(
     }
   }
   if (found === -1) return null;
-  const length = Math.max(highlight.quote.length, highlight.end - highlight.start);
+  // A quote shorter than the limit is the whole highlighted text; only a
+  // truncated one leaves the stored range to say how far the highlight ran.
+  const length = highlight.quote.length < READER_HIGHLIGHT_QUOTE_LIMIT
+    ? highlight.quote.length
+    : Math.max(highlight.quote.length, highlight.end - highlight.start);
   return { start: found, end: Math.min(text.length, found + length) };
 }
 
@@ -827,8 +836,8 @@ function isStoredHighlight(value: unknown): value is ReaderHighlight {
   if (typeof value !== "object" || value === null) return false;
   const entry = value as Partial<ReaderHighlight>;
   return typeof entry.id === "string" && entry.id.length > 0
-    && Number.isFinite(entry.start)
-    && Number.isFinite(entry.end)
+    && typeof entry.start === "number" && Number.isSafeInteger(entry.start) && entry.start >= 0
+    && typeof entry.end === "number" && Number.isSafeInteger(entry.end) && entry.end > entry.start
     && isReaderHighlightColor(entry.color)
     && typeof entry.quote === "string"
     && Number.isFinite(entry.createdAt)
@@ -836,13 +845,19 @@ function isStoredHighlight(value: unknown): value is ReaderHighlight {
 }
 
 /**
- * Keeps well-formed stored highlights, in reading order, and re-anchors any
- * whose text has moved. One whose text is gone keeps its record (and stays
- * listed and exported) but no longer marks the page.
+ * Keeps well-formed stored highlights, in reading order and once per id, and
+ * re-anchors any whose text has moved. One whose text is gone keeps its record
+ * (and stays listed and exported) but no longer marks the page.
  */
 function normalizeReaderHighlights(text: string, highlights: readonly unknown[]): ReaderHighlight[] {
+  const seenIds = new Set<string>();
   return highlights
     .filter(isStoredHighlight)
+    .filter((highlight) => {
+      if (seenIds.has(highlight.id)) return false;
+      seenIds.add(highlight.id);
+      return true;
+    })
     .map((highlight) => {
       const range = resolveReaderHighlightRange(text, highlight);
       if (range) return range.start === highlight.start && range.end === highlight.end ? highlight : { ...highlight, ...range };
@@ -856,7 +871,8 @@ function normalizeReaderHighlights(text: string, highlights: readonly unknown[])
  * Carries highlights across a text edit. Anchored ones move with their words
  * and take their quote from the edited text, so a fix inside a highlighted
  * passage keeps the highlight, while one whose words were all deleted goes
- * with them. Detached ones are left for their quote to find.
+ * with them. Text typed right after a highlight stays outside it. Detached
+ * ones are left for their quote to find.
  */
 export function rebaseReaderHighlights(
   previousText: string,
@@ -865,11 +881,13 @@ export function rebaseReaderHighlights(
   hint?: ReaderTextChangeHint,
 ): ReaderHighlight[] {
   if (highlights.length === 0) return [];
-  const rebase = createReaderOffsetRebaser(previousText, nextText, hint);
+  const range = rememberedTextChangeRange(previousText, nextText, hint);
+  const rebase = (offset: number) => rebaseOffsetAcross(range, previousText.length, nextText.length, offset);
+  const insertionAt = range.previousChangeEnd === range.prefixLength ? range.prefixLength : -1;
   return highlights.flatMap((highlight) => {
     if (!isReaderHighlightAnchored(previousText, highlight)) return [highlight];
     const start = rebase(highlight.start);
-    const end = rebase(highlight.end);
+    const end = highlight.end === insertionAt ? highlight.end : rebase(highlight.end);
     if (end <= start) return [];
     return [{
       ...highlight,
