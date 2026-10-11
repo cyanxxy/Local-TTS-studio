@@ -73,7 +73,7 @@ function splitPunctuationRuns(text: string): Array<{ start: number; end: number;
   for (const match of text.matchAll(PUNCTUATION_RUN)) {
     const end = match.index + match[0].length;
     // Keep "4.50", "1,000" and "10:30" whole: eSpeak reads them as one number,
-    // while splitting them would make "$4.50" sound like "$4 50".
+    // while splitting them would make "4.50" sound like "4. 50".
     if (/^[.,:]$/.test(match[0]) && /\d/.test(text[match.index - 1] ?? "") && /\d/.test(text[end] ?? "")) continue;
     if (cursor < match.index) runs.push({ start: cursor, end: match.index, punctuation: false });
     runs.push({ start: match.index, end, punctuation: true });
@@ -81,6 +81,35 @@ function splitPunctuationRuns(text: string): Array<{ start: number; end: number;
   }
   if (cursor < text.length) runs.push({ start: cursor, end: text.length, punctuation: false });
   return runs;
+}
+
+function spellOutMoney(value: string): string {
+  const unit = value[0] === "$" ? "dollar" : "pound";
+  const amount = value.slice(1);
+  if (Number.isNaN(Number(amount))) return `${amount} ${unit}s`;
+  if (!amount.includes(".")) return `${amount} ${unit}${amount === "1" ? "" : "s"}`;
+  const [whole, fraction] = amount.split(".");
+  const cents = parseInt(fraction.padEnd(2, "0"), 10);
+  const centUnit = value[0] === "$" ? (cents === 1 ? "cent" : "cents") : (cents === 1 ? "penny" : "pence");
+  return `${whole} ${unit}${whole === "1" ? "" : "s"} and ${cents} ${centUnit}`;
+}
+
+/**
+ * kokoro-js 1.2.1's money rules (Apache-2.0): drop digit-group commas, then
+ * spell amounts out ("$4.50" -> "4 dollars and 50 cents"). eSpeak alone reads
+ * "$4.50" as "dollar four point five zero".
+ */
+export function spellOutCurrency(text: string): string {
+  return text
+    .replace(/(?<=\d),(?=\d)/g, "")
+    .replace(/[$£]\d+(?:\.\d+)?(?: hundred| thousand| (?:[bm]|tr)illion)*\b|[$£]\d+\.\d\d?\b/gi, spellOutMoney);
+}
+
+export interface PhonemizeOptions {
+  /** eSpeak voice; American English by default. */
+  language?: string;
+  /** Rewrites each run of words just before eSpeak sees it, such as spellOutCurrency. */
+  prepareRun?: (run: string) => string;
 }
 
 /**
@@ -92,7 +121,7 @@ function splitPunctuationRuns(text: string): Array<{ start: number; end: number;
 export async function phonemizeKeepingPunctuation(
   text: string,
   phonemize: EspeakPhonemize,
-  language: string = ESPEAK_AMERICAN_ENGLISH,
+  { language = ESPEAK_AMERICAN_ENGLISH, prepareRun = (run) => run }: PhonemizeOptions = {},
 ): Promise<PhonemizedText> {
   let phonemes = "";
   const segments: PhonemeSegment[] = [];
@@ -102,7 +131,7 @@ export async function phonemizeKeepingPunctuation(
     let output = source;
     if (!run.punctuation && source.trim()) {
       // A curly apostrophe would split "don’t" into two eSpeak words.
-      output = (await phonemize(source.replace(/[‘’]/g, "'"), language)).join(" ");
+      output = (await phonemize(prepareRun(source.replace(/[‘’]/g, "'")), language)).join(" ");
     }
     segments.push({
       textStart: run.start,

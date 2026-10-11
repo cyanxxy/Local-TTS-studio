@@ -12,7 +12,7 @@
 import * as ort from "onnxruntime-web";
 import type { InferenceBackend } from "../types";
 import { chunkWithConstraintsDetailed, type TextChunk } from "./chunking";
-import { phonemizeKeepingPunctuation, type EspeakPhonemize, type PhonemizedText } from "./espeakPhonemizer";
+import { phonemizeKeepingPunctuation, spellOutCurrency, type EspeakPhonemize, type PhonemizedText } from "./espeakPhonemizer";
 import {
   KITTEN_STYLE_DIMENSION,
   resolveKittenVoice,
@@ -259,7 +259,9 @@ export class KittenRuntime {
     const styles = this.styles.get(styleKey);
     if (!styles) throw new Error(`Kitten voice ${styleKey} is not loaded.`);
     const prepared = ensureTerminalPunctuation(text);
-    const phonemized = await phonemizeKeepingPunctuation(prepared, this.phonemize);
+    // Upstream expands numbers and currency in Python before eSpeak; eSpeak
+    // handles everything but money itself.
+    const phonemized = await phonemizeKeepingPunctuation(prepared, this.phonemize, { prepareRun: spellOutCurrency });
     const tokens = tokenizeKittenPhonemes(phonemized.phonemes);
     if (tokens.ids.length > STYLE_TTS_MAX_INPUT_TOKENS) throw new ChunkTooLongError(tokens.ids.length);
     if (!tokens.ids.some((id) => id > LAST_NON_PHONEME_ID)) {

@@ -3,6 +3,7 @@
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spellOutCurrency } from "./espeakPhonemizer";
 
 const PHONEMIZER_BUILD_URL = pathToFileURL(resolve("node_modules/phonemizer/dist/phonemizer.js")).href;
 
@@ -38,7 +39,7 @@ describe("phonemizeKeepingPunctuation", () => {
     const { phonemizeKeepingPunctuation, PRESERVED_PUNCTUATION } = await importPhonemizer();
     const phonemize = vi.fn(async (text: string) => text.split(" "));
 
-    const result = await phonemizeKeepingPunctuation(`(don’t stop) [a-b] ${PRESERVED_PUNCTUATION}`, phonemize, "en");
+    const result = await phonemizeKeepingPunctuation(`(don’t stop) [a-b] ${PRESERVED_PUNCTUATION}`, phonemize, { language: "en" });
 
     expect(phonemize.mock.calls).toEqual([["don't stop", "en"], ["a-b", "en"]]);
     expect(result.phonemes).toBe(`(don't stop) [a-b] ${PRESERVED_PUNCTUATION}`);
@@ -52,6 +53,16 @@ describe("phonemizeKeepingPunctuation", () => {
     await phonemizeKeepingPunctuation("Pay $4.50, 1,000 or 10:30. Then 7. 8", phonemize);
 
     expect(phonemize.mock.calls.map(([text]) => text)).toEqual(["Pay $4.50", "1,000 or 10:30", "Then 7", "8"]);
+  });
+
+  it("rewrites each run of words with prepareRun just before eSpeak", async () => {
+    const { phonemizeKeepingPunctuation } = await importPhonemizer();
+    const phonemize = vi.fn(async (text: string) => [text]);
+
+    const result = await phonemizeKeepingPunctuation("Pay $4.50, now.", phonemize, { prepareRun: (run) => run.toUpperCase() });
+
+    expect(phonemize.mock.calls).toEqual([["PAY $4.50", "en-us"], ["NOW", "en-us"]]);
+    expect(result.phonemes).toBe("PAY $4.50, NOW.");
   });
 
   it("passes whitespace-only text through without calling eSpeak", async () => {
@@ -85,5 +96,17 @@ describe("loadEspeakPhonemizer", () => {
     await expect(loadEspeakPhonemizer(brokenUrl)).rejects.toThrow("does not export phonemize()");
     await expect(loadEspeakPhonemizer(brokenUrl)).rejects.toThrow("does not export phonemize()");
     await expect(loadEspeakPhonemizer(PHONEMIZER_BUILD_URL)).resolves.toBeTypeOf("function");
+  });
+});
+
+describe("spellOutCurrency", () => {
+  it.each([
+    ["Pay $4.50 now", "Pay 4 dollars and 50 cents now"],
+    ["$1 or $1.01", "1 dollar or 1 dollar and 1 cent"],
+    ["£2.5 and £3", "2 pounds and 50 pence and 3 pounds"],
+    ["$1,000,000 or $3 million", "1000000 dollars or 3 million dollars"],
+    ["4.50 and 1,000 stay numbers", "4.50 and 1000 stay numbers"],
+  ])("spells %s as kokoro-js does", (text, expected) => {
+    expect(spellOutCurrency(text)).toBe(expected);
   });
 });

@@ -169,6 +169,21 @@ describe("KittenRuntime.synthesize", () => {
     expect((run.mock.calls[1][0].speed.data as Float32Array)[0]).toBe(0.5);
   });
 
+  it("spells out money before eSpeak, which would read $4.50 as dollar four point five zero", async () => {
+    const phonemize = vi.fn(lowerCasePhonemize);
+    const { session } = fakeSession((feeds) => {
+      const frames = feeds.input_ids.dims[1] * 2;
+      return { waveform: new Float32Array(frames * FRAME).fill(0.5), duration: Array.from({ length: feeds.input_ids.dims[1] }, () => 2) };
+    });
+    const runtime = new KittenRuntime(session, styleTables(), { speedPriors: {} }, phonemize);
+
+    const result = await runtime.synthesize("It cost $4.50 today.", "Bella", 1);
+
+    expect(phonemize).toHaveBeenCalledWith("It cost 4 dollars and 50 cents today", "en-us");
+    // eSpeak's words no longer line up one-to-one, so the run is shared out by source word length.
+    expect(result.wordTimings?.map(({ start, end }) => "It cost $4.50 today.".slice(start, end))).toEqual(["It", "cost", "$4.50", "today"]);
+  });
+
   it("rejects chunks over the graph's token limit before inference", async () => {
     const { session, run } = fakeSession(() => ({ waveform: new Float32Array(0) }));
     const runtime = new KittenRuntime(session, styleTables(), { speedPriors: {} }, lowerCasePhonemize);

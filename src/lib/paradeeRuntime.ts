@@ -11,7 +11,7 @@
  */
 import * as ort from "onnxruntime-web";
 import { chunkWithConstraintsDetailed, type TextChunk } from "./chunking";
-import { phonemizeKeepingPunctuation, type EspeakPhonemize } from "./espeakPhonemizer";
+import { phonemizeKeepingPunctuation, spellOutCurrency, type EspeakPhonemize } from "./espeakPhonemizer";
 import {
   ChunkTooLongError,
   disposeOutputs,
@@ -52,17 +52,6 @@ function splitNumber(value: string): string {
   return `${left} ${right}${suffix}`;
 }
 
-function flipMoney(value: string): string {
-  const unit = value[0] === "$" ? "dollar" : "pound";
-  const amount = value.slice(1);
-  if (Number.isNaN(Number(amount))) return `${amount} ${unit}s`;
-  if (!amount.includes(".")) return `${amount} ${unit}${amount === "1" ? "" : "s"}`;
-  const [whole, fraction] = amount.split(".");
-  const cents = parseInt(fraction.padEnd(2, "0"), 10);
-  const centUnit = value[0] === "$" ? (cents === 1 ? "cent" : "cents") : (cents === 1 ? "penny" : "pence");
-  return `${whole} ${unit}${whole === "1" ? "" : "s"} and ${cents} ${centUnit}`;
-}
-
 function pointNumber(value: string): string {
   const [whole, fraction] = value.split(".");
   return `${whole} point ${fraction.split("").join(" ")}`;
@@ -73,7 +62,7 @@ function pointNumber(value: string): string {
  * runs of spaces are collapsed everywhere rather than only the first one.
  */
 export function normalizeParadeeText(text: string): string {
-  return text
+  const withNumbers = text
     .replace(/[‘’]/g, "'")
     .replace(/«/g, "“")
     .replace(/»/g, "”")
@@ -96,9 +85,8 @@ export function normalizeParadeeText(text: string): string {
     .replace(/\b(?:Mrs\.|MRS\.(?= [A-Z]))/g, "Mrs")
     .replace(/\betc\.(?! [A-Z])/gi, "etc")
     .replace(/\b(y)eah?\b/gi, "$1e'a")
-    .replace(/\d*\.\d+|\b\d{4}s?\b|(?<!:)\b(?:[1-9]|1[0-2]):[0-5]\d\b(?!:)/g, splitNumber)
-    .replace(/(?<=\d),(?=\d)/g, "")
-    .replace(/[$£]\d+(?:\.\d+)?(?: hundred| thousand| (?:[bm]|tr)illion)*\b|[$£]\d+\.\d\d?\b/gi, flipMoney)
+    .replace(/\d*\.\d+|\b\d{4}s?\b|(?<!:)\b(?:[1-9]|1[0-2]):[0-5]\d\b(?!:)/g, splitNumber);
+  return spellOutCurrency(withNumbers)
     .replace(/\d*\.\d+/g, pointNumber)
     .replace(/(?<=\d)-(?=\d)/g, " to ")
     .replace(/(?<=\d)S/g, " S")
