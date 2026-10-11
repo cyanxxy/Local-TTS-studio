@@ -8,13 +8,23 @@ import {
   parseArgs,
   REPORT_SCHEMA_VERSION,
   summarizeComparison,
+  USAGE,
 } from "./scripts/inference-speed-eval.mjs";
 import {
+  BENCHMARK_MODEL_SELECTIONS as CLI_MODEL_SELECTIONS,
+  BENCHMARK_MODELS as CLI_MODELS,
   createElectronOutputParser,
+  formatModelSummary,
   getRequestedModelFailures,
   getRequestedModelExitCode,
+  resolveRequestedModels,
   RESULT_PREFIX,
 } from "./scripts/inference-speed-output.mjs";
+import {
+  BENCHMARK_MODEL_SELECTIONS,
+  BENCHMARK_MODELS,
+  resolveBenchmarkModels,
+} from "./src/eval/inferenceSpeedOptions";
 
 interface BenchmarkHost {
   platform: string;
@@ -114,6 +124,53 @@ describe("inference speed CLI", () => {
     expect(() => getRequestedModelExitCode({ models: [] }, "bogus")).toThrow(/Unsupported/);
   });
 
+  it("accepts every model selection the benchmark page accepts", () => {
+    expect(CLI_MODELS).toEqual(BENCHMARK_MODELS);
+    expect(CLI_MODEL_SELECTIONS).toEqual(BENCHMARK_MODEL_SELECTIONS);
+    for (const model of BENCHMARK_MODEL_SELECTIONS) {
+      const options = parseArgs(["--model", model]);
+      expect(encodeParams(options).get("model")).toBe(model);
+      expect(resolveRequestedModels(model)).toEqual(resolveBenchmarkModels(model));
+    }
+    expect(parseArgs([]).model).toBe("both");
+  });
+
+  it("documents every model selection in the usage text", () => {
+    expect(parseArgs(["--help"]).help).toBe(true);
+    expect(parseArgs(["-h"]).help).toBe(true);
+    for (const model of BENCHMARK_MODEL_SELECTIONS) {
+      expect(USAGE).toMatch(new RegExp(`^\\s+${model}\\s`, "m"));
+    }
+  });
+
+  it("formats cold load, warm load, first audio, and throughput per model", () => {
+    expect(formatModelSummary({
+      model: "supertonic3",
+      backend: "webgpu",
+      coldLoadMs: 5000,
+      warmLoadMs: 1200.04,
+      loadMs: 5000,
+      firstChunkMs: 350,
+      summary: { meanGenerationMs: 900, meanFirstChunkMs: 300, meanCharsPerSec: 420.55, meanRtf: 0.12345 },
+    })).toBe(
+      "supertonic3: cold load 5000.0ms, warm load 1200.0ms, first audio 350.0ms, mean 900.0ms, "
+        + "mean first chunk 300.0ms, 420.6 chars/s, RTF 0.123, backend webgpu",
+    );
+  });
+
+  it("formats errors, missing audio, and pre-split reports without throwing", () => {
+    expect(formatModelSummary({ model: "kokoro", error: "load failed" })).toBe("kokoro: ERROR load failed");
+    expect(formatModelSummary({
+      model: "kokoro",
+      backend: "wasm",
+      loadMs: 800,
+      summary: { meanGenerationMs: 100, meanFirstChunkMs: null, meanCharsPerSec: 10, meanRtf: null },
+    })).toBe(
+      "kokoro: cold load 800.0ms, warm load n/a, first audio n/a, mean 100.0ms, "
+        + "mean first chunk n/a, 10.0 chars/s, RTF n/a, backend wasm",
+    );
+  });
+
   it("mirrors production WebGPU flags and disables hidden-window throttling", () => {
     const runner = readFileSync("scripts/inference-speed-electron.mjs", "utf8");
     expect(runner).toContain('appendSwitch("enable-unsafe-webgpu")');
@@ -155,6 +212,20 @@ describe("inference speed CLI", () => {
     expect(getRequestedModelExitCode(result, "kokoro")).toBe(1);
     expect(getRequestedModelExitCode(result, "supertonic")).toBe(0);
     expect(getRequestedModelExitCode({ models: [] }, "both")).toBe(1);
+  });
+
+  it("requires a successful result for every runtime selected by all", () => {
+    const succeeded = (model: string) => ({ model, summary: { meanGenerationMs: 10 } });
+    const complete = { models: ["kokoro", "supertonic", "supertonic3"].map(succeeded) };
+    expect(getRequestedModelExitCode(complete, "all")).toBe(0);
+
+    const missing = { models: [succeeded("kokoro"), succeeded("supertonic")] };
+    expect(getRequestedModelExitCode(missing, "both")).toBe(0);
+    expect(getRequestedModelFailures(missing, "all")).toEqual([{
+      model: "supertonic3",
+      error: "The benchmark returned no result for this requested model.",
+    }]);
+    expect(getRequestedModelExitCode(missing, "supertonic3")).toBe(1);
   });
 
   it("compares only reports with identical compatibility fingerprints", () => {
