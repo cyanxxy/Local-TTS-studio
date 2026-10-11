@@ -1,10 +1,11 @@
 import {
+  createChangeNotifier,
   deleteIndexedDatabase,
-  isUint8ArrayLike,
   isArrayBufferLike,
+  isUint8ArrayLike,
   openVersionedDatabase,
   requestResult,
-  transactionDone,
+  runTransaction,
   type IndexedDbMigration,
 } from "../indexedDb";
 import { decodeWav, encodeWavPcm16, toStandaloneArrayBuffer } from "../wavCodec";
@@ -176,8 +177,7 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
   const maxTotalAudioBytes = options.maxTotalAudioBytes ?? VOICE_LIBRARY_LIMITS.maxTotalAudioBytes;
   const maxPreviewEntries = options.previewCache?.maxEntries ?? DEFAULT_PREVIEW_CACHE_LIMITS.maxEntries;
   const maxPreviewBytes = options.previewCache?.maxBytes ?? DEFAULT_PREVIEW_CACHE_LIMITS.maxBytes;
-  const listeners = new Set<() => void>();
-  let channel: BroadcastChannel | null = null;
+  const changes = createChangeNotifier(CHANGE_CHANNEL);
 
   function open(): Promise<IDBDatabase> {
     return openVersionedDatabase({
@@ -188,53 +188,19 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
     });
   }
 
-  async function withTransaction<T>(
+  function withTransaction<T>(
     stores: string[],
     mode: IDBTransactionMode,
     operation: (transaction: IDBTransaction) => Promise<T>,
   ): Promise<T> {
-    const database = await open();
-    try {
-      const transaction = database.transaction(stores, mode);
-      const done = transactionDone(transaction);
-      let result: T;
-      try {
-        result = await operation(transaction);
-      } catch (cause) {
-        // Roll back partial writes; the abort rejection is the less useful error.
-        try {
-          transaction.abort();
-        } catch { /* already finished */ }
-        done.catch(() => {});
-        throw cause;
-      }
-      await done;
-      return result;
-    } finally {
-      database.close();
-    }
+    return runTransaction(open, stores, mode, operation);
   }
 
-  function notifyLocal(): void {
-    for (const listener of [...listeners]) {
-      try {
-        listener();
-      } catch {
-        // A faulty subscriber must not break the mutation that notified it.
-      }
-    }
-  }
 
   function emitChange(): void {
-    notifyLocal();
-    if (typeof BroadcastChannel === "undefined") return;
-    // Other tabs (and other store instances) listen on the same channel name.
-    // A store nobody subscribes to still announces its writes, through a
-    // throwaway channel that is closed right after posting.
-    const sender = channel ?? new BroadcastChannel(CHANGE_CHANNEL);
-    sender.postMessage("changed");
-    if (sender !== channel) sender.close();
+    changes.emit();
   }
+
 
   async function readAudioInfo(bytes: Uint8Array, maxDurationSec?: number): Promise<StoredAudioInfo> {
     if (!isUint8ArrayLike(bytes) || bytes.byteLength === 0) {
@@ -533,21 +499,9 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
     },
 
     subscribe(listener) {
-      listeners.add(listener);
-      // The channel exists only while someone listens, so an idle store never
-      // holds an open handle (which would also keep Node test workers alive).
-      if (!channel && typeof BroadcastChannel !== "undefined") {
-        channel = new BroadcastChannel(CHANGE_CHANNEL);
-        channel.onmessage = () => notifyLocal();
-      }
-      return () => {
-        listeners.delete(listener);
-        if (listeners.size === 0 && channel) {
-          channel.close();
-          channel = null;
-        }
-      };
+      return changes.subscribe(listener);
     },
+
 
     async destroy() {
       await deleteIndexedDatabase(databaseName);

@@ -128,3 +128,89 @@ export function isUint8ArrayLike(value: unknown): value is Uint8Array {
   return value instanceof Uint8Array
     || Object.prototype.toString.call(value) === "[object Uint8Array]";
 }
+
+/**
+ * Open a database, run `operation` inside one transaction, wait for it to
+ * commit, and close the connection. A thrown operation aborts the transaction
+ * so its partial writes roll back, and its own error is the one rethrown.
+ */
+export async function runTransaction<T>(
+  open: () => Promise<IDBDatabase>,
+  stores: string[],
+  mode: IDBTransactionMode,
+  operation: (transaction: IDBTransaction) => Promise<T>,
+): Promise<T> {
+  const database = await open();
+  try {
+    const transaction = database.transaction(stores, mode);
+    const done = transactionDone(transaction);
+    let result: T;
+    try {
+      result = await operation(transaction);
+    } catch (cause) {
+      try {
+        transaction.abort();
+      } catch { /* already committed or aborted */ }
+      done.catch(() => {});
+      throw cause;
+    }
+    await done;
+    return result;
+  } finally {
+    database.close();
+  }
+}
+
+export interface ChangeNotifier {
+  /** Notify local subscribers and announce the change to other tabs. */
+  emit(): void;
+  subscribe(listener: () => void): () => void;
+}
+
+/**
+ * Change notifications for a store: local listeners run synchronously, and
+ * other tabs (or other store instances) hear about writes on a
+ * BroadcastChannel. The listening channel exists only while someone is
+ * subscribed, so an idle store never holds an open handle, which would also
+ * keep Node test workers alive.
+ */
+export function createChangeNotifier(channelName: string): ChangeNotifier {
+  const listeners = new Set<() => void>();
+  let channel: BroadcastChannel | null = null;
+
+  function notifyLocal(): void {
+    for (const listener of [...listeners]) {
+      try {
+        listener();
+      } catch {
+        // A faulty subscriber must not break the write that notified it.
+      }
+    }
+  }
+
+  return {
+    emit() {
+      notifyLocal();
+      if (typeof BroadcastChannel === "undefined") return;
+      // BroadcastChannel never delivers to its sender, so local listeners are
+      // not notified twice. Without a subscriber, post through a throwaway.
+      const sender = channel ?? new BroadcastChannel(channelName);
+      sender.postMessage("changed");
+      if (sender !== channel) sender.close();
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      if (!channel && typeof BroadcastChannel !== "undefined") {
+        channel = new BroadcastChannel(channelName);
+        channel.onmessage = () => notifyLocal();
+      }
+      return () => {
+        listeners.delete(listener);
+        if (listeners.size === 0 && channel) {
+          channel.close();
+          channel = null;
+        }
+      };
+    },
+  };
+}

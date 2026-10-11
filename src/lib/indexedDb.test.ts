@@ -1,6 +1,7 @@
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  createChangeNotifier,
   deleteIndexedDatabase,
   isArrayBufferLike,
   isIndexedDbSupported,
@@ -8,6 +9,7 @@ import {
   latestMigrationVersion,
   openVersionedDatabase,
   requestResult,
+  runTransaction,
   transactionDone,
   type IndexedDbMigration,
 } from "./indexedDb";
@@ -123,5 +125,75 @@ describe("indexedDb helpers", () => {
     expect(isArrayBufferLike(new Uint8Array(1))).toBe(false);
     expect(isUint8ArrayLike(new Uint8Array(1))).toBe(true);
     expect(isUint8ArrayLike(new ArrayBuffer(1))).toBe(false);
+  });
+});
+
+describe("runTransaction", () => {
+  beforeEach(() => {
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("IDBKeyRange", IDBKeyRange);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("commits successful work and rolls back a throwing operation", async () => {
+    const open = () => openVersionedDatabase(options([V1]));
+    await runTransaction(open, ["items"], "readwrite", async (transaction) => {
+      transaction.objectStore("items").put({ id: "kept" });
+    });
+    await expect(runTransaction(open, ["items"], "readwrite", async (transaction) => {
+      transaction.objectStore("items").put({ id: "rolled-back" });
+      await requestResult(transaction.objectStore("items").get("kept"));
+      throw new Error("validation failed");
+    })).rejects.toThrow("validation failed");
+    const keys = await runTransaction(open, ["items"], "readonly", (transaction) => (
+      requestResult(transaction.objectStore("items").getAllKeys())
+    ));
+    expect(keys).toEqual(["kept"]);
+  });
+});
+
+describe("createChangeNotifier", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("notifies local listeners and isolates faulty ones", () => {
+    const notifier = createChangeNotifier("open-tts-test-local");
+    const first = vi.fn(() => {
+      throw new Error("bad listener");
+    });
+    const second = vi.fn();
+    const unsubscribeFirst = notifier.subscribe(first);
+    const unsubscribeSecond = notifier.subscribe(second);
+    notifier.emit();
+    expect(first).toHaveBeenCalledTimes(1);
+    expect(second).toHaveBeenCalledTimes(1);
+    unsubscribeFirst();
+    unsubscribeSecond();
+    notifier.emit();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it("relays changes between notifiers on the same channel", async () => {
+    const listening = createChangeNotifier("open-tts-test-relay");
+    const writer = createChangeNotifier("open-tts-test-relay");
+    const listener = vi.fn();
+    const unsubscribe = listening.subscribe(listener);
+    writer.emit();
+    await vi.waitFor(() => expect(listener).toHaveBeenCalledTimes(1));
+    unsubscribe();
+  });
+
+  it("works without BroadcastChannel", () => {
+    vi.stubGlobal("BroadcastChannel", undefined);
+    const notifier = createChangeNotifier("open-tts-test-none");
+    const listener = vi.fn();
+    const unsubscribe = notifier.subscribe(listener);
+    notifier.emit();
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
   });
 });
