@@ -12,6 +12,11 @@
  *   words, and are matched case-insensitively, so "BOB" and "Bob" are one
  *   speaker. The colon must be followed by a space or the end of the line, so
  *   times ("10:30") and URLs never read as labels.
+ * - Prose also puts colons after its opening words ("Remember one thing:
+ *   ..."), so a label only counts when it names a known speaker, is used on
+ *   at least two lines, or looks like a name (capitalized words, allowing
+ *   short particles such as "de"). Anything else stays part of the text and
+ *   is reported as an issue, as is a multi-word speaker labelled only once.
  * - [tags] in square brackets, after the name or anywhere in the line, are
  *   delivery cues such as [whispering]; they are recorded and never spoken.
  * - (Stage directions) are recorded and not spoken when they open a line or
@@ -63,6 +68,8 @@ export interface DialogueScript {
 export interface ParseDialogueOptions {
   /** Speaker for text before the first label. Defaults to "Narrator". */
   defaultSpeaker?: string;
+  /** Names already cast, accepted as labels however they are written. */
+  knownSpeakers?: readonly string[];
 }
 
 export const DIALOGUE_SCRIPT_LIMITS = {
@@ -79,6 +86,39 @@ const LABEL_PATTERN = /^\s*(\p{L}[\p{L}\p{M}\p{N}'’._-]*(?:[ \t]+[\p{L}\p{M}\p
 const LEADING_CUE_PATTERN = /^\s*(?:\[([^\]\n]*)\]|\(([^)\n]*)\))/;
 const TAG_PATTERN = /\[([^\]\n]*)\]/g;
 const WHOLE_LINE_CUES_PATTERN = /^\s*(?:(?:\[[^\]\n]*\]|\([^)\n]*\))\s*)+$/;
+
+interface SpeakerLabel {
+  name: string;
+  key: string;
+  /** Length of the label, including the colon and following whitespace. */
+  length: number;
+  /** The bracket tags between the name and the colon. */
+  tagsText: string;
+}
+
+function matchLabel(line: string): SpeakerLabel | null {
+  const match = LABEL_PATTERN.exec(line);
+  if (!match) return null;
+  const name = cleanCue(match[1]);
+  if (name.length > DIALOGUE_SCRIPT_LIMITS.maxSpeakerNameLength) return null;
+  if (name.split(" ").length > DIALOGUE_SCRIPT_LIMITS.maxSpeakerWords) return null;
+  return { name, key: dialogueSpeakerKey(name), length: match[0].length, tagsText: match[2] };
+}
+
+/**
+ * Whether a label reads as a name rather than the opening words of a
+ * sentence: the first word is capitalized, and so is every later word longer
+ * than three letters ("Jean de Florette" and "Mary Ann" pass, "Remember one
+ * thing" does not). Letters without case, as in CJK names, always pass.
+ */
+function looksLikeName(name: string): boolean {
+  return name.split(" ").every((word, index) => {
+    const letter = word.match(/\p{L}/u)?.[0];
+    const isLowercase = letter !== undefined && letter === letter.toLowerCase() && letter !== letter.toUpperCase();
+    if (!isLowercase) return true;
+    return index > 0 && word.replace(/[^\p{L}]/gu, "").length <= 3;
+  });
+}
 
 /** Collapse whitespace and fold case so speaker names compare reliably. */
 export function dialogueSpeakerKey(name: string): string {
@@ -138,6 +178,18 @@ export function parseDialogueScript(source: string, options: ParseDialogueOption
   let pendingTags: string[] = [];
   let pendingDirections: string[] = [];
   let truncated = false;
+
+  // Count label-shaped lines first, so a speaker used more than once is
+  // recognized however its name is written.
+  const knownKeys = new Set((options.knownSpeakers ?? []).map(dialogueSpeakerKey));
+  const labelCounts = new Map<string, number>();
+  for (const line of source.split("\n")) {
+    const candidate = matchLabel(line);
+    if (candidate) labelCounts.set(candidate.key, (labelCounts.get(candidate.key) ?? 0) + 1);
+  }
+  const acceptsLabel = (label: SpeakerLabel) => (
+    knownKeys.has(label.key) || (labelCounts.get(label.key) ?? 0) >= 2 || looksLikeName(label.name)
+  );
 
   function closeTurn(): void {
     if (!open) return;
@@ -230,15 +282,18 @@ export function parseDialogueScript(source: string, options: ParseDialogueOption
       continue;
     }
 
-    const label = LABEL_PATTERN.exec(raw);
-    const name = label ? cleanCue(label[1]) : "";
-    const isLabel = label !== null
-      && name.length <= DIALOGUE_SCRIPT_LIMITS.maxSpeakerNameLength
-      && name.split(" ").length <= DIALOGUE_SCRIPT_LIMITS.maxSpeakerWords;
-    if (isLabel) {
+    const candidate = matchLabel(raw);
+    const label = candidate && acceptsLabel(candidate) ? candidate : null;
+    if (candidate && !label) {
+      issues.push({
+        line: lineNumber,
+        message: `"${candidate.name}:" reads as part of the text, not a speaker. Capitalize the name to make it a speaker.`,
+      });
+    }
+    if (label) {
       closeTurn();
-      const key = dialogueSpeakerKey(name);
-      const contentStart = offset + label[0].length;
+      const { name, key } = label;
+      const contentStart = offset + label.length;
       if (!admitSpeaker(key, name, lineNumber)) {
         // Keep the rejected speaker current so its continuation lines are
         // dropped too instead of falling to the previous speaker.
@@ -248,11 +303,11 @@ export function parseDialogueScript(source: string, options: ParseDialogueOption
         continue;
       }
       open = startTurn(name, key, lineNumber, contentStart);
-      for (const match of label[2].matchAll(TAG_PATTERN)) {
+      for (const match of label.tagsText.matchAll(TAG_PATTERN)) {
         const cue = cleanCue(match[1]);
         if (cue) open.tags.push(cue);
       }
-      appendContent(open, raw.slice(label[0].length), contentStart);
+      appendContent(open, raw.slice(label.length), contentStart);
       continue;
     }
 
@@ -265,6 +320,17 @@ export function parseDialogueScript(source: string, options: ParseDialogueOption
     appendContent(open, raw.trimStart(), contentStart);
   }
   closeTurn();
+
+  for (const speaker of speakers.values()) {
+    // Multi-word, one-off labels are the ones prose produces ("Rule Number One: ...").
+    if (!speaker.name.includes(" ") || knownKeys.has(speaker.key) || (labelCounts.get(speaker.key) ?? 0) !== 1) continue;
+    const turn = turns.find((item) => item.speakerKey === speaker.key);
+    issues.push({
+      line: turn?.line ?? 1,
+      message: `"${speaker.name}" speaks only once. If that colon belongs to the sentence, it was read as a speaker by mistake.`,
+    });
+  }
+  issues.sort((a, b) => a.line - b.line);
 
   return { turns, speakers: [...speakers.values()], issues };
 }

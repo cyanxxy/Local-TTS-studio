@@ -43,6 +43,42 @@ describe("parseDialogueScript", () => {
     expect(spoken(`${longName}: hi`)[0][0]).toBe("Narrator");
   });
 
+  it("keeps colons in prose as text and reports the ambiguous lines", () => {
+    const script = parseDialogueScript([
+      "Alice: Listen carefully.",
+      "Remember one thing: never trust Bob.",
+      "Bob: Hey!",
+      "rule number one: arrive early.",
+    ].join("\n"));
+    expect(script.turns.map((turn) => [turn.speaker, turn.text])).toEqual([
+      ["Alice", "Listen carefully. Remember one thing: never trust Bob."],
+      ["Bob", "Hey! rule number one: arrive early."],
+    ]);
+    expect(script.speakers.map((speaker) => speaker.name)).toEqual(["Alice", "Bob"]);
+    expect(script.issues).toEqual([
+      { line: 2, message: '"Remember one thing:" reads as part of the text, not a speaker. Capitalize the name to make it a speaker.' },
+      { line: 4, message: '"rule number one:" reads as part of the text, not a speaker. Capitalize the name to make it a speaker.' },
+    ]);
+  });
+
+  it("accepts names that look like names, repeated labels and a known cast", () => {
+    expect(spoken("Jean de Florette: Bonjour.\nMary Ann: Hi.\n李雷: 你好。\nO'BRIEN: Evening.").map(([speaker]) => speaker))
+      .toEqual(["Jean de Florette", "Mary Ann", "李雷", "O'BRIEN"]);
+    // Lower-case names count once they label more than one line.
+    expect(spoken("alice: hi\nbob: hey\nalice: bye\nbob: ciao").map(([speaker]) => speaker)).toEqual(["alice", "bob", "alice", "bob"]);
+    const cast = parseDialogueScript("the narrator: Once upon a time.", { knownSpeakers: ["The  Narrator"] });
+    expect(cast.turns[0]).toMatchObject({ speaker: "the narrator", text: "Once upon a time." });
+    expect(cast.issues).toEqual([]);
+  });
+
+  it("flags a capitalized multi-word speaker who speaks only once", () => {
+    const script = parseDialogueScript("Alice: Rules.\nRule Number One: arrive early.\nAlice: Got it?\nBob: Yes.");
+    expect(script.speakers.map((speaker) => speaker.name)).toEqual(["Alice", "Rule Number One", "Bob"]);
+    expect(script.issues).toEqual([
+      { line: 2, message: '"Rule Number One" speaks only once. If that colon belongs to the sentence, it was read as a speaker by mistake.' },
+    ]);
+  });
+
   it("records tags and leading stage directions without speaking them", () => {
     const script = parseDialogueScript("Bob [whispering] [ slow ]: (leaning in) [scared] It's (I think) here [gasps].");
     expect(script.turns[0]).toMatchObject({
