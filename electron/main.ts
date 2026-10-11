@@ -139,13 +139,17 @@ function start(): void {
     if (process.platform !== "darwin") app.quit();
   });
 
+  // Neither opens a window once the quit has started: its renderer would only
+  // meet IPC handlers that refuse new work.
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
+    if (!shutdown.shuttingDown && BrowserWindow.getAllWindows().length === 0) {
       // Re-create window on macOS dock click
       createMainWindow(windowOptions);
     }
   });
 
   // Another launch while this copy runs: show the running window instead.
-  app.on("second-instance", () => revealMainWindow(windowOptions));
+  app.on("second-instance", () => {
+    if (!shutdown.shuttingDown) revealMainWindow(windowOptions);
+  });
 }

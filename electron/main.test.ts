@@ -60,6 +60,7 @@ const mocks = vi.hoisted(() => ({
   windowError: null as Error | null,
   singleInstanceLock: true,
   exit: vi.fn(),
+  windowOpened: null as (() => void) | null,
 }));
 
 vi.mock("electron", () => ({
@@ -82,6 +83,7 @@ vi.mock("electron", () => ({
     static getAllWindows = () => mocks.windows;
     constructor() {
       if (mocks.windowError) throw mocks.windowError;
+      mocks.windowOpened?.();
     }
 
     loadURL = () => Promise.resolve();
@@ -1770,10 +1772,12 @@ describe("single-instance lock", () => {
   beforeEach(() => {
     mocks.windows = [];
     mocks.exit.mockClear();
+    mocks.quit.mockClear();
   });
 
   afterEach(() => {
     mocks.singleInstanceLock = true;
+    mocks.windowOpened = null;
   });
 
   it("exits a second launch before it logs, registers IPC or opens a window", async () => {
@@ -1798,5 +1802,28 @@ describe("single-instance lock", () => {
     expect(mocks.exit).not.toHaveBeenCalled();
     expect(window.restore).toHaveBeenCalledTimes(1);
     expect(window.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens no window for a relaunch or a dock click once the quit has started", async () => {
+    await importMain();
+    const opened = vi.fn();
+    mocks.windowOpened = opened;
+    mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
+
+    mocks.appListeners.get("second-instance")!();
+    mocks.appListeners.get("activate")!();
+
+    expect(opened).not.toHaveBeenCalled();
+    await waitForQuit();
+  });
+
+  it("reopens a window on a dock click when none is left", async () => {
+    await importMain();
+    const opened = vi.fn();
+    mocks.windowOpened = opened;
+
+    mocks.appListeners.get("activate")!();
+
+    expect(opened).toHaveBeenCalledTimes(1);
   });
 });
