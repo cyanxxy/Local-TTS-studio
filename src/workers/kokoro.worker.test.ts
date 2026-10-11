@@ -5,6 +5,8 @@ interface MockKokoroInstance {
   voices?: Record<string, unknown>;
   list_voices: ReturnType<typeof vi.fn>;
   generate: ReturnType<typeof vi.fn>;
+  tokenizer?: ReturnType<typeof vi.fn>;
+  generate_from_ids?: ReturnType<typeof vi.fn>;
   dispose?: ReturnType<typeof vi.fn>;
   model?: { dispose: ReturnType<typeof vi.fn> };
 }
@@ -14,6 +16,8 @@ interface LoadOptions {
   canUseWebGPU?: boolean;
   fallbackVoices?: string[];
   instances?: MockKokoroInstance[];
+  /** The phonemizer vite.kokoroAssets.ts exports from kokoro.web.js; absent by default. */
+  phonemize?: (text: string, language?: string) => Promise<string>;
 }
 
 function createRawAudio(length: number = 2, samplingRate: number = 10) {
@@ -90,6 +94,7 @@ async function loadWorkerModule({
   canUseWebGPU = false,
   fallbackVoices = ["af_heart", "am_echo"],
   instances,
+  phonemize,
 }: LoadOptions = {}) {
   vi.resetModules();
   const postedMessages: WorkerOutMessage[] = [];
@@ -116,6 +121,8 @@ async function loadWorkerModule({
     KokoroTTS: {
       from_pretrained: fromPretrained,
     },
+    // Always defined: a mocked module throws on reading an export it lacks.
+    phonemize,
   }));
   vi.doMock("../lib/onnxWasmAssets", () => ({
     KOKORO_ONNX_WASM_ASSETS: { mjs: "ort.mjs", wasm: "ort.wasm" },
@@ -547,5 +554,102 @@ describe("Kokoro soft abort", () => {
     await vi.waitFor(() => expect(postedMessages.filter((message) => message.type === "READY")).toHaveLength(2));
     expect(first.dispose).toHaveBeenCalledOnce();
     expect(postedMessages.some((message) => message.type === "AUDIO_CHUNK")).toBe(false);
+  });
+});
+
+describe("Kokoro context budget", () => {
+  // One 135-character sentence: no sentence or line break to merge across.
+  const SENTENCE = "The keeper climbed the spiral stairs every evening, counting each worn step, and at the top he lit the lamp that guided the ships home.";
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  /** A tokenizer whose phonemes cost `idsPerChar` ids per character, plus the start and end tokens. */
+  function createBudgetedInstance(idsPerChar: number): MockKokoroInstance {
+    const instance = createInstance([], { af_heart: {}, bf_emma: {} });
+    instance.tokenizer = vi.fn((phonemes: string) => ({ input_ids: { dims: [1, phonemes.length * idsPerChar + 2] } }));
+    instance.generate_from_ids = vi.fn(async () => createRawAudio(3));
+    return instance;
+  }
+
+  async function generateWith(instance: MockKokoroInstance, voice: string, phonemize = vi.fn(async (text: string) => text)) {
+    const loaded = await loadWorkerModule({ instances: [instance], phonemize });
+    loaded.dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(loaded.postedMessages.some((message) => message.type === "READY")).toBe(true));
+    loaded.dispatch({ type: "GENERATE", generationId: "g", text: SENTENCE, voice, speed: 1, quality: 5 });
+    return { ...loaded, phonemize };
+  }
+
+  function audioChunks(messages: WorkerOutMessage[]) {
+    return messages.filter((message): message is Extract<WorkerOutMessage, { type: "AUDIO_CHUNK" }> => (
+      message.type === "AUDIO_CHUNK"
+    ));
+  }
+
+  it("generates a unit that fits from its untruncated ids, phonemized for the voice's language", async () => {
+    const instance = createBudgetedInstance(3);
+    const { phonemize, postedMessages } = await generateWith(instance, "bf_emma");
+
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "g" }));
+    expect(phonemize).toHaveBeenCalledExactlyOnceWith(SENTENCE, "b");
+    expect(instance.tokenizer).toHaveBeenCalledExactlyOnceWith(SENTENCE, { truncation: false });
+    expect(instance.generate_from_ids).toHaveBeenCalledExactlyOnceWith(
+      { dims: [1, SENTENCE.length * 3 + 2] },
+      { voice: "bf_emma", speed: 1 },
+    );
+    expect(instance.generate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      idsPerChar: 4,
+      parts: [
+        "The keeper climbed the spiral stairs every evening, counting each worn step,",
+        "and at the top he lit the lamp that guided the ships home.",
+      ],
+    },
+    {
+      idsPerChar: 8,
+      parts: [
+        "The keeper climbed the spiral stairs every evening,",
+        "counting each worn step,",
+        "and at the top he lit the lamp that guided the ships home.",
+      ],
+    },
+  ])("splits a unit needing $idsPerChar ids per character at clause breaks and posts one chunk", async ({ idsPerChar, parts }) => {
+    const instance = createBudgetedInstance(idsPerChar);
+    const { phonemize, postedMessages } = await generateWith(instance, "af_heart");
+
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "g" }));
+    expect(instance.generate).not.toHaveBeenCalled();
+    expect(instance.generate_from_ids).toHaveBeenCalledTimes(parts.length);
+    for (const [inputIds] of instance.generate_from_ids!.mock.calls) {
+      expect((inputIds as { dims: number[] }).dims[1]).toBeLessThanOrEqual(512);
+    }
+    // Only the parts that fit reach the model, in order.
+    const synthesized = phonemize.mock.calls
+      .map(([text]) => text)
+      .filter((text) => text.length * idsPerChar + 2 <= 512);
+    expect(synthesized).toEqual(parts);
+    expect(phonemize.mock.calls.every(([, language]) => language === "a")).toBe(true);
+
+    const chunks = audioChunks(postedMessages);
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]).toMatchObject({ index: 1, total: 1, text: SENTENCE, textStart: 0, textEnd: SENTENCE.length });
+    expect(chunks[0].audio).toHaveLength(3 * parts.length);
+  });
+
+  it("stops before synthesizing when the generation is aborted while phonemizing", async () => {
+    const pending = deferred<string>();
+    const instance = createBudgetedInstance(3);
+    const { dispatch, postedMessages } = await generateWith(instance, "af_heart", vi.fn(() => pending.promise));
+
+    dispatch({ type: "ABORT", generationId: "g" });
+    pending.resolve(SENTENCE);
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "ABORTED", generationId: "g" }));
+    expect(instance.tokenizer).not.toHaveBeenCalled();
+    expect(instance.generate_from_ids).not.toHaveBeenCalled();
+    expect(audioChunks(postedMessages)).toHaveLength(0);
   });
 });

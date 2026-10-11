@@ -13,8 +13,9 @@ import {
   KOKORO_MODEL_ID,
   KOKORO_MODEL_REVISION,
 } from "../constants";
+import { concatFloat32Arrays } from "../lib/audio";
 import { normalizeRawAudioOutput } from "../lib/audioOutput";
-import { chunkForKokoroDetailed } from "../lib/chunking";
+import { chunkForKokoroDetailed, findSplitNearMiddle } from "../lib/chunking";
 import { KOKORO_ONNX_WASM_ASSETS, KOKORO_WEB_MODULE_URL } from "../lib/onnxWasmAssets";
 import { configureKokoroOnnxRuntime } from "../lib/onnxRuntime";
 import { resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
@@ -57,11 +58,23 @@ const KOKORO_VOICE_CACHE_REVISION_MARKER = `https://huggingface.co/${KOKORO_MODE
 const KOKORO_TRANSFORMERS_CACHE_NAME = "transformers-cache";
 const KOKORO_TRANSFORMERS_CACHE_REVISION_MARKER = `https://huggingface.co/${KOKORO_MODEL_ID}/open-tts-transformers-cache-revision`;
 
-type KokoroModule = typeof import("kokoro-js");
+// Kokoro's context: 512 input ids, the "$" start and end tokens included.
+// kokoro-js tokenizes with truncation at this length, so a passage whose
+// phonemes need more ids would silently lose its end.
+const KOKORO_MAX_INPUT_IDS = 512;
+
+type KokoroPhonemize = (text: string, language?: string) => Promise<string>;
+type KokoroInputIds = Parameters<KokoroTTSInstance["generate_from_ids"]>[0];
+type KokoroTokenize = (text: string, options: { truncation: boolean }) => { input_ids: KokoroInputIds };
+type KokoroRawAudio = Awaited<ReturnType<KokoroTTSInstance["generate"]>>;
+// kokoro-js keeps its phonemizer private; vite.kokoroAssets.ts re-exports it
+// from the kokoro.web.js the worker imports, and fails builds without it.
+type KokoroModule = typeof import("kokoro-js") & { phonemize?: KokoroPhonemize };
 
 let tts: KokoroTTSInstance | null = null;
 let voices: string[] = [];
 let activeBackend: InferenceBackend | null = null;
+let phonemize: KokoroPhonemize | null = null;
 let kokoroModulePromise: Promise<KokoroModule> | null = null;
 const workerRuntime = createWorkerRuntime({ load: loadModel, generate });
 const { port, generations } = workerRuntime;
@@ -232,6 +245,10 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
   port.post({ type: "LOAD_PROGRESS", percent: 0 });
   await ensureKokoroCacheRevisions();
   const kokoroModule = await loadKokoroModule();
+  phonemize = typeof kokoroModule.phonemize === "function" ? kokoroModule.phonemize : null;
+  if (!phonemize) {
+    console.warn("[kokoro] phonemize is not exported; long passages may lose their end to truncation.");
+  }
   const loaded = await loadWithBackendFallback<KokoroTTSInstance>({
     backends: BACKEND_ORDER,
     load: (backend) => loadKokoroOn(kokoroModule, backend),
@@ -249,49 +266,19 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
 
 /** Splits a unit that failed to generate in two near its middle, for a retry. */
 function splitForRetry(unit: KokoroChunkUnit): KokoroChunkUnit[] {
-  const source = unit.text;
-  if (source.length < 40 || unit.depth >= 2) return [unit];
+  if (unit.text.length < 40 || unit.depth >= 2) return [unit];
+  const splitAt = findSplitNearMiddle(unit.text);
+  if (splitAt === null) return [unit];
 
-  const midpoint = Math.floor(source.length / 2);
-  let splitAt = -1;
-
-  for (let i = midpoint; i < source.length; i += 1) {
-    // Punctuation at the final index would split off an empty right side —
-    // keep the recorded whitespace fallback instead of bailing.
-    if (i < source.length - 1 && /[,;:!?]/.test(source[i])) {
-      splitAt = i + 1;
-      break;
-    }
-    if (splitAt === -1 && /\s/.test(source[i])) {
-      splitAt = i + 1;
-    }
-  }
-
-  if (splitAt === -1) {
-    for (let i = midpoint; i > 10; i -= 1) {
-      if (/\s/.test(source[i])) {
-        splitAt = i + 1;
-        break;
-      }
-    }
-  }
-
-  if (splitAt <= 0 || splitAt >= source.length) return [unit];
-
-  const leftText = source.slice(0, splitAt).trim();
-  const rightText = source.slice(splitAt).trim();
-  if (!leftText || !rightText) return [unit];
-
-  const leftStartLocal = source.indexOf(leftText);
-  const rightStartLocal = source.indexOf(rightText, Math.max(splitAt - 2, 0));
-  const leftStart = unit.start !== undefined ? unit.start + Math.max(0, leftStartLocal) : undefined;
-  const rightStart = unit.start !== undefined ? unit.start + Math.max(0, rightStartLocal) : undefined;
-
+  // Units are trimmed ranges of the source text, so both parts keep exact offsets.
+  const leftText = unit.text.slice(0, splitAt).trimEnd();
+  const rightText = unit.text.slice(splitAt);
+  const rightStart = unit.start !== undefined ? unit.start + splitAt : undefined;
   return [
     {
       text: leftText,
-      start: leftStart,
-      end: leftStart !== undefined ? leftStart + leftText.length : undefined,
+      start: unit.start,
+      end: unit.start !== undefined ? unit.start + leftText.length : undefined,
       pauseAfterSec: 0.14,
       pauseKind: "comma",
       depth: unit.depth + 1,
@@ -299,12 +286,50 @@ function splitForRetry(unit: KokoroChunkUnit): KokoroChunkUnit[] {
     {
       text: rightText,
       start: rightStart,
-      end: rightStart !== undefined ? rightStart + rightText.length : undefined,
+      end: unit.end,
       pauseAfterSec: unit.pauseAfterSec,
       pauseKind: unit.pauseKind,
       depth: unit.depth + 1,
     },
   ];
+}
+
+interface KokoroSynthesisOptions {
+  voice: KokoroVoiceId;
+  speed: number;
+  tune(text: string): string;
+}
+
+/**
+ * Synthesizes `text` without losing its end to Kokoro's context. kokoro-js's
+ * generate() phonemizes, tokenizes with truncation, and runs the model; this
+ * runs the same steps but tokenizes without truncation, and text whose
+ * phonemes need more ids than the context holds is split near its middle
+ * (see findSplitNearMiddle) until every part fits. Characters are a poor
+ * proxy: digits and abbreviations expand into many phonemes. Returns the
+ * parts' audio in order, or null once the generation is no longer current.
+ */
+async function synthesizeWithinContext(
+  instance: KokoroTTSInstance,
+  text: string,
+  options: KokoroSynthesisOptions,
+  ticket: GenerationTicket,
+): Promise<KokoroRawAudio[] | null> {
+  const { voice, speed } = options;
+  const tunedText = options.tune(text);
+  if (!phonemize) return [await instance.generate(tunedText, { voice, speed })];
+
+  // The language kokoro-js derives from the voice: "a" (American) or "b" (British).
+  const phonemes = await phonemize(tunedText, voice.at(0));
+  if (!ticket.isCurrent()) return null;
+  const { input_ids: inputIds } = (instance.tokenizer as unknown as KokoroTokenize)(phonemes, { truncation: false });
+  const splitAt = (inputIds.dims.at(-1) ?? 0) > KOKORO_MAX_INPUT_IDS ? findSplitNearMiddle(text) : null;
+  if (splitAt === null) return [await instance.generate_from_ids(inputIds, { voice, speed })];
+
+  const left = await synthesizeWithinContext(instance, text.slice(0, splitAt).trimEnd(), options, ticket);
+  if (!left || !ticket.isCurrent()) return null;
+  const right = await synthesizeWithinContext(instance, text.slice(splitAt), options, ticket);
+  return right && [...left, ...right];
 }
 
 async function generate(message: GenerateMessage, ticket: GenerationTicket): Promise<void> {
@@ -331,11 +356,25 @@ async function generate(message: GenerateMessage, ticket: GenerationTicket): Pro
     if (!unit.text.trim()) continue;
 
     try {
-      const tunedText = tuneChunkText(unit.text, pronunciationRules, emphasisStrength);
-      const unitSpeed = clampSpeed(resolveSentenceSpeed(normalizedSpeed, sentenceSpeedVariance, tunedText));
-      const output = await ttsInstance.generate(tunedText, { voice: selectedVoice as KokoroVoiceId, speed: unitSpeed });
-      if (!ticket.isCurrent()) return;
-      const normalized = normalizeRawAudioOutput(output as unknown as Parameters<typeof normalizeRawAudioOutput>[0]);
+      const tune = (text: string) => tuneChunkText(text, pronunciationRules, emphasisStrength);
+      // One speed for the whole unit, even when it is synthesized in parts.
+      const unitSpeed = clampSpeed(resolveSentenceSpeed(normalizedSpeed, sentenceSpeedVariance, tune(unit.text)));
+      const outputs = await synthesizeWithinContext(
+        ttsInstance,
+        unit.text,
+        { voice: selectedVoice as KokoroVoiceId, speed: unitSpeed, tune },
+        ticket,
+      );
+      if (!outputs || !ticket.isCurrent()) return;
+      // Parts of a unit that outgrew the context play as one chunk, so the
+      // chunk still matches the unit the Reader previews and highlights.
+      const parts = outputs.map((output) => normalizeRawAudioOutput(
+        output as unknown as Parameters<typeof normalizeRawAudioOutput>[0],
+      ));
+      const normalized = {
+        audio: parts.length === 1 ? parts[0].audio : concatFloat32Arrays(parts.map((part) => part.audio)),
+        samplingRate: parts[0].samplingRate,
+      };
       const index = emitted + 1;
       const hasFollowing = queue.length > 0;
       emitAudioChunk(port, {
