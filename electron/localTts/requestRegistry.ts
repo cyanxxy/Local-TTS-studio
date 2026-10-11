@@ -1,17 +1,13 @@
-import type { WebContents } from "electron";
 import type { BridgeAction, LocalModel } from "../localTtsIpc";
+import { createSenderWatcher, type RequestSender } from "./senderLifecycle";
+
+export type { RequestSender } from "./senderLifecycle";
 
 export interface BridgeRequestOwner {
   model: LocalModel;
   senderId: number;
   kind: BridgeAction | "warm";
 }
-
-/**
- * The renderer that started a request. The registry watches it so a crashed,
- * navigating or closed renderer cannot leave its requests running.
- */
-export type RequestSender = Pick<WebContents, "id" | "on" | "once" | "removeListener">;
 
 /**
  * Tracks which renderer owns each local-runtime request (generate, probe and
@@ -23,8 +19,9 @@ export type RequestSender = Pick<WebContents, "id" | "on" | "once" | "removeList
 export class BridgeRequestRegistry {
   readonly #owners = new Map<string, BridgeRequestOwner>();
   readonly #cancelled = new Set<string>();
-  readonly #monitored = new WeakSet<RequestSender>();
   readonly #stop: (requestId: string) => void;
+  // A renderer that goes away cancels every request it owns.
+  readonly #watch = createSenderWatcher((senderId) => this.#cancelForSender(senderId));
 
   constructor(stop: (requestId: string) => void) {
     this.#stop = stop;
@@ -40,7 +37,7 @@ export class BridgeRequestRegistry {
     if (this.#owners.has(requestId)) {
       throw new Error(`A request with id ${requestId} is already running.`);
     }
-    if (sender) this.#monitor(sender);
+    if (sender) this.#watch(sender);
     const owner = { model, senderId: sender?.id ?? -1, kind };
     this.#owners.set(requestId, owner);
     return owner;
@@ -84,22 +81,5 @@ export class BridgeRequestRegistry {
       if (owner.senderId !== senderId) continue;
       this.cancel(requestId);
     }
-  }
-
-  #monitor(sender: RequestSender): void {
-    if (this.#monitored.has(sender)) return;
-    this.#monitored.add(sender);
-    const senderId = sender.id;
-    const cancelOwnedRequests = () => this.#cancelForSender(senderId);
-    const cancelForNavigation = (details: { isMainFrame: boolean; isSameDocument: boolean }) => {
-      if (details.isMainFrame && !details.isSameDocument) cancelOwnedRequests();
-    };
-    sender.on("render-process-gone", cancelOwnedRequests);
-    sender.on("did-start-navigation", cancelForNavigation);
-    sender.once("destroyed", () => {
-      cancelOwnedRequests();
-      sender.removeListener("render-process-gone", cancelOwnedRequests);
-      sender.removeListener("did-start-navigation", cancelForNavigation);
-    });
   }
 }
