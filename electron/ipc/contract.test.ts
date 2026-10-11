@@ -110,7 +110,10 @@ vi.mock("../diagnostics", async (importOriginal) => {
 
 const sorted = (values: Iterable<string>) => [...values].sort();
 
-/** Calls every function the preload exposes, recursing into namespaces. */
+/**
+ * Calls every function the preload exposes, recursing into namespaces, and
+ * every function one returns (an unsubscribe, a lease release).
+ */
 async function exercise(api: Record<string, unknown>): Promise<void> {
   const request = { requestId: "contract", model: "qwen3", modelRepo: "repo", chunks: [] };
   for (const [name, value] of Object.entries(api)) {
@@ -118,6 +121,9 @@ async function exercise(api: Record<string, unknown>): Promise<void> {
       const argument = name.startsWith("subscribe") ? () => undefined : request;
       await Promise.resolve()
         .then(() => (value as (...args: unknown[]) => unknown)(argument, "section"))
+        .then((result) => {
+          if (typeof result === "function") (result as () => unknown)();
+        })
         .catch(() => undefined);
     } else if (value && typeof value === "object") {
       await exercise(value as Record<string, unknown>);

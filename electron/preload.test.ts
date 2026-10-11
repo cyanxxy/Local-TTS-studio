@@ -27,6 +27,8 @@ interface LocalTtsBridge {
   ) => Promise<unknown>;
   cancel: (request: { model: "qwen3"; requestId: string }) => Promise<unknown>;
   subscribeAudioChunk: (listener: (payload: unknown) => void) => () => void;
+  keepWarm: (request: { model: "qwen3"; modelRepo: string; modelPath: string }) => () => void;
+  subscribeModelEvicted: (listener: (payload: unknown) => void) => () => void;
 }
 
 type IpcListener = (event: unknown, payload: unknown) => void;
@@ -428,5 +430,85 @@ describe("preload local TTS audio delivery", () => {
     expect(thrown).toEqual([new Error("listener bug")]);
     failing();
     unsubscribe();
+  });
+});
+
+describe("preload local TTS keep-warm leases", () => {
+  const request = { model: "qwen3", modelRepo: "repo", modelPath: "/models/qwen3" } as const;
+
+  afterEach(() => {
+    ipcInvoke.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  function invokedChannels(): string[] {
+    return ipcInvoke.mock.calls.map(([channel]) => channel as string);
+  }
+
+  it("takes out a lease under a fresh id and releases that same lease once", async () => {
+    ipcInvoke.mockResolvedValue(undefined);
+
+    const release = exposed.localTts!.keepWarm(request);
+    const other = exposed.localTts!.keepWarm(request);
+    const [[, first], [, second]] = ipcInvoke.mock.calls as [string, { leaseId: string }][];
+    expect(first).toEqual({ ...request, leaseId: expect.stringMatching(/^lease-[0-9a-f-]+$/) });
+    expect(second.leaseId).not.toBe(first.leaseId);
+
+    release();
+    release();
+    await vi.waitFor(() => expect(invokedChannels()).toContain("local-tts:release-keep-warm"));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(ipcInvoke.mock.calls.filter(([channel]) => channel === "local-tts:release-keep-warm"))
+      .toEqual([["local-tts:release-keep-warm", { leaseId: first.leaseId }]]);
+    other();
+  });
+
+  it("sends a release that overtakes its acquisition only after it", async () => {
+    let acquire!: () => void;
+    ipcInvoke.mockImplementationOnce(() => new Promise<void>((resolve) => { acquire = resolve; }));
+    ipcInvoke.mockResolvedValue({ released: true });
+
+    const release = exposed.localTts!.keepWarm(request);
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(invokedChannels()).toEqual(["local-tts:keep-warm"]);
+
+    acquire();
+    await vi.waitFor(() => expect(invokedChannels()).toEqual(["local-tts:keep-warm", "local-tts:release-keep-warm"]));
+  });
+
+  it("releases nothing for a lease main refused, and warns instead of throwing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    ipcInvoke.mockRejectedValueOnce(new Error("Only Qwen3-TTS models can be kept warm."));
+
+    const release = exposed.localTts!.keepWarm(request);
+    release();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(invokedChannels()).toEqual(["local-tts:keep-warm"]);
+    expect(warn).toHaveBeenCalledWith("Could not keep the local model warm:", expect.any(Error));
+  });
+
+  it("warns when a release fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    ipcInvoke.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("shutting down"));
+
+    exposed.localTts!.keepWarm(request)();
+
+    await vi.waitFor(() => expect(warn).toHaveBeenCalledWith(
+      "Could not release a local model keep-warm lease:",
+      expect.any(Error),
+    ));
+  });
+
+  it("hands eviction events to a subscriber until it unsubscribes", () => {
+    const listener = vi.fn();
+    const unsubscribe = exposed.localTts!.subscribeModelEvicted(listener);
+
+    emitIpc("local-tts:model-evicted", { model: "qwen3", reason: "idle" });
+    unsubscribe();
+
+    expect(listener.mock.calls).toEqual([[{ model: "qwen3", reason: "idle" }]]);
+    expect(ipcListeners.has("local-tts:model-evicted")).toBe(false);
   });
 });

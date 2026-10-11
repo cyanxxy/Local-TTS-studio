@@ -25,6 +25,8 @@ import {
   sanitizeCancelRequest,
   sanitizeGenerationContinuation,
   sanitizeGeneratePayload,
+  sanitizeKeepWarmRequest,
+  sanitizeReleaseKeepWarmRequest,
   sanitizeWarmRequest,
 } from "./localTtsIpc";
 
@@ -68,6 +70,9 @@ describe("localTtsIpc primitive parsers", () => {
     expect(() => parseRequestId(`${" ".repeat(120)}x`)).toThrow("exceeds 120");
     expect(() => parseRequestId("bad/id")).toThrow("may contain only");
     expect(() => parseRequestId("bad..id")).toThrow("consecutive dots");
+    // Other ids share the rules and name their own field.
+    expect(() => parseRequestId(" ", { required: true, field: "leaseId" })).toThrow("`leaseId` is required.");
+    expect(() => parseRequestId("bad/id", { field: "leaseId" })).toThrow("`leaseId` may contain only");
 
     expect(parseOptionalStringArray(["a", "b"], "warnings")).toEqual(["a", "b"]);
     expect(() => parseOptionalStringArray(["a", 1], "warnings")).toThrow("array of strings");
@@ -423,6 +428,43 @@ describe("localTtsIpc request sanitizers", () => {
     expect(() => sanitizeWarmRequest(null)).toThrow("Invalid warm request payload");
     expect(() => sanitizeWarmRequest({ model: "qwen3", mode: "customVoice", modelPath: "/model", topP: 0.9 }))
       .toThrow("Unknown Qwen3-TTS warm-up field");
+  });
+
+  it("sanitizes keep-warm leases with the warm-up rules, deriving the mode from the profile", () => {
+    const modelRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
+    const lease = { leaseId: "lease-1", model: "qwen3", modelPath: "/models/qwen3", modelRepo };
+    const expected = {
+      leaseId: "lease-1",
+      model: "qwen3",
+      payload: { mode: "customVoice", modelPath: "/models/qwen3", modelRepo },
+    };
+    expect(sanitizeKeepWarmRequest(lease, "darwin", "arm64")).toEqual(expected);
+    expect(sanitizeKeepWarmRequest({ ...lease, mode: "customVoice" }, "darwin", "arm64")).toEqual(expected);
+
+    expect(() => sanitizeKeepWarmRequest({ ...lease, mode: "voiceDesign" }, "darwin", "arm64"))
+      .toThrow("Unsupported Qwen3-TTS warm-up profile");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, modelRepo: "unknown/repo" }, "darwin", "arm64"))
+      .toThrow("Unsupported Qwen3-TTS mode");
+    expect(() => sanitizeKeepWarmRequest(lease, "linux", "x64")).toThrow("Unsupported Qwen3-TTS warm-up profile");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, modelPath: undefined }, "darwin", "arm64"))
+      .toThrow("`modelPath` is required");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, model: "neutts" }, "darwin", "arm64"))
+      .toThrow("Only Qwen3-TTS models can be kept warm.");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, leaseId: undefined }, "darwin", "arm64"))
+      .toThrow("`leaseId` is required.");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, leaseId: "../lease" }, "darwin", "arm64"))
+      .toThrow("`leaseId` may contain only");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, text: "hello" }, "darwin", "arm64"))
+      .toThrow("Unknown keep-warm field: `text`.");
+    expect(() => sanitizeKeepWarmRequest(null)).toThrow("Invalid keep-warm request payload.");
+  });
+
+  it("sanitizes keep-warm releases", () => {
+    expect(sanitizeReleaseKeepWarmRequest({ leaseId: " lease-1 " })).toEqual({ leaseId: "lease-1" });
+    expect(() => sanitizeReleaseKeepWarmRequest({})).toThrow("`leaseId` is required.");
+    expect(() => sanitizeReleaseKeepWarmRequest({ leaseId: "lease-1", model: "qwen3" }))
+      .toThrow("Unknown keep-warm field: `model`.");
+    expect(() => sanitizeReleaseKeepWarmRequest("lease-1")).toThrow("Invalid keep-warm release payload.");
   });
 });
 

@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => ({
   localWsCancel: vi.fn<(requestId: string) => boolean>(() => false),
   localWsShutdown: vi.fn(async () => undefined),
   localWsShutdownAll: vi.fn(async () => undefined),
+  localWsRefreshIdleEviction: vi.fn(),
   qwenDownload: vi.fn(),
   qwenResolve: vi.fn(),
   qwenInspect: vi.fn(),
@@ -126,6 +127,7 @@ vi.mock("./webSocketBridgeWorker", () => ({
       cancel: mocks.localWsCancel,
       shutdown: mocks.localWsShutdown,
       shutdownAll: mocks.localWsShutdownAll,
+      refreshIdleEviction: mocks.localWsRefreshIdleEviction,
     };
   },
 }));
@@ -1126,6 +1128,7 @@ describe("local model cache lifecycle IPC", () => {
     mocks.localWsCancel.mockReset().mockReturnValue(false);
     mocks.localWsShutdown.mockReset().mockResolvedValue(undefined);
     mocks.localWsShutdownAll.mockReset().mockResolvedValue(undefined);
+    mocks.localWsRefreshIdleEviction.mockReset();
     mocks.localWsRun.mockReset().mockImplementation(async (_model, request: { command?: string }) => ({
       response: { ok: true, result: request.command === "warm" ? { warmed: true } : {
         sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
@@ -1411,6 +1414,14 @@ describe("local model cache lifecycle IPC", () => {
     expect(mocks.localWsRun).not.toHaveBeenCalled();
   });
 
+  async function writeModelDir(directory: string): Promise<void> {
+    for (const file of qwenProfile.requiredFiles) {
+      const target = path.join(directory, ...file.split("/"));
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, file === "config.json" ? JSON.stringify({ tts_model_type: "custom_voice" }) : "x");
+    }
+  }
+
   describe("audio stream", () => {
     const audioChunk = {
       requestId: "local-generate",
@@ -1483,15 +1494,117 @@ describe("local model cache lifecycle IPC", () => {
     });
   });
 
-  describe("Qwen3 model folder checks", () => {
-    async function writeModelDir(directory: string): Promise<void> {
-      for (const file of qwenProfile.requiredFiles) {
-        const target = path.join(directory, ...file.split("/"));
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, file === "config.json" ? JSON.stringify({ tts_model_type: "custom_voice" }) : "x");
-      }
+  describe("keep-warm leases", () => {
+    const MINUTE = 60 * 1000;
+
+    function lease(modelPath: string, leaseId = "lease-1") {
+      return { leaseId, model: "qwen3", modelRepo: qwenProfile.repo, modelPath };
     }
 
+    /** Warms `modelPath` and returns what the pool was told the worker now holds. */
+    async function warmQwen(modelPath: string): Promise<string> {
+      await writeModelDir(modelPath);
+      await expect(invoke("local-tts:warm", { model: "qwen3", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath }))
+        .resolves.toEqual({ warmed: true });
+      const options = mocks.localWsRun.mock.lastCall![1] as { residencyKey?: string };
+      expect(options.residencyKey).toEqual(expect.any(String));
+      return options.residencyKey!;
+    }
+
+    function idleEvictMs(model: "neutts" | "qwen3", residencyKey: string | null): number {
+      const option = mocks.poolOptions!.idleEvictMs;
+      return typeof option === "function" ? option(model, residencyKey) : option;
+    }
+
+    it("tells the pool a generation leaves the same model loaded as a warm-up of it", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const warmed = await warmQwen(modelPath);
+
+      await invoke("local-tts:generate", {
+        model: "qwen3",
+        requestId: "qwen-generate",
+        payload: { text: "hello", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath },
+      });
+
+      expect((mocks.localWsRun.mock.lastCall![1] as { residencyKey?: string }).residencyKey).toBe(warmed);
+    });
+
+    it("keeps a leased Qwen3 model resident for the keep-warm window, and only that model", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const otherPath = path.join(mocks.userDataPath, "other-qwen3");
+      const residency = await warmQwen(modelPath);
+      const other = await warmQwen(otherPath);
+      expect(idleEvictMs("qwen3", residency)).toBe(MINUTE);
+
+      await expect(invoke("local-tts:keep-warm", lease(modelPath))).resolves.toBeUndefined();
+
+      // The idle worker is re-timed at once.
+      expect(mocks.localWsRefreshIdleEviction).toHaveBeenCalledWith("qwen3");
+      expect(idleEvictMs("qwen3", residency)).toBe(30 * MINUTE);
+      expect(idleEvictMs("qwen3", other)).toBe(MINUTE);
+      expect(idleEvictMs("qwen3", null)).toBe(MINUTE);
+      expect(idleEvictMs("neutts", null)).toBe(5 * MINUTE);
+    });
+
+    it("returns to the usual idle window once the lease is released", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const residency = await warmQwen(modelPath);
+      await invoke("local-tts:keep-warm", lease(modelPath));
+      mocks.localWsRefreshIdleEviction.mockClear();
+
+      await expect(invoke("local-tts:release-keep-warm", { leaseId: "lease-1" })).resolves.toEqual({ released: true });
+
+      expect(mocks.localWsRefreshIdleEviction).toHaveBeenCalledWith("qwen3");
+      expect(idleEvictMs("qwen3", residency)).toBe(MINUTE);
+      await expect(invoke("local-tts:release-keep-warm", { leaseId: "lease-1" })).resolves.toEqual({ released: false });
+    });
+
+    it("does not let another window release a lease", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const residency = await warmQwen(modelPath);
+      await invoke("local-tts:keep-warm", lease(modelPath));
+      const otherWindow = createEvent(undefined);
+      otherWindow.sender.id = 2;
+
+      await expect(Promise.resolve(mocks.invokeHandlers.get("local-tts:release-keep-warm")!(otherWindow, { leaseId: "lease-1" })))
+        .resolves.toEqual({ released: false });
+      expect(idleEvictMs("qwen3", residency)).toBe(30 * MINUTE);
+    });
+
+    it("drops the leases of a window that goes away", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const residency = await warmQwen(modelPath);
+      const event = createEvent(undefined);
+      await mocks.invokeHandlers.get("local-tts:keep-warm")!(event, lease(modelPath));
+
+      const crashed = event.sender.on.mock.calls.find(([name]) => name === "render-process-gone")?.[1] as () => void;
+      crashed();
+
+      expect(idleEvictMs("qwen3", residency)).toBe(MINUTE);
+    });
+
+    it("refuses a lease it cannot validate", async () => {
+      await expect(invoke("local-tts:keep-warm", { ...lease("/models/qwen3"), model: "neutts" }))
+        .rejects.toThrow("Only Qwen3-TTS models can be kept warm.");
+      await expect(invoke("local-tts:keep-warm", { ...lease("/models/qwen3"), leaseId: "" }))
+        .rejects.toThrow("`leaseId` is required.");
+    });
+
+    it("tells every open window when a resident model goes away", async () => {
+      await invoke("local-tts:generate", generateRequest);
+      const open = createWindow();
+      const closed = createWindow();
+      closed.webContents.isDestroyed = () => true;
+      mocks.windows = [open, closed];
+
+      mocks.poolOptions!.onWorkerExit!("qwen3", { reason: "idle" });
+
+      expect(open.webContents.send).toHaveBeenCalledWith("local-tts:model-evicted", { model: "qwen3", reason: "idle" });
+      expect(closed.webContents.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Qwen3 model folder checks", () => {
     // Consecutive sections of one read, as the Reader sends them, so the
     // generation cooldown does not refuse the second request.
     function qwenGenerate(modelPath: string, sectionIndex: number) {

@@ -19,6 +19,8 @@ export const IPC_INVOKE_CHANNELS = [
   "local-tts:probe",
   "local-tts:generate",
   "local-tts:warm",
+  "local-tts:keep-warm",
+  "local-tts:release-keep-warm",
   "local-tts:cancel",
   "local-tts:cache-info",
   "local-tts:clear-cache",
@@ -50,6 +52,8 @@ export const RENDERER_EVENT_CHANNELS = [
   "local-tts:progress",
   // Audio chunks of a generation, then its end marker, in one ordered stream.
   "local-tts:audio-stream",
+  // A resident worker went away, and the model it had loaded with it.
+  "local-tts:model-evicted",
   "local-tts:qwen3-download-progress",
   "audio8:progress",
 ] as const;

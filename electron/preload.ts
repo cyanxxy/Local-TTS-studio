@@ -22,6 +22,13 @@ interface CancelRequest extends CacheRequest {
   requestId: string;
 }
 
+interface KeepWarmRequest {
+  model: "qwen3";
+  modelRepo: string;
+  modelPath: string;
+  mode?: string;
+}
+
 const READER_AUDIO_STREAM_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_READER_AUDIO_CHUNKS = 16_384;
 const MAX_READER_AUDIO_CHUNK_BYTES = 16 * 1024 * 1024;
@@ -119,6 +126,33 @@ function cancelLocalTts(request: CancelRequest): Promise<unknown> {
   const stream = typeof requestId === "string" ? localTtsAudioStreams.get(requestId) : undefined;
   if (stream) stream.stopped = true;
   return ipcRenderer.invoke("local-tts:cancel", request);
+}
+
+// Takes out a lease that keeps the named model resident in main until the
+// returned function is called. The function may be called at any time, once
+// or more: a release that overtakes the acquisition is sent after it.
+function keepLocalModelWarm(request: KeepWarmRequest): () => void {
+  const leaseId = `lease-${crypto.randomUUID()}`;
+  const held = ipcRenderer.invoke("local-tts:keep-warm", { ...request, leaseId }).then(
+    () => true,
+    (error: unknown) => {
+      // Best effort, like warm(): the model is then only kept for the usual
+      // idle window, which is not worth failing the caller over.
+      console.warn("Could not keep the local model warm:", error);
+      return false;
+    },
+  );
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    void held.then((acquired) => {
+      if (!acquired) return;
+      return ipcRenderer.invoke("local-tts:release-keep-warm", { leaseId });
+    }).catch((error: unknown) => {
+      console.warn("Could not release a local model keep-warm lease:", error);
+    });
+  };
 }
 
 function saveReaderAudio(value: unknown): Promise<void> {
@@ -401,6 +435,7 @@ contextBridge.exposeInMainWorld("electron", {
     warm: (request: { model: LocalModel; mode?: string; modelPath?: string; modelRepo?: string }) => (
       ipcRenderer.invoke("local-tts:warm", request)
     ),
+    keepWarm: keepLocalModelWarm,
     cancel: cancelLocalTts,
     getCacheInfo: (request: CacheRequest) => ipcRenderer.invoke("local-tts:cache-info", request),
     clearCache: (request: CacheRequest) => ipcRenderer.invoke("local-tts:clear-cache", request),
@@ -430,6 +465,13 @@ contextBridge.exposeInMainWorld("electron", {
       audioChunkSubscribers.add(listener);
       return () => {
         audioChunkSubscribers.delete(listener);
+      };
+    },
+    subscribeModelEvicted: (listener: (event: unknown) => void) => {
+      const wrapped = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("local-tts:model-evicted", wrapped);
+      return () => {
+        ipcRenderer.off("local-tts:model-evicted", wrapped);
       };
     },
   },

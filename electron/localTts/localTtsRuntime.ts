@@ -25,6 +25,8 @@ import {
   sanitizeCancelRequest,
   sanitizeGeneratePayload,
   sanitizeGenerationContinuation,
+  sanitizeKeepWarmRequest,
+  sanitizeReleaseKeepWarmRequest,
   sanitizeWarmRequest,
   type BridgeAction,
   type BridgeGenerateResult,
@@ -41,12 +43,14 @@ import {
   type WebSocketAudioChunk,
   type WebSocketBridgeWorkerPool,
   type WebSocketWorkerRunResult,
+  type WorkerExitReason,
 } from "../webSocketBridgeWorker";
 import {
   buildRustBridgeEnv,
   createBridgeEnvironment,
   type BridgeEnvironmentOptions,
 } from "./bridgeEnvironment";
+import { KeepWarmLeases } from "./keepWarmLeases";
 import { createModelDirValidationCache } from "./modelDirValidationCache";
 import { createProbeRunner } from "./probeRunner";
 import { createQwen3SetupHandlers, type Qwen3ModelDirChoice, type Qwen3SetupResult } from "./qwen3Setup";
@@ -77,16 +81,30 @@ const RUST_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
 // local runtimes. Keep its warm-start grace short so macOS can reclaim unified
 // memory promptly after the user finishes a generation.
 const QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS = 60 * 1000;
+// While a renderer holds a keep-warm lease on the Qwen3 model a worker has
+// loaded, the worker idles this long instead. The cap still frees the memory
+// of a window left open with a model selected, or of a lease never released.
+export const QWEN3_KEEP_WARM_IDLE_EVICT_MS = 30 * 60 * 1000;
+
+/** A resident worker went away, and the model it had loaded with it. */
+export interface LocalModelEvictedEvent {
+  model: LocalModel;
+  reason: WorkerExitReason;
+}
 
 export interface LocalTtsRuntimeOptions extends BridgeEnvironmentOptions {
   /** Failures that never reach a renderer as an IPC rejection are logged here. */
   logger: DiagnosticsLogger;
+  /** Told whenever a worker that had connected goes away (see WorkerExitReason). */
+  onModelEvicted?: (event: LocalModelEvictedEvent) => void;
 }
 
 export interface LocalTtsRuntime {
   probe(request: unknown, event: IpcMainInvokeEvent): Promise<BridgeProbeResult>;
   generate(request: unknown, event: IpcMainInvokeEvent): Promise<BridgeGenerateResult>;
   warm(request: unknown, event: IpcMainInvokeEvent): Promise<BridgeWarmResult>;
+  keepWarm(request: unknown, event: IpcMainInvokeEvent): Promise<void>;
+  releaseKeepWarm(request: unknown, event: IpcMainInvokeEvent): Promise<{ released: boolean }>;
   cancel(request: unknown, event: IpcMainInvokeEvent): Promise<{ cancelled: boolean }>;
   cacheInfo(request: unknown): Promise<LocalCacheInfo>;
   clearCache(request: unknown): Promise<{ path: string; cleared: boolean }>;
@@ -124,6 +142,8 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
   const registry = new BridgeRequestRegistry(stopRequestNow);
   const qwen3ModelDirs = createModelDirValidationCache({ validate: isStructurallyValidQwen3ModelDir });
   let webSocketBridgeWorkers: WebSocketBridgeWorkerPool<LocalModel> | null = null;
+  // A lease taken or dropped re-times the model's idle worker at once.
+  const keepWarmLeases = new KeepWarmLeases((model) => webSocketBridgeWorkers?.refreshIdleEviction(model));
   let shuttingDown = false;
 
   function assertAcceptingRequests(): void {
@@ -151,14 +171,19 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
     assertAcceptingRequests();
     if (!webSocketBridgeWorkers) {
       webSocketBridgeWorkers = createWebSocketBridgeWorkerPool<LocalModel>({
-        idleEvictMs: (model) => (
-          model === "qwen3"
-            ? QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS
-            : RUST_BRIDGE_WORKER_IDLE_EVICT_MS
-        ),
+        idleEvictMs: (model, residencyKey) => {
+          if (model !== "qwen3") return RUST_BRIDGE_WORKER_IDLE_EVICT_MS;
+          return keepWarmLeases.covers(model, residencyKey)
+            ? QWEN3_KEEP_WARM_IDLE_EVICT_MS
+            : QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS;
+        },
         killGraceMs: RUST_CANCEL_KILL_AFTER_MS,
         onListenerError: (error, { requestId, listener }) => {
           logger.error("A bridge stream consumer failed", { requestId, listener, error: describeError(error) });
+        },
+        onWorkerExit: (model, { reason }) => {
+          logger.debug("A resident bridge worker went away", { model, reason });
+          options.onModelEvicted?.({ model, reason });
         },
         spawn: (model, { bridgeBinary, cacheDir, env, authToken, host, port }) =>
           spawn(
@@ -282,6 +307,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
       runPromise = getWebSocketBridgeWorkers().run(model, {
         requestId,
         payload,
+        residencyKey: generateWarmTarget,
         spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
         idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
         progressTimeoutMs: RUST_BRIDGE_GENERATE_PROGRESS_TIMEOUT_MS,
@@ -389,6 +415,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
             requestId: warmRequestId,
             payload,
             command: "warm",
+            residencyKey: targetKey,
             spawnConfig: { bridgeBinary, cacheDir, env: buildRustBridgeEnv(cacheDir) },
             idleTimeoutMs: RUST_BRIDGE_GENERATE_IDLE_TIMEOUT_MS,
             progressTimeoutMs: RUST_BRIDGE_GENERATE_PROGRESS_TIMEOUT_MS,
@@ -409,6 +436,20 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
           registry.release(warmRequestId, owner);
         }
       });
+    },
+
+    // Keeps the named Qwen3 model resident for as long as the lease is held
+    // (bounded by QWEN3_KEEP_WARM_IDLE_EVICT_MS of idling). Taking a lease
+    // loads nothing: the renderer warms the model as before.
+    async keepWarm(request, event) {
+      assertAcceptingRequests();
+      const { leaseId, model, payload } = sanitizeKeepWarmRequest(request, process.platform, process.arch);
+      keepWarmLeases.acquire(event.sender, leaseId, model, warmTargetKey(model, payload));
+    },
+
+    async releaseKeepWarm(request, event) {
+      const { leaseId } = sanitizeReleaseKeepWarmRequest(request);
+      return { released: keepWarmLeases.release(event.sender.id, leaseId) };
     },
 
     async cancel(request, event) {

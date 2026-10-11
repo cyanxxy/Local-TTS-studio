@@ -106,6 +106,14 @@ export interface LocalTtsAudioChunkEvent {
   audio: ArrayBuffer;
 }
 
+// A resident Rust worker went away, and the model it had loaded with it:
+// evicted after idling, stopped on purpose (a cache clear, a respawn with new
+// settings, shutdown) or failed. The next request loads the model again.
+export interface LocalTtsModelEvictedEvent {
+  model: LocalTtsModel;
+  reason: "idle" | "stopped" | "failed";
+}
+
 export type DocumentImportResult =
   | { canceled: true }
   | { canceled: false; fileName: string; text: string; pageCount?: number; epubBytes?: Uint8Array };
@@ -166,6 +174,17 @@ interface LocalTtsBridge {
     modelPath?: string;
     modelRepo?: string;
   }) => Promise<LocalTtsWarmResult>;
+  // Keeps the named Qwen3 model resident while the lease is held, instead of
+  // evicting it after a minute of idling (main still frees it after 30 idle
+  // minutes). Loads nothing itself: pair it with `warm`. Call the returned
+  // function, once or more, to release the lease; a closing, crashing or
+  // reloading window releases its leases on its own.
+  keepWarm?: (request: {
+    model: "qwen3";
+    modelRepo: string;
+    modelPath: string;
+    mode?: "customVoice" | "voiceClone" | "voiceDesign";
+  }) => () => void;
   cancel: (request: {
     model: LocalTtsModel;
     requestId: string;
@@ -185,6 +204,7 @@ interface LocalTtsBridge {
   subscribeProgress: (listener: (event: LocalTtsProgressEvent) => void) => () => void;
   // Chunks of the requests started without their own `onAudioChunk`.
   subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;
+  subscribeModelEvicted?: (listener: (event: LocalTtsModelEvictedEvent) => void) => () => void;
 }
 
 export interface Audio8LoadResult {

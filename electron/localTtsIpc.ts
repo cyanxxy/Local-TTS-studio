@@ -22,6 +22,7 @@ import {
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
 export const LOCAL_MODELS = ["neutts", "qwen3"] as const;
+const MAX_REQUEST_ID_LENGTH = 120;
 
 const MAX_REFERENCE_TEXT_LENGTH = 2000;
 
@@ -247,24 +248,26 @@ export function parseOptionalStringArray(value: unknown, field: string): string[
   return value;
 }
 
-export function parseRequestId(value: unknown, { required = false }: { required?: boolean } = {}): string | undefined {
+export function parseRequestId(
+  value: unknown,
+  { required = false, field = "requestId" }: { required?: boolean; field?: string } = {},
+): string | undefined {
   if (value == null) {
-    if (required) throw new Error("`requestId` is required.");
+    if (required) throw new Error(`\`${field}\` is required.`);
     return undefined;
   }
-  if (typeof value !== "string") throw new Error("`requestId` must be a string.");
-  if (value.length > 120) throw new Error("`requestId` exceeds 120 characters.");
+  if (typeof value !== "string") throw new Error(`\`${field}\` must be a string.`);
+  if (value.length > MAX_REQUEST_ID_LENGTH) throw new Error(`\`${field}\` exceeds ${MAX_REQUEST_ID_LENGTH} characters.`);
   const requestId = value.trim();
   if (!requestId) {
-    if (required) throw new Error("`requestId` is required.");
+    if (required) throw new Error(`\`${field}\` is required.`);
     return undefined;
   }
-  if (requestId.length > 120) throw new Error("`requestId` exceeds 120 characters.");
   if (!/^[A-Za-z0-9._-]+$/.test(requestId)) {
-    throw new Error("`requestId` may contain only letters, numbers, dots, underscores, and dashes.");
+    throw new Error(`\`${field}\` may contain only letters, numbers, dots, underscores, and dashes.`);
   }
   if (requestId.includes("..")) {
-    throw new Error("`requestId` may not contain consecutive dots.");
+    throw new Error(`\`${field}\` may not contain consecutive dots.`);
   }
   return requestId;
 }
@@ -485,6 +488,51 @@ export function sanitizeWarmRequest(
     modelRepo,
     payload: { mode, modelPath, modelRepo },
   };
+}
+
+export interface KeepWarmRequest {
+  leaseId: string;
+  model: "qwen3";
+  /** The warm-up payload of the model the lease keeps resident. */
+  payload: Record<string, unknown>;
+}
+
+/**
+ * A keep-warm lease: the warm-up fields of the Qwen3 model to keep resident
+ * (`mode` may be left out; it follows from the profile) plus the renderer's
+ * own id for the lease. Only Qwen3 has a short idle eviction worth holding
+ * off.
+ */
+export function sanitizeKeepWarmRequest(
+  request: unknown,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): KeepWarmRequest {
+  if (!isRecord(request)) throw new Error("Invalid keep-warm request payload.");
+  const unknownField = Object.keys(request).find((field) => (
+    !["leaseId", "model", "mode", "modelPath", "modelRepo"].includes(field)
+  ));
+  if (unknownField) throw new Error(`Unknown keep-warm field: \`${unknownField}\`.`);
+  const leaseId = parseRequestId(request.leaseId, { required: true, field: "leaseId" })!;
+  const model = assertLocalModel(String(request.model));
+  if (model !== "qwen3") throw new Error("Only Qwen3-TTS models can be kept warm.");
+  const mode = request.mode ?? (typeof request.modelRepo === "string"
+    ? getQwen3Profile(request.modelRepo.trim())?.mode
+    : undefined);
+  const { payload } = sanitizeWarmRequest({
+    model,
+    mode,
+    modelPath: request.modelPath,
+    modelRepo: request.modelRepo,
+  }, platform, arch);
+  return { leaseId, model, payload };
+}
+
+export function sanitizeReleaseKeepWarmRequest(request: unknown): { leaseId: string } {
+  if (!isRecord(request)) throw new Error("Invalid keep-warm release payload.");
+  const unknownField = Object.keys(request).find((field) => field !== "leaseId");
+  if (unknownField) throw new Error(`Unknown keep-warm field: \`${unknownField}\`.`);
+  return { leaseId: parseRequestId(request.leaseId, { required: true, field: "leaseId" })! };
 }
 
 export function sanitizeCacheRequest(request: unknown): CacheRequest {
