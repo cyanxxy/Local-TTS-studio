@@ -254,6 +254,10 @@ export function parseGenerationHistoryEntry(value: unknown): GenerationHistoryEn
   }
 }
 
+function isNewerSchemaEntry(value: unknown): boolean {
+  return isRecord(value) && typeof value.schemaVersion === "number" && value.schemaVersion > GENERATION_HISTORY_SCHEMA_VERSION;
+}
+
 /** The fields Studio needs to set up the same generation again. */
 export function reusableSettingsFromEntry(entry: GenerationHistoryEntry): ReusableGenerationSettings {
   return {
@@ -513,11 +517,16 @@ export function createGenerationHistoryStore(options: GenerationHistoryStoreOpti
           audio.clear();
           return;
         }
-        const keep = new Set((await readEntries(transaction)).filter((entry) => entry.favorite).map((entry) => entry.id));
-        for (const key of await requestResult(entries.getAllKeys())) {
-          if (keep.has(String(key))) continue;
-          entries.delete(key);
-          audio.delete(key);
+        // Entries a newer version wrote cannot be read here, so they may be
+        // favorites; leave them alone like the voice library does.
+        const raws = await requestResult(entries.getAll()) as unknown[];
+        for (const raw of raws) {
+          const entry = parseGenerationHistoryEntry(raw);
+          if (entry?.favorite || isNewerSchemaEntry(raw)) continue;
+          const id = isRecord(raw) ? raw.id : undefined;
+          if (typeof id !== "string" && typeof id !== "number") continue;
+          entries.delete(id);
+          audio.delete(id);
         }
       });
       emitChange();

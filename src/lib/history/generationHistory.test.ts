@@ -205,6 +205,27 @@ describe("generation history store", () => {
     expect(await strict.listEntries()).toHaveLength(3);
   });
 
+  it("keeps favorites and newer-schema entries when clearing with keepFavorites", async () => {
+    await store.saveGeneration(generation());
+    const { entry: favorite } = await store.saveGeneration(generation());
+    await store.setFavorite(favorite.id, true);
+    await putRawEntry({ id: "future", schemaVersion: 2, favorite: true });
+    await putRawEntry({ id: "broken", schemaVersion: 1 });
+    await putRawEntry({ id: 42, schemaVersion: 1 });
+    await store.clear({ keepFavorites: true });
+
+    const database = await openVersionedDatabase({
+      name: GENERATION_HISTORY_DATABASE_NAME,
+      migrations: GENERATION_HISTORY_MIGRATIONS,
+      blockedMessage: "blocked",
+      unsupportedMessage: "unsupported",
+    });
+    const transaction = database.transaction(["entries"], "readonly");
+    const keys = await requestResult(transaction.objectStore("entries").getAllKeys());
+    database.close();
+    expect(keys).toEqual(["future", favorite.id]);
+  });
+
   it("validates input", async () => {
     await expect(store.saveGeneration(generation({ text: "  " }))).rejects.toThrow(/needs its text/);
     await expect(store.saveGeneration(generation({ text: "x".repeat(200_001) }))).rejects.toThrow(/too long/);
