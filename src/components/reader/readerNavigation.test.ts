@@ -38,6 +38,13 @@ describe("sentenceStarts", () => {
     expect(startsOf("Written by J. R. R. Tolkien in 1937. He taught.", "en")).toEqual(["Writte", "He tau"]);
     expect(startsOf("It was plan b. Then we left.", "en")).toEqual(["It was", "Then w"]);
     expect(startsOf(`${"word ".repeat(10)}Undr. Next one.`, "en")).toEqual(["word w", "Next o"]);
+    expect(startsOf("See No. 5 today. Then go.", "en")).toEqual(["See No", "Then g"]);
+    expect(startsOf("I. M. Pei drew it. Then he left.", "en")).toEqual(["I. M. ", "Then h"]);
+  });
+
+  it("ends a sentence at a closing \"no.\" or the pronoun \"I.\"", () => {
+    expect(startsOf("He said no. Then he left.", "en")).toEqual(["He sai", "Then h"]);
+    expect(startsOf("So did I. Then we left.", "en")).toEqual(["So did", "Then w"]);
   });
 
   it("splits CJK text at its own full stops", () => {
@@ -54,7 +61,17 @@ describe("sentenceStarts", () => {
 
   it("returns nothing for empty text", () => {
     expect(sentenceStarts("", [])).toEqual([]);
-    expect(paragraphStarts([])).toEqual([]);
+    expect(paragraphStarts("", [])).toEqual([]);
+  });
+});
+
+describe("paragraphStarts", () => {
+  it("starts an indented paragraph at its first word, so stepping back from it moves on", () => {
+    const text = "First paragraph.\n    Indented second.\n   \nThird.";
+    const starts = paragraphStarts(text, splitTextBlocks(text));
+
+    expect(starts).toEqual([0, text.indexOf("Indented"), text.indexOf("Third")]);
+    expect(stepBoundary(starts, text.indexOf("Indented"), "previous")).toBe(0);
   });
 });
 

@@ -453,7 +453,7 @@ export function AdvancedReaderPage({
     const currentOffset = clamp(spokenOffset ?? currentLocalTextOffset, 0, text.length);
     const boundaries = unit === "sentence"
       ? sentenceStarts(text, textBlocks, documentLanguage)
-      : paragraphStarts(textBlocks);
+      : paragraphStarts(text, textBlocks);
     let target = stepBoundary(boundaries, currentOffset, direction);
     if (target !== null && direction === "next" && hasAudio && !estimatedWordTrackingStable) {
       // Without word timing a step seeks to its passage's start, which may be

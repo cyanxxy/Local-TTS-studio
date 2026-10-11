@@ -16,16 +16,27 @@ const FALLBACK_SENTENCE_END = /[.!?…。！？]+["'”’)\]]*\s+/gu;
  * A title, a common abbreviation or an initial right before a break. The
  * platform segmenter splits "Dr. Smith" and "J. R. R. Tolkien" apart.
  */
-const ABBREVIATION_BEFORE_BREAK = /(?:^|[\s("“‘])(?:mr|mrs|ms|mx|dr|prof|sr|jr|st|mt|rev|gen|col|capt|lt|sgt|vs|e\.g|i\.e|cf|no|nos|vol|fig|ch|pp?)\.\s*$/iu;
-const INITIAL_BEFORE_BREAK = /(?:^|[\s("“‘])\p{Lu}\.\s*$/u;
+const ABBREVIATION_BEFORE_BREAK = /(?:^|[\s("“‘])(?:mr|mrs|ms|mx|dr|prof|sr|jr|st|mt|rev|gen|col|capt|lt|sgt|vs|e\.g|i\.e|cf|vol|fig|ch|pp?)\.\s*$/iu;
+/** "No. 5" abbreviates only before a number; "He said no." ends a sentence. */
+const NUMBER_ABBREVIATION_BEFORE_BREAK = /(?:^|[\s("“‘])nos?\.\s*$/iu;
+const NUMBER_AFTER_BREAK = /^\s*[\d#]/u;
+const INITIAL_BEFORE_BREAK = /(?:^|[\s("“‘])(\p{Lu})\.\s*$/u;
+/** "I." is usually the pronoun ending a sentence, unless it sits among initials. */
+const INITIAL_BEFORE_PRONOUN = /\p{Lu}\.\s+I\.\s*$/u;
+const INITIAL_AFTER_BREAK = /^\s*\p{Lu}\./u;
 const ABBREVIATION_WINDOW = 16;
 
-/** Tests only the tail before the break, so long paragraphs stay linear. */
+/** Tests only the text around the break, so long paragraphs stay linear. */
 function endsWithAbbreviation(paragraph: string, index: number): boolean {
   const from = Math.max(0, index - ABBREVIATION_WINDOW);
   // A cut-off word must not pass for the start of the paragraph.
   const tail = `${from > 0 ? "x" : ""}${paragraph.slice(from, index)}`;
-  return ABBREVIATION_BEFORE_BREAK.test(tail) || INITIAL_BEFORE_BREAK.test(tail);
+  const head = paragraph.slice(index, index + ABBREVIATION_WINDOW);
+  if (ABBREVIATION_BEFORE_BREAK.test(tail)) return true;
+  if (NUMBER_ABBREVIATION_BEFORE_BREAK.test(tail)) return NUMBER_AFTER_BREAK.test(head);
+  const initial = tail.match(INITIAL_BEFORE_BREAK)?.[1];
+  if (initial === undefined) return false;
+  return initial !== "I" || INITIAL_BEFORE_PRONOUN.test(tail) || INITIAL_AFTER_BREAK.test(head);
 }
 
 function sentenceSegmenter(language: string | undefined): Intl.Segmenter | null {
@@ -49,9 +60,9 @@ function firstVisible(text: string, offsets: Iterable<number>, end: number): num
   return [...starts].sort((a, b) => a - b);
 }
 
-/** Where each paragraph of the section starts. */
-export function paragraphStarts(blocks: readonly TextBlock[]): number[] {
-  return blocks.map((block) => block.start);
+/** Where each paragraph's first word starts, skipping any indent. */
+export function paragraphStarts(text: string, blocks: readonly TextBlock[]): number[] {
+  return blocks.flatMap((block) => firstVisible(text, [block.start], block.end));
 }
 
 /**
@@ -63,7 +74,7 @@ export function paragraphStarts(blocks: readonly TextBlock[]): number[] {
  * initial with the words after it.
  */
 export function sentenceStarts(text: string, blocks: readonly TextBlock[], language?: string): number[] {
-  const offsets: number[] = paragraphStarts(blocks);
+  const offsets: number[] = paragraphStarts(text, blocks);
   const segmenter = sentenceSegmenter(language);
   for (const block of blocks) {
     const paragraph = text.slice(block.start, block.end);
