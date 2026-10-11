@@ -66,20 +66,28 @@ export interface ReferenceDurationLimits {
   minSec: number;
   /** Below this the clip still works but clones less reliably. */
   recommendedMinSec: number;
+  /** The runtime rejects longer clips outright. */
   maxSec: number;
-  /** Whether the runtime rejects clips over maxSec (true) or truncates them. */
-  rejectsLonger: boolean;
 }
 
 /**
- * Qwen3 Base rejects references over 20 s and warns under 3 s
- * (rust/local-tts-bridge/src/qwen3/reference.rs, runtime.rs). NeuTTS needs
- * some speech and silently uses only the first 20 s (main.rs).
+ * Both runtimes reject reference WAVs over 20 s before using them
+ * (rust/local-tts-bridge/src/qwen3/reference.rs decode_reference_wav and
+ * neutts_backend/mod.rs prepare_neutts_reference_samples). Qwen3 Base warns
+ * under 3 s; NeuTTS needs some speech.
  */
 export const REFERENCE_DURATION_LIMITS: Readonly<Record<ReferenceCloneTarget, ReferenceDurationLimits>> = {
-  "qwen3-base": { minSec: 1, recommendedMinSec: 3, maxSec: 20, rejectsLonger: true },
-  neutts: { minSec: 0.5, recommendedMinSec: 3, maxSec: 20, rejectsLonger: false },
+  "qwen3-base": { minSec: 1, recommendedMinSec: 3, maxSec: 20 },
+  neutts: { minSec: 0.5, recommendedMinSec: 3, maxSec: 20 },
 };
+
+/**
+ * prepareReferenceClip refuses longer clips before resampling, which costs
+ * about a second per minute of audio on the calling thread. The headroom over
+ * the 20 s runtime limit lets a slightly long recording still be analyzed and
+ * shown with trimming guidance.
+ */
+export const MAX_PREPARE_REFERENCE_SEC = 30;
 
 /** Both clone runtimes resample to 24 kHz internally; store references there. */
 export const REFERENCE_TARGET_SAMPLE_RATE = 24_000;
@@ -279,10 +287,8 @@ function checkDuration(analysis: ReferenceClipAnalysis, target: ReferenceCloneTa
   if (duration > limits.maxSec) {
     return {
       id: "duration",
-      status: limits.rejectsLonger ? "fail" : "warn",
-      message: limits.rejectsLonger
-        ? `${runtime} rejects references longer than ${formatSeconds(limits.maxSec)}; this clip is ${formatSeconds(duration)}.`
-        : `${runtime} only uses the first ${formatSeconds(limits.maxSec)} of a reference; this clip is ${formatSeconds(duration)}.`,
+      status: "fail",
+      message: `${runtime} rejects references longer than ${formatSeconds(limits.maxSec)}; this clip is ${formatSeconds(duration)}.`,
       fix: `Trim the clip to ${limits.maxSec} s or less, and trim the transcript to match.`,
     };
   }
@@ -551,6 +557,12 @@ export function prepareReferenceClip(
     samples = trimClip(samples, decoded.sampleRate, findSpeechBounds(samples, decoded.sampleRate));
   }
   const trimmed = samples.length !== originalLength;
+  const trimmedSec = samples.length / decoded.sampleRate;
+  if (trimmedSec > MAX_PREPARE_REFERENCE_SEC) {
+    throw new Error(
+      `This clip is ${formatSeconds(trimmedSec)} long. Trim it to ${REFERENCE_DURATION_LIMITS["qwen3-base"].maxSec} s or less, and its transcript to match, before using it as a reference.`,
+    );
+  }
   if (options.normalizeToDbfs !== undefined) samples = normalizePeak(samples, options.normalizeToDbfs);
 
   const sampleRate = options.sampleRate ?? REFERENCE_TARGET_SAMPLE_RATE;

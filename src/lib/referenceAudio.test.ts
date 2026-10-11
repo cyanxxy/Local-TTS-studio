@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createWavBlob } from "./audio";
 import {
+  MAX_PREPARE_REFERENCE_SEC,
   MAX_REFERENCE_WAV_BYTES,
   REFERENCE_DURATION_LIMITS,
   analyzeReferenceClip,
@@ -124,7 +125,8 @@ describe("assessReferenceClip", () => {
     expect(REFERENCE_DURATION_LIMITS["qwen3-base"].maxSec).toBe(20);
     const long = analyzeReferenceClip(clip({ speechSec: 21 }), RATE);
     expect(statusOf(long, "duration")?.status).toBe("fail");
-    expect(statusOf(long, "duration", undefined, "neutts")).toMatchObject({ status: "warn", message: expect.stringMatching(/first 20 s/) });
+    // The bridge rejects WAV references over 20 s for both runtimes.
+    expect(statusOf(long, "duration", undefined, "neutts")).toMatchObject({ status: "fail", message: expect.stringMatching(/NeuTTS rejects references longer than 20 s/) });
 
     const short = analyzeReferenceClip(clip({ speechSec: 2 }), RATE);
     expect(statusOf(short, "duration")?.status).toBe("warn");
@@ -245,6 +247,14 @@ describe("prepareReferenceClip", () => {
     const cut = prepareReferenceClip(wav, { trim: { startSec: 1, endSec: 4 }, sampleRate: RATE });
     expect(cut.trimmed).toBe(true);
     expect(cut.analysis.durationSec).toBeCloseTo(3, 2);
+  });
+
+  it("refuses over-long clips before resampling them, after any explicit trim", () => {
+    expect(MAX_PREPARE_REFERENCE_SEC).toBe(30);
+    const wav = encodeWavPcm16(new Float32Array(31 * 8000).fill(0.1), 8000);
+    expect(() => prepareReferenceClip(wav)).toThrow(/31 s long\. Trim it to 20 s or less/);
+    // A trim that brings the clip under the limit is applied first.
+    expect(prepareReferenceClip(wav, { trim: { endSec: 25 }, sampleRate: 8000 }).assessment.checks[0]).toMatchObject({ id: "duration", status: "fail" });
   });
 
   it("refuses files over the bridge's reference size limit", () => {
