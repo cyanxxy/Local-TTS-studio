@@ -199,6 +199,74 @@ describe("useSupertonic3Runtime", () => {
     expect(workers[1].postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
   });
 
+  it("keeps a loaded worker while another surface still selects Supertonic 3", async () => {
+    vi.useFakeTimers();
+    const worker = new FakeWorker();
+    const createWorker = () => worker as unknown as Worker;
+    const { result, rerender } = renderHook(
+      (props: { active: boolean; retain: boolean }) => useSupertonic3Runtime({
+        ...baseOptions,
+        active: props.active,
+        retain: props.retain,
+        createWorker,
+        player: createPlayer(),
+      }),
+      { initialProps: { active: true, retain: true } },
+    );
+    act(() => worker.dispatchEvent(new MessageEvent("message", {
+      data: { type: "READY", voices: ["M1"], backend: "wasm" },
+    })));
+
+    rerender({ active: false, retain: true });
+    await act(async () => {
+      vi.advanceTimersByTime(60_000);
+      await Promise.resolve();
+    });
+    expect(worker.terminate).not.toHaveBeenCalled();
+    expect(result.current.modelState.ready).toBe(true);
+
+    rerender({ active: false, retain: false });
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+
+  it("retries a failed load once for a request, then rejects it with the failure", async () => {
+    const worker = new FakeWorker();
+    const createWorker = () => worker as unknown as Worker;
+    const { result } = renderHook(() => useSupertonic3Runtime({
+      ...baseOptions,
+      active: false,
+      createWorker,
+      player: createPlayer(),
+    }));
+    const failLoad = (message: string) => act(() => worker.dispatchEvent(new MessageEvent("message", {
+      data: { type: "ERROR", message, scope: "load" },
+    })));
+    let failure: unknown;
+    const request = (async () => {
+      try {
+        for await (const chunk of result.current.synthesize({
+          text: "A preview line.",
+          settings: { voice: "M1", language: "en" },
+          tuning: { speed: 1, quality: 5 },
+        })) void chunk;
+      } catch (error) {
+        failure = error;
+      }
+    })();
+
+    await waitFor(() => expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false }));
+    failLoad("offline");
+    await waitFor(() => expect(worker.postMessage).toHaveBeenCalledTimes(2));
+    failLoad("still offline");
+    await request;
+
+    expect(failure).toEqual(new Error("still offline"));
+  });
+
   it("hard-stops compute and recreates the worker when generation is cancelled", async () => {
     const workers: FakeWorker[] = [];
     const createWorker = vi.fn(() => {
