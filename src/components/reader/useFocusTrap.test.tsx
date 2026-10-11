@@ -124,6 +124,45 @@ describe("useFocusTrap", () => {
     expect(screen.getByRole("button", { name: "Anchor" })).toHaveFocus();
   });
 
+  it("lets only the innermost of two open traps handle Escape and Tab", async () => {
+    const outerEscape = vi.fn();
+    const innerEscape = vi.fn();
+    function Nested() {
+      const outerRef = useRef<HTMLDivElement>(null);
+      const innerRef = useRef<HTMLDivElement>(null);
+      const [innerOpen, setInnerOpen] = useState(true);
+      useFocusTrap(outerRef, { active: true, onEscape: outerEscape });
+      useFocusTrap(innerRef, {
+        active: innerOpen,
+        onEscape: () => {
+          innerEscape();
+          setInnerOpen(false);
+        },
+      });
+      return (
+        <>
+          <div ref={outerRef}><button type="button">Outer</button></div>
+          {innerOpen && <div ref={innerRef}><button type="button">Inner</button></div>}
+        </>
+      );
+    }
+    render(<Nested />);
+    await flushFrame();
+
+    const inner = screen.getByRole("button", { name: "Inner" });
+    inner.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(inner).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(innerEscape).toHaveBeenCalledTimes(1);
+    expect(outerEscape).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(outerEscape).toHaveBeenCalledTimes(1);
+    expect(innerEscape).toHaveBeenCalledTimes(1);
+  });
+
   it("ignores keys while inactive", () => {
     const onEscape = vi.fn();
     render(<Harness onEscape={onEscape} />);

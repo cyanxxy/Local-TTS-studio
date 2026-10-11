@@ -3,6 +3,9 @@ export interface ReaderShortcut {
   action: string;
 }
 
+/** Marks the shortcuts dialog, the one dialog where "?" still toggles it. */
+export const READER_SHORTCUTS_DIALOG_ATTRIBUTE = "data-reader-shortcuts";
+
 /** The Reader's keyboard map, listed by the "?" shortcuts dialog. */
 export const READER_SHORTCUTS: readonly ReaderShortcut[] = [
   { keys: "Space", action: "Play or pause" },

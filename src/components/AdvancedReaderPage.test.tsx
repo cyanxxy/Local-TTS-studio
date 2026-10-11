@@ -14,6 +14,7 @@ import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunk
 import { chunkTextForModelDetailed } from "../lib/chunking";
 import { PlaybackClock } from "../lib/playbackClock";
 import { estimateSegmentWords } from "./reader/readerSegments";
+import { READER_SHORTCUTS_DIALOG_ATTRIBUTE } from "./reader/readerShortcuts";
 
 function clockAt(seconds: number): PlaybackClock {
   const clock = new PlaybackClock();
@@ -1277,7 +1278,8 @@ describe("AdvancedReaderPage", () => {
     renderReader({ onImmersiveChange });
 
     fireEvent.keyDown(document.body, { key: "?" });
-    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    const shortcuts = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
+    expect(shortcuts).toHaveAttribute(READER_SHORTCUTS_DIALOG_ATTRIBUTE);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull();
 

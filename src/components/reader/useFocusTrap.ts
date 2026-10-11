@@ -9,6 +9,13 @@ const FOCUSABLE_SELECTOR = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
+/**
+ * Active traps, innermost last. Every trap listens on the document, so only
+ * the innermost one handles a key: one Escape closes one surface, and Tab
+ * cycles only inside the surface on top.
+ */
+const activeTraps: symbol[] = [];
+
 /** Keyboard-reachable controls inside `container`, in DOM order. */
 export function focusableWithin(container: HTMLElement): HTMLElement[] {
   return [...container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)]
@@ -32,7 +39,8 @@ interface FocusTrapOptions {
  * Modal focus handling shared by the Reader's popovers, dialogs and library
  * drawer: Escape dismisses, Tab and Shift+Tab cycle inside the container (and
  * pull focus back in when it has escaped to the page behind), and focus returns
- * to its origin when the surface closes.
+ * to its origin when the surface closes. When surfaces stack, only the one on
+ * top responds.
  */
 export function useFocusTrap(
   containerRef: RefObject<HTMLElement | null>,
@@ -42,6 +50,8 @@ export function useFocusTrap(
 
   useEffect(() => {
     if (!active) return;
+    const trap = Symbol("focus-trap");
+    activeTraps.push(trap);
     const origin = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const returnTarget = returnFocusRef?.current ?? origin;
     const frame = autoFocus
@@ -52,6 +62,7 @@ export function useFocusTrap(
       : null;
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (activeTraps.at(-1) !== trap) return;
       if (event.key === "Escape") {
         event.preventDefault();
         escape();
@@ -82,6 +93,7 @@ export function useFocusTrap(
     return () => {
       if (frame !== null) window.cancelAnimationFrame(frame);
       document.removeEventListener("keydown", handleKeyDown);
+      activeTraps.splice(activeTraps.indexOf(trap), 1);
       if (returnTarget?.isConnected) returnTarget.focus();
     };
   }, [active, autoFocus, containerRef, returnFocusRef]);

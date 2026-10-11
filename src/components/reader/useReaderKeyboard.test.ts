@@ -1,6 +1,7 @@
 import { fireEvent, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ReaderSection } from "../../lib/readerDocument";
+import { READER_SHORTCUTS_DIALOG_ATTRIBUTE } from "./readerShortcuts";
 import { useReaderKeyboard } from "./useReaderKeyboard";
 
 function section(id: string, start: number): ReaderSection {
@@ -130,6 +131,21 @@ describe("useReaderKeyboard", () => {
     fireEvent.keyDown(document.body, { key: "f", metaKey: true });
     expect(options.onImmersiveChange).toHaveBeenCalledTimes(1);
     expect(options.onImmersiveChange).toHaveBeenCalledWith(false);
+  });
+
+  it("ignores ? inside another dialog but toggles from inside the shortcut list", () => {
+    const { options, dialogButton } = setup();
+    const shortcuts = document.createElement("div");
+    shortcuts.setAttribute("role", "dialog");
+    shortcuts.setAttribute(READER_SHORTCUTS_DIALOG_ATTRIBUTE, "");
+    const closeButton = document.createElement("button");
+    shortcuts.append(closeButton);
+    document.body.append(shortcuts);
+
+    fireEvent.keyDown(dialogButton, { key: "?" });
+    expect(options.onToggleShortcuts).not.toHaveBeenCalled();
+    fireEvent.keyDown(closeButton, { key: "?" });
+    expect(options.onToggleShortcuts).toHaveBeenCalledTimes(1);
   });
 
   it("ignores F when the focus layout cannot be changed, and keys already handled", () => {

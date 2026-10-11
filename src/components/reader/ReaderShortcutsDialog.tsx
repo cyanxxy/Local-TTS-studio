@@ -15,6 +15,7 @@ export function ReaderShortcutsDialog({ onClose }: { onClose: () => void }) {
         role="dialog"
         aria-modal="true"
         aria-label="Keyboard shortcuts"
+        data-reader-shortcuts=""
         tabIndex={-1}
         onClick={(event) => event.stopPropagation()}
         className="glass-pop w-full max-w-sm rounded-2xl p-5"

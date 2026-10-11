@@ -1,6 +1,7 @@
 import { useEffect, useEffectEvent, type RefObject } from "react";
 import type { ReaderSection } from "../../lib/readerDocument";
 import type { ReaderStepDirection, ReaderStepUnit } from "./readerNavigation";
+import { READER_SHORTCUTS_DIALOG_ATTRIBUTE } from "./readerShortcuts";
 
 interface UseReaderKeyboardOptions {
   editing: boolean;
@@ -21,8 +22,12 @@ function isTextEntry(target: EventTarget | null): boolean {
     && target.closest("input, textarea, select, [contenteditable='true']") !== null;
 }
 
+function dialogOf(target: EventTarget | null): HTMLElement | null {
+  return target instanceof HTMLElement ? target.closest<HTMLElement>("[role='dialog']") : null;
+}
+
 function isInDialog(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && target.closest("[role='dialog']") !== null;
+  return dialogOf(target) !== null;
 }
 
 /** A selection in the reading pane, which Shift+arrow keys extend instead of stepping. */
@@ -63,6 +68,9 @@ export function useReaderKeyboard({
     if (isTextEntry(target)) return;
 
     if (event.key === "?") {
+      // Another dialog owns the keyboard; only the shortcut list itself toggles.
+      const dialog = dialogOf(target);
+      if (dialog && !dialog.hasAttribute(READER_SHORTCUTS_DIALOG_ATTRIBUTE)) return;
       event.preventDefault();
       onToggleShortcuts();
       return;
