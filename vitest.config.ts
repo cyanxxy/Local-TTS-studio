@@ -28,6 +28,7 @@ export default defineConfig({
       include: [
         "electron/generateRateLimiter.ts",
         "electron/nativeModels/progressThrottle.ts",
+        "electron/nativeModels/runtimeBenchmark.ts",
         "src/constants.ts",
         "src/components/TextInput.tsx",
         "src/lib/audio.ts",
