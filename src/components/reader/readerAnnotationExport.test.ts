@@ -76,6 +76,26 @@ describe("readerAnnotationExport", () => {
     ].join("\n"));
   });
 
+  it("keeps titles, authors, chapter titles and bookmark labels on one Markdown line", () => {
+    const book = annotatedBook();
+    const markdown = buildReaderAnnotationsMarkdown({
+      ...book,
+      title: "Moby-Dick\n# Injected",
+      author: "Herman\n\nMelville",
+      chapters: book.chapters.map((chapter, index) => (index === 1 ? { ...chapter, title: "The\n## Carpet-Bag" } : chapter)),
+      bookmarks: book.bookmarks.map((bookmark) => ({ ...bookmark, label: "Chapter\r\n# two" })),
+    }, EXPORTED_AT);
+
+    expect(markdown).toContain("# Moby-Dick # Injected\n\nby Herman Melville\n");
+    expect(markdown).toContain("\n## The ## Carpet-Bag\n");
+    expect(markdown).toContain("- Bookmark: Chapter # two (48% through, 1:02:03)");
+    expect(markdown.split("\n").filter((line) => line.startsWith("#"))).toEqual([
+      "# Moby-Dick # Injected",
+      "## Loomings",
+      "## The ## Carpet-Bag",
+    ]);
+  });
+
   it("leaves chapter headings out of a one-chapter document and quotes multi-line passages line by line", () => {
     const text = "First line\n\nSecond line of the passage.";
     const book: ReaderDocumentRecord = {

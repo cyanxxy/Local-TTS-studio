@@ -62,6 +62,11 @@ function plural(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
+/** One Markdown line: a line break inside a title or label must not start a heading. */
+function inline(text: string): string {
+  return text.replace(/\s+/g, " ").trim();
+}
+
 function blockquote(text: string): string {
   return text.trim().split("\n").map((line) => (line.trim() ? `> ${line.trim()}` : ">")).join("\n");
 }
@@ -97,7 +102,7 @@ function markdownEntry(document: ReaderDocumentRecord, entry: AnnotationEntry): 
   switch (entry.kind) {
     case "bookmark": {
       const time = entry.bookmark.positionSec > 0 ? `, ${formatListeningTime(entry.bookmark.positionSec)}` : "";
-      return `- Bookmark: ${entry.bookmark.label} (${where}${time})`;
+      return `- Bookmark: ${inline(entry.bookmark.label)} (${where}${time})`;
     }
     case "highlight":
       return [
@@ -125,8 +130,8 @@ export function buildReaderAnnotationsMarkdown(document: ReaderDocumentRecord, e
     plural(document.bookmarks.length, "bookmark"),
   ].join(" · ");
   const blocks = [
-    `# ${document.title}`,
-    ...(document.author ? [`by ${document.author}`] : []),
+    `# ${inline(document.title)}`,
+    ...(document.author ? [`by ${inline(document.author)}`] : []),
     `${counts} · exported from Open TTS on ${localDate(exportedAt)}`,
   ];
 
@@ -136,7 +141,7 @@ export function buildReaderAnnotationsMarkdown(document: ReaderDocumentRecord, e
   for (const entry of entries) {
     const entryChapter = chapterAtOffset(document.chapters, entry.offset);
     if (showChapters && entryChapter && entryChapter !== chapter) {
-      blocks.push(`## ${entryChapter.title}`);
+      blocks.push(`## ${inline(entryChapter.title)}`);
       chapter = entryChapter;
     }
     blocks.push(markdownEntry(document, entry));
