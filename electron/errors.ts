@@ -50,3 +50,13 @@ export class NativeRuntimeError extends Error {
 export function nativeFailureDiagnostics(error: unknown): NativeFailureDiagnostics | undefined {
   return error instanceof NativeRuntimeError ? error.diagnostics : undefined;
 }
+
+/**
+ * What the log keeps of a failure: the message, plus the native process's
+ * diagnostics for a bridge failure, or the stack for anything else.
+ */
+export function describeError(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) return { message: String(error) };
+  const native = nativeFailureDiagnostics(error);
+  return native ? { message: error.message, native } : { message: error.message, stack: error.stack };
+}

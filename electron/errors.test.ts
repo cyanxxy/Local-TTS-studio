@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
+  describeError,
   errorMessage,
   GENERATION_CANCELLED_MESSAGE,
   generationCancelledError,
@@ -37,5 +38,24 @@ describe("main-process errors", () => {
     expect(error).toBeInstanceOf(Error);
     expect(nativeFailureDiagnostics(error)).toEqual({ stderr: "panic", exitCode: 101 });
     expect(nativeFailureDiagnostics(new Error("plain"))).toBeUndefined();
+  });
+});
+
+describe("describeError", () => {
+  it("keeps the native diagnostics of a bridge failure instead of its stack", () => {
+    const error = new NativeRuntimeError("Rust local bridge exited.", { stderr: "panic", exitCode: 101 });
+
+    expect(describeError(error)).toEqual({
+      message: "Rust local bridge exited.",
+      native: { stderr: "panic", exitCode: 101 },
+    });
+  });
+
+  it("keeps the stack of any other error and stringifies non-errors", () => {
+    const error = new TypeError("Invalid request.");
+
+    expect(describeError(error)).toEqual({ message: "Invalid request.", stack: error.stack });
+    expect(describeError("plain")).toEqual({ message: "plain" });
+    expect(describeError(42)).toEqual({ message: "42" });
   });
 });

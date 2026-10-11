@@ -8,6 +8,7 @@ import {
   IPC_PORT_CHANNELS,
   RENDERER_EVENT_CHANNELS,
 } from "./channels";
+import type { DiagnosticsLogger } from "../diagnostics";
 import { UNTRUSTED_SENDER_MESSAGE } from "./trusted";
 
 type Listener = (event: unknown, payload?: unknown) => unknown;
@@ -32,6 +33,7 @@ vi.mock("electron", () => ({
     on: vi.fn(),
     getPath: () => "/tmp",
     getAppPath: () => "/tmp",
+    getVersion: () => "0.0.0-test",
     quit: vi.fn(),
   },
   BrowserWindow: class {
@@ -87,6 +89,17 @@ vi.mock("electron", () => ({
     off: vi.fn(),
   },
 }));
+
+// Main logs as it starts and as requests fail; none of that belongs on disk here.
+vi.mock("../diagnostics", async (importOriginal) => {
+  const logger = (): DiagnosticsLogger => ({
+    debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), child: logger,
+  });
+  return {
+    ...await importOriginal<typeof import("../diagnostics")>(),
+    createDiagnosticsLog: () => ({ logger, flush: () => Promise.resolve(), pending: false }),
+  };
+});
 
 const sorted = (values: Iterable<string>) => [...values].sort();
 

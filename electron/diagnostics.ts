@@ -1,7 +1,7 @@
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
-import { nativeFailureDiagnostics } from "./errors";
+import { describeError } from "./errors";
 
 export type DiagnosticsLevel = "debug" | "info" | "warn" | "error";
 
@@ -70,14 +70,11 @@ const MAX_ITEMS = 50;
 
 const LEVEL_RANK: Record<DiagnosticsLevel, number> = { debug: 0, info: 1, warn: 2, error: 3 };
 
-/**
- * What the log keeps of a failure: the message, plus the native process's
- * diagnostics for a bridge failure, or the stack for anything else.
- */
-export function describeError(error: unknown): Record<string, unknown> {
-  if (!(error instanceof Error)) return { message: String(error) };
-  const native = nativeFailureDiagnostics(error);
-  return native ? { message: error.message, native } : { message: error.message, stack: error.stack };
+/** Echoes warnings and errors to the console, where a development run shows them. */
+export function mirrorToConsole(entry: DiagnosticsEntry): void {
+  if (entry.level !== "warn" && entry.level !== "error") return;
+  const write = entry.level === "error" ? console.error : console.warn;
+  write(`[${entry.scope}] ${entry.msg}`, ...(entry.data ? [entry.data] : []));
 }
 
 /**

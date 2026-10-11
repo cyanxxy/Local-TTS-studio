@@ -3,10 +3,13 @@ import { spawn } from "child_process";
 import { randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import type { ShutdownParticipant } from "../appShutdown";
+import type { DiagnosticsLogger } from "../diagnostics";
 import { getDirectorySizeBytes } from "../directorySize";
 import {
+  describeError,
   errorMessage,
   generationCancelledError,
+  isGenerationCancelled,
   LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE,
 } from "../errors";
 import { createGenerateRateLimiter } from "../generateRateLimiter";
@@ -74,7 +77,10 @@ const RUST_BRIDGE_WORKER_IDLE_EVICT_MS = 5 * 60 * 1000;
 // memory promptly after the user finishes a generation.
 const QWEN3_BRIDGE_WORKER_IDLE_EVICT_MS = 60 * 1000;
 
-export type LocalTtsRuntimeOptions = BridgeEnvironmentOptions;
+export interface LocalTtsRuntimeOptions extends BridgeEnvironmentOptions {
+  /** Failures that never reach a renderer as an IPC rejection are logged here. */
+  logger: DiagnosticsLogger;
+}
 
 export interface LocalTtsRuntime {
   probe(request: unknown, event: IpcMainInvokeEvent): Promise<BridgeProbeResult>;
@@ -101,6 +107,7 @@ interface BridgeRequestTarget {
  * model setup.
  */
 export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTtsRuntime {
+  const { logger } = options;
   const environment = createBridgeEnvironment(options);
   const lifecycle = new LocalModelLifecycle<LocalModel>();
   const generateRateLimiter = createGenerateRateLimiter<LocalModel>({
@@ -148,6 +155,9 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
             : RUST_BRIDGE_WORKER_IDLE_EVICT_MS
         ),
         killGraceMs: RUST_CANCEL_KILL_AFTER_MS,
+        onListenerError: (error, { requestId, listener }) => {
+          logger.error("A bridge stream consumer failed", { requestId, listener, error: describeError(error) });
+        },
         spawn: (model, { bridgeBinary, cacheDir, env, authToken, host, port }) =>
           spawn(
             bridgeBinary,
@@ -246,15 +256,17 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
         throw generationCancelledError();
       }
 
+      let reportedMalformedProgress = false;
       const onProgress = (progressPayload: unknown) => {
         if (event.sender.isDestroyed()) return;
         try {
           const progress = parseBridgeProgressResult(progressPayload);
           event.sender.send("local-tts:progress", { requestId, model, ...progress });
         } catch (err) {
-          console.warn(
-            `[local-tts:generate] Failed parsing WebSocket bridge progress: ${errorMessage(err)}`,
-          );
+          // Progress is advisory: skip the frame, and log the first per request.
+          if (reportedMalformedProgress) return;
+          reportedMalformedProgress = true;
+          logger.warn("Ignored a malformed bridge progress frame", { model, requestId, error: errorMessage(err) });
         }
       };
 
@@ -370,6 +382,9 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
           });
           return parseBridgeWarmResult(response);
         } catch (err) {
+          // The renderer only learns `warmed: false`, so this is the one place
+          // a failing warm-up leaves its diagnostics.
+          if (!isGenerationCancelled(err)) logger.warn("Warm-up failed", { model, error: describeError(err) });
           return { warmed: false, message: errorMessage(err) };
         } finally {
           signal.removeEventListener("abort", cancel);

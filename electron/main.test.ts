@@ -5,10 +5,19 @@ import { fileURLToPath } from "url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { dialog } from "electron";
 import { AUDIO8_MAX_TEXT_CHARACTERS, AUDIO8_MODEL_REVISION } from "./audio8Model";
+import type { DiagnosticsLevel, DiagnosticsLogger } from "./diagnostics";
 import { getDefaultQwen3Profile } from "./qwen3Profiles";
+import type { CreateWebSocketBridgeWorkerPoolOptions } from "./webSocketBridgeWorker";
 
 interface FakeWindow {
   webContents: { isDestroyed: () => boolean; send: ReturnType<typeof vi.fn> };
+}
+
+interface LoggedEntry {
+  scope: string;
+  level: DiagnosticsLevel;
+  msg: string;
+  data?: Record<string, unknown>;
 }
 
 interface FakeAudio8Client {
@@ -44,6 +53,11 @@ const mocks = vi.hoisted(() => ({
   qwenDownload: vi.fn(),
   qwenResolve: vi.fn(),
   qwenInspect: vi.fn(),
+  poolOptions: null as CreateWebSocketBridgeWorkerPoolOptions<"neutts" | "qwen3"> | null,
+  logEntries: [] as LoggedEntry[],
+  logPending: false,
+  logFlush: null as Promise<void> | null,
+  windowError: null as Error | null,
 }));
 
 vi.mock("electron", () => ({
@@ -56,11 +70,16 @@ vi.mock("electron", () => ({
     },
     getPath: () => mocks.userDataPath,
     getAppPath: () => "/tmp",
+    getVersion: () => "0.0.0-test",
     quit: mocks.quit,
   },
   BrowserWindow: class {
     static fromWebContents = () => null;
     static getAllWindows = () => mocks.windows;
+    constructor() {
+      if (mocks.windowError) throw mocks.windowError;
+    }
+
     loadURL = () => Promise.resolve();
   },
   dialog: { showOpenDialog: vi.fn() },
@@ -94,13 +113,41 @@ vi.mock("./readerLibraryWorkerClient", () => ({
 }));
 
 vi.mock("./webSocketBridgeWorker", () => ({
-  createWebSocketBridgeWorkerPool: () => ({
-    run: mocks.localWsRun,
-    cancel: mocks.localWsCancel,
-    shutdown: mocks.localWsShutdown,
-    shutdownAll: mocks.localWsShutdownAll,
-  }),
+  createWebSocketBridgeWorkerPool: (options: CreateWebSocketBridgeWorkerPoolOptions<"neutts" | "qwen3">) => {
+    mocks.poolOptions = options;
+    return {
+      run: mocks.localWsRun,
+      cancel: mocks.localWsCancel,
+      shutdown: mocks.localWsShutdown,
+      shutdownAll: mocks.localWsShutdownAll,
+    };
+  },
 }));
+
+// The real log writes under userData/logs. These tests check what main asks
+// it to record; electron/diagnostics.test.ts covers the file itself.
+vi.mock("./diagnostics", async (importOriginal) => {
+  const record = (scope: string, level: DiagnosticsLevel) => (msg: string, data?: Record<string, unknown>) => {
+    mocks.logEntries.push({ scope, level, msg, ...(data ? { data } : {}) });
+  };
+  const logger = (scope: string): DiagnosticsLogger => ({
+    debug: record(scope, "debug"),
+    info: record(scope, "info"),
+    warn: record(scope, "warn"),
+    error: record(scope, "error"),
+    child: (child) => logger(`${scope}:${child}`),
+  });
+  return {
+    ...await importOriginal<typeof import("./diagnostics")>(),
+    createDiagnosticsLog: () => ({
+      logger,
+      flush: () => mocks.logFlush ?? Promise.resolve(),
+      get pending() {
+        return mocks.logPending;
+      },
+    }),
+  };
+});
 
 vi.mock("./qwen3ModelDownload", async (importOriginal) => ({
   ...await importOriginal<typeof import("./qwen3ModelDownload")>(),
@@ -1356,5 +1403,258 @@ describe("local model cache lifecycle IPC", () => {
     await expect(queued).resolves.toContain("shutting down");
     await waitForQuit();
     expect(mocks.localWsRun).not.toHaveBeenCalled();
+  });
+});
+
+describe("main-process diagnostics", () => {
+  const generateRequest = {
+    model: "neutts", requestId: "local-generate", payload: {
+      text: "hello", referenceText: "hello", referenceCodesBase64: "AAAA",
+    },
+  };
+  const generateResponse = {
+    response: { ok: true, result: {
+      sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+      audioTransport: "websocket-binary", audioChunkCount: 1, phaseTimingsSec: {},
+    } },
+  };
+
+  function invoke(channel: string, request: unknown, url?: string): Promise<unknown> {
+    return Promise.resolve().then(() => mocks.invokeHandlers.get(channel)!(createEvent(undefined, url), request));
+  }
+
+  function logged(scope: string): LoggedEntry[] {
+    return mocks.logEntries.filter((entry) => entry.scope === scope);
+  }
+
+  async function importMain(): Promise<void> {
+    vi.resetModules();
+    mocks.invokeHandlers.clear();
+    mocks.ipcListeners.clear();
+    mocks.appListeners.clear();
+    mocks.logEntries = [];
+    (globalThis as { __dirname?: string }).__dirname = "/tmp";
+    await import("./main");
+  }
+
+  beforeEach(async () => {
+    mocks.windows = [];
+    mocks.quit.mockClear();
+    mocks.closeWorker.mockClear();
+    mocks.workerError = null;
+    mocks.logPending = false;
+    mocks.logFlush = null;
+    mocks.localWsRun.mockReset().mockResolvedValue(generateResponse);
+    mocks.localWsCancel.mockReset().mockReturnValue(false);
+    mocks.localWsShutdownAll.mockReset().mockResolvedValue(undefined);
+    mocks.userDataPath = await fs.mkdtemp(path.join(os.tmpdir(), "open-tts-main-diagnostics-"));
+    await importMain();
+    vi.spyOn(fs, "access").mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    mocks.windowError = null;
+    await fs.rm(mocks.userDataPath, { recursive: true, force: true });
+    mocks.userDataPath = "/tmp";
+  });
+
+  it("records the start of the session with the runtime it runs on", () => {
+    expect(mocks.logEntries[0]).toEqual({
+      scope: "app",
+      level: "info",
+      msg: "Started",
+      data: {
+        version: "0.0.0-test",
+        electron: process.versions.electron,
+        chrome: process.versions.chrome,
+        platform: process.platform,
+        arch: process.arch,
+        osRelease: os.release(),
+        packaged: false,
+      },
+    });
+  });
+
+  it("logs a failed generation with the bridge's native diagnostics", async () => {
+    // The module instance main loaded after resetModules, so `instanceof` holds.
+    const { NativeRuntimeError } = await import("./errors");
+    const failure = new NativeRuntimeError(
+      "Rust local bridge exited before returning a result (code 101).",
+      { stderr: "thread 'main' panicked", exitCode: 101, signal: null },
+    );
+    mocks.localWsRun.mockRejectedValueOnce(failure);
+
+    await expect(invoke("local-tts:generate", generateRequest)).rejects.toBe(failure);
+
+    expect(logged("ipc")).toEqual([{
+      scope: "ipc",
+      level: "error",
+      msg: "IPC request failed",
+      data: {
+        channel: "local-tts:generate",
+        error: { message: failure.message, native: { stderr: "thread 'main' panicked", exitCode: 101, signal: null } },
+      },
+    }]);
+  });
+
+  it("records a deliberate stop at debug level only", async () => {
+    mocks.localWsRun.mockRejectedValueOnce(new Error("Generation cancelled."));
+
+    await expect(invoke("local-tts:generate", generateRequest)).rejects.toThrow("Generation cancelled.");
+
+    expect(logged("ipc")).toEqual([
+      { scope: "ipc", level: "debug", msg: "IPC request cancelled", data: { channel: "local-tts:generate" } },
+    ]);
+  });
+
+  it("logs an untrusted sender once per channel", async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(invoke("audio8:cache-info", undefined, "https://evil.test/page"))
+        .rejects.toThrow("Rejected IPC from untrusted sender.");
+    }
+
+    expect(logged("ipc")).toEqual([{
+      scope: "ipc",
+      level: "warn",
+      msg: "Rejected IPC from an untrusted sender",
+      data: { channel: "audio8:cache-info", senderOrigin: "https://evil.test" },
+    }]);
+  });
+
+  it("logs a failed warm-up, which the renderer only sees as warmed: false, but not a cancelled one", async () => {
+    mocks.localWsRun.mockRejectedValueOnce(new Error("Model load failed."));
+    await expect(invoke("local-tts:warm", { model: "neutts" }))
+      .resolves.toEqual({ warmed: false, message: "Model load failed." });
+    mocks.localWsRun.mockRejectedValueOnce(new Error("Generation cancelled."));
+    await expect(invoke("local-tts:warm", { model: "neutts" }))
+      .resolves.toEqual({ warmed: false, message: "Generation cancelled." });
+
+    expect(logged("local-tts")).toEqual([{
+      scope: "local-tts",
+      level: "warn",
+      msg: "Warm-up failed",
+      data: { model: "neutts", error: { message: "Model load failed.", stack: expect.stringContaining("Model load failed.") } },
+    }]);
+  });
+
+  it("logs the first malformed progress frame of a request and keeps generating", async () => {
+    mocks.localWsRun.mockImplementationOnce(async (_model, options: { onProgress: (payload: unknown) => void }) => {
+      options.onProgress({ type: "progress" });
+      options.onProgress({ type: "progress", phase: 7 });
+      return generateResponse;
+    });
+
+    await expect(invoke("local-tts:generate", generateRequest)).resolves.toMatchObject({ audioChunkCount: 1 });
+
+    expect(logged("local-tts")).toEqual([{
+      scope: "local-tts",
+      level: "warn",
+      msg: "Ignored a malformed bridge progress frame",
+      data: { model: "neutts", requestId: "local-generate", error: expect.any(String) },
+    }]);
+  });
+
+  it("logs a throwing bridge stream consumer", async () => {
+    // The pool is built on the first request.
+    await invoke("local-tts:generate", generateRequest);
+    const failure = new Error("renderer send failed");
+
+    mocks.poolOptions!.onListenerError!(failure, { requestId: "local-generate", listener: "audioChunk" });
+
+    expect(logged("local-tts")).toEqual([{
+      scope: "local-tts",
+      level: "error",
+      msg: "A bridge stream consumer failed",
+      data: { requestId: "local-generate", listener: "audioChunk", error: { message: failure.message, stack: failure.stack } },
+    }]);
+  });
+
+  it("logs renderer and child process crashes, and a clean child exit as routine", () => {
+    mocks.appListeners.get("render-process-gone")!({}, {}, { reason: "oom", exitCode: 9 });
+    mocks.appListeners.get("child-process-gone")!({}, { type: "GPU", reason: "crashed", exitCode: 5, name: "GPU" });
+    mocks.appListeners.get("child-process-gone")!({}, {
+      type: "Utility", reason: "clean-exit", exitCode: 0, serviceName: "network.mojom.NetworkService",
+    });
+
+    expect(logged("app").slice(1)).toEqual([
+      { scope: "app", level: "error", msg: "A renderer process is gone", data: { reason: "oom", exitCode: 9 } },
+      {
+        scope: "app",
+        level: "error",
+        msg: "A child process is gone",
+        data: { type: "GPU", reason: "crashed", exitCode: 5, name: "GPU" },
+      },
+      {
+        scope: "app",
+        level: "info",
+        msg: "A child process exited",
+        data: { type: "Utility", reason: "clean-exit", exitCode: 0, serviceName: "network.mojom.NetworkService" },
+      },
+    ]);
+  });
+
+  it("logs a startup that failed before the IPC handlers were registered", async () => {
+    mocks.windowError = new Error("Window creation failed.");
+    await importMain();
+    await drainTurns();
+
+    expect(logged("app")).toContainEqual({
+      scope: "app",
+      level: "error",
+      msg: "Startup failed",
+      data: { error: { message: "Window creation failed.", stack: expect.any(String) } },
+    });
+    expect(mocks.invokeHandlers.size).toBe(0);
+  });
+
+  it("logs a shutdown step that fails and still quits", async () => {
+    emitStream("reader-library:save-audio-stream", createEvent(createPort()), { metadata: {}, chunkCount: 1 });
+    mocks.closeWorker.mockImplementationOnce(() => Promise.reject(new Error("Reader library worker is shutting down.")));
+
+    mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
+    await waitForQuit();
+
+    expect(logged("shutdown")).toEqual([{
+      scope: "shutdown",
+      level: "error",
+      msg: "A shutdown step failed",
+      data: {
+        participant: "reader-library",
+        error: { message: "Reader library worker is shutting down.", stack: expect.any(String) },
+      },
+    }]);
+  });
+
+  it("holds the quit for pending log writes and quits once they land", async () => {
+    let finishFlush!: () => void;
+    mocks.logPending = true;
+    mocks.logFlush = new Promise<void>((resolve) => { finishFlush = resolve; });
+    const quitEvent = { preventDefault: vi.fn() };
+
+    mocks.appListeners.get("before-quit")!(quitEvent);
+
+    // Nothing else is outstanding; the unwritten entries alone hold the quit.
+    expect(quitEvent.preventDefault).toHaveBeenCalledTimes(1);
+    await drainTurns();
+    expect(mocks.quit).not.toHaveBeenCalled();
+    finishFlush();
+    await waitForQuit();
+    expect(mocks.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a stuck log write keep the app from quitting", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    mocks.logPending = true;
+    mocks.logFlush = new Promise<void>(() => {});
+
+    mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
+    // The barrier gives up first, then the final flush gets its own short wait.
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(mocks.quit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(mocks.quit).toHaveBeenCalledTimes(1);
   });
 });

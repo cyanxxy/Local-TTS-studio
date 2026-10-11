@@ -63,6 +63,11 @@ export interface TrustedIpcOptions {
    * it as an uncaught exception in the main process.
    */
   onListenerError?: (channel: string, error: unknown) => void;
+  /**
+   * Told when a `handle` handler throws or its promise rejects. The renderer
+   * still receives the failure exactly as before.
+   */
+  onHandlerError?: (channel: string, error: unknown) => void;
 }
 
 function senderOrigin(event: IpcSenderEvent): string {
@@ -73,13 +78,27 @@ function senderOrigin(event: IpcSenderEvent): string {
   }
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return typeof value === "object" && value !== null && typeof (value as { then?: unknown }).then === "function";
+}
+
 export function createTrustedIpc(
   ipcMain: Pick<IpcMain, "handle" | "on">,
-  { allowDevServer, onUntrustedSender, onListenerError }: TrustedIpcOptions,
+  { allowDevServer, onUntrustedSender, onListenerError, onHandlerError }: TrustedIpcOptions,
 ): TrustedIpc {
+  // The callbacks only observe. One that throws must never change what the
+  // sender gets back, leave a port open, or escape into Electron.
+  const report = <Args extends unknown[]>(callback: ((...args: Args) => void) | undefined, ...args: Args): void => {
+    try {
+      callback?.(...args);
+    } catch {
+      // Diagnostics only.
+    }
+  };
+
   const isTrusted = (channel: string, event: IpcSenderEvent): boolean => {
     if (isAllowedAppUrl(ipcSenderUrl(event), { allowDevServer })) return true;
-    onUntrustedSender?.(channel, senderOrigin(event));
+    report(onUntrustedSender, channel, senderOrigin(event));
     return false;
   };
 
@@ -87,7 +106,19 @@ export function createTrustedIpc(
     handle(channel, handler) {
       ipcMain.handle(channel, (event, request: unknown) => {
         if (!isTrusted(channel, event)) throw new Error(UNTRUSTED_SENDER_MESSAGE);
-        return handler(event, request);
+        let result: unknown;
+        try {
+          result = handler(event, request);
+        } catch (error) {
+          report(onHandlerError, channel, error);
+          throw error;
+        }
+        // Observe an async failure without touching a synchronous result.
+        if (!onHandlerError || !isPromiseLike(result)) return result;
+        return Promise.resolve(result).catch((error: unknown) => {
+          report(onHandlerError, channel, error);
+          throw error;
+        });
       });
     },
 
@@ -97,7 +128,7 @@ export function createTrustedIpc(
         try {
           listener(event, request);
         } catch (error) {
-          onListenerError?.(channel, error);
+          report(onListenerError, channel, error);
         }
       });
     },
@@ -120,7 +151,7 @@ export function createTrustedIpc(
           } catch {
             // Already closed by the listener.
           }
-          onListenerError?.(channel, error);
+          report(onListenerError, channel, error);
         }
       });
     },

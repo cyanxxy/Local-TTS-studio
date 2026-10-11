@@ -6,8 +6,8 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createDiagnosticsLog,
-  describeError,
   type DiagnosticsEntry,
+  mirrorToConsole,
   type DiagnosticsLogOptions,
 } from "./diagnostics";
 import { NativeRuntimeError } from "./errors";
@@ -323,21 +323,35 @@ describe("createDiagnosticsLog", () => {
   });
 });
 
-describe("describeError", () => {
-  it("keeps the native diagnostics of a bridge failure instead of its stack", () => {
-    const error = new NativeRuntimeError("Rust local bridge exited.", { stderr: "panic", exitCode: 101 });
-
-    expect(describeError(error)).toEqual({
-      message: "Rust local bridge exited.",
-      native: { stderr: "panic", exitCode: 101 },
-    });
+describe("mirrorToConsole", () => {
+  const entry = (level: DiagnosticsEntry["level"], data?: Record<string, unknown>): DiagnosticsEntry => ({
+    ts: FIXED_TIME.toISOString(), level, scope: "local-tts", msg: "Warm-up failed", ...(data ? { data } : {}),
   });
 
-  it("keeps the stack of any other error and stringifies non-errors", () => {
-    const error = new TypeError("Invalid request.");
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
 
-    expect(describeError(error)).toEqual({ message: "Invalid request.", stack: error.stack });
-    expect(describeError("plain")).toEqual({ message: "plain" });
-    expect(describeError(42)).toEqual({ message: "42" });
+  it("echoes warnings and errors with their scope and data", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    mirrorToConsole(entry("warn", { model: "qwen3" }));
+    mirrorToConsole(entry("error"));
+
+    expect(warn).toHaveBeenCalledWith("[local-tts] Warm-up failed", { model: "qwen3" });
+    expect(error).toHaveBeenCalledWith("[local-tts] Warm-up failed");
+  });
+
+  it("keeps routine entries off the console", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const info = vi.spyOn(console, "info").mockImplementation(() => undefined);
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+    mirrorToConsole(entry("info"));
+    mirrorToConsole(entry("debug"));
+
+    for (const spy of [log, info, debug, warn]) expect(spy).not.toHaveBeenCalled();
   });
 });
