@@ -101,9 +101,18 @@ const BLOCK_TAGS = new Set([
   "h6", "header", "hgroup", "hr", "legend", "li", "main", "menu", "nav", "ol", "p", "pre", "section",
   "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
 ]);
-// Never readable: code, styling, and ruby annotations (which would read
-// furigana twice).
-const SKIPPED_TAGS = new Set(["noscript", "rp", "rt", "script", "style", "template"]);
+// Never readable: code, styling, ruby annotations (which would read furigana
+// twice), embedded media and graphics (whose fallback or label text is not
+// prose), and form controls. MathML reads its alttext when it has one.
+const SKIPPED_TAGS = new Set([
+  "audio", "button", "canvas", "embed", "iframe", "noscript", "object", "option", "rp", "rt", "script",
+  "select", "style", "svg", "template", "textarea", "video",
+]);
+
+/** One line of text, for titles and labels lifted from markup. */
+function singleLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
 
 interface ExtractedBlock {
   /** The nearest block element that owns the text. */
@@ -135,7 +144,10 @@ function extractBlocks(root: Element): ExtractedBlock[] {
         const element = child as Element;
         const tag = element.localName.toLowerCase();
         if (SKIPPED_TAGS.has(tag)) continue;
-        if (tag === "br") {
+        if (tag === "math") {
+          const alttext = singleLine(element.getAttribute("alttext") ?? "");
+          if (alttext) buffer += ` ${alttext} `;
+        } else if (tag === "br") {
           buffer += "\n";
         } else if (BLOCK_TAGS.has(tag)) {
           flush();
@@ -168,7 +180,7 @@ function extractSections(root: Element, fallbackTitle: string): ExtractedSection
     const tag = owner.localName.toLowerCase();
     if (/^h[1-6]$/.test(tag)) {
       if (cleanText(current.text)) flush();
-      current = { title: blockText.slice(0, 160), level: Number(tag.slice(1)), text: blockText };
+      current = { title: singleLine(blockText).slice(0, 160), level: Number(tag.slice(1)), text: blockText };
       continue;
     }
 
@@ -253,7 +265,7 @@ function epubNavigationLabels(
   const document = parseMarkup(strFromU8(bytes), "text/html");
   for (const link of document.querySelectorAll("nav a[href], a[href]")) {
     const href = link.getAttribute("href");
-    const label = cleanText(link.textContent ?? "");
+    const label = singleLine(link.textContent ?? "");
     if (!href || !label) continue;
     labels.set(zipPath(navPath, href.split("#")[0]), label.slice(0, 160));
   }
@@ -307,23 +319,28 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
-/**
- * Picks the cover by the EPUB 3 `cover-image` property, then the EPUB 2
- * `<meta name="cover">` reference, then a raster manifest item named "cover".
- */
-function findEpubCoverItem(opf: Document, manifest: Map<string, EpubManifestItem>): EpubManifestItem | undefined {
-  const items = [...manifest.entries()];
-  const byProperty = items.find(([, item]) => item.properties.split(/\s+/).includes("cover-image"));
-  if (byProperty) return byProperty[1];
+// "cover" as a word of its own: "cover.jpg" and "book-cover" match, while
+// "discover.png" and "recovery-map.png" do not.
+const COVER_NAME = /(?<!\p{L})cover(?!\p{L})/iu;
+// Bounds how many images a book can make the importer inflate for its cover.
+const MAX_COVER_CANDIDATES = 4;
 
+/**
+ * Raster cover candidates in order of trust: the EPUB 3 `cover-image`
+ * property, then the EPUB 2 `<meta name="cover">` reference, then manifest
+ * items named "cover". The first that decodes wins.
+ */
+function findEpubCoverItems(opf: Document, manifest: Map<string, EpubManifestItem>): EpubManifestItem[] {
+  const items = [...manifest.entries()];
   const coverMeta = [...opf.getElementsByTagNameNS("*", "meta")]
     .find((meta) => meta.getAttribute("name") === "cover");
   const metaItem = manifest.get(coverMeta?.getAttribute("content") ?? "");
-  if (metaItem) return metaItem;
-
-  return items.find(([id, item]) => (
-    isCoverMediaType(item.mediaType) && /cover/i.test(`${id} ${item.href}`)
-  ))?.[1];
+  const candidates = [
+    ...items.filter(([, item]) => item.properties.split(/\s+/).includes("cover-image")).map(([, item]) => item),
+    ...(metaItem ? [metaItem] : []),
+    ...items.filter(([id, item]) => COVER_NAME.test(`${id} ${item.href}`)).map(([, item]) => item),
+  ];
+  return [...new Set(candidates)].filter((item) => isCoverMediaType(item.mediaType)).slice(0, MAX_COVER_CANDIDATES);
 }
 
 /**
@@ -338,16 +355,15 @@ function readEpubCover(
   manifest: Map<string, EpubManifestItem>,
   budget: EpubExpansionBudget,
 ): ReaderDocumentCover | undefined {
-  const item = findEpubCoverItem(opf, manifest);
-  if (!item || !isCoverMediaType(item.mediaType)) return undefined;
-  const coverPath = zipPath(opfPath, item.href);
-  const candidates = new Set([coverPath, encodeURI(coverPath)]);
+  const coverPaths = findEpubCoverItems(opf, manifest).map((item) => zipPath(opfPath, item.href));
+  if (coverPaths.length === 0) return undefined;
+  const entryNames = new Set(coverPaths.flatMap((path) => [path, encodeURI(path)]));
 
   let files: Record<string, Uint8Array>;
   try {
     files = unzipSync(archive, {
       filter: (entry: UnzipFileInfo) => {
-        if (!candidates.has(entry.name)) return false;
+        if (!entryNames.has(entry.name)) return false;
         if (entry.originalSize > MAX_COVER_BYTES || entry.originalSize > budget.remaining) return false;
         budget.remaining -= entry.originalSize;
         return true;
@@ -356,11 +372,16 @@ function readEpubCover(
   } catch {
     return undefined;
   }
-  const bytes = findZipEntry(files, coverPath);
-  const type = bytes ? sniffCoverImageType(bytes) : null;
-  if (!bytes || !type) return undefined;
-  const cover = { dataUrl: `data:image/${type};base64,${bytesToBase64(bytes)}` };
-  return isReaderDocumentCover(cover) ? cover : undefined;
+  for (const path of coverPaths) {
+    const bytes = findZipEntry(files, path);
+    // The declared size gated inflation; the inflated bytes are what count.
+    if (!bytes || bytes.length > MAX_COVER_BYTES) continue;
+    const type = sniffCoverImageType(bytes);
+    if (!type) continue;
+    const cover = { dataUrl: `data:image/${type};base64,${bytesToBase64(bytes)}` };
+    if (isReaderDocumentCover(cover)) return cover;
+  }
+  return undefined;
 }
 
 export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDocumentRecord {
@@ -440,7 +461,7 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
     if (!contentBytes) continue;
     const contentDocument = parseMarkup(strFromU8(contentBytes), "text/html");
     const fallbackTitle = navigationLabels.get(contentPath)
-      || cleanText(contentDocument.querySelector("title")?.textContent ?? "")
+      || singleLine(contentDocument.querySelector("title")?.textContent ?? "")
       || `Chapter ${sections.length + 1}`;
     const extracted = extractSections(contentDocument.body, fallbackTitle);
     if (extracted.length === 0) continue;

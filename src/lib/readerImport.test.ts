@@ -1,4 +1,4 @@
-import { strToU8, zipSync } from "fflate";
+import { strToU8, zipSync, type ZippableFile } from "fflate";
 import { describe, expect, it, vi } from "vitest";
 import { READER_COVER_MAX_DATA_URL_CHARS } from "./readerDocument";
 import {
@@ -41,7 +41,7 @@ interface EpubFixture {
   chapters: string[];
   manifest?: string;
   metadata?: string;
-  files?: Record<string, Uint8Array>;
+  files?: Record<string, ZippableFile>;
 }
 
 function buildEpub({ chapters, manifest = "", metadata = "", files = {} }: EpubFixture): Uint8Array {
@@ -82,6 +82,27 @@ function pngBytes(length = 64): Uint8Array {
 
 function dataUrl(type: string, bytes: Uint8Array): string {
   return `data:image/${type};base64,${Buffer.from(bytes).toString("base64")}`;
+}
+
+/**
+ * Rewrites the uncompressed size a stored (uncompressed) zip entry declares,
+ * in both its local and central headers, so a test can make an entry lie
+ * about how large it inflates.
+ */
+function declareStoredSize(archive: Uint8Array, name: string, size: number): Uint8Array {
+  const patched = archive.slice();
+  const view = new DataView(patched.buffer);
+  const nameBytes = strToU8(name);
+  const matchesName = (offset: number) => nameBytes.every((byte, index) => patched[offset + index] === byte);
+  for (let offset = 0; offset + 46 < patched.length; offset += 1) {
+    const signature = view.getUint32(offset, true);
+    if (signature === 0x04034b50 && view.getUint16(offset + 26, true) === nameBytes.length && matchesName(offset + 30)) {
+      view.setUint32(offset + 22, size, true);
+    } else if (signature === 0x02014b50 && view.getUint16(offset + 28, true) === nameBytes.length && matchesName(offset + 46)) {
+      view.setUint32(offset + 24, size, true);
+    }
+  }
+  return patched;
 }
 
 function occurrences(text: string, fragment: string): number {
@@ -243,6 +264,44 @@ describe("readerImport", () => {
     expect(occurrences(document.text, "inner paragraph")).toBe(1);
   });
 
+  it("skips embedded media, graphics and form controls, and reads math by its alttext", () => {
+    const document = parseEpubDocument(buildEpub({
+      chapters: [`
+        <p>Press <button>Click me</button>to begin<svg><title>Logo</title><text>SVG label</text></svg>.</p>
+        <p>The area is <math alttext="pi r squared"><mi>π</mi><msup><mi>r</mi><mn>2</mn></msup></math>, and <math><mi>x</mi></math>is unnamed.</p>
+        <video><p>Your reader cannot play this video.</p></video><audio>Audio fallback</audio>
+        <object>Object fallback</object><embed src="x.swf"/><iframe>Frame text</iframe><canvas>Canvas text</canvas>
+        <form><select><option>First option</option></select><textarea>Draft text</textarea></form>
+        <p>The end.</p>`],
+    }), "media.epub");
+    expect(document.text).toBe([
+      "Press to begin.",
+      "The area is pi r squared , and is unnamed.",
+      "The end.",
+    ].join("\n\n"));
+  });
+
+  it("keeps chapter titles on one line when headings or labels contain breaks", () => {
+    const document = parseEpubDocument(buildEpub({
+      chapters: [
+        "<h2>Part One<br/>The\n  Harbor</h2><p>The harbor chapter body.</p><h2>Ashore</h2><p>The landing.</p>",
+        "<p>A chapter titled by its navigation label.</p>",
+      ],
+      manifest: `<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav" />`,
+      files: {
+        "OEBPS/nav.xhtml": strToU8(`<html><body><nav><ol>
+          <li><a href="chapter-2.xhtml">The Second
+            Chapter</a></li>
+        </ol></nav></body></html>`),
+      },
+    }), "titles.epub");
+    expect(document.chapters.map((chapter) => chapter.title)).toEqual([
+      "Part One The Harbor",
+      "Ashore",
+      "The Second Chapter",
+    ]);
+  });
+
   it("reads an EPUB 3 cover-image as a data URL", () => {
     const cover = pngBytes();
     const document = parseEpubDocument(buildEpub({
@@ -293,6 +352,47 @@ describe("readerImport", () => {
       manifest: `<item id="art" href="gone.png" media-type="image/png" properties="cover-image" />`,
     }), "missing.epub");
     expect(missing.cover).toBeUndefined();
+  });
+
+  it("tries the next cover candidate when the first cannot be read", () => {
+    const cover = pngBytes(48);
+    const document = parseEpubDocument(buildEpub({
+      chapters: ["<p>Body.</p>"],
+      metadata: `<meta name="cover" content="front" />`,
+      manifest: `
+        <item id="art" href="images/missing.png" media-type="image/png" properties="cover-image" />
+        <item id="front" href="images/front.png" media-type="image/png" />`,
+      files: { "OEBPS/images/front.png": cover },
+    }), "fallback.epub");
+    expect(document.cover).toEqual({ dataUrl: dataUrl("png", cover) });
+  });
+
+  it("matches \"cover\" only as a word of its own in manifest names", () => {
+    const document = parseEpubDocument(buildEpub({
+      chapters: ["<p>Body.</p>"],
+      manifest: `<item id="map" href="images/discover.png" media-type="image/png" />`,
+      files: { "OEBPS/images/discover.png": pngBytes(32) },
+    }), "discover.epub");
+    expect(document.cover).toBeUndefined();
+  });
+
+  it("rejects a cover that inflates past the cap before encoding it, whatever size it declares", () => {
+    const oversizedBytes = pngBytes(Math.ceil(READER_COVER_MAX_DATA_URL_CHARS * 0.75) + 1);
+    const archive = buildEpub({
+      chapters: ["<p>Body.</p>"],
+      manifest: `<item id="art" href="cover.png" media-type="image/png" properties="cover-image" />`,
+      // Stored, so the inflated size is simply the bytes on disk.
+      files: { "OEBPS/cover.png": [oversizedBytes, { level: 0 }] },
+    });
+    const encode = vi.spyOn(globalThis, "btoa");
+    try {
+      const document = parseEpubDocument(declareStoredSize(archive, "OEBPS/cover.png", 64), "liar.epub");
+      expect(document.text).toBe("Body.");
+      expect(document.cover).toBeUndefined();
+      expect(encode).not.toHaveBeenCalled();
+    } finally {
+      encode.mockRestore();
+    }
   });
 
   it("falls back to a raster manifest item named cover", () => {
