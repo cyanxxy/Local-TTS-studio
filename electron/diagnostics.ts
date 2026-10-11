@@ -52,6 +52,11 @@ export interface DiagnosticsLogOptions {
   maxPendingEntries?: number;
   /** Written as "~" wherever it appears, so a shared log does not name the user. */
   homeDirectory?: string;
+  /**
+   * Matches the home directory regardless of case, as macOS and Windows file
+   * systems do: the same path can be reported as `/Users/Alice` and `/users/alice`.
+   */
+  caseInsensitivePaths?: boolean;
   now?: () => Date;
   /** Also sees every entry that passes the level filter, e.g. to echo it to a console. */
   mirror?: (entry: DiagnosticsEntry) => void;
@@ -77,6 +82,10 @@ export function mirrorToConsole(entry: DiagnosticsEntry): void {
   write(`[${entry.scope}] ${entry.msg}`, ...(entry.data ? [entry.data] : []));
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
  * A bounded, rotating JSON-lines log for the main process. Logging never
  * throws and never waits: entries are written in order by one background
@@ -92,6 +101,7 @@ export function createDiagnosticsLog({
   maxEntryBytes = DEFAULT_MAX_ENTRY_BYTES,
   maxPendingEntries = DEFAULT_MAX_PENDING_ENTRIES,
   homeDirectory = os.homedir(),
+  caseInsensitivePaths = process.platform === "darwin" || process.platform === "win32",
   now = () => new Date(),
   mirror,
   onWriteError,
@@ -105,7 +115,12 @@ export function createDiagnosticsLog({
   const { name: baseName, ext: extension } = path.parse(fileName);
   // A root or empty home would match every path separator.
   const home = homeDirectory.length > 1 ? homeDirectory : "";
-  const homeForwardSlashes = home.replaceAll("\\", "/");
+  const homePattern = home
+    ? new RegExp(
+      [...new Set([home, home.replaceAll("\\", "/")])].map(escapeRegExp).join("|"),
+      caseInsensitivePaths ? "gi" : "g",
+    )
+    : null;
 
   const queue: string[] = [];
   let draining: Promise<void> | null = null;
@@ -115,9 +130,7 @@ export function createDiagnosticsLog({
   let reportedWriteError = false;
 
   function redact(text: string): string {
-    if (!home) return text;
-    const redacted = text.replaceAll(home, "~");
-    return homeForwardSlashes === home ? redacted : redacted.replaceAll(homeForwardSlashes, "~");
+    return homePattern ? text.replace(homePattern, "~") : text;
   }
 
   function boundString(text: string): string {

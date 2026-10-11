@@ -28,6 +28,7 @@ function createLog(options: Partial<DiagnosticsLogOptions> = {}) {
   return createDiagnosticsLog({
     directory: () => path.join(directory, "logs"),
     homeDirectory: "/Users/alice",
+    caseInsensitivePaths: false,
     now: () => FIXED_TIME,
     ...options,
   });
@@ -148,6 +149,33 @@ describe("createDiagnosticsLog", () => {
       msg: "Missing ~\\models",
       data: { path: "~/AppData/Open TTS", nested: { paths: ["~\\a"] } },
     }]);
+  });
+
+  it("matches the home directory in any case where paths ignore case", async () => {
+    const log = createLog({ homeDirectory: "C:\\Users\\Alice", caseInsensitivePaths: true });
+
+    log.logger("local-tts").warn("Missing c:\\users\\alice\\models", { path: "C:/USERS/ALICE/AppData" });
+    await log.flush();
+
+    expect(await readEntries()).toMatchObject([{ msg: "Missing ~\\models", data: { path: "~/AppData" } }]);
+  });
+
+  it("matches the home directory exactly where paths are case-sensitive", async () => {
+    const log = createLog({ homeDirectory: "/home/alice" });
+
+    log.logger("app").info("/home/alice/a and /home/Alice/b (a different user's folder)");
+    await log.flush();
+
+    expect((await readEntries())[0].msg).toBe("~/a and /home/Alice/b (a different user's folder)");
+  });
+
+  it("redacts a home directory that contains pattern characters literally", async () => {
+    const log = createLog({ homeDirectory: "/Users/a.b+(c)" });
+
+    log.logger("app").info("/Users/a.b+(c)/x and /Users/aXb+(c)/y");
+    await log.flush();
+
+    expect((await readEntries())[0].msg).toBe("~/x and /Users/aXb+(c)/y");
   });
 
   it("does not treat a root home directory as something to redact", async () => {
