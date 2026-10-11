@@ -2,25 +2,15 @@
 // Do not edit by hand: change the revision there and run it with --write.
 import type { PinnedModelFile } from "./types";
 
-// Kitten TTS Nano 0.8. Both graphs share one voices.npz and config.json (identical blobs), so those come from the fp32 repository only.
+// Kitten TTS Nano 0.8. Only the fp32 export: the int8 one (KittenML/kitten-tts-nano-0.8-int8) is under half the size but runs 1.2-3.5x slower in WASM and not at all on WebGPU.
 
-/** Standard-op fp32 graph, used on WebGPU. */
+/** Standard-op fp32 graph, used on WebGPU and WASM. */
 export const KITTEN_NANO_FP32_MODEL: PinnedModelFile = {
   repo: "KittenML/kitten-tts-nano-0.8-fp32",
   revision: "7a1db645b1f3ab9420761d87428e042b9cec3f26",
   path: "kitten_tts_nano_v0_8.onnx",
   byteLength: 56_767_095,
   sha256: "320564d2615f235de972ca27a7f39551c94185cfa24ca85b07a29084135f1e5e",
-  license: "apache-2.0",
-};
-
-/** Dynamically quantized graph (ConvInteger, DynamicQuantizeLSTM), WASM only. */
-export const KITTEN_NANO_INT8_MODEL: PinnedModelFile = {
-  repo: "KittenML/kitten-tts-nano-0.8-int8",
-  revision: "84781d74e29ee25217551556398b42f80593a813",
-  path: "kitten_tts_nano_v0_8.onnx",
-  byteLength: 24_369_971,
-  sha256: "f7b0afcbee92870b32b8e0276d855b954dc25470c9f051b376ac7eee537c76fc",
   license: "apache-2.0",
 };
 

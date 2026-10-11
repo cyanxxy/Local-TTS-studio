@@ -1,21 +1,14 @@
 /**
- * Kitten TTS Nano 0.8 worker. WebGPU runs the fp32 graph (standard ops only);
- * WASM-only devices get the int8 graph, whose dynamic-quantization ops WebGPU
- * lacks, at less than half the download. When WebGPU fails to load or warm
- * up, the fp32 bytes already in memory run on WASM instead of downloading the
- * int8 graph too. Both graphs share one voices.npz and config.json.
+ * Kitten TTS Nano 0.8 worker. One fp32 graph (standard ops only) runs on
+ * WebGPU when it initializes and on WASM otherwise; a WebGPU session that
+ * fails to load or warm up falls back to WASM on the bytes already in memory.
  */
 import { PHONEMIZER_MODULE_URL } from "virtual:phonemizer-assets";
 import type { InferenceBackend } from "../types";
 import { loadEspeakPhonemizer } from "../lib/espeakPhonemizer";
 import { chunkKittenText, KITTEN_CACHE_NAME, KITTEN_SAMPLE_RATE, KittenRuntime } from "../lib/kittenRuntime";
 import { KITTEN_DEFAULT_VOICE, KITTEN_VOICES, parseKittenConfig, parseKittenVoices } from "../lib/kittenVoices";
-import {
-  KITTEN_CONFIG_FILE,
-  KITTEN_NANO_FP32_MODEL,
-  KITTEN_NANO_INT8_MODEL,
-  KITTEN_VOICES_FILE,
-} from "../lib/manifests/kitten";
+import { KITTEN_CONFIG_FILE, KITTEN_NANO_FP32_MODEL, KITTEN_VOICES_FILE } from "../lib/manifests/kitten";
 import type { PinnedModelFile } from "../lib/manifests/types";
 import {
   deletePinnedModelCache,
@@ -29,17 +22,15 @@ import { canInitializeWebGPU } from "../lib/webgpu";
 
 const LABEL = "Kitten TTS";
 const WARM_UP_TEXT = "Hello.";
-const ALL_FILES = [KITTEN_NANO_FP32_MODEL, KITTEN_NANO_INT8_MODEL, KITTEN_VOICES_FILE, KITTEN_CONFIG_FILE];
+const ALL_FILES = [KITTEN_NANO_FP32_MODEL, KITTEN_VOICES_FILE, KITTEN_CONFIG_FILE];
 
 async function load(onProgress: (fraction: number) => void): Promise<LoadedStyleTtsModel> {
   configureStyleTtsWasm();
-  const webgpu = await canInitializeWebGPU();
-  const modelFile = webgpu ? KITTEN_NANO_FP32_MODEL : KITTEN_NANO_INT8_MODEL;
-  const backends: InferenceBackend[] = webgpu ? ["webgpu", "wasm"] : ["wasm"];
-  const track = trackDownloadProgress([modelFile, KITTEN_VOICES_FILE, KITTEN_CONFIG_FILE], onProgress);
+  const backends: InferenceBackend[] = await canInitializeWebGPU() ? ["webgpu", "wasm"] : ["wasm"];
+  const track = trackDownloadProgress(ALL_FILES, onProgress);
   const fetchFile = (file: PinnedModelFile) => fetchPinnedModelFile(file, { cacheName: KITTEN_CACHE_NAME, label: LABEL, onProgress: track(file) });
   const [modelBuffer, voicesBuffer, configBuffer, phonemize] = await Promise.all([
-    fetchFile(modelFile),
+    fetchFile(KITTEN_NANO_FP32_MODEL),
     fetchFile(KITTEN_VOICES_FILE),
     fetchFile(KITTEN_CONFIG_FILE),
     loadEspeakPhonemizer(PHONEMIZER_MODULE_URL),

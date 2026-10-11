@@ -24,7 +24,6 @@ function pinnedFile(content: string, repo: string, path: string): PinnedModelFil
 
 const FILES = {
   KITTEN_NANO_FP32_MODEL: pinnedFile("fp32 graph bytes", "test/kitten-fp32", "kitten.onnx"),
-  KITTEN_NANO_INT8_MODEL: pinnedFile("int8 graph", "test/kitten-int8", "kitten.onnx"),
   KITTEN_VOICES_FILE: pinnedFile("voices archive", "test/kitten-fp32", "voices.npz"),
   KITTEN_CONFIG_FILE: pinnedFile("{\"config\":true}", "test/kitten-fp32", "config.json"),
 };
@@ -142,7 +141,7 @@ afterEach(() => {
 });
 
 describe("kitten.worker", () => {
-  it("loads the int8 graph on WASM with verified files, warms up and lists the eight voices", async () => {
+  it("loads the fp32 graph on WASM with verified files, warms up and lists the eight voices", async () => {
     const worker = await startWorker();
 
     await settledLoad(worker);
@@ -154,12 +153,12 @@ describe("kitten.worker", () => {
     }]);
     expect(fetchedUrls(worker).sort()).toEqual([
       FILES.KITTEN_CONFIG_FILE,
-      FILES.KITTEN_NANO_INT8_MODEL,
+      FILES.KITTEN_NANO_FP32_MODEL,
       FILES.KITTEN_VOICES_FILE,
     ].map(pinnedModelFileUrl).sort());
     expect(worker.parsed).toEqual({ voices: ["voices archive"], config: ["{\"config\":true}"] });
     expect(worker.loadEspeakPhonemizer).toHaveBeenCalledWith("/assets/phonemizer.js");
-    expect(worker.sessions.map(({ backend, model }) => ({ backend, model }))).toEqual([{ backend: "wasm", model: "int8 graph" }]);
+    expect(worker.sessions.map(({ backend, model }) => ({ backend, model }))).toEqual([{ backend: "wasm", model: "fp32 graph bytes" }]);
     // The warm-up proved the session before READY.
     expect(worker.sessions[0].run).toHaveBeenCalledOnce();
     expect(worker.ortEnv.wasm).toEqual({ wasmPaths: { mjs: "/ort.mjs", wasm: "/ort.wasm" }, numThreads: 1 });
@@ -189,7 +188,7 @@ describe("kitten.worker", () => {
     expect(words).toEqual(["Hello", "there", "How", "are", "you"]);
   });
 
-  it("runs the fp32 graph on WebGPU and plans longer chunks there", async () => {
+  it("runs on WebGPU when it initializes and plans longer chunks there", async () => {
     const worker = await startWorker({ webgpu: true });
     await settledLoad(worker);
     const text = Array.from({ length: 12 }, (_, index) => `Sentence ${index} is long enough to need planning.`).join(" ");
@@ -198,12 +197,11 @@ describe("kitten.worker", () => {
     await vi.waitFor(() => expect(worker.ofType("GENERATION_COMPLETE")).toHaveLength(1));
 
     expect(worker.ofType("READY")[0].backend).toBe("webgpu");
-    expect(fetchedUrls(worker)).not.toContain(pinnedModelFileUrl(FILES.KITTEN_NANO_INT8_MODEL));
     expect(worker.sessions.map(({ backend, model }) => ({ backend, model }))).toEqual([{ backend: "webgpu", model: "fp32 graph bytes" }]);
     expect(Math.max(...worker.ofType("AUDIO_CHUNK").map((chunk) => chunk.text.length))).toBeGreaterThan(240);
   });
 
-  it("falls back to WASM on the downloaded fp32 bytes when WebGPU warm-up yields NaN audio", async () => {
+  it("falls back to WASM on the downloaded bytes when WebGPU warm-up yields NaN audio", async () => {
     const worker = await startWorker({
       webgpu: true,
       plans: { webgpu: { waveform: (frames) => new Float32Array(frames * 600).fill(Number.NaN) } },
@@ -218,7 +216,7 @@ describe("kitten.worker", () => {
     ]);
     expect(worker.sessions[0].release).toHaveBeenCalledOnce();
     expect(worker.sessions[1].release).not.toHaveBeenCalled();
-    expect(fetchedUrls(worker)).not.toContain(pinnedModelFileUrl(FILES.KITTEN_NANO_INT8_MODEL));
+    expect(worker.fetchMock).toHaveBeenCalledTimes(3);
   });
 
   it("reports the last backend error when every backend fails", async () => {

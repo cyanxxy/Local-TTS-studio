@@ -18,16 +18,14 @@ const HF_HOST = "https://huggingface.co";
 const ALLOWED_LICENSES = new Set(["apache-2.0", "mit"]);
 
 const KITTEN_FP32 = { repo: "KittenML/kitten-tts-nano-0.8-fp32", revision: "7a1db645b1f3ab9420761d87428e042b9cec3f26" };
-const KITTEN_INT8 = { repo: "KittenML/kitten-tts-nano-0.8-int8", revision: "84781d74e29ee25217551556398b42f80593a813" };
 const PARADEE = { repo: "sahilmahendrakar/Paradee-8M-v1.0", revision: "c7f83f86c04e84d0ae94cbe1aad7618e0544f80a" };
 
 export const MANIFEST_SPECS = [
   {
     output: "src/lib/manifests/kitten.ts",
-    description: "Kitten TTS Nano 0.8. Both graphs share one voices.npz and config.json (identical blobs), so those come from the fp32 repository only.",
+    description: "Kitten TTS Nano 0.8. Only the fp32 export: the int8 one (KittenML/kitten-tts-nano-0.8-int8) is under half the size but runs 1.2-3.5x slower in WASM and not at all on WebGPU.",
     files: [
-      { exportName: "KITTEN_NANO_FP32_MODEL", comment: "Standard-op fp32 graph, used on WebGPU.", ...KITTEN_FP32, path: "kitten_tts_nano_v0_8.onnx" },
-      { exportName: "KITTEN_NANO_INT8_MODEL", comment: "Dynamically quantized graph (ConvInteger, DynamicQuantizeLSTM), WASM only.", ...KITTEN_INT8, path: "kitten_tts_nano_v0_8.onnx" },
+      { exportName: "KITTEN_NANO_FP32_MODEL", comment: "Standard-op fp32 graph, used on WebGPU and WASM.", ...KITTEN_FP32, path: "kitten_tts_nano_v0_8.onnx" },
       { exportName: "KITTEN_VOICES_FILE", comment: "Eight float32 [400, 256] style tables, stored uncompressed.", ...KITTEN_FP32, path: "voices.npz" },
       { exportName: "KITTEN_CONFIG_FILE", comment: "Voice aliases and per-voice speed priors.", ...KITTEN_FP32, path: "config.json" },
     ],
