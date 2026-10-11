@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useMemo } from "react";
 import { getVoiceLibraryStore, type VoiceLibraryStore } from "../lib/voiceLibrary/store";
 import type { NewVoice, VoiceKind, VoicePatch, VoiceRecord } from "../lib/voiceLibrary/types";
+import { useStoreSnapshot } from "./useStoreSnapshot";
 
 export interface VoiceLibraryFilter {
   /** Case-insensitive match on name, description, tags and transcript. */
@@ -58,8 +59,10 @@ export interface UseVoiceLibraryReturn {
   store: VoiceLibraryStore;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+const EMPTY_VOICES: VoiceRecord[] = [];
+
+function listVoices(store: VoiceLibraryStore): Promise<VoiceRecord[]> {
+  return store.listVoices();
 }
 
 /**
@@ -69,43 +72,7 @@ function errorMessage(error: unknown): string {
  * show them next to the field that caused them.
  */
 export function useVoiceLibrary(store: VoiceLibraryStore = getVoiceLibraryStore()): UseVoiceLibraryReturn {
-  const [voices, setVoices] = useState<VoiceRecord[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const loadSequenceRef = useRef(0);
-
-  const refresh = useCallback((): Promise<void> => {
-    // Reloads can overlap when changes arrive quickly; only the newest wins.
-    // State is set from promise callbacks, never synchronously, so the
-    // subscription effect below does not cascade renders.
-    const sequence = ++loadSequenceRef.current;
-    const isCurrent = () => sequence === loadSequenceRef.current;
-    return store.listVoices().then(
-      (next) => {
-        if (!isCurrent()) return;
-        setVoices(next);
-        setError(null);
-        setLoading(false);
-      },
-      (cause: unknown) => {
-        if (!isCurrent()) return;
-        setError(errorMessage(cause));
-        setLoading(false);
-      },
-    );
-  }, [store]);
-
-  useEffect(() => {
-    const unsubscribe = store.subscribe(() => {
-      void refresh();
-    });
-    void refresh();
-    return () => {
-      unsubscribe();
-      // Drop any reload still in flight for this store.
-      loadSequenceRef.current += 1;
-    };
-  }, [refresh, store]);
+  const { data: voices, loading, error, refresh } = useStoreSnapshot(store, listVoices, EMPTY_VOICES);
 
   return useMemo(() => ({
     voices,
