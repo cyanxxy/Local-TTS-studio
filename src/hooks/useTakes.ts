@@ -13,7 +13,8 @@ import {
 export type TakesState<TAudio = TakeAudio> = Readonly<Record<string, TakeStack<TAudio>>>;
 
 export type TakesAction<TAudio = TakeAudio> =
-  | { type: "add"; targetId: string; take: Take<TAudio>; activate?: boolean; maxTakes?: number }
+  | { type: "open"; targetId: string; maxTakes?: number }
+  | { type: "add"; targetId: string; take: Take<TAudio>; activate?: boolean }
   | { type: "activate"; targetId: string; takeId: string }
   | { type: "remove"; targetId: string; takeId: string }
   | { type: "pin"; targetId: string; takeId: string; pinned: boolean }
@@ -21,15 +22,19 @@ export type TakesAction<TAudio = TakeAudio> =
   | { type: "reset" };
 
 /**
- * Take stacks keyed by segment or script id. Actions on unknown targets or
- * takes are ignored, because a take can finish rendering after the user has
- * already removed its segment.
+ * Take stacks keyed by segment or script id. A stack exists only once it is
+ * opened; every other action on an unknown target or take is ignored, because
+ * a take can finish rendering after the user has cleared its segment, and that
+ * late take must not bring the stack back.
  */
 export function takesReducer<TAudio>(state: TakesState<TAudio>, action: TakesAction<TAudio>): TakesState<TAudio> {
   switch (action.type) {
+    case "open":
+      if (Object.hasOwn(state, action.targetId)) return state;
+      return { ...state, [action.targetId]: createTakeStack<TAudio>(action.targetId, { maxTakes: action.maxTakes }) };
     case "add": {
-      const current = state[action.targetId] ?? createTakeStack<TAudio>(action.targetId, { maxTakes: action.maxTakes });
-      if (current.takes.some((take) => take.id === action.take.id)) return state;
+      const current = state[action.targetId];
+      if (!current || current.takes.some((take) => take.id === action.take.id)) return state;
       return { ...state, [action.targetId]: addTake(current, action.take, { activate: action.activate }) };
     }
     case "activate": {
@@ -50,7 +55,7 @@ export function takesReducer<TAudio>(state: TakesState<TAudio>, action: TakesAct
       return { ...state, [action.targetId]: pinTake(current, action.takeId, action.pinned) };
     }
     case "clear": {
-      if (!(action.targetId in state)) return state;
+      if (!Object.hasOwn(state, action.targetId)) return state;
       const next = { ...state };
       delete next[action.targetId];
       return next;
@@ -62,6 +67,9 @@ export function takesReducer<TAudio>(state: TakesState<TAudio>, action: TakesAct
 
 export interface UseTakesReturn<TAudio = TakeAudio> {
   stacks: TakesState<TAudio>;
+  /** Create the target's stack if needed; call before rendering its takes. */
+  openTakes: (targetId: string) => void;
+  /** Ignored unless the target's stack is open. */
   addTake: (targetId: string, take: Take<TAudio>, options?: { activate?: boolean }) => void;
   setActiveTake: (targetId: string, takeId: string) => void;
   removeTake: (targetId: string, takeId: string) => void;
@@ -78,17 +86,18 @@ export function useTakes<TAudio = TakeAudio>(options: { maxTakes?: number } = {}
   );
   const { maxTakes } = options;
 
-  const add = useCallback((targetId: string, take: Take<TAudio>, addOptions: { activate?: boolean } = {}) => {
-    dispatch({ type: "add", targetId, take, activate: addOptions.activate, maxTakes });
+  const open = useCallback((targetId: string) => {
+    dispatch({ type: "open", targetId, maxTakes });
   }, [maxTakes]);
 
   return useMemo(() => ({
     stacks,
-    addTake: add,
+    openTakes: open,
+    addTake: (targetId, take, addOptions = {}) => dispatch({ type: "add", targetId, take, activate: addOptions.activate }),
     setActiveTake: (targetId, takeId) => dispatch({ type: "activate", targetId, takeId }),
     removeTake: (targetId, takeId) => dispatch({ type: "remove", targetId, takeId }),
     pinTake: (targetId, takeId, pinned) => dispatch({ type: "pin", targetId, takeId, pinned }),
     clearTakes: (targetId) => dispatch({ type: "clear", targetId }),
     resetTakes: () => dispatch({ type: "reset" }),
-  }), [add, stacks]);
+  }), [open, stacks]);
 }
