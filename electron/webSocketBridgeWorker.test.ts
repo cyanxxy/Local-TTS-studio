@@ -2028,7 +2028,86 @@ describe("worker residency", () => {
     children[0].exit();
   });
 
-  it("re-times an idle worker's eviction from now when asked", async () => {
+  // Warm-ups succeed; a generation fails as handled, or waits for its cancel
+  // and acknowledges it, as the bridge does.
+  function failingGenerationPool(poolOverrides: Parameters<typeof makePool>[1], { hold = false } = {}) {
+    return makePool((message, server) => {
+      if (message.command === "warm") {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: {} });
+      } else if (message.command === "cancel") {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: false, error: "Generation cancelled." });
+      } else if (!hold) {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: false, error: "Bad voice." });
+      }
+    }, poolOverrides);
+  }
+
+  function generate(pool: ReturnType<typeof makePool>["pool"], requestId: string, residencyKey: string) {
+    return pool.run("qwen3", { ...RUN_DEFAULTS, requestId, payload: {}, spawnConfig: SPAWN_CONFIG, residencyKey });
+  }
+
+  it("keeps what a worker holds through a handled failure aimed at the loaded model", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children } = failingGenerationPool({ idleEvictMs });
+    await warm(pool, "w1", "model-a");
+
+    await expect(generate(pool, "g1", "model-a")).rejects.toThrow("Bad voice.");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", "model-a");
+
+    // A failed request for another model may have unloaded the first.
+    await expect(generate(pool, "g2", "model-b")).rejects.toThrow("Bad voice.");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", null);
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+  });
+
+  it("keeps what a worker holds through a cancel it drains", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children, servers } = failingGenerationPool({ idleEvictMs }, { hold: true });
+    await warm(pool, "w1", "model-a");
+    const run = generate(pool, "g1", "model-a");
+    await waitFor(() => servers[0].messages.length === 2);
+
+    expect(pool.cancel("g1")).toBe(true);
+    await expect(run).rejects.toThrow(/cancelled/i);
+    // The bridge's acknowledgement restarts the clock of the still-loaded model.
+    await waitFor(() => idleEvictMs.mock.calls.length === 3);
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", "model-a");
+    expect(children[0].killed).toBe(false);
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+  });
+
+  it("re-times an idle worker without restarting its clock", async () => {
+    let evictAfterMs = 60_000;
+    const onWorkerExit = vi.fn();
+    const { pool } = residencyPool({ idleEvictMs: () => evictAfterMs, onWorkerExit });
+    const beforeWarm = Date.now();
+    await warm(pool, "w1", "model-a");
+    const afterWarm = Date.now();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const now = vi.spyOn(Date, "now").mockReturnValue(afterWarm + 10_000);
+
+    // However often it is re-timed, a 60 s window still ends 60 s after the
+    // worker went idle.
+    pool.refreshIdleEviction("qwen3");
+    pool.refreshIdleEviction("qwen3");
+    const delayMs = setTimeoutSpy.mock.lastCall![1]!;
+    expect(delayMs).toBeLessThanOrEqual(50_000);
+    expect(delayMs).toBeGreaterThanOrEqual(50_000 - (afterWarm - beforeWarm));
+
+    // A window that has already run out evicts at once.
+    evictAfterMs = 5_000;
+    pool.refreshIdleEviction("qwen3");
+    expect(setTimeoutSpy.mock.lastCall![1]).toBe(0);
+    now.mockRestore();
+    setTimeoutSpy.mockRestore();
+    await waitFor(() => onWorkerExit.mock.calls.length === 1);
+  });
+
+  it("re-times an idle worker's eviction when asked", async () => {
     let evictAfterMs = 60_000;
     const onWorkerExit = vi.fn();
     const { pool, children } = residencyPool({ idleEvictMs: () => evictAfterMs, onWorkerExit });

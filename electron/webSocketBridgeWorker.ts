@@ -113,9 +113,10 @@ export interface WebSocketBridgeWorkerPool<TModel extends string> {
   shutdownAll: () => Promise<void>;
   isRunning: (requestId: string) => boolean;
   /**
-   * Restarts the idle-eviction clock of `model`'s idle worker with whatever
-   * `idleEvictMs` returns now. A busy or draining worker is left alone: its
-   * clock starts when it next goes idle.
+   * Re-times `model`'s idle worker with whatever `idleEvictMs` returns now,
+   * still counted from when the worker went idle: a change of window never
+   * restarts the clock. A busy or draining worker is left alone: its clock
+   * starts when it next goes idle.
    */
   refreshIdleEviction: (model: TModel) => void;
 }
@@ -157,6 +158,8 @@ interface Worker {
   // yet safe to hand a new request.
   draining: DrainState | null;
   evictTimer: ReturnType<typeof setTimeout> | null;
+  // When the worker last went idle (Date.now()); its eviction is timed from here.
+  idleSince: number;
   alive: boolean;
   // What the last successful request left loaded (see residencyKey).
   residencyKey: string | null;
@@ -248,13 +251,15 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     if (wasResident) notifyWorkerExit(model, reason);
   }
 
-  function armIdleEviction(model: TModel, worker: Worker): void {
+  // Starts the idle-eviction clock of a worker that has just gone idle, or
+  // (`restart: false`) re-times the running one without moving its start, so
+  // the window can change but never restarts without real activity.
+  function armIdleEviction(model: TModel, worker: Worker, { restart = true }: { restart?: boolean } = {}): void {
     if (!worker.alive || !isOpen(worker.socket)) return;
     if (worker.evictTimer) clearTimeout(worker.evictTimer);
-    worker.evictTimer = setTimeout(
-      () => killWorker(model, worker, "idle"),
-      idleEvictionDelay(model, worker.residencyKey),
-    );
+    if (restart) worker.idleSince = Date.now();
+    const remaining = worker.idleSince + idleEvictionDelay(model, worker.residencyKey) - Date.now();
+    worker.evictTimer = setTimeout(() => killWorker(model, worker, "idle"), Math.max(0, remaining));
     worker.evictTimer.unref?.();
   }
 
@@ -349,8 +354,12 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
     // A settled request can no longer be cancelled, so a crashed worker stops
     // holding the model; a Stop settles it before the output grace ends.
     if (failingWorkers.get(model) === worker) failingWorkers.delete(model);
-    // Only a request that finished cleanly says what the worker now holds.
-    worker.residencyKey = outcome.ok ? active.residencyKey : null;
+    // A request that finished cleanly says what the worker now holds. One
+    // that failed or was cancelled leaves an already-loaded model in place
+    // when it targeted that model (the bridge keeps it through a handled
+    // failure or a drained cancel); otherwise what is loaded is unknown.
+    if (outcome.ok) worker.residencyKey = active.residencyKey;
+    else if (active.residencyKey !== worker.residencyKey) worker.residencyKey = null;
 
     if (outcome.ok) {
       active.resolve({ response: outcome.response });
@@ -567,6 +576,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       active: null,
       draining: null,
       evictTimer: null,
+      idleSince: 0,
       alive: true,
       residencyKey: null,
     };
@@ -834,7 +844,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       const worker = workers.get(model);
       // Only an idle worker has an eviction clock running.
       if (!worker?.evictTimer || worker.active || worker.draining) return;
-      armIdleEviction(model, worker);
+      armIdleEviction(model, worker, { restart: false });
     },
   };
 }
