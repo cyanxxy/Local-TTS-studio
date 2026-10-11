@@ -177,6 +177,29 @@ describe("voice library store", () => {
     await expect(fixedId.createVoice(PRESET)).rejects.toThrow(/already exists/);
   });
 
+  it("saves several voices atomically with linked caller-chosen ids", async () => {
+    const [designed, clone] = await store.createVoices([
+      { ...DESIGNED, id: "design-1" },
+      cloned({ designedFromId: "design-1" }),
+    ]);
+    expect(designed.id).toBe("design-1");
+    expect(clone).toMatchObject({ id: "voice-1", designedFromId: "design-1" });
+    expect(await store.createVoices([])).toEqual([]);
+
+    // Count, space, id and validation failures write nothing at all.
+    const small = createVoiceLibraryStore({ databaseName: "small", createId: () => `s-${++ids}`, maxVoices: 2 });
+    const kept = await small.createVoice(PRESET);
+    await expect(small.createVoices([PRESET, PRESET])).rejects.toThrow(/at most 2 voices/);
+    const tight = createVoiceLibraryStore({ databaseName: "tight-batch", createId: () => `b-${++ids}`, maxTotalAudioBytes: 300_000 });
+    await expect(tight.createVoices([cloned(), cloned()])).rejects.toThrow(/out of space/);
+    await expect(store.createVoices([{ ...PRESET, id: "design-1" }])).rejects.toThrow(/already exists/);
+    await expect(store.createVoices([{ ...PRESET, id: "x" }, { ...PRESET, id: "x" }])).rejects.toThrow(/different ids/);
+    await expect(store.createVoices([PRESET, { ...PRESET, id: "bad id!" }])).rejects.toThrow(/Voice ids must be/);
+    expect((await small.listVoices()).map((voice) => voice.id)).toEqual([kept.id]);
+    expect(await tight.listVoices()).toEqual([]);
+    expect(await store.listVoices()).toHaveLength(2);
+  });
+
   it("skips damaged records and leaves newer-schema records untouched", async () => {
     await store.createVoice(PRESET);
     await putRaw({ id: "broken", schemaVersion: 1, kind: "preset" });

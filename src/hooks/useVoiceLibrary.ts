@@ -51,6 +51,8 @@ export interface UseVoiceLibraryReturn {
   error: string | null;
   refresh: () => Promise<void>;
   createVoice: (input: NewVoice) => Promise<VoiceRecord>;
+  /** Save several voices atomically; see VoiceLibraryStore.createVoices. */
+  createVoices: (inputs: readonly NewVoice[]) => Promise<VoiceRecord[]>;
   updateVoice: (id: string, patch: VoicePatch) => Promise<VoiceRecord>;
   setFavorite: (id: string, favorite: boolean) => Promise<VoiceRecord>;
   deleteVoice: (id: string) => Promise<void>;
@@ -80,6 +82,7 @@ export function useVoiceLibrary(store: VoiceLibraryStore = getVoiceLibraryStore(
     error,
     refresh,
     createVoice: (input) => store.createVoice(input),
+    createVoices: (inputs) => store.createVoices(inputs),
     updateVoice: (id, patch) => store.updateVoice(id, patch),
     setFavorite: (id, favorite) => store.setFavorite(id, favorite),
     deleteVoice: (id) => store.deleteVoice(id),

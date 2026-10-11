@@ -1,6 +1,8 @@
+import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it, vi } from "vitest";
 import type { PresetSynthesize, SynthesizedAudioChunk } from "./presetSynthesis";
-import type { NewClonedVoice, NewDesignedVoice, VoicePreset, VoiceRecord } from "./voiceLibrary/types";
+import { createVoiceLibraryStore } from "./voiceLibrary/store";
+import type { VoicePreset } from "./voiceLibrary/types";
 import { VoiceLibraryValidationError } from "./voiceLibrary/validation";
 import {
   DEFAULT_VOICE_DESIGN_PREVIEW_TEXTS,
@@ -260,26 +262,33 @@ describe("saving a preview", () => {
     expect(warnings.filter((check) => check.id === "duration")).toHaveLength(1);
   });
 
-  it("saves the designed voice and an optional linked clone", async () => {
-    const created: Array<NewDesignedVoice | NewClonedVoice> = [];
-    const library = {
-      createVoice: vi.fn(async (input: NewDesignedVoice | NewClonedVoice) => {
-        created.push(input);
-        return { id: `voice-${created.length}`, kind: input.kind, name: input.name } as VoiceRecord;
-      }),
-    };
-    const designedOnly = await saveSelectedPreview(library, readySession(), { name: "Rasp" });
-    expect(designedOnly).toMatchObject({ designed: { id: "voice-1" }, cloned: null, warnings: [] });
+  it("saves the designed voice and an optional linked clone in one transaction", async () => {
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("IDBKeyRange", IDBKeyRange);
+    try {
+      let ids = 0;
+      const store = createVoiceLibraryStore({ createId: () => `voice-${++ids}` });
+      const designedOnly = await saveSelectedPreview(store, readySession(), { name: "Rasp" });
+      expect(designedOnly).toMatchObject({ designed: { id: "voice-1", kind: "designed" }, cloned: null, warnings: [] });
 
-    const both = await saveSelectedPreview(library, readySession(), { name: "Rasp", alsoClone: true, cloneName: "Rasp (clone)" });
-    expect(both.cloned).toMatchObject({ id: "voice-3", kind: "cloned", name: "Rasp (clone)" });
-    expect(created[2]).toMatchObject({ kind: "cloned", designedFromId: "voice-2" });
-    await saveSelectedPreview(library, readySession(), { name: "Same", alsoClone: true });
-    expect(created[4].name).toBe("Same");
+      const both = await saveSelectedPreview(store, readySession(), { name: "Rasp", alsoClone: true, cloneName: "Rasp (clone)" }, () => "design-1");
+      expect(both.designed).toMatchObject({ id: "design-1", kind: "designed", name: "Rasp" });
+      expect(both.cloned).toMatchObject({ kind: "cloned", name: "Rasp (clone)", designedFromId: "design-1", source: "voiceDesign" });
+      const same = await saveSelectedPreview(store, readySession(), { name: "Same", alsoClone: true });
+      expect(same.cloned?.name).toBe("Same");
+      expect(same.designed.id).toMatch(/[0-9a-f-]{36}/);
+      expect((await store.listVoices())).toHaveLength(5);
 
-    // A clip that cannot be cloned is rejected before anything is written.
-    library.createVoice.mockClear();
-    await expect(saveSelectedPreview(library, readySession(0.5), { name: "x", alsoClone: true })).rejects.toThrow(/needs at least/);
-    expect(library.createVoice).not.toHaveBeenCalled();
+      // A clip that cannot be cloned is rejected before anything is written.
+      await expect(saveSelectedPreview(store, readySession(0.5), { name: "x", alsoClone: true })).rejects.toThrow(/needs at least/);
+      expect((await store.listVoices())).toHaveLength(5);
+
+      // A store-level failure on the clone rolls back the designed voice too.
+      const small = createVoiceLibraryStore({ databaseName: "small", maxVoices: 1 });
+      await expect(saveSelectedPreview(small, readySession(), { name: "Warm", alsoClone: true })).rejects.toThrow(/at most 1 voices/);
+      expect(await small.listVoices()).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

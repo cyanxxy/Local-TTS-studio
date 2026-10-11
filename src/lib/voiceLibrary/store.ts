@@ -30,6 +30,7 @@ import {
   normalizeTranscript,
   normalizeVoiceDescription,
   normalizeVoiceDesign,
+  normalizeVoiceId,
   normalizeVoiceName,
   normalizeVoiceSource,
   normalizeVoiceTags,
@@ -116,6 +117,12 @@ export interface VoiceLibraryStore {
   listVoices(): Promise<VoiceRecord[]>;
   getVoice(id: string): Promise<VoiceRecord | null>;
   createVoice(input: NewVoice): Promise<VoiceRecord>;
+  /**
+   * Save several voices in one transaction: all of them or none. Inputs may
+   * carry caller-chosen ids so one can link to another (a clone's
+   * designedFromId naming the designed voice saved with it).
+   */
+  createVoices(inputs: readonly NewVoice[]): Promise<VoiceRecord[]>;
   updateVoice(id: string, patch: VoicePatch): Promise<VoiceRecord>;
   setFavorite(id: string, favorite: boolean): Promise<VoiceRecord>;
   deleteVoice(id: string): Promise<void>;
@@ -268,35 +275,49 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
     return await requestResult(transaction.objectStore(VOICES_STORE).getAll()) as unknown[];
   }
 
-  async function insertRecord(input: NewVoice): Promise<VoiceRecord> {
+  async function insertRecords(inputs: readonly NewVoice[]): Promise<VoiceRecord[]> {
+    if (inputs.length === 0) return [];
     const timestamp = now();
-    const { record, audio } = await buildRecord(input, createId(), timestamp);
+    const built: Array<Awaited<ReturnType<typeof buildRecord>>> = [];
+    for (const input of inputs) {
+      built.push(await buildRecord(input, input.id === undefined ? createId() : normalizeVoiceId(input.id), timestamp));
+    }
+    const ids = built.map(({ record }) => record.id);
+    if (new Set(ids).size !== ids.length) throw new VoiceLibraryValidationError("Voices saved together need different ids.");
     await withTransaction([VOICES_STORE, AUDIO_STORE], "readwrite", async (transaction) => {
       const existing = await readAllRaw(transaction);
-      if (existing.length >= maxVoices) {
+      if (existing.length + built.length > maxVoices) {
         throw new VoiceLibraryValidationError(`The voice library holds at most ${maxVoices} voices. Delete some voices first.`);
       }
       const usedBytes = existing.reduce<number>((total, raw) => {
         const parsed = parseStoredVoiceRecord(raw);
         return total + (parsed ? recordAudioBytes(parsed) : 0);
       }, 0);
-      if (usedBytes + recordAudioBytes(record) > maxTotalAudioBytes) {
+      const addedBytes = built.reduce((total, { record }) => total + recordAudioBytes(record), 0);
+      if (usedBytes + addedBytes > maxTotalAudioBytes) {
         throw new VoiceLibraryValidationError("The voice library is out of space. Delete cloned or designed voices first.");
       }
-      if (existing.some((raw) => (raw as { id?: unknown }).id === record.id)) {
+      if (existing.some((raw) => ids.includes((raw as { id?: unknown }).id as string))) {
         throw new VoiceLibraryValidationError("A voice with this id already exists.");
       }
-      transaction.objectStore(VOICES_STORE).put(record);
-      for (const entry of audio) {
-        transaction.objectStore(AUDIO_STORE).put({
-          key: audioKey(record.id, entry.role),
-          voiceId: record.id,
-          role: entry.role,
-          bytes: toStandaloneArrayBuffer(entry.bytes),
-        } satisfies StoredAudioRow);
+      for (const { record, audio } of built) {
+        transaction.objectStore(VOICES_STORE).put(record);
+        for (const entry of audio) {
+          transaction.objectStore(AUDIO_STORE).put({
+            key: audioKey(record.id, entry.role),
+            voiceId: record.id,
+            role: entry.role,
+            bytes: toStandaloneArrayBuffer(entry.bytes),
+          } satisfies StoredAudioRow);
+        }
       }
     });
     emitChange();
+    return built.map(({ record }) => record);
+  }
+
+  async function insertRecord(input: NewVoice): Promise<VoiceRecord> {
+    const [record] = await insertRecords([input]);
     return record;
   }
 
@@ -389,6 +410,8 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
     getVoice,
 
     createVoice: insertRecord,
+
+    createVoices: insertRecords,
 
     updateVoice(id, patch) {
       return mutateRecord(id, (record) => applyPatch(record, patch));

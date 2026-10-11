@@ -105,6 +105,16 @@ export function normalizeVoiceTags(value: unknown): string[] {
   return tags;
 }
 
+const VOICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/;
+
+/** A caller-chosen voice id: 1-100 letters, digits, ".", "_", ":" or "-". */
+export function normalizeVoiceId(value: unknown): string {
+  if (typeof value !== "string" || !VOICE_ID_PATTERN.test(value)) {
+    fail("Voice ids must be 1-100 letters, digits, dots, underscores, colons or dashes.");
+  }
+  return value;
+}
+
 export function normalizeTranscript(value: unknown): string {
   // Whitespace inside a transcript is preserved: it is sent verbatim.
   return boundedText(value, "Transcript", VOICE_LIBRARY_LIMITS.maxTranscriptLength, { required: true, collapse: false });

@@ -106,6 +106,8 @@ export interface DesignedVoiceRecord extends VoiceRecordBase {
 export type VoiceRecord = PresetVoiceRecord | ClonedVoiceRecord | DesignedVoiceRecord;
 
 interface NewVoiceBase {
+  /** Caller-chosen id, for linking voices saved together; generated when absent. */
+  id?: string;
   name: string;
   description?: string;
   tags?: readonly string[];

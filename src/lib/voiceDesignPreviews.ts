@@ -379,20 +379,27 @@ export function cloneReferenceFromPreview(
 
 /**
  * Save the selected preview: always as a designed voice and, when asked, also
- * as a Qwen3 Base clone linked back to it. The clone is validated before
- * anything is written, so a failing clip never leaves a half-saved pair.
+ * as a Qwen3 Base clone linked back to it. Both are written in one library
+ * transaction, so a failure (a bad clip, a full library) never leaves a
+ * half-saved pair.
  */
 export async function saveSelectedPreview(
-  library: { createVoice(input: NewDesignedVoice | NewClonedVoice): Promise<VoiceRecord> },
+  library: { createVoices(inputs: ReadonlyArray<NewDesignedVoice | NewClonedVoice>): Promise<VoiceRecord[]> },
   session: VoiceDesignPreviewSession,
   details: SavePreviewDetails & { alsoClone?: boolean; cloneName?: string },
+  createId: () => string = () => globalThis.crypto.randomUUID(),
 ): Promise<{ designed: VoiceRecord; cloned: VoiceRecord | null; warnings: ReferenceCheck[] }> {
   const designedInput = designedVoiceFromPreview(session, details);
-  const clone = details.alsoClone
-    ? cloneReferenceFromPreview(session, { ...details, name: details.cloneName ?? details.name })
-    : null;
-  const designed = await library.createVoice(designedInput);
-  if (!clone) return { designed, cloned: null, warnings: [] };
-  const cloned = await library.createVoice({ ...clone.voice, designedFromId: designed.id });
+  if (!details.alsoClone) {
+    const [designed] = await library.createVoices([designedInput]);
+    return { designed, cloned: null, warnings: [] };
+  }
+  const designedId = createId();
+  const clone = cloneReferenceFromPreview(session, {
+    ...details,
+    name: details.cloneName ?? details.name,
+    designedFromId: designedId,
+  });
+  const [designed, cloned] = await library.createVoices([{ ...designedInput, id: designedId }, clone.voice]);
   return { designed, cloned, warnings: clone.warnings };
 }
