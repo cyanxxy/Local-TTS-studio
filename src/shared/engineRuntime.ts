@@ -6,11 +6,7 @@ import type { SurfaceEngineId } from "../models/registry";
 import type { SupertonicSettings } from "../models/supertonic";
 import type { Supertonic3Settings } from "../models/supertonic3";
 
-/**
- * The fields every surface reads off whichever runtime is currently driving it.
- * The browser path is assembled from several hooks rather than one object, so
- * it is adapted into this shape instead of the shape being bent to fit it.
- */
+/** The fields every surface reads off whichever runtime is currently driving it. */
 export interface SurfaceRuntime {
   modelState: ModelState;
   canGenerate: boolean;
@@ -96,9 +92,3 @@ export interface EngineRuntime<Id extends SurfaceEngineId = SurfaceEngineId> ext
 
 /** The runtime for each engine Studio and the Reader can select. */
 export type EngineRuntimeMap = { readonly [Id in SurfaceEngineId]: EngineRuntime<Id> };
-
-/** Stops an engine's generation, and clears the audio it put in the shared player. */
-export interface RuntimeControls {
-  cancel: () => void;
-  reset: () => void;
-}

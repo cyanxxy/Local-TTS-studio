@@ -970,6 +970,34 @@ describe("SynthesisApp", () => {
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps the browser model loaded across page switches and stops only the engine left behind", async () => {
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
+    // Studio runs Audio8, but the Reader still selects the browser model.
+    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ active: false, retain: true }));
+    mock.audio8Runtime.cancelActiveGeneration.mockClear();
+
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    await screen.findByTestId("reader-text-value");
+    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ active: true, retain: true }));
+    expect(mock.audio8Runtime.cancelActiveGeneration).toHaveBeenCalled();
+
+    mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    mock.audio8Runtime.cancelActiveGeneration.mockClear();
+    mock.routing = { ...mock.routing, activePage: "neutts", isReaderPage: false, isStudioPage: false };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    // Leaving Studio stops Studio's engine; nothing ever restarted the browser model.
+    expect(mock.audio8Runtime.cancelActiveGeneration).toHaveBeenCalledTimes(1);
+    expect(mock.modelLoader.hardRestartModel).not.toHaveBeenCalled();
+  });
+
   it("restores and persists the selected Audio8 voice", async () => {
     mock.initialEngineSettings = { ...mock.initialEngineSettings, audio8: { voice: "iris" } };
     Object.defineProperty(window, "electron", {
