@@ -6,6 +6,7 @@ import {
   importDocumentFromDialog,
   importDocumentFromPath,
   isSupportedImportExtension,
+  stripPageFurniture,
   type DocumentParser,
   type ImportFs,
 } from "./documentImport";
@@ -192,6 +193,113 @@ describe("importDocumentFromPath", () => {
     await expect(
       importDocumentFromPath("/tmp/doc.pdf", parserFactory, makeFs()),
     ).rejects.toThrow('Failed to import "doc.pdf": Cannot find module');
+  });
+});
+
+const BODY_WORDS = [
+  "amber", "birch", "cedar", "delta", "ember", "fjord", "grove", "harbor", "inlet", "juniper", "kestrel", "lagoon",
+];
+
+// Body lines differ by words, not digits, because furniture matching ignores
+// digits; real prose never repeats line for line across pages.
+function bodyLines(index: number): string {
+  const word = BODY_WORDS[index];
+  return `The ${word} paragraph begins on this page and\ncontinues the ${word} story to its end.`;
+}
+
+// A book fixture: every page carries a running header, a body, and a footer
+// page number, as LiteParse reports them for a typeset PDF.
+function bookPages(count = 10): string[] {
+  return Array.from({ length: count }, (_, index) => {
+    const page = index + 1;
+    return [
+      `The Lighthouse Keeper   Chapter ${Math.ceil(page / 4)}`,
+      "",
+      bodyLines(index),
+      "",
+      `Page ${page} of ${count}`,
+    ].join("\n");
+  });
+}
+
+describe("stripPageFurniture", () => {
+  it("removes running headers and footers that repeat at page edges", () => {
+    const pages = bookPages().map((page, index) => `${page}\n© 2026 Lighthouse Press. Draft ${index + 1}`);
+    const stripped = stripPageFurniture(pages);
+    expect(stripped).toHaveLength(10);
+    for (const [index, page] of stripped.entries()) {
+      expect(page.trim()).toBe(bodyLines(index));
+    }
+  });
+
+  it("removes bare page numbers at page tops and bottoms", () => {
+    const formats = ["12", "- 13 -", "Page 14", "15 / 300", "xvi", "— 17 —", "p. 18", "- xc -"];
+    const pages = formats.map((pageNumber, index) => (
+      index % 2 === 0
+        ? `${pageNumber}\n${bodyLines(index)}`
+        : `${bodyLines(index)}\n${pageNumber}`
+    ));
+    expect(stripPageFurniture(pages)).toEqual(formats.map((_, index) => bodyLines(index)));
+  });
+
+  it("keeps numbers and roman-letter words that sit inside the body or are not page numbers", () => {
+    const pages = [
+      "Intro line\n12\nThe body keeps an inner 12.\nMore body\nOutro line",
+      "mix\nA lone word made of roman letters stays.",
+      "I\nA capital pronoun stays too.",
+    ];
+    expect(stripPageFurniture(pages)).toEqual(pages);
+  });
+
+  it("keeps an edge line that repeats on only a minority of pages", () => {
+    const pages = Array.from({ length: 10 }, (_, index) => (
+      index < 3 ? `Part One\n${bodyLines(index)}` : bodyLines(index)
+    ));
+    expect(stripPageFurniture(pages)).toEqual(pages);
+  });
+
+  it("leaves documents shorter than three pages untouched", () => {
+    const pages = ["Header\nFirst body.\n1", "Header\nSecond body.\n2"];
+    expect(stripPageFurniture(pages)).toEqual(pages);
+  });
+
+  it("never empties a page whose only text is a repeated line", () => {
+    const pages = [
+      `Shared title\n${bodyLines(0)}\n1`,
+      `Shared title\n${bodyLines(1)}\n2`,
+      `Shared title\n${bodyLines(2)}\n3`,
+      "Shared title\n4",
+    ];
+    expect(stripPageFurniture(pages)).toEqual([bodyLines(0), bodyLines(1), bodyLines(2), "Shared title"]);
+  });
+});
+
+describe("importDocumentFromPath page cleanup", () => {
+  it("strips page furniture from per-page parser output before joining pages", async () => {
+    const parser: DocumentParser = {
+      parse: vi.fn().mockResolvedValue({ pages: bookPages(5), pageCount: 5 }),
+    };
+    const result = await importDocumentFromPath("/tmp/book.pdf", makeParserFactory(parser), makeFs());
+    expect(result.pageCount).toBe(5);
+    expect(result.text).not.toMatch(/Lighthouse Keeper|Page \d of/);
+    expect(result.text.split("\n\n")).toEqual(Array.from({ length: 5 }, (_, index) => bodyLines(index)));
+  });
+
+  it("joins short per-page output without removing anything", async () => {
+    const parser: DocumentParser = {
+      parse: vi.fn().mockResolvedValue({ pages: ["Title\nOne\n1", "Title\nTwo\n2"], pageCount: 2 }),
+    };
+    const result = await importDocumentFromPath("/tmp/memo.pdf", makeParserFactory(parser), makeFs());
+    expect(result.text).toBe("Title\nOne\n1\n\nTitle\nTwo\n2");
+  });
+
+  it("still enforces the text cap on per-page output", async () => {
+    const parser: DocumentParser = {
+      parse: vi.fn().mockResolvedValue({ pages: ["a".repeat(MAX_IMPORT_TEXT_CHARS + 1)], pageCount: 1 }),
+    };
+    await expect(
+      importDocumentFromPath("/tmp/tome.pdf", makeParserFactory(parser), makeFs()),
+    ).rejects.toThrow("contains too much text to import");
   });
 });
 

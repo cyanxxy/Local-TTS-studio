@@ -11,10 +11,14 @@ export interface DocumentImportSuccess {
 
 export type DocumentImportResult = { canceled: true } | DocumentImportSuccess;
 
-export interface DocumentParseOutcome {
-  text: string;
-  pageCount?: number;
-}
+/**
+ * A parser returns either joined text or, when it knows the page layout,
+ * per-page text so running headers, footers, and page numbers can be removed
+ * before the pages are joined.
+ */
+export type DocumentParseOutcome =
+  | { text: string; pageCount?: number }
+  | { pages: readonly string[]; pageCount?: number };
 
 export interface DocumentParser {
   parse: (filePath: string) => Promise<DocumentParseOutcome>;
@@ -88,6 +92,82 @@ function normalizeImportedText(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }
 
+// Running headers and footers live in the first and last few non-empty lines
+// of a page. A line there counts as furniture when its digit-insensitive form
+// recurs on at least FURNITURE_PAGE_RATIO of the pages, and never on fewer than
+// MIN_FURNITURE_PAGES pages, so short documents are left untouched.
+const PAGE_EDGE_LINES = 2;
+const MIN_FURNITURE_PAGES = 3;
+const FURNITURE_PAGE_RATIO = 0.4;
+// "12", "- 12 -", "Page 12", "p. 12", "12 / 300", "Page 3 of 20".
+const ARABIC_PAGE_NUMBER_LINE =
+  /^(?:[-–—]\s*)?(?:(?:page|p\.)\s*)?\d{1,4}(?:\s*(?:\/|of)\s*\d{1,4})?(?:\s*[-–—])?$/i;
+// Front-matter numbering such as "iv" or "- xii -": lowercase, well formed,
+// and below 100, so a lone "I" or a word made of roman letters ("mix", "civil")
+// is kept.
+const ROMAN_PAGE_NUMBER_LINE = /^(?:[-–—]\s*)?([ivxlc]{1,8})(?:\s*[-–—])?$/;
+const ROMAN_NUMERAL = /^(?:xc|xl|l?x{0,3})(?:ix|iv|v?i{0,3})$/;
+
+function isPageNumberLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (ARABIC_PAGE_NUMBER_LINE.test(trimmed)) return true;
+  const numeral = trimmed.match(ROMAN_PAGE_NUMBER_LINE)?.[1];
+  return numeral !== undefined && ROMAN_NUMERAL.test(numeral);
+}
+
+function furnitureKey(line: string): string {
+  return line.replace(/\d+/g, "#").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function pageEdgeLineIndexes(lines: readonly string[]): number[] {
+  const nonEmpty = lines.flatMap((line, index) => (line.trim() ? [index] : []));
+  if (nonEmpty.length <= PAGE_EDGE_LINES * 2) return nonEmpty;
+  return [...nonEmpty.slice(0, PAGE_EDGE_LINES), ...nonEmpty.slice(-PAGE_EDGE_LINES)];
+}
+
+/**
+ * Peels furniture lines off each page edge, walking inward and stopping at
+ * the first line that is not furniture, so body text between furniture lines
+ * is never touched. Repeated lines are kept when removing them would leave the
+ * page with no text at all.
+ */
+function peelPageFurniture(page: string, repeatedKeys: ReadonlySet<string>): string {
+  const lines = page.split("\n");
+  const nonEmpty = lines.flatMap((line, index) => (line.trim() ? [index] : []));
+  const pageNumbers = new Set<number>();
+  const repeated = new Set<number>();
+  const peel = (order: readonly number[]) => {
+    for (const index of order.slice(0, PAGE_EDGE_LINES)) {
+      if (isPageNumberLine(lines[index])) pageNumbers.add(index);
+      else if (repeatedKeys.has(furnitureKey(lines[index]))) repeated.add(index);
+      else break;
+    }
+  };
+  peel(nonEmpty);
+  peel([...nonEmpty].reverse());
+
+  const keepsText = nonEmpty.some((index) => !pageNumbers.has(index) && !repeated.has(index));
+  const removed = keepsText ? new Set([...pageNumbers, ...repeated]) : pageNumbers;
+  return lines.filter((_, index) => !removed.has(index)).join("\n");
+}
+
+/** Removes running headers, footers, and page numbers from parsed pages. */
+export function stripPageFurniture(pages: readonly string[]): string[] {
+  if (pages.length < MIN_FURNITURE_PAGES) return [...pages];
+  const normalizedPages = pages.map((page) => page.replace(/\r\n?/g, "\n"));
+  const pageCounts = new Map<string, number>();
+  for (const page of normalizedPages) {
+    const lines = page.split("\n");
+    const keys = new Set(pageEdgeLineIndexes(lines).map((index) => furnitureKey(lines[index])));
+    for (const key of keys) pageCounts.set(key, (pageCounts.get(key) ?? 0) + 1);
+  }
+  const threshold = Math.max(MIN_FURNITURE_PAGES, Math.ceil(pages.length * FURNITURE_PAGE_RATIO));
+  const repeatedKeys = new Set(
+    [...pageCounts].filter(([, count]) => count >= threshold).map(([key]) => key),
+  );
+  return normalizedPages.map((page) => peelPageFurniture(page, repeatedKeys));
+}
+
 function describeParseFailure(fileName: string, extension: string, error: unknown): Error {
   const message = error instanceof Error ? error.message : String(error);
   const lowered = message.toLowerCase();
@@ -158,7 +238,8 @@ export async function importDocumentFromPath(
     } catch (error) {
       throw describeParseFailure(fileName, extension, error);
     }
-    text = outcome.text;
+    // Pages are joined the way LiteParse joins its own text output.
+    text = "pages" in outcome ? stripPageFurniture(outcome.pages).join("\n\n") : outcome.text;
     pageCount = outcome.pageCount;
   }
 
