@@ -2,11 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   ALL_TEXT_CLEANUP_ACTIONS,
   DEFAULT_TEXT_CLEANUP_ACTIONS,
-  buildTextDiff,
   cleanupText,
   type TextCleanupAction,
 } from "./cleanup";
-import { applyTextEdits } from "./textEdits";
+import { applyTextEdits, buildTextDiff } from "./textEdits";
 
 type Fixture = readonly [input: string, expected: string];
 

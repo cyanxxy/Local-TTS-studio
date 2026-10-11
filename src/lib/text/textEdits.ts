@@ -172,3 +172,32 @@ export function chainTextRewrites(first: TextOffsetMap, second: TextOffsetMap): 
     toOutputOffset: (offset) => second.toOutputOffset(first.toOutputOffset(offset)),
   };
 }
+
+export type TextDiffPart =
+  | { type: "equal"; text: string; sourceStart: number }
+  | { type: "removed"; text: string; sourceStart: number; reason?: string }
+  | { type: "inserted"; text: string; sourceStart: number; reason?: string };
+
+/**
+ * Preview diff of a rewrite: unchanged text, removed source text and inserted
+ * replacement text, in reading order. Works for any `TextRewrite` (cleanup,
+ * normalization, pronunciation or the spoken-text pipeline).
+ */
+export function buildTextDiff(rewrite: Pick<TextRewrite, "source" | "edits">): TextDiffPart[] {
+  const parts: TextDiffPart[] = [];
+  let cursor = 0;
+  const pushEdit = (edit: AppliedTextEdit) => {
+    if (edit.start > cursor) parts.push({ type: "equal", text: rewrite.source.slice(cursor, edit.start), sourceStart: cursor });
+    const reason = edit.reason === undefined ? {} : { reason: edit.reason };
+    if (edit.end > edit.start) {
+      parts.push({ type: "removed", text: rewrite.source.slice(edit.start, edit.end), sourceStart: edit.start, ...reason });
+    }
+    if (edit.replacement) parts.push({ type: "inserted", text: edit.replacement, sourceStart: edit.start, ...reason });
+    cursor = edit.end;
+  };
+  rewrite.edits.forEach(pushEdit);
+  if (cursor < rewrite.source.length) {
+    parts.push({ type: "equal", text: rewrite.source.slice(cursor), sourceStart: cursor });
+  }
+  return parts;
+}

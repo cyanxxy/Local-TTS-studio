@@ -144,12 +144,19 @@ export function applyPronunciationRules(text: string, rules: readonly Pronunciat
   return matcher.apply(text);
 }
 
+/**
+ * `[[word]]`, `**word**` or `*word*`, scanned left to right in one pass.
+ * Shared with the spoken-text pipeline (`buildSpeechTextRewrite`).
+ */
+export const EMPHASIS_MARKUP = /\[\[([^[\]]+)\]\]|\*\*([^*]+)\*\*|\*([^*]+)\*/dg;
+
 /** Removes `*word*`, `**word**` and `[[word]]` emphasis markers, keeping the words. */
 export function stripEmphasisMarkup(text: string): string {
-  return text
-    .replace(/\[\[([^[\]]+)\]\]/g, "*$1*")
-    .replace(/\*\*([^*]+)\*\*/g, "*$1*")
-    .replace(/\*([^*]+)\*/g, "$1");
+  return text.replace(EMPHASIS_MARKUP, (match: string) => {
+    // "[[" and "**" are two characters; a single "*" is never followed by another.
+    const markerLength = match[0] === "[" || match[1] === "*" ? 2 : 1;
+    return match.slice(markerLength, -markerLength);
+  });
 }
 
 /**

@@ -160,6 +160,12 @@ export function parseSpeechBreaks(text: string): ParsedSpeechBreaks {
   return { segments, breaks, leadingPauseSec };
 }
 
+/** Tags separated only by spaces or tabs, with the spaces around them, go as one run. */
+const BREAK_MARKUP_RUN = new RegExp(
+  `[ \\t]*(?:${BREAK_MARKUP.source})(?:[ \\t]*(?:${BREAK_MARKUP.source}))*[ \\t]*`,
+  "giu",
+);
+
 /**
  * Removes pause tags so they are never spoken, collapsing the space around a
  * tag to one space between words and to nothing next to a line break or at
@@ -167,8 +173,7 @@ export function parseSpeechBreaks(text: string): ParsedSpeechBreaks {
  */
 export function stripSpeechBreakMarkup(text: string): string {
   if (!text.includes("<") && !text.includes("[")) return text;
-  const pattern = new RegExp(`[ \\t]*(?:${BREAK_MARKUP.source})[ \\t]*`, "giu");
-  return text.replace(pattern, (match: string, ...args: unknown[]) => {
+  return text.replace(BREAK_MARKUP_RUN, (match: string, ...args: unknown[]) => {
     const offset = args[args.length - 2] as number;
     const before = text[offset - 1];
     const after = text[offset + match.length];
