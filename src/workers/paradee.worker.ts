@@ -1,7 +1,8 @@
 /**
  * Paradee-8M worker: one 9 MB int8 graph, WASM only. It is small and fast
- * enough (about 13x real time on one thread) that skipping WebGPU's adapter
- * and shader start-up is what makes it start instantly.
+ * enough (about 5x real time on one WASM thread, 11x on four, measured with
+ * onnxruntime-web 1.26) that skipping WebGPU's adapter and shader start-up is
+ * what makes it start instantly.
  */
 import { PHONEMIZER_MODULE_URL } from "virtual:phonemizer-assets";
 import { loadEspeakPhonemizer } from "../lib/espeakPhonemizer";
