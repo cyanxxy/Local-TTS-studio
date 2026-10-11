@@ -22,19 +22,20 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function parseWorkerResult(message: unknown): DocumentParseOutcome {
+function parseWorkerResult(message: unknown, maxPages: number): DocumentParseOutcome {
   if (!isRecord(message)) throw new Error("Document parser worker returned an invalid response.");
   if (message.ok !== true) {
     throw new Error(typeof message.error === "string" ? message.error : "Document parser worker failed.");
   }
-  if (typeof message.text !== "string") {
+  const { pages } = message;
+  if (!Array.isArray(pages) || !pages.every((page): page is string => typeof page === "string")) {
     throw new Error("Document parser worker returned invalid text.");
   }
   const pageCount = Number(message.pageCount);
-  if (!Number.isSafeInteger(pageCount) || pageCount < 0) {
+  if (!Number.isSafeInteger(pageCount) || pageCount !== pages.length || pageCount > maxPages) {
     throw new Error("Document parser worker returned an invalid page count.");
   }
-  return { text: message.text, pageCount };
+  return { pages, pageCount };
 }
 
 export class DocumentParseWorkerClient implements DocumentParser {
@@ -95,7 +96,7 @@ export class DocumentParseWorkerClient implements DocumentParser {
       };
       worker.on("message", (message) => {
         try {
-          settle({ value: parseWorkerResult(message) });
+          settle({ value: parseWorkerResult(message, this.#maxPages) });
         } catch (cause) {
           settle({ error: cause instanceof Error ? cause : new Error(String(cause)) });
         }
