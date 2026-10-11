@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { TextChunk } from "../lib/chunking";
+import { SUPERTONIC_FIRST_CHUNK_MAX_CHARS, type TextChunk } from "../lib/chunking";
 import type { WorkerInMessage, WorkerOutMessage } from "../types";
 
 const REVISION = "3cadd1ee6394adea1bd021217a0e650ede09a323";
@@ -163,7 +163,7 @@ async function loadSupertonic3Worker({
   }));
   vi.doMock("../lib/chunking", async (importOriginal) => {
     const actual = await importOriginal<typeof import("../lib/chunking")>();
-    return chunks ? { ...actual, chunkWithConstraintsDetailed: () => chunks } : actual;
+    return chunks ? { ...actual, chunkForSupertonicDetailed: () => chunks } : actual;
   });
 
   await import("./supertonic3.worker");
@@ -317,6 +317,24 @@ describe("Supertonic 3 generation", () => {
     const chunks = messages.filter((message) => message.type === "AUDIO_CHUNK");
     expect(Array.from(chunks[0].audio)).toEqual([0.5, 0.5, 0, 0, 0]);
     expect(Array.from(chunks[1].audio)).toEqual([0.5, 0.5, 0, 0, 0, 0, 0]);
+  });
+});
+
+describe("Supertonic 3 first chunk", () => {
+  it("caps the first chunk so the first audio arrives sooner, with exact text offsets", async () => {
+    const text = Array.from({ length: 12 }, (_, index) => `Sentence ${index} keeps the long story going on.`).join(" ");
+    const { dispatch, messages } = await loadSupertonic3Worker();
+
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+    dispatch({ type: "GENERATE", text, voice: "M1", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(messages.some((message) => message.type === "GENERATION_COMPLETE")).toBe(true));
+
+    const chunks = messages.filter((message) => message.type === "AUDIO_CHUNK");
+    expect(chunks.length).toBeGreaterThan(2);
+    expect(chunks[0].textEnd! - chunks[0].textStart!).toBeLessThanOrEqual(SUPERTONIC_FIRST_CHUNK_MAX_CHARS);
+    expect(Math.max(...chunks.map((chunk) => chunk.textEnd! - chunk.textStart!))).toBeGreaterThan(SUPERTONIC_FIRST_CHUNK_MAX_CHARS);
+    for (const chunk of chunks) expect(text.slice(chunk.textStart, chunk.textEnd)).toBe(chunk.text);
   });
 });
 

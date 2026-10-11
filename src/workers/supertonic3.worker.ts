@@ -7,7 +7,7 @@ import {
   SUPERTONIC3_MODEL_REVISION,
   SUPERTONIC3_VOICES,
 } from "../constants";
-import { chunkWithConstraintsDetailed } from "../lib/chunking";
+import { chunkForSupertonicDetailed } from "../lib/chunking";
 import { resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { getSafeWasmThreadCount } from "../lib/onnxRuntime";
@@ -300,7 +300,7 @@ async function generate(message: GenerateMessage, ticket: GenerationTicket): Pro
     : "en";
   const style = await loadStyle(message.voice);
   if (!ticket.isCurrent()) return;
-  const chunks = chunkWithConstraintsDetailed(message.text, {
+  const chunks = chunkForSupertonicDetailed(message.text, {
     minCharacters: 30,
     maxCharacters: language === "ko" || language === "ja" ? 120 : 280,
     runtime: { backend, quality: message.quality },

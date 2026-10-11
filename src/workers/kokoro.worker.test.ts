@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { KOKORO_FIRST_UNIT_MAX_CHARS } from "../lib/chunking";
 import type { WorkerInMessage, WorkerOutMessage } from "../types";
 
 interface MockKokoroInstance {
@@ -11,13 +12,15 @@ interface MockKokoroInstance {
   model?: { dispose: ReturnType<typeof vi.fn> };
 }
 
+type KokoroPhonemize = (text: string, language?: string) => Promise<string>;
+
 interface LoadOptions {
   baseFetch?: typeof fetch;
   canUseWebGPU?: boolean;
   fallbackVoices?: string[];
   instances?: MockKokoroInstance[];
   /** The phonemizer vite.kokoroAssets.ts exports from kokoro.web.js; absent by default. */
-  phonemize?: (text: string, language?: string) => Promise<string>;
+  phonemize?: KokoroPhonemize;
 }
 
 function createRawAudio(length: number = 2, samplingRate: number = 10) {
@@ -557,6 +560,31 @@ describe("Kokoro soft abort", () => {
   });
 });
 
+describe("Kokoro first unit", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("caps the first unit so the first audio arrives sooner, with exact text offsets", async () => {
+    const text = Array.from({ length: 12 }, (_, index) => `Sentence ${index} keeps the long story going on.`).join(" ");
+    const instance = createInstance([], { af_heart: {} });
+    const { dispatch, postedMessages } = await loadWorkerModule({ instances: [instance] });
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+
+    dispatch({ type: "GENERATE", text, voice: "af_heart", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "GENERATION_COMPLETE")).toBe(true));
+
+    const chunks = postedMessages.filter((message): message is Extract<WorkerOutMessage, { type: "AUDIO_CHUNK" }> => (
+      message.type === "AUDIO_CHUNK"
+    ));
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks[0].textEnd! - chunks[0].textStart!).toBeLessThanOrEqual(KOKORO_FIRST_UNIT_MAX_CHARS);
+    expect(chunks[1].textEnd! - chunks[1].textStart!).toBeGreaterThan(KOKORO_FIRST_UNIT_MAX_CHARS);
+    for (const chunk of chunks) expect(text.slice(chunk.textStart, chunk.textEnd)).toBe(chunk.text);
+  });
+});
+
 describe("Kokoro context budget", () => {
   // One 135-character sentence: no sentence or line break to merge across.
   const SENTENCE = "The keeper climbed the spiral stairs every evening, counting each worn step, and at the top he lit the lamp that guided the ships home.";
@@ -573,7 +601,7 @@ describe("Kokoro context budget", () => {
     return instance;
   }
 
-  async function generateWith(instance: MockKokoroInstance, voice: string, phonemize = vi.fn(async (text: string) => text)) {
+  async function generateWith(instance: MockKokoroInstance, voice: string, phonemize = vi.fn<KokoroPhonemize>(async (text) => text)) {
     const loaded = await loadWorkerModule({ instances: [instance], phonemize });
     loaded.dispatch({ type: "LOAD" });
     await vi.waitFor(() => expect(loaded.postedMessages.some((message) => message.type === "READY")).toBe(true));
@@ -643,7 +671,7 @@ describe("Kokoro context budget", () => {
   it("stops before synthesizing when the generation is aborted while phonemizing", async () => {
     const pending = deferred<string>();
     const instance = createBudgetedInstance(3);
-    const { dispatch, postedMessages } = await generateWith(instance, "af_heart", vi.fn(() => pending.promise));
+    const { dispatch, postedMessages } = await generateWith(instance, "af_heart", vi.fn<KokoroPhonemize>(() => pending.promise));
 
     dispatch({ type: "ABORT", generationId: "g" });
     pending.resolve(SENTENCE);
