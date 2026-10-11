@@ -761,6 +761,7 @@ export function AdvancedReaderPage({
           activeRange={activeRange}
           highlights={sectionHighlights}
           sectionStart={sectionStart}
+          language={documentLanguage}
           chapterHeading={chapterHeading}
           headingBlockStart={headingBlockStart}
           clock={clock}

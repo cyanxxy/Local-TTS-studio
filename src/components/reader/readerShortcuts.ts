@@ -13,6 +13,9 @@ export const READER_SHORTCUTS: readonly ReaderShortcut[] = [
   { keys: "⌘/Ctrl Enter", action: "Generate speech" },
   { keys: "⌘/Ctrl .", action: "Stop generating" },
   { keys: "Double-click", action: "Listen from that word" },
+  { keys: "Enter", action: "Listen from the focused paragraph" },
+  { keys: "⇧Enter", action: "Select the focused paragraph" },
+  { keys: "↑ / ↓", action: "Move between paragraphs once one is focused" },
   { keys: "F", action: "Toggle focus layout" },
   { keys: "?", action: "Show these shortcuts" },
 ];

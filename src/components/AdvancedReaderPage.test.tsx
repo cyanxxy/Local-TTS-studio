@@ -434,6 +434,105 @@ describe("AdvancedReaderPage", () => {
     });
   });
 
+  describe("keyboard and screen-reader access", () => {
+    const text = "First paragraph to read.\nSecond paragraph follows.";
+
+    it("keeps one paragraph in the tab order and listens from it with Enter", () => {
+      const onNavigateToOffset = vi.fn();
+      const { container } = renderReader({ text, onNavigateToOffset });
+      const paragraphs = [...container.querySelectorAll<HTMLElement>("article [data-block-start]")];
+
+      expect(paragraphs.map((paragraph) => paragraph.tabIndex)).toEqual([0, -1]);
+      expect(paragraphs[0]).toHaveAccessibleDescription(/Press Enter to listen from this paragraph/);
+
+      paragraphs[0].focus();
+      fireEvent.keyDown(paragraphs[0], { key: "ArrowDown" });
+      expect(paragraphs[1]).toHaveFocus();
+      expect(paragraphs.map((paragraph) => paragraph.tabIndex)).toEqual([-1, 0]);
+
+      fireEvent.keyDown(paragraphs[1], { key: "Enter" });
+      expect(onNavigateToOffset).toHaveBeenCalledWith(text.indexOf("Second"), undefined);
+
+      fireEvent.keyDown(paragraphs[1], { key: "ArrowUp" });
+      expect(paragraphs[0]).toHaveFocus();
+    });
+
+    it("selects a paragraph with Shift+Enter so the toolbar can bookmark it", () => {
+      const book = createReaderDocument({ id: "keyboard-bookmark", text });
+      const onAddBookmark = vi.fn();
+      const { container } = renderReader({ text, documents: [book], activeDocument: book, onAddBookmark });
+      const second = container.querySelectorAll<HTMLElement>("article [data-block-start]")[1];
+
+      second.focus();
+      fireEvent.keyDown(second, { key: "Enter", shiftKey: true });
+
+      expect(window.getSelection()?.toString()).toBe("Second paragraph follows.");
+      fireEvent.click(screen.getByRole("button", { name: "Bookmark" }));
+      expect(onAddBookmark).toHaveBeenCalledWith(expect.objectContaining({
+        label: "Second paragraph follows.",
+        textOffset: text.indexOf("Second"),
+      }));
+    });
+
+    it("opens the selection toolbar for a selection made without the mouse", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = renderReader({ text });
+        const textNode = container.querySelector("article span")!.firstChild!;
+        const range = document.createRange();
+        range.setStart(textNode, 6);
+        range.setEnd(textNode, 15);
+        window.getSelection()!.removeAllRanges();
+        window.getSelection()!.addRange(range);
+        act(() => {
+          document.dispatchEvent(new Event("selectionchange"));
+        });
+        expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+
+        act(() => {
+          vi.advanceTimersByTime(250);
+        });
+        expect(screen.getByRole("toolbar", { name: "Selected passage" })).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+        window.getSelection()?.removeAllRanges();
+      }
+    });
+
+    it("waits for the mouseup while a pointer drag is still selecting", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = renderReader({ text });
+        const article = container.querySelector("article")!;
+        const textNode = article.querySelector("span")!.firstChild!;
+        fireEvent.pointerDown(article);
+        const range = document.createRange();
+        range.setStart(textNode, 6);
+        range.setEnd(textNode, 15);
+        window.getSelection()!.removeAllRanges();
+        window.getSelection()!.addRange(range);
+        act(() => {
+          document.dispatchEvent(new Event("selectionchange"));
+          vi.advanceTimersByTime(250);
+        });
+
+        expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+      } finally {
+        vi.useRealTimers();
+        window.getSelection()?.removeAllRanges();
+      }
+    });
+
+    it("marks the text with the book's language", () => {
+      const book = createReaderDocument({ id: "french", text: "Bonjour tout le monde.", language: "fr" });
+      const { container } = renderReader({ text: book.text, documents: [book], activeDocument: book });
+
+      expect(container.querySelector("article")).toHaveAttribute("lang", "fr");
+      fireEvent.click(screen.getByRole("button", { name: "Edit current section" }));
+      expect(screen.getByLabelText("Reading Text")).toHaveAttribute("lang", "fr");
+    });
+  });
+
   it("pages between reading sections with the arrow keys", () => {
     const book = createReaderDocument({
       id: "keyboard-reader",

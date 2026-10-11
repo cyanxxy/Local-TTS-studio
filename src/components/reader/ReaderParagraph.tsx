@@ -10,6 +10,10 @@ interface ReaderParagraphProps {
   wordEnd: number;
   /** The chapter's own title line, drawn as the chapter heading. */
   heading?: boolean;
+  /** This paragraph is the reading pane's one tab stop; the rest focus by script. */
+  tabStop?: boolean;
+  /** Id of the hint describing the paragraph's keyboard actions. */
+  describedBy?: string;
 }
 
 // A still wash: a breathing highlight kept moving in the corner of the eye
@@ -29,15 +33,20 @@ export const ReaderParagraph = memo(function ReaderParagraph({
   wordStart,
   wordEnd,
   heading = false,
+  tabStop = false,
+  describedBy,
 }: ReaderParagraphProps) {
+  const layoutClassName = heading
+    ? "reader-chapter-heading"
+    : block.blankLineBefore ? "reader-paragraph-spaced" : "";
   return (
     <p
       data-block-start={block.start}
       role={heading ? "heading" : undefined}
       aria-level={heading ? 3 : undefined}
-      className={heading
-        ? "reader-chapter-heading"
-        : block.blankLineBefore ? "reader-paragraph-spaced" : undefined}
+      tabIndex={tabStop ? 0 : -1}
+      aria-describedby={describedBy}
+      className={`${layoutClassName} rounded-sm outline-none focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-accent/50`}
     >
       {parts.map((part) => {
         const className = overlayPartClassName(part.isActive);

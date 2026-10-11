@@ -2,7 +2,12 @@ import {
   memo,
   useCallback,
   useEffect,
+  useEffectEvent,
   useMemo,
+  useRef,
+  useState,
+  type FocusEvent as ReactFocusEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type RefObject,
 } from "react";
@@ -33,6 +38,13 @@ const DOCUMENT_TEXT_CLASSES =
 
 /* Horizontal padding comes from .reader-doc-pad, which centers a readable
    text column inside the full-bleed panel at any window size. */
+/** How long a keyboard or assistive-technology selection settles before the toolbar opens. */
+const SELECTION_SETTLE_MS = 250;
+
+function paragraphOf(target: EventTarget): HTMLElement | null {
+  return target instanceof HTMLElement && target.dataset.blockStart !== undefined ? target : null;
+}
+
 function documentPadding(fullScreen: boolean): string {
   return fullScreen
     ? "reader-doc-pad pt-8 pb-44 sm:pt-12 sm:pb-48"
@@ -53,6 +65,8 @@ interface ReaderTextPaneProps {
   highlights: readonly SectionHighlight[];
   /** Document offset of the section, for mapping selections back to the book. */
   sectionStart: number;
+  /** BCP 47 language of the book, for pronunciation by screen readers and hyphenation. */
+  language?: string;
   /** Shown above the text when the chapter does not open with its own title line. */
   chapterHeading: { title: string; continued: boolean } | null;
   /** Offset of the first block when that block is the chapter's own title line. */
@@ -107,6 +121,7 @@ export const ReaderTextPane = memo(function ReaderTextPane({
   activeRange,
   highlights,
   sectionStart,
+  language,
   chapterHeading,
   headingBlockStart,
   clock,
@@ -165,10 +180,94 @@ export const ReaderTextPane = memo(function ReaderTextPane({
     onSelectPassage(null);
   }, [onSelectPassage]);
 
+  // Keyboard (caret browsing) and screen-reader selections never fire a
+  // mouseup, so a settled selection in the article opens the toolbar too.
+  // Pointer selections still wait for the mouseup, which knows about
+  // double-clicks.
+  const pointerDownRef = useRef(false);
+  const handleSelectionSettled = useEffectEvent(() => {
+    const article = articleRef.current;
+    if (pointerDownRef.current || !article) return;
+    const selection = readArticleSelection(article, text.length);
+    if (!selection || selection.collapsed) return;
+    const quote = normalizeQuote(selection.quote);
+    const textOffset = sectionStart + selection.start;
+    const endOffset = sectionStart + selection.end;
+    if (!quote || (selectedPassage?.textOffset === textOffset && selectedPassage.endOffset === endOffset)) return;
+    onSelectPassage({ quote, textOffset, endOffset });
+  });
+  useEffect(() => {
+    if (editing) return;
+    let timer: number | undefined;
+    const handleSelectionChange = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => handleSelectionSettled(), SELECTION_SETTLE_MS);
+    };
+    const handlePointerUp = () => {
+      pointerDownRef.current = false;
+    };
+    document.addEventListener("selectionchange", handleSelectionChange);
+    document.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener("selectionchange", handleSelectionChange);
+      document.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [editing]);
+
+  // One paragraph is in the tab order at a time (a roving tab stop): the last
+  // one focused while it still exists, else the one being spoken, else the
+  // first. ↑/↓ move between paragraphs once one has focus.
+  const [focusedBlockStart, setFocusedBlockStart] = useState<number | null>(null);
+  const tabStopBlockStart = blocks.some((block) => block.start === focusedBlockStart)
+    ? focusedBlockStart
+    : (activeRange && blocks.find((block) => activeRange.start < block.end)?.start) ?? blocks[0]?.start;
+  const paragraphHintId = `${readingTextId}-paragraph-hint`;
+
+  const handleArticleFocus = useCallback((event: ReactFocusEvent) => {
+    const paragraph = paragraphOf(event.target);
+    if (paragraph) setFocusedBlockStart(Number(paragraph.dataset.blockStart));
+  }, []);
+
+  const handleArticleKeyDown = useCallback((event: ReactKeyboardEvent) => {
+    const paragraph = paragraphOf(event.target);
+    if (!paragraph || event.altKey || event.metaKey || event.ctrlKey) return;
+    const blockStart = Number(paragraph.dataset.blockStart);
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      clearDomSelection();
+      onListenFrom(sectionStart + blockStart);
+      return;
+    }
+    if (event.key === "Enter") {
+      // Selecting the paragraph opens the selection toolbar, next in the tab
+      // order, for bookmarking, highlighting or a note.
+      event.preventDefault();
+      const block = blocks.find((entry) => entry.start === blockStart);
+      const quote = normalizeQuote(paragraph.textContent ?? "");
+      if (!block || !quote) return;
+      const range = document.createRange();
+      range.selectNodeContents(paragraph);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      onSelectPassage({ quote, textOffset: sectionStart + block.start, endOffset: sectionStart + block.end });
+      return;
+    }
+    if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !event.shiftKey) {
+      const sibling = event.key === "ArrowDown" ? paragraph.nextElementSibling : paragraph.previousElementSibling;
+      if (sibling instanceof HTMLElement && paragraphOf(sibling)) {
+        event.preventDefault();
+        sibling.focus();
+      }
+    }
+  }, [blocks, clearDomSelection, onListenFrom, onSelectPassage, sectionStart]);
+
   const handleMouseUp = useCallback((event: ReactMouseEvent) => {
     // The second mouseup of a double-click lands after the browser has selected
     // the word under the cursor, which would flash the note pill for a frame
     // before `dblclick` seeks and clears it. Only a deliberate drag opens it.
+    pointerDownRef.current = false;
     if (event.detail > 1 || !articleRef.current) return;
     const selection = readArticleSelection(articleRef.current, text.length);
     if (!selection) return;
@@ -224,6 +323,7 @@ export const ReaderTextPane = memo(function ReaderTextPane({
           id={readingTextId}
           ref={textareaRef}
           aria-label="Reading Text"
+          lang={language || undefined}
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           onBlur={onDraftCommit}
@@ -258,10 +358,19 @@ export const ReaderTextPane = memo(function ReaderTextPane({
               </h3>
             </header>
           ))}
+          <span id={paragraphHintId} hidden>
+            Press Enter to listen from this paragraph, or Shift+Enter to select it.
+          </span>
           <article
             ref={articleRef}
+            lang={language || undefined}
             onMouseUp={handleMouseUp}
+            onPointerDown={() => {
+              pointerDownRef.current = true;
+            }}
             onDoubleClick={handleDoubleClick}
+            onFocus={handleArticleFocus}
+            onKeyDown={handleArticleKeyDown}
             title="Double-click to listen from here"
             className={`${DOCUMENT_TEXT_CLASSES} reader-article`}
           >
@@ -279,6 +388,8 @@ export const ReaderTextPane = memo(function ReaderTextPane({
                   wordStart={holdsWord ? wordRange.start : -1}
                   wordEnd={holdsWord ? wordRange.end : -1}
                   heading={block.start === headingBlockStart}
+                  tabStop={block.start === tabStopBlockStart}
+                  describedBy={paragraphHintId}
                 />
               );
             })}
