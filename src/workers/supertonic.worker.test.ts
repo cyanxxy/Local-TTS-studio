@@ -121,6 +121,17 @@ async function loadWorkerModule({
     createPipelineInstance([createRawAudio()], pipelineCalls),
   ];
 
+  const createPipeline = vi.fn(async (_task: string, _modelId: string, options?: { progress_callback?: (info: unknown) => void }) => {
+    for (const event of pipelineProgressEvents) {
+      options?.progress_callback?.(event);
+    }
+    const next = pipelineQueue.shift();
+    if (!next) {
+      throw new Error("No pipeline instance queued for test.");
+    }
+    return next;
+  });
+
   vi.doMock("@huggingface/transformers", () => ({
     env: {
       allowRemoteModels,
@@ -133,16 +144,7 @@ async function loadWorkerModule({
         },
       },
     },
-    pipeline: vi.fn(async (_task: string, _modelId: string, options?: { progress_callback?: (info: unknown) => void }) => {
-      for (const event of pipelineProgressEvents) {
-        options?.progress_callback?.(event);
-      }
-      const next = pipelineQueue.shift();
-      if (!next) {
-        throw new Error("No pipeline instance queued for test.");
-      }
-      return next;
-    }),
+    pipeline: createPipeline,
     TextToAudioPipeline: class {},
     Tensor: MockTensor,
   }));
@@ -161,7 +163,7 @@ async function loadWorkerModule({
   }));
 
   vi.doMock("../lib/chunking", () => ({
-    chunkWithConstraintsDetailed: vi.fn(() => chunkTexts.map((text, index) => ({
+    chunkForSupertonicDetailed: vi.fn(() => chunkTexts.map((text, index) => ({
       text,
       start: index * 20,
       end: index * 20 + text.length,
@@ -190,6 +192,7 @@ async function loadWorkerModule({
   }
 
   return {
+    createPipeline,
     dispatch,
     fetchModeRef,
     flushPromises,
@@ -227,6 +230,25 @@ describe("supertonic.worker", () => {
       { type: "LOAD_PROGRESS", percent: 21 },
       { type: "LOAD_PROGRESS", percent: 63 },
     ]));
+  });
+
+  it("keeps the load progress milestones for per-file download events", async () => {
+    const { dispatch, postedMessages } = await loadWorkerModule();
+
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => {
+      expect(postedMessages.some((message) => message.type === "READY")).toBe(true);
+    });
+
+    // Downloads fill 0-84; voice preload, warm-up, and READY take the rest.
+    expect(postedMessages.filter((message) => message.type === "LOAD_PROGRESS")).toEqual([
+      { type: "LOAD_PROGRESS", percent: 0 },
+      { type: "LOAD_PROGRESS", percent: 42 },
+      { type: "LOAD_PROGRESS", percent: 84 },
+      { type: "LOAD_PROGRESS", percent: 84 },
+      { type: "LOAD_PROGRESS", percent: 92 },
+      { type: "LOAD_PROGRESS", percent: 99 },
+    ]);
   });
 
   it("suppresses stale generation output after cancel", async () => {
@@ -606,5 +628,108 @@ describe("Supertonic 2 language conditioning", () => {
     dispatch({ type: "GENERATE", text: "Bonjour.", voice: "Female", speed: 1, quality: 5, language });
     await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "GENERATION_COMPLETE")).toBe(true));
     expect(calls.at(-1)?.text).toBe(`<${language}>Bonjour.</${language}>`);
+  });
+});
+
+describe("Supertonic 2 soft abort", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function generationEvents(messages: WorkerOutMessage[]): Array<[string, string | undefined]> {
+    return messages.map((message) => [message.type, "generationId" in message ? message.generationId : undefined]);
+  }
+
+  it("stops after the in-flight inference and keeps the pipeline loaded for the next generation", async () => {
+    const pending = createDeferred<ReturnType<typeof createRawAudio>>();
+    const calls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const instance = createPipelineInstance([createRawAudio(), pending.promise, createRawAudio(), createRawAudio()], calls);
+    const { createPipeline, dispatch, postedMessages, workerGlobal } = await loadWorkerModule({
+      chunkTexts: ["First sentence.", "Second sentence."],
+      pipelineInstances: [instance],
+    });
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+    const afterLoad = postedMessages.length;
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "First sentence. Second sentence.", voice: "Female", speed: 1, quality: 5 });
+    // The warm-up, then the first chunk of "a".
+    await vi.waitFor(() => expect(calls).toHaveLength(2));
+    dispatch({ type: "ABORT", generationId: "a" });
+    dispatch({ type: "GENERATE", generationId: "b", text: "First sentence. Second sentence.", voice: "Female", speed: 1, quality: 5 });
+    await flushPromises();
+    // "b" waits for the aborted inference instead of running beside it.
+    expect(calls).toHaveLength(2);
+
+    pending.resolve(createRawAudio());
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "b" }));
+
+    // "a" never emitted its first chunk nor ran its second.
+    expect(generationEvents(postedMessages.slice(afterLoad))).toEqual([
+      ["ABORTED", "a"],
+      ["AUDIO_CHUNK", "b"],
+      ["AUDIO_CHUNK", "b"],
+      ["GENERATION_COMPLETE", "b"],
+    ]);
+    expect(calls).toHaveLength(4);
+    expect(createPipeline).toHaveBeenCalledOnce();
+    expect(instance.dispose).not.toHaveBeenCalled();
+    expect(workerGlobal.close).not.toHaveBeenCalled();
+  });
+
+  it("ignores an ABORT for a generation that already finished", async () => {
+    const pending = createDeferred<ReturnType<typeof createRawAudio>>();
+    const calls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const instance = createPipelineInstance([createRawAudio(), createRawAudio(), pending.promise], calls);
+    const { dispatch, postedMessages } = await loadWorkerModule({
+      chunkTexts: ["Only sentence."],
+      pipelineInstances: [instance],
+    });
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "Only sentence.", voice: "Female", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "a" }));
+    const afterA = postedMessages.length;
+
+    dispatch({ type: "GENERATE", generationId: "b", text: "Only sentence.", voice: "Female", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(calls).toHaveLength(3));
+    dispatch({ type: "ABORT", generationId: "a" });
+    await flushPromises();
+    pending.resolve(createRawAudio());
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "b" }));
+
+    expect(generationEvents(postedMessages.slice(afterA))).toEqual([
+      ["ABORTED", "a"],
+      ["AUDIO_CHUNK", "b"],
+      ["GENERATION_COMPLETE", "b"],
+    ]);
+  });
+
+  it("waits for the running inference before a forced reload disposes the pipeline", async () => {
+    const pending = createDeferred<ReturnType<typeof createRawAudio>>();
+    const firstCalls: Array<{ text: string | string[]; options: Record<string, unknown> }> = [];
+    const first = createPipelineInstance([createRawAudio(), pending.promise], firstCalls);
+    const second = createPipelineInstance([createRawAudio()], []);
+    const { createPipeline, dispatch, postedMessages } = await loadWorkerModule({
+      chunkTexts: ["Only sentence."],
+      pipelineInstances: [first, second],
+    });
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(postedMessages.some((message) => message.type === "READY")).toBe(true));
+
+    dispatch({ type: "GENERATE", generationId: "a", text: "Only sentence.", voice: "Female", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(firstCalls).toHaveLength(2));
+    dispatch({ type: "LOAD", forceReload: true });
+    await flushPromises();
+    expect(first.dispose).not.toHaveBeenCalled();
+    expect(createPipeline).toHaveBeenCalledOnce();
+
+    pending.resolve(createRawAudio());
+    await vi.waitFor(() => expect(postedMessages.filter((message) => message.type === "READY")).toHaveLength(2));
+    expect(first.dispose).toHaveBeenCalledOnce();
+    expect(createPipeline).toHaveBeenCalledTimes(2);
+    expect(postedMessages.some((message) => message.type === "AUDIO_CHUNK")).toBe(false);
+    expect(postedMessages.some((message) => message.type === "ERROR")).toBe(false);
   });
 });

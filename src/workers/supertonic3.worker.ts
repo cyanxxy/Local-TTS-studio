@@ -1,22 +1,31 @@
 /** Electron-renderer-only Supertonic 3 worker. */
-import * as ort from "onnxruntime-web";
-import type { InferenceBackend, WorkerInMessage, WorkerOutMessage } from "../types";
+import * as ort from "onnxruntime-web/webgpu";
+import type { InferenceBackend, WorkerInMessage } from "../types";
 import {
   SUPERTONIC3_LANGUAGES,
   SUPERTONIC3_MODEL_ID,
   SUPERTONIC3_MODEL_REVISION,
   SUPERTONIC3_VOICES,
 } from "../constants";
-import { concatFloat32Arrays, createSilence } from "../lib/audio";
-import { chunkWithConstraintsDetailed } from "../lib/chunking";
-import { resolvePauseSeconds, resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
-import { canInitializeWebGPU } from "../lib/webgpu";
+import { chunkForSupertonicDetailed } from "../lib/chunking";
+import { resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { getSafeWasmThreadCount } from "../lib/onnxRuntime";
 import { verifyPinnedAssetIntegrity, type PinnedAssetIntegrity } from "../lib/pinnedModelFetch";
+import { BackendIndependentLoadError, loadWithBackendFallback, MAX_WASM_THREADS } from "./kit/backends";
+import { emitAudioChunk, resolveChunkPauseSec } from "./kit/emit";
+import type { GenerationTicket } from "./kit/generation";
+import { createPrefetcher } from "./kit/prefetch";
+import { createLoadProgress, type LoadProgress } from "./kit/progress";
+import { generationMeta } from "./kit/protocol";
+import { createWorkerRuntime, type GenerateMessage, type LoadMessage } from "./kit/runtime";
+import { SUPERTONIC3_ASSETS } from "./manifests/supertonic3";
 import {
+  createSeededRandom,
   createSupertonic3RuntimeStreaming,
   createSupertonic3Style,
+  deriveChunkSeed,
+  SUPERTONIC3_MAX_SEED,
   type Supertonic3Config,
   type Supertonic3ModelName,
   type Supertonic3Style,
@@ -25,7 +34,6 @@ import {
 } from "../lib/supertonic3Runtime";
 
 const CACHE_NAME = "transformers-cache-supertonic3-v1";
-const MAX_WASM_THREADS = 4;
 const MODEL_FILES = [
   "onnx/tts.json",
   "onnx/unicode_indexer.json",
@@ -40,127 +48,135 @@ const MODEL_FILE_BY_NAME: Record<Supertonic3ModelName, string> = {
   vector_estimator: "onnx/vector_estimator.onnx",
   vocoder: "onnx/vocoder.onnx",
 };
-const LOAD_FILE_COUNT = MODEL_FILES.length + 1;
-// Exact sizes and repository hashes from the pinned revision's HF siblings metadata.
-// Update this table together with SUPERTONIC3_MODEL_REVISION.
-const ASSET_INTEGRITY: Record<string, PinnedAssetIntegrity> = {
-  "onnx/tts.json": { byteLength: 8_253, gitBlobSha1: "28575b0793c92607a0f0a292550df9bd17709a79" },
-  "onnx/unicode_indexer.json": { byteLength: 277_676, gitBlobSha1: "3aaf4d33024aff0be455633c24b3636b3a810150" },
-  "onnx/duration_predictor.onnx": { byteLength: 3_700_147, sha256: "c3eb91414d5ff8a7a239b7fe9e34e7e2bf8a8140d8375ffb14718b1c639325db" },
-  "onnx/text_encoder.onnx": { byteLength: 36_416_150, sha256: "c7befd5ea8c3119769e8a6c1486c4edc6a3bc8365c67621c881bbb774b9902ff" },
-  "onnx/vector_estimator.onnx": { byteLength: 256_534_781, sha256: "883ac868ea0275ef0e991524dc64f16b3c0376efd7c320af6b53f5b780d7c61c" },
-  "onnx/vocoder.onnx": { byteLength: 101_424_195, sha256: "085de76dd8e8d5836d6ca66826601f615939218f90e519f70ee8a36ed2a4c4ba" },
-  "voice_styles/F1.json": { byteLength: 292_046, gitBlobSha1: "421365f307ed1535d8da16845031d0e9fa3e60c5" },
-  "voice_styles/F2.json": { byteLength: 292_423, gitBlobSha1: "b09a3a433df8a4856d1d7d64736a56ddf37a4ea3" },
-  "voice_styles/F3.json": { byteLength: 290_794, gitBlobSha1: "a366f94c77c4b440404071f1a52bed3ccf83a5ff" },
-  "voice_styles/F4.json": { byteLength: 291_808, gitBlobSha1: "39c78a52795320c6101b7eaf984c0e2352fbdc18" },
-  "voice_styles/F5.json": { byteLength: 291_479, gitBlobSha1: "06983f8816ad00a8eeb7efd37a33d457587e16f8" },
-  "voice_styles/M1.json": { byteLength: 291_748, gitBlobSha1: "bddfff85a7c4c140c11620bd7005d86681dccdac" },
-  "voice_styles/M2.json": { byteLength: 292_055, gitBlobSha1: "602ff6c4d6d48cdb71c37461f7c175d71fe8b34b" },
-  "voice_styles/M3.json": { byteLength: 290_198, gitBlobSha1: "000b60436b77619b933fdc33628ad737595e6794" },
-  "voice_styles/M4.json": { byteLength: 291_522, gitBlobSha1: "aae253ae81185fa06a6469c3f1cdff04ed121ddf" },
-  "voice_styles/M5.json": { byteLength: 291_469, gitBlobSha1: "0536b252698830f8536c077edcb94e1ce4768ab6" },
-};
+const DEFAULT_VOICE = "M1";
+// Exact sizes and repository digests at SUPERTONIC3_MODEL_REVISION, generated
+// by scripts/pin-hf-assets.mjs; regenerate the manifest with the revision.
+const ASSET_INTEGRITY: Readonly<Record<string, PinnedAssetIntegrity>> = SUPERTONIC3_ASSETS.files;
+// Downloads fill the bar up to here; session creation takes the rest.
+const DOWNLOAD_PROGRESS_MAX = 94;
+// Sessions are created in this order, one buffer at a time.
+const SESSION_FILES = [
+  MODEL_FILE_BY_NAME.duration_predictor,
+  MODEL_FILE_BY_NAME.text_encoder,
+  MODEL_FILE_BY_NAME.vector_estimator,
+  MODEL_FILE_BY_NAME.vocoder,
+];
+// While one session is created, the next model file downloads (or is read
+// back from the cache and verified) unless it is larger than this. The 256 MB
+// vector estimator is therefore only fetched when its turn comes, and at most
+// one buffer of up to 128 MB is held ahead: the vocoder, which downloads
+// while the vector estimator's session is created.
+const PREFETCH_AHEAD_MAX_BYTES = 128 * 1024 * 1024;
 
 let runtime: Supertonic3Runtime | null = null;
 let backend: InferenceBackend | null = null;
-let isLoadingModel = false;
-let activeGenerationEpoch = 0;
-let loadQueue: Promise<void> = Promise.resolve();
-let activeGenerationTask: Promise<void> | null = null;
 const styles = new Map<string, Supertonic3Style>();
-const loadProgress = new Map<string, number>();
-
-function post(message: WorkerOutMessage): void {
-  if (message.type === "AUDIO_CHUNK") {
-    self.postMessage(message, { transfer: [message.audio.buffer as ArrayBuffer] });
-  } else {
-    self.postMessage(message);
-  }
-}
+const workerRuntime = createWorkerRuntime({ load: loadModel, generate });
+const { port, generations } = workerRuntime;
 
 function assetUrl(file: string): string {
   return `https://huggingface.co/${SUPERTONIC3_MODEL_ID}/resolve/${SUPERTONIC3_MODEL_REVISION}/${file}`;
 }
 
-function updateLoadProgress(file: string, fraction: number): void {
-  if (!isLoadingModel) return;
-  loadProgress.set(file, Math.max(0, Math.min(1, fraction)));
-  const total = Array.from(loadProgress.values()).reduce((sum, value) => sum + value, 0);
-  post({ type: "LOAD_PROGRESS", percent: (total / LOAD_FILE_COUNT) * 94 });
+function styleFile(voice: string): string {
+  return `voice_styles/${voice}.json`;
 }
 
-async function assertAssetIntegrity(file: string, buffer: ArrayBuffer): Promise<void> {
-  const expected = ASSET_INTEGRITY[file];
-  if (!expected || !await verifyPinnedAssetIntegrity(buffer, expected)) {
-    throw new Error(`Supertonic 3 ${file} failed integrity verification.`);
+/** Byte-weighted load progress over every file a cold load downloads. */
+function createModelLoadProgress(): LoadProgress {
+  const loadFiles = [...MODEL_FILES, styleFile(DEFAULT_VOICE)];
+  return createLoadProgress({
+    report: (percent) => port.post({ type: "LOAD_PROGRESS", percent }),
+    range: [0, DOWNLOAD_PROGRESS_MAX],
+    expectedBytes: Object.fromEntries(loadFiles.map((file) => [file, ASSET_INTEGRITY[file].byteLength])),
+  });
+}
+
+/**
+ * Reads a response body into exactly `byteLength` bytes. The pinned size is
+ * authoritative and Content-Length is never used to size the buffer: Hugging
+ * Face serves the small JSON assets compressed with no Content-Length, and
+ * when one is present it counts encoded bytes, not the decoded body read here.
+ */
+async function readPinnedBody(
+  response: Response,
+  file: string,
+  byteLength: number,
+  progress?: LoadProgress,
+  signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength !== byteLength) {
+      throw new Error(`Supertonic 3 ${file} did not match its pinned size.`);
+    }
+    return buffer;
   }
+
+  const bytes = new Uint8Array(byteLength);
+  let received = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      if (received + value.byteLength > byteLength) {
+        throw new Error(`Supertonic 3 ${file} exceeded its pinned size.`);
+      }
+      bytes.set(value, received);
+      received += value.byteLength;
+      progress?.update(file, received);
+    }
+  } catch (error) {
+    // Stop the download instead of draining a body that is already rejected.
+    await reader.cancel().catch(() => undefined);
+    throw error;
+  }
+  if (received !== byteLength) {
+    throw new Error(`Supertonic 3 ${file} was truncated at ${received} of ${byteLength} bytes.`);
+  }
+  return bytes.buffer;
 }
 
-async function fetchAsset(file: string): Promise<ArrayBuffer> {
+/** Headers for the cached copy, which holds the decoded body. */
+function cacheHeaders(response: Response, byteLength: number): Headers {
+  const headers = new Headers({ "content-length": String(byteLength) });
+  const contentType = response.headers.get("content-type");
+  if (contentType) headers.set("content-type", contentType);
+  return headers;
+}
+
+/**
+ * Downloads (or reads from the cache) one pinned asset and verifies it.
+ * Aborting `signal` stops a download the load no longer needs, before it
+ * reports any more progress.
+ */
+async function fetchAsset(file: string, progress?: LoadProgress, signal?: AbortSignal): Promise<ArrayBuffer> {
+  const expected = ASSET_INTEGRITY[file];
+  if (!expected) throw new Error(`Supertonic 3 ${file} is not a pinned asset.`);
   const url = assetUrl(file);
   const cache = typeof caches === "undefined" ? null : await caches.open(CACHE_NAME);
   const cached = await cache?.match(url);
   if (cached) {
     const buffer = await cached.arrayBuffer();
-    try {
-      await assertAssetIntegrity(file, buffer);
-      updateLoadProgress(file, 1);
+    if (await verifyPinnedAssetIntegrity(buffer, expected)) {
+      progress?.complete(file);
       return buffer;
-    } catch {
-      await cache?.delete(url);
     }
+    await cache?.delete(url);
   }
 
-  const response = await fetch(url);
+  const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`Failed to download ${file}: HTTP ${response.status}.`);
-  const declaredLength = Number(response.headers.get("content-length"));
-  const reader = response.body?.getReader();
-  if (!reader) {
-    const buffer = await response.arrayBuffer();
-    await assertAssetIntegrity(file, buffer);
-    await cache?.put(url, new Response(buffer, { headers: response.headers }));
-    updateLoadProgress(file, 1);
-    return buffer;
+  const buffer = await readPinnedBody(response, file, expected.byteLength, progress, signal);
+  if (!await verifyPinnedAssetIntegrity(buffer, expected)) {
+    throw new Error(`Supertonic 3 ${file} failed integrity verification.`);
   }
-
-  const canPreallocate = Number.isSafeInteger(declaredLength) && declaredLength >= 0;
-  const preallocated = canPreallocate ? new Uint8Array(declaredLength) : null;
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (value) {
-      if (preallocated) {
-        if (received + value.byteLength > preallocated.byteLength) {
-          throw new Error(`Supertonic 3 ${file} exceeded its declared size.`);
-        }
-        preallocated.set(value, received);
-      } else {
-        chunks.push(value);
-      }
-      received += value.byteLength;
-      if (Number.isFinite(declaredLength) && declaredLength > 0) {
-        updateLoadProgress(file, received / declaredLength);
-      }
-    }
-  }
-  if (preallocated && received !== preallocated.byteLength) {
-    throw new Error(`Supertonic 3 ${file} did not match its declared size.`);
-  }
-  const merged = preallocated ?? new Uint8Array(received);
-  if (!preallocated) {
-    let offset = 0;
-    for (const chunk of chunks) {
-      merged.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-  }
-  await assertAssetIntegrity(file, merged.buffer);
-  await cache?.put(url, new Response(merged, { headers: response.headers }));
-  updateLoadProgress(file, 1);
-  return merged.buffer;
+  await cache?.put(url, new Response(buffer, { headers: cacheHeaders(response, buffer.byteLength) }));
+  signal?.throwIfAborted();
+  progress?.complete(file);
+  return buffer;
 }
 
 function parseJson<T>(buffer: ArrayBuffer, file: string): T {
@@ -191,79 +207,123 @@ async function disposeRuntime(value: Supertonic3Runtime | null): Promise<void> {
   await value?.dispose();
 }
 
-async function loadStyle(voice: string): Promise<Supertonic3Style> {
-  const normalized = (SUPERTONIC3_VOICES as readonly string[]).includes(voice) ? voice : "M1";
+async function loadStyle(voice: string, progress?: LoadProgress): Promise<Supertonic3Style> {
+  const normalized = (SUPERTONIC3_VOICES as readonly string[]).includes(voice) ? voice : DEFAULT_VOICE;
   const cached = styles.get(normalized);
   if (cached) return cached;
-  const file = `voice_styles/${normalized}.json`;
-  const value = parseJson<VoiceStyleJson>(await fetchAsset(file), file);
+  const file = styleFile(normalized);
+  const value = parseJson<VoiceStyleJson>(await fetchAsset(file, progress), file);
   const style = createSupertonic3Style(value);
   styles.set(normalized, style);
   return style;
 }
 
-async function loadModel(forceReload: boolean): Promise<void> {
+/**
+ * One single-step synthesis on WebGPU compiles every session's shaders before
+ * READY, so the first real chunk does not pay for it, and proves the device
+ * can run the graphs at all.
+ */
+async function warmUpRuntime(instance: Supertonic3Runtime, style: Supertonic3Style): Promise<void> {
+  await instance.synthesize("Hello.", "en", style, 1, 1);
+}
+
+async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
   if (runtime && !forceReload) {
-    post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend: backend ?? undefined });
+    port.post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend: backend ?? undefined });
     return;
   }
-  if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
-  isLoadingModel = true;
+  // Dropped before the first await, so a GENERATE that arrives during the
+  // reload is refused instead of running on sessions about to be released.
+  const previousRuntime = runtime;
+  runtime = null;
+  backend = null;
+  const progress = createModelLoadProgress();
+  // Aborted when a backend attempt ends: model files it prefetched but no
+  // longer needs stop downloading instead of reporting progress after the
+  // load failed or fell back, and a fallback never reuses their buffers.
+  let attempt = new AbortController();
   try {
-    activeGenerationEpoch += 1;
-    if (activeGenerationTask) await activeGenerationTask.catch(() => undefined);
-    const previousRuntime = runtime;
-    runtime = null;
-    backend = null;
+    // The runtime superseded the running generation when this reload
+    // arrived; never release sessions under its in-flight inference.
+    await generations.idle();
     clearStyles();
     await disposeRuntime(previousRuntime);
-    loadProgress.clear();
-    post({ type: "LOAD_PROGRESS", percent: 0 });
+    if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
+    progress.reset();
+    // The asyncify build is the one the onnxruntime-web/webgpu entry runs
+    // WebGPU on; the default entry would need the JSEP build instead and fail
+    // every WebGPU session.
     ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;
     ort.env.wasm.numThreads = getSafeWasmThreadCount(MAX_WASM_THREADS);
-    const configBuffer = await fetchAsset("onnx/tts.json");
-    const indexerBuffer = await fetchAsset("onnx/unicode_indexer.json");
+    const createModelPrefetcher = (signal: AbortSignal) => createPrefetcher({
+      order: SESSION_FILES,
+      fetch: (file) => fetchAsset(file, progress, signal),
+      sizeOf: (file) => ASSET_INTEGRITY[file].byteLength,
+      maxAheadBytes: PREFETCH_AHEAD_MAX_BYTES,
+    });
+    let models = createModelPrefetcher(attempt.signal);
+    // The small JSON assets and the first model file download together.
+    models.prefetch(SESSION_FILES[0]);
+    const [configBuffer, indexerBuffer, defaultStyle] = await Promise.all([
+      fetchAsset("onnx/tts.json", progress),
+      fetchAsset("onnx/unicode_indexer.json", progress),
+      loadStyle(DEFAULT_VOICE, progress),
+    ]);
     const config = parseJson<Supertonic3Config>(configBuffer, "onnx/tts.json");
     const indexer = parseJson<number[]>(indexerBuffer, "onnx/unicode_indexer.json");
-    const loadModelBuffer = (name: Supertonic3ModelName) => fetchAsset(MODEL_FILE_BY_NAME[name]);
-    const preferredBackend: InferenceBackend = await canInitializeWebGPU() ? "webgpu" : "wasm";
-    try {
-      runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, preferredBackend);
-      backend = preferredBackend;
-    } catch (error) {
-      if (preferredBackend === "wasm") throw error;
-      runtime = await createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, "wasm");
-      backend = "wasm";
-    }
-    await loadStyle("M1");
-    post({ type: "LOAD_PROGRESS", percent: 100 });
-    post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend });
+    // A failed or corrupt download fails on every backend; retrying on WASM
+    // would only download it again.
+    const loadModelBuffer = (name: Supertonic3ModelName) => models.take(MODEL_FILE_BY_NAME[name])
+      .catch((error: unknown) => {
+        throw new BackendIndependentLoadError(error);
+      });
+    const loaded = await loadWithBackendFallback({
+      backends: ["webgpu", "wasm"],
+      load: (candidate) => createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, candidate),
+      warmUp: (instance, candidate) => (candidate === "webgpu" ? warmUpRuntime(instance, defaultStyle) : Promise.resolve()),
+      dispose: (instance) => instance.dispose(),
+      onFallback: (failed, error) => {
+        console.warn(`[supertonic3] ${failed} load failed; falling back to WASM.`, error);
+        attempt.abort();
+        attempt = new AbortController();
+        // The WASM attempt re-reads the model files from the cache.
+        models = createModelPrefetcher(attempt.signal);
+        progress.reset();
+        for (const file of ["onnx/tts.json", "onnx/unicode_indexer.json", styleFile(DEFAULT_VOICE)]) progress.complete(file);
+      },
+      failureMessage: "Failed to load Supertonic 3.",
+    });
+    runtime = loaded.instance;
+    backend = loaded.backend;
+    port.post({ type: "LOAD_PROGRESS", percent: 100 });
+    port.post({ type: "READY", voices: [...SUPERTONIC3_VOICES], backend });
   } catch (error) {
-    const failedRuntime: Supertonic3Runtime | null = runtime;
-    runtime = null;
-    backend = null;
     clearStyles();
-    await disposeRuntime(failedRuntime);
     throw error;
   } finally {
-    isLoadingModel = false;
+    attempt.abort();
+    progress.close();
   }
 }
 
-function enqueueModelLoad(forceReload: boolean): Promise<void> {
-  const request = loadQueue.catch(() => undefined).then(() => loadModel(forceReload));
-  loadQueue = request;
-  return request;
+function validateSeed(seed: number | undefined): number | undefined {
+  if (seed === undefined) return undefined;
+  if (!Number.isInteger(seed) || seed < 0 || seed > SUPERTONIC3_MAX_SEED) {
+    throw new Error(`Supertonic 3 seed must be an integer from 0 to ${SUPERTONIC3_MAX_SEED}.`);
+  }
+  return seed;
 }
 
-async function generate(message: Extract<WorkerInMessage, { type: "GENERATE" }>): Promise<void> {
-  if (!runtime) throw new Error("Supertonic 3 is not loaded.");
-  const epoch = ++activeGenerationEpoch;
+async function generate(message: GenerateMessage, ticket: GenerationTicket): Promise<void> {
+  const activeRuntime = runtime;
+  if (!activeRuntime) throw new Error("Supertonic 3 is not loaded.");
+  const seed = validateSeed(message.seed);
   const language = (SUPERTONIC3_LANGUAGES as readonly string[]).includes(message.language ?? "")
     ? message.language!
     : "en";
   const style = await loadStyle(message.voice);
-  const chunks = chunkWithConstraintsDetailed(message.text, {
+  if (!ticket.isCurrent()) return;
+  const chunks = chunkForSupertonicDetailed(message.text, {
     minCharacters: 30,
     maxCharacters: language === "ko" || language === "ja" ? 120 : 280,
     runtime: { backend, quality: message.quality },
@@ -271,68 +331,40 @@ async function generate(message: Extract<WorkerInMessage, { type: "GENERATE" }>)
   const pronunciationRules = message.pronunciationRules ?? [];
   const emphasisStrength = message.emphasisStrength ?? 0;
   const variance = message.sentenceSpeedVariance ?? 0;
-  for (let index = 0; index < chunks.length; index += 1) {
-    if (epoch !== activeGenerationEpoch) return;
-    const chunk = chunks[index];
-    const speed = resolveSentenceSpeed(message.speed, variance, chunk.text);
-    const audio = await runtime.synthesize(
-      tuneChunkText(chunk.text, pronunciationRules, emphasisStrength),
+  const totalSteps = Math.max(1, Math.min(20, Math.round(message.quality)));
+  for (const [index, chunk] of chunks.entries()) {
+    const tunedText = tuneChunkText(chunk.text, pronunciationRules, emphasisStrength);
+    const audio = await activeRuntime.synthesize(
+      tunedText,
       language,
       style,
-      Math.max(1, Math.min(20, Math.round(message.quality))),
-      speed,
+      totalSteps,
+      resolveSentenceSpeed(message.speed, variance, chunk.text),
+      { random: seed === undefined ? undefined : createSeededRandom(deriveChunkSeed(seed, tunedText)) },
     );
-    if (epoch !== activeGenerationEpoch) return;
-    const pauseSec = index + 1 === chunks.length
-      ? Math.max(0, Math.min(5, message.finalPauseSec ?? 0))
-      : resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec, message.pauseOverridesSec);
-    post({
-      type: "AUDIO_CHUNK",
+    if (!ticket.isCurrent()) return;
+    emitAudioChunk(port, {
       generationId: message.generationId,
-      audio: pauseSec > 0 ? concatFloat32Arrays([audio, createSilence(pauseSec, runtime.sampleRate)]) : audio,
-      samplingRate: runtime.sampleRate,
+      audio,
+      samplingRate: activeRuntime.sampleRate,
       text: chunk.text,
       index: index + 1,
       total: chunks.length,
       textStart: chunk.start,
       textEnd: chunk.end,
-      pauseAfterSec: pauseSec,
       pauseKind: chunk.pauseKind,
+      pauseSec: resolveChunkPauseSec({
+        hasFollowing: index + 1 < chunks.length,
+        pauseKind: chunk.pauseKind,
+        pauseAfterSec: chunk.pauseAfterSec,
+        pauseOverridesSec: message.pauseOverridesSec,
+        finalPauseSec: message.finalPauseSec,
+      }),
     });
   }
-  if (epoch === activeGenerationEpoch) {
-    post({ type: "GENERATION_COMPLETE", generationId: message.generationId });
-  }
+  port.post({ type: "GENERATION_COMPLETE", ...generationMeta(message.generationId) });
 }
 
-self.onmessage = (event: MessageEvent<WorkerInMessage & { language?: string }>) => {
-  const message = event.data;
-  if (message.type === "CANCEL") {
-    activeGenerationEpoch += 1;
-    post({ type: "CANCELLED" });
-    self.close();
-    return;
-  }
-  if (message.type === "LOAD") {
-    void enqueueModelLoad(Boolean(message.forceReload)).catch((error: unknown) => {
-      post({ type: "ERROR", scope: "load", message: error instanceof Error ? error.message : String(error) });
-    });
-    return;
-  }
-  if (message.type === "GENERATE") {
-    const task = generate(message);
-    activeGenerationTask = task;
-    void task
-      .catch((error: unknown) => {
-        post({
-          type: "ERROR",
-          scope: "generate",
-          generationId: message.generationId,
-          message: error instanceof Error ? error.message : String(error),
-        });
-      })
-      .finally(() => {
-        if (activeGenerationTask === task) activeGenerationTask = null;
-      });
-  }
+self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
+  workerRuntime.handleMessage(event.data);
 };
