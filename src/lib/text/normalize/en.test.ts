@@ -152,6 +152,7 @@ const FIXTURES: Record<string, readonly Fixture[]> = {
     ["See example.org, or example.co.uk!", "See example dot org, or example dot co dot uk!"],
     ["(see https://x.com/a).", "(see x dot com slash a)."],
     ["https://en.wikipedia.org/wiki/Foo_(bar)", "en dot wikipedia dot org"],
+    ["(see https://en.wikipedia.org/wiki/Foo_(bar))", "(see en dot wikipedia dot org)"],
     ["https://a.b.com/x_y~z/a-b.", "a dot b dot com slash x underscore y tilde z slash a dash b."],
     ["https://example.com/a/b/c/d", "example dot com"],
     ["https://example.com/a%20b", "example dot com"],

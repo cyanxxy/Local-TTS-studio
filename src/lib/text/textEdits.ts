@@ -125,15 +125,16 @@ export function applyTextEdits(source: string, edits: readonly TextEdit[]): Text
     return edit.end + (offset - edit.outputEnd);
   };
 
+  // An end offset only depends on edits whose output starts before it: one
+  // that lands strictly inside a replacement covers all of it, and one right
+  // before an edit (or a deletion) ends before that edit's source.
   const toSourceEnd = (outputOffset: number): number => {
     const offset = clampOffset(outputOffset, text.length);
-    // An end offset that lands strictly inside a replacement covers all of it.
     const index = lastEditAtOrBefore(offset - 1, "outputStart");
-    if (index >= 0) {
-      const edit = applied[index];
-      if (offset > edit.outputStart && offset < edit.outputEnd) return edit.end;
-    }
-    return toSourceOffset(offset);
+    if (index < 0) return offset;
+    const edit = applied[index];
+    if (offset < edit.outputEnd) return edit.end;
+    return edit.end + (offset - edit.outputEnd);
   };
 
   const toOutputOffset = (sourceOffset: number): number => {

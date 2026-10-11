@@ -288,16 +288,20 @@ function speakHost(host: string): string {
     .join(" dot ");
 }
 
-/** Sentence punctuation and unbalanced closing brackets are not part of a URL. */
+function countOf(text: string, character: string): number {
+  return text.split(character).length - 1;
+}
+
+/** Sentence punctuation and unbalanced closing parentheses are not part of a URL. */
 function trimUrl(url: string): string {
-  let end = url.length;
+  let trimmed = url;
   while (
-    URL_TRAILING_PUNCTUATION.includes(url[end - 1])
-    || (url[end - 1] === ")" && !url.includes("("))
+    URL_TRAILING_PUNCTUATION.includes(trimmed.at(-1) as string)
+    || (trimmed.endsWith(")") && countOf(trimmed, ")") > countOf(trimmed, "("))
   ) {
-    end -= 1;
+    trimmed = trimmed.slice(0, -1);
   }
-  return url.slice(0, end);
+  return trimmed;
 }
 
 /** Drops the scheme; returns undefined when the host is not a dotted name. */
