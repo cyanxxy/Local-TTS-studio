@@ -66,18 +66,31 @@ class FakeContext implements MicAudioContextLike {
   close = vi.fn(async () => {});
 }
 
+/** Follows the spec: stop() on an inactive recorder does nothing and fires no event. */
 class FakeMediaRecorder implements MediaRecorderLike {
   mimeType = "audio/webm";
+  state = "inactive";
   ondataavailable: ((event: BlobEvent) => void) | null = null;
   onstop: ((event: Event) => void) | null = null;
   onerror: ((event: ErrorEvent) => void) | null = null;
-  start = vi.fn();
+  /** Simulates a recorder that never reports stopping. */
+  ignoresStop = false;
   data = new Blob([new Uint8Array([1, 2, 3])]);
+  start = vi.fn(() => {
+    this.state = "recording";
+  });
   stop = vi.fn(() => {
+    if (this.state === "inactive" || this.ignoresStop) return;
+    this.endRecording();
+  });
+
+  /** What the browser does when it ends the recording itself, as on device loss. */
+  endRecording(): void {
     this.ondataavailable?.({ data: new Blob([]) } as BlobEvent);
     this.ondataavailable?.({ data: this.data } as BlobEvent);
+    this.state = "inactive";
     this.onstop?.(new Event("stop"));
-  });
+  }
 }
 
 function setup(overrides: Partial<MicRecorderOptions> = {}) {
@@ -383,6 +396,33 @@ describe("MediaRecorder fallback", () => {
     expect(onAutoStop.mock.calls[0][0].error).toMatchObject({ code: "empty" });
     // Errors after the recorder stopped are ignored.
     mediaRecorder.onerror?.(new ErrorEvent("error"));
+  });
+
+  it("finishes when the browser already stopped the recorder before the track ended", async () => {
+    const onAutoStop = vi.fn();
+    const { recorder, mediaRecorder, stream } = setup({ preferMediaRecorder: true, onAutoStop });
+    await recorder.start();
+    mediaRecorder.endRecording();
+    // The track's ended event arrives after the recorder's stop event.
+    stream.tracks[0].onended?.();
+    await vi.waitFor(() => expect(onAutoStop).toHaveBeenCalled());
+    expect(onAutoStop.mock.calls[0][0].recording).toMatchObject({ stoppedBy: "device-ended", mode: "media-recorder" });
+    expect(mediaRecorder.stop).not.toHaveBeenCalled();
+    expect(recorder.getState()).toBe("idle");
+    await expect(recorder.start()).resolves.toBeUndefined();
+    recorder.cancel();
+  });
+
+  it("does not hang when the recorder never reports stopping", async () => {
+    vi.useFakeTimers();
+    const { recorder, mediaRecorder } = setup({ preferMediaRecorder: true });
+    await recorder.start();
+    mediaRecorder.ignoresStop = true;
+    mediaRecorder.ondataavailable?.({ data: mediaRecorder.data } as BlobEvent);
+    const stopped = recorder.stop();
+    await vi.advanceTimersByTimeAsync(2_000);
+    await expect(stopped).resolves.toMatchObject({ mode: "media-recorder", stoppedBy: "user" });
+    expect(recorder.getState()).toBe("idle");
   });
 
   it("fails clearly when neither capture path exists", async () => {

@@ -90,6 +90,8 @@ export interface WorkletNodeLike extends AudioNodeLike {
 
 export interface MediaRecorderLike {
   readonly mimeType: string;
+  /** "inactive" once stopped, including when the browser stopped it. */
+  readonly state: string;
   ondataavailable: ((event: BlobEvent) => void) | null;
   onstop: ((event: Event) => void) | null;
   onerror: ((event: ErrorEvent) => void) | null;
@@ -134,6 +136,7 @@ export const DEFAULT_MIC_MAX_DURATION_SEC = REFERENCE_DURATION_LIMITS["qwen3-bas
 export const MAX_MIC_DURATION_SEC = 600;
 const LEVEL_INTERVAL_MS = 50;
 const FLUSH_TIMEOUT_MS = 500;
+const MEDIA_RECORDER_STOP_TIMEOUT_MS = 2_000;
 const MEDIA_RECORDER_TIMESLICE_MS = 250;
 
 /** Voice processing smears the timbre a clone copies, so it stays off. */
@@ -365,7 +368,16 @@ export function createMicRecorder(options: MicRecorderOptions = {}): MicRecorder
       if (state === "recording") void autoStop("max-duration");
     }, maxDurationSec * 1000);
 
-    let stopped: Promise<void> | null = null;
+    // The browser stops the recorder by itself when the device goes away, and
+    // stop() on an inactive recorder fires no event, so listen from the start.
+    let markStopped: () => void = () => {};
+    const stopped = new Promise<void>((resolve) => {
+      markStopped = resolve;
+    });
+    recorder.onstop = () => {
+      markStopped();
+      if (state === "recording") void autoStop("device-ended");
+    };
     const release = () => {
       clearInterval(levelTimer);
       clearTimeout(limitTimer);
@@ -394,11 +406,13 @@ export function createMicRecorder(options: MicRecorderOptions = {}): MicRecorder
       frames: 0,
       release,
       finish: async () => {
-        stopped ??= new Promise<void>((resolve) => {
-          recorder.onstop = () => resolve();
-          recorder.stop();
-        });
-        await stopped;
+        if (recorder.state !== "inactive") recorder.stop();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        // Keep what was captured even if the stop event never arrives.
+        await Promise.race([stopped, new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, MEDIA_RECORDER_STOP_TIMEOUT_MS);
+        })]);
+        clearTimeout(timer);
         const blob = new Blob(blobs, { type: recorder.mimeType || "audio/webm" });
         if (blob.size === 0) return { chunks: [], sampleRate: 0 };
         const decoded = await decodeAudio(await blob.arrayBuffer());
