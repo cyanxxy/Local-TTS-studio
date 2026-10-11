@@ -95,3 +95,22 @@ export function finiteWaveform(output: ort.Tensor | undefined): Float32Array {
   }
   return samples;
 }
+
+/** Below -60 dBFS: what these graphs emit around speech is digital silence, far quieter than any phoneme. */
+const NEAR_SILENCE = 1e-3;
+const SILENCE_MARGIN_SEC = 0.05;
+
+/**
+ * Cut leading and trailing near-silence down to a 50 ms margin, so the pauses
+ * the worker renders between chunks are the pauses listeners hear. Returns a
+ * standalone copy; all-silent input becomes empty.
+ */
+export function trimNearSilence(samples: Float32Array, sampleRate: number): Float32Array {
+  let first = 0;
+  while (first < samples.length && Math.abs(samples[first]) < NEAR_SILENCE) first += 1;
+  if (first === samples.length) return new Float32Array(0);
+  let last = samples.length - 1;
+  while (Math.abs(samples[last]) < NEAR_SILENCE) last -= 1;
+  const margin = Math.round(SILENCE_MARGIN_SEC * sampleRate);
+  return samples.slice(Math.max(0, first - margin), Math.min(samples.length, last + 1 + margin));
+}

@@ -131,8 +131,10 @@ describe("ParadeeRuntime.synthesize", () => {
   const vocabulary = new Map(Object.entries(VOCAB));
   const phonemize: EspeakPhonemize = async (text) => [text.toLowerCase()];
 
-  it("feeds padded ids and speed, returns a standalone copy of the waveform and disposes the output", async () => {
-    const waveform = Float32Array.of(0.1, -0.2, 0.3);
+  it("feeds padded ids and speed, returns trimmed standalone audio and disposes the output", async () => {
+    // 100 ms of digital silence on each side; 50 ms of it is kept.
+    const waveform = new Float32Array(2400 + 3 + 2400);
+    waveform.set([0.1, -0.2, 0.3], 2400);
     const { session, run, disposed } = fakeSession(waveform);
     const runtime = new ParadeeRuntime(session, vocabulary, phonemize);
 
@@ -143,7 +145,8 @@ describe("ParadeeRuntime.synthesize", () => {
     expect(feeds.input_ids.dims).toEqual([1, 9]);
     expect((feeds.speed.data as Float32Array)[0]).toBeCloseTo(1.1);
     expect(feeds.speed.dims).toEqual([1]);
-    expect(Array.from(audio)).toEqual(Array.from(waveform));
+    expect(audio.length).toBe(1200 + 3 + 1200);
+    expect(Array.from(audio.subarray(1200, 1203))).toEqual(Array.from(waveform.subarray(2400, 2403)));
     expect(audio.buffer).not.toBe(waveform.buffer);
     expect(disposed).toHaveBeenCalledOnce();
   });

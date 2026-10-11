@@ -19,6 +19,7 @@ import {
   idsTensor,
   STYLE_TTS_MAX_INPUT_TOKENS,
   STYLE_TTS_SAMPLE_RATE,
+  trimNearSilence,
   type StyleTtsSession,
 } from "./styleTtsRuntime";
 
@@ -207,6 +208,10 @@ export class ParadeeRuntime {
     this.phonemize = phonemize;
   }
 
+  /**
+   * Standalone 24 kHz PCM. The graph pads speech with about 0.3 s of digital
+   * silence before and 0.5 s after; that is trimmed to a 50 ms margin.
+   */
   async synthesize(text: string, speed: number): Promise<Float32Array> {
     const phonemes = await paradeePhonemes(text, this.phonemize);
     const ids = tokenizeParadeePhonemes(phonemes, this.vocabulary);
@@ -219,7 +224,7 @@ export class ParadeeRuntime {
       speed: new ort.Tensor("float32", Float32Array.of(speed), [1]),
     });
     try {
-      return finiteWaveform(outputs.waveform).slice();
+      return trimNearSilence(finiteWaveform(outputs.waveform), PARADEE_SAMPLE_RATE);
     } finally {
       disposeOutputs(outputs);
     }
