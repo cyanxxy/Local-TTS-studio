@@ -11,8 +11,17 @@ import {
   X,
 } from "lucide-react";
 import type { PlaybackClock } from "../lib/playbackClock";
-import { chapterAtOffset, type ReaderChapter, type ReaderDocumentRecord } from "../lib/readerDocument";
+import {
+  chapterAtOffset,
+  type ReaderChapter,
+  type ReaderDocumentRecord,
+  type ReaderHighlightColor,
+} from "../lib/readerDocument";
 import { findDocumentMatches } from "../lib/readerSearch";
+import { ReaderAnnotationExportBar } from "./reader/ReaderAnnotationExportBar";
+import { ReaderHighlightList } from "./reader/ReaderHighlightList";
+import { countReaderAnnotations } from "./reader/readerAnnotationExport";
+import { useFocusTrap } from "./reader/useFocusTrap";
 
 export type ReaderSidebarTab = "library" | "contents" | "search" | "bookmarks" | "notes";
 
@@ -24,15 +33,6 @@ const METADATA_COMMIT_MS = 400;
 /** "Just now" only has to become "1m ago" eventually, not precisely. */
 const RELATIVE_TIME_REFRESH_MS = 60_000;
 const BOOKMARK_LABEL_LIMIT = 40;
-
-const SIDEBAR_FOCUSABLE_SELECTOR = [
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "textarea:not([disabled])",
-  "select:not([disabled])",
-  "[href]",
-  "[tabindex]:not([tabindex='-1'])",
-].join(",");
 
 /** Stable empty array so chapter memos keep their identity without a document. */
 const NO_CHAPTERS: ReaderChapter[] = [];
@@ -56,6 +56,10 @@ interface ReaderLibrarySidebarProps {
   onAddNote: (input: { text: string; quote: string; textOffset: number }) => void;
   onUpdateNote: (id: string, text: string) => void;
   onRemoveNote: (id: string) => void;
+  /** Absent when highlights cannot be recoloured. */
+  onUpdateHighlight?: (id: string, patch: { color: ReaderHighlightColor }) => void;
+  /** Absent when highlights cannot be removed. */
+  onRemoveHighlight?: (id: string) => void;
   selectedPassage?: { quote: string; textOffset: number } | null;
   tab: ReaderSidebarTab;
   onTabChange: (tab: ReaderSidebarTab) => void;
@@ -148,7 +152,14 @@ const DocumentCard = memo(function DocumentCard({
         className="w-full text-left active:scale-[0.99]"
       >
         <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
+          {record.cover && (
+            <img
+              src={record.cover.dataUrl}
+              alt=""
+              className="h-14 w-10 shrink-0 rounded-md object-cover shadow-sm ring-1 ring-black/10"
+            />
+          )}
+          <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold text-text-primary">{record.title}</p>
             <p className="mt-0.5 truncate text-xs text-text-muted">
               {record.author || record.sourceName || "Personal document"}
@@ -220,6 +231,8 @@ export function ReaderLibrarySidebar({
   onAddNote,
   onUpdateNote,
   onRemoveNote,
+  onUpdateHighlight,
+  onRemoveHighlight,
   selectedPassage = null,
   tab,
   onTabChange,
@@ -236,7 +249,6 @@ export function ReaderLibrarySidebar({
   const sidebarRef = useRef<HTMLElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
   const keyboardTabNavRef = useRef(false);
   const onCloseRef = useRef(onClose);
   const onOpenDocumentRef = useRef(onOpenDocument);
@@ -368,44 +380,9 @@ export function ReaderLibrarySidebar({
     setAuthorDraft(null);
   };
 
-  useEffect(() => {
-    if (!open) return;
-    restoreFocusRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        handleClose();
-        return;
-      }
-      // The drawer floats above the page, so an untrapped Tab walks into
-      // controls the user cannot see behind it. Mirrors the reader popovers.
-      if (event.key !== "Tab" || !sidebarRef.current) return;
-      const focusable = [...sidebarRef.current.querySelectorAll<HTMLElement>(SIDEBAR_FOCUSABLE_SELECTOR)]
-        .filter((element) => !element.hasAttribute("disabled"));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        sidebarRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable.at(-1)!;
-      const activeElement = document.activeElement;
-      if (event.shiftKey && (activeElement === first || !sidebarRef.current.contains(activeElement))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (activeElement === last || !sidebarRef.current.contains(activeElement))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("keydown", handleKeyDown);
-      if (restoreFocusRef.current?.isConnected) restoreFocusRef.current.focus();
-    };
-  }, [handleClose, open]);
+  // The drawer floats above the page, so an untrapped Tab walks into controls
+  // the user cannot see behind it. Initial focus is chosen per tab below.
+  useFocusTrap(sidebarRef, { active: open, onEscape: handleClose, autoFocus: false });
 
   useEffect(() => {
     if (!open) return;
@@ -454,6 +431,10 @@ export function ReaderLibrarySidebar({
   const bookmarkChapterLabel = currentChapter && currentChapter.title.length > BOOKMARK_LABEL_LIMIT
     ? `${currentChapter.title.slice(0, BOOKMARK_LABEL_LIMIT).trimEnd()}…`
     : currentChapter?.title ?? "";
+  const highlights = activeDocument?.highlights ?? [];
+  const exportBar = activeDocument && countReaderAnnotations(activeDocument) > 0
+    ? <ReaderAnnotationExportBar document={activeDocument} />
+    : null;
 
   return (
     <>
@@ -709,6 +690,7 @@ export function ReaderLibrarySidebar({
 
           {tab === "bookmarks" && activeDocument && (
             <div className="space-y-3">
+              {exportBar}
               <button
                 type="button"
                 onClick={() => onAddBookmark({
@@ -770,6 +752,7 @@ export function ReaderLibrarySidebar({
 
           {tab === "notes" && activeDocument && (
             <div className="space-y-3">
+              {exportBar}
               <label className="block text-xs font-semibold text-text-secondary">
                 {selectedPassage ? "New note for selected passage" : "New note at current position"}
                 {selectedPassage && (
@@ -800,6 +783,15 @@ export function ReaderLibrarySidebar({
                 <NotebookPen size={15} />
                 Save note
               </button>
+              {highlights.length > 0 && (
+                <ReaderHighlightList
+                  text={activeDocument.text}
+                  highlights={highlights}
+                  onJumpToOffset={onJumpToOffset}
+                  onUpdateHighlight={onUpdateHighlight}
+                  onRemoveHighlight={onRemoveHighlight}
+                />
+              )}
               {activeDocument.notes.length === 0 ? (
                 <p className="rounded-2xl border border-dashed border-border p-5 text-center text-sm text-text-muted">
                   Notes stay attached to this document.

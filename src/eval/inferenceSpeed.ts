@@ -1,41 +1,43 @@
-import { MODELS } from "../constants";
-import type { InferenceBackend, ModelType, WorkerInMessage, WorkerOutMessage } from "../types";
+import type { InferenceBackend, WorkerInMessage, WorkerOutMessage } from "../types";
 import { getWebGPUStatus, type WebGPUStatus } from "../lib/webgpu";
+import { BENCHMARK_MODEL_INFO, resolveBenchmarkVoice } from "./inferenceSpeedModels";
 import {
   parseInferenceSpeedOptions,
+  resolveBenchmarkModels,
+  type BenchmarkModel,
   type ParsedInferenceSpeedOptions,
 } from "./inferenceSpeedOptions";
+import { summarizeIterations, type IterationResult, type IterationSummary } from "./inferenceSpeedSummary";
 
 const RESULT_PREFIX = "INFERENCE_SPEED_RESULT_JSON:";
 const ERROR_PREFIX = "INFERENCE_SPEED_ERROR_JSON:";
-
-interface IterationResult {
-  iteration: number;
-  warmup: boolean;
-  generationMs: number;
-  firstChunkMs: number | null;
-  chunks: number;
-  audioSeconds: number;
-  charsPerSec: number;
-  rtf: number | null;
-}
+// Fixed so Supertonic 3, which samples from noise, synthesizes the same audio
+// on every run; Kokoro and Supertonic 2 ignore it.
+const BENCHMARK_SEED = 0;
 
 interface ModelBenchmarkResult {
-  model: ModelType;
+  model: BenchmarkModel;
   modelId: string;
   modelRevision: string;
+  /** Backend of the worker that ran the generations (the warm-loaded one). */
   backend: InferenceBackend | null;
+  /**
+   * First LOAD on a fresh worker. It includes downloads only when the
+   * runtime's Cache Storage is empty in this browser profile.
+   */
+  coldLoadMs: number | null;
+  /** LOAD on a second fresh worker after the first is terminated, served from the cache. */
+  warmLoadMs: number | null;
+  /** Alias of `coldLoadMs` for reports and tools that predate the split. */
   loadMs: number | null;
+  /**
+   * Time to the first AUDIO_CHUNK of the first GENERATE after the warm load,
+   * before any warm-up: the first-audio latency a user sees after loading.
+   */
+  firstChunkMs: number | null;
   voice: string;
   iterations: IterationResult[];
-  summary: {
-    meanGenerationMs: number;
-    medianGenerationMs: number;
-    bestGenerationMs: number;
-    meanFirstChunkMs: number | null;
-    meanCharsPerSec: number;
-    meanRtf: number | null;
-  } | null;
+  summary: IterationSummary | null;
   error?: string;
 }
 
@@ -50,35 +52,48 @@ interface BenchmarkResult {
   models: ModelBenchmarkResult[];
 }
 
-function modelList(model: ParsedInferenceSpeedOptions["model"]): ModelType[] {
-  return model === "both" ? ["kokoro", "supertonic"] : [model];
+interface LoadResult {
+  backend: InferenceBackend | null;
+  voices?: string[];
+  loadMs: number;
 }
 
-function createWorker(model: ModelType): Worker {
-  if (model === "kokoro") {
-    return new Worker(new URL("../workers/kokoro.worker.ts", import.meta.url), { type: "module" });
+// One literal `new Worker(new URL(...))` per runtime so Vite bundles each worker.
+function createWorker(model: BenchmarkModel): Worker {
+  switch (model) {
+    case "kokoro":
+      return new Worker(new URL("../workers/kokoro.worker.ts", import.meta.url), { type: "module" });
+    case "supertonic":
+      return new Worker(new URL("../workers/supertonic.worker.ts", import.meta.url), { type: "module" });
+    case "supertonic3":
+      return new Worker(new URL("../workers/supertonic3.worker.ts", import.meta.url), { type: "module" });
   }
-  return new Worker(new URL("../workers/supertonic.worker.ts", import.meta.url), { type: "module" });
 }
 
-function timeoutPromise<T>(timeoutMs: number, label: string): Promise<T> {
-  return new Promise((_resolve, reject) => {
-    setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms.`)), timeoutMs);
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms.`)), timeoutMs);
   });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-function waitForLoad(
-  worker: Worker,
-  model: ModelType,
-  timeoutMs: number,
-): Promise<{ backend: InferenceBackend | null; voices?: string[]; loadMs: number }> {
+function workerErrorMessage(event: ErrorEvent, model: BenchmarkModel): string {
+  return event.message || `${model} worker failed to start.`;
+}
+
+function waitForLoad(worker: Worker, model: BenchmarkModel, timeoutMs: number, label: string): Promise<LoadResult> {
   const startedAt = performance.now();
 
-  const promise = new Promise<{ backend: InferenceBackend | null; voices?: string[]; loadMs: number }>((resolve, reject) => {
+  const promise = new Promise<LoadResult>((resolve, reject) => {
+    const cleanup = () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.removeEventListener("error", handleError);
+    };
     const handleMessage = (event: MessageEvent<WorkerOutMessage>) => {
       const message = event.data;
       if (message.type === "READY") {
-        worker.removeEventListener("message", handleMessage);
+        cleanup();
         resolve({
           backend: message.backend ?? null,
           voices: message.voices,
@@ -88,27 +103,33 @@ function waitForLoad(
       }
 
       if (message.type === "ERROR" && message.scope !== "generate") {
-        worker.removeEventListener("message", handleMessage);
+        cleanup();
         reject(new Error(message.message));
       }
     };
+    // A worker whose module fails to evaluate posts nothing; fail fast instead
+    // of waiting for the timeout.
+    const handleError = (event: ErrorEvent) => {
+      cleanup();
+      reject(new Error(workerErrorMessage(event, model)));
+    };
 
     worker.addEventListener("message", handleMessage);
+    worker.addEventListener("error", handleError);
     worker.postMessage({
       type: "LOAD",
-      preferredVoice: model === "supertonic" ? MODELS.supertonic.defaultVoice : undefined,
+      // Only Supertonic 2 preloads a voice during LOAD, as in useModelLoader.
+      preferredVoice: model === "supertonic" ? BENCHMARK_MODEL_INFO.supertonic.defaultVoice : undefined,
       debugProfiling: false,
     } satisfies WorkerInMessage);
   });
 
-  return Promise.race([
-    promise,
-    timeoutPromise<{ backend: InferenceBackend | null; voices?: string[]; loadMs: number }>(timeoutMs, `${model} load`),
-  ]);
+  return withTimeout(promise, timeoutMs, `${model} ${label}`);
 }
 
 function generateOnce(
   worker: Worker,
+  model: BenchmarkModel,
   options: ParsedInferenceSpeedOptions,
   voice: string,
   iteration: number,
@@ -157,6 +178,7 @@ function generateOnce(
       type: "GENERATE",
       text: options.text,
       voice,
+      language: BENCHMARK_MODEL_INFO[model].language,
       speed: options.speed,
       quality: options.quality,
       pauseOverridesSec: {
@@ -168,88 +190,65 @@ function generateOnce(
       sentenceSpeedVariance: 0,
       pronunciationRules: [],
       emphasisStrength: 0,
+      seed: BENCHMARK_SEED,
     } satisfies WorkerInMessage);
   });
 }
 
-function mean(values: number[]): number {
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
-}
-
-function median(values: number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0
-    ? (sorted[middle - 1] + sorted[middle]) / 2
-    : sorted[middle];
-}
-
-function summarize(iterations: IterationResult[]): ModelBenchmarkResult["summary"] {
-  const measured = iterations.filter((iteration) => !iteration.warmup);
-  if (measured.length === 0) return null;
-
-  const generationMs = measured.map((iteration) => iteration.generationMs);
-  const firstChunkMs = measured
-    .map((iteration) => iteration.firstChunkMs)
-    .filter((value): value is number => value !== null);
-  const rtf = measured
-    .map((iteration) => iteration.rtf)
-    .filter((value): value is number => value !== null);
-
-  return {
-    meanGenerationMs: mean(generationMs),
-    medianGenerationMs: median(generationMs),
-    bestGenerationMs: Math.min(...generationMs),
-    meanFirstChunkMs: firstChunkMs.length > 0 ? mean(firstChunkMs) : null,
-    meanCharsPerSec: mean(measured.map((iteration) => iteration.charsPerSec)),
-    meanRtf: rtf.length > 0 ? mean(rtf) : null,
+/**
+ * Cold-loads the runtime on a fresh worker, terminates it, warm-loads a second
+ * fresh worker from the cache, then runs the warm-ups and measured iterations
+ * on the warm worker. Whatever was measured before a failure is kept.
+ */
+async function benchmarkModel(model: BenchmarkModel, options: ParsedInferenceSpeedOptions): Promise<ModelBenchmarkResult> {
+  const info = BENCHMARK_MODEL_INFO[model];
+  const result: ModelBenchmarkResult = {
+    model,
+    modelId: info.modelId,
+    modelRevision: info.modelRevision,
+    backend: null,
+    coldLoadMs: null,
+    warmLoadMs: null,
+    loadMs: null,
+    firstChunkMs: null,
+    voice: info.defaultVoice,
+    iterations: [],
+    summary: null,
   };
-}
 
-async function benchmarkModel(model: ModelType, options: ParsedInferenceSpeedOptions): Promise<ModelBenchmarkResult> {
-  const worker = createWorker(model);
+  let worker: Worker | null = null;
   try {
-    const loaded = await waitForLoad(worker, model, options.timeoutMs);
-    const voice = model === "kokoro"
-      ? (loaded.voices?.includes(MODELS.kokoro.defaultVoice) ? MODELS.kokoro.defaultVoice : loaded.voices?.[0] ?? MODELS.kokoro.defaultVoice)
-      : MODELS.supertonic.defaultVoice;
+    worker = createWorker(model);
+    const cold = await waitForLoad(worker, model, options.timeoutMs, "cold load");
+    result.coldLoadMs = cold.loadMs;
+    result.loadMs = cold.loadMs;
+    worker.terminate();
+    worker = null;
 
-    const iterations: IterationResult[] = [];
+    worker = createWorker(model);
+    const warm = await waitForLoad(worker, model, options.timeoutMs, "warm load");
+    result.warmLoadMs = warm.loadMs;
+    result.backend = warm.backend;
+    result.voice = resolveBenchmarkVoice(model, warm.voices);
+
     const totalRuns = options.warmups + options.iterations;
     for (let index = 0; index < totalRuns; index += 1) {
-      const warmup = index < options.warmups;
-      const iteration = await Promise.race([
-        generateOnce(worker, options, voice, index + 1, warmup),
-        timeoutPromise<IterationResult>(options.timeoutMs, `${model} generation ${index + 1}`),
-      ]);
-      iterations.push(iteration);
+      const iteration = await withTimeout(
+        generateOnce(worker, model, options, result.voice, index + 1, index < options.warmups),
+        options.timeoutMs,
+        `${model} generation ${index + 1}`,
+      );
+      result.iterations.push(iteration);
     }
 
-    return {
-      model,
-      modelId: MODELS[model].id,
-      modelRevision: MODELS[model].revision,
-      backend: loaded.backend,
-      loadMs: loaded.loadMs,
-      voice,
-      iterations,
-      summary: summarize(iterations),
-    };
+    result.firstChunkMs = result.iterations[0]?.firstChunkMs ?? null;
+    result.summary = summarizeIterations(result.iterations);
   } catch (error) {
-    return {
-      model,
-      modelId: MODELS[model].id,
-      modelRevision: MODELS[model].revision,
-      backend: null,
-      loadMs: null,
-      voice: model === "kokoro" ? MODELS.kokoro.defaultVoice : MODELS.supertonic.defaultVoice,
-      iterations: [],
-      summary: null,
-      error: error instanceof Error ? error.message : String(error),
-    };
+    result.error = error instanceof Error ? error.message : String(error);
   } finally {
-    worker.terminate();
+    worker?.terminate();
   }
+  return result;
 }
 
 function setStatus(value: string): void {
@@ -262,7 +261,7 @@ async function main(): Promise<void> {
   const webgpu = await getWebGPUStatus();
   const models: ModelBenchmarkResult[] = [];
 
-  for (const model of modelList(options.model)) {
+  for (const model of resolveBenchmarkModels(options.model)) {
     setStatus(`Benchmarking ${model}...`);
     models.push(await benchmarkModel(model, options));
   }

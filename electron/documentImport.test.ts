@@ -6,6 +6,7 @@ import {
   importDocumentFromDialog,
   importDocumentFromPath,
   isSupportedImportExtension,
+  stripPageFurniture,
   type DocumentParser,
   type ImportFs,
 } from "./documentImport";
@@ -192,6 +193,177 @@ describe("importDocumentFromPath", () => {
     await expect(
       importDocumentFromPath("/tmp/doc.pdf", parserFactory, makeFs()),
     ).rejects.toThrow('Failed to import "doc.pdf": Cannot find module');
+  });
+});
+
+const BODY_WORDS = [
+  "amber", "birch", "cedar", "delta", "ember", "fjord", "grove", "harbor", "inlet", "juniper", "kestrel", "lagoon",
+];
+
+// Body lines differ by words, not digits, because furniture matching groups
+// lines that differ only by their digits; real prose never repeats line for
+// line across pages.
+function bodyLines(index: number): string {
+  const word = BODY_WORDS[index];
+  return `The ${word} paragraph begins on this page and\ncontinues the ${word} story to its end.`;
+}
+
+const RUNNING_HEADER = (page: number) => `The Lighthouse Keeper   Chapter ${Math.ceil(page / 4)}`;
+
+// A book fixture: every page carries a running header, a body, and a footer
+// page number, as LiteParse reports them for a typeset PDF.
+function bookPages(count = 10): string[] {
+  return Array.from({ length: count }, (_, index) => {
+    const page = index + 1;
+    return [RUNNING_HEADER(page), "", bodyLines(index), "", `Page ${page} of ${count}`].join("\n");
+  });
+}
+
+describe("stripPageFurniture", () => {
+  it("removes running headers and footers that repeat at page edges, keeping the first page's header", () => {
+    const pages = bookPages().map((page) => `${page}\n© 2026 Lighthouse Press`);
+    const stripped = stripPageFurniture(pages);
+    expect(stripped).toHaveLength(10);
+    expect(stripped[0].trim()).toBe(`${RUNNING_HEADER(1)}\n\n${bodyLines(0)}`);
+    for (const [index, page] of stripped.slice(1).entries()) {
+      expect(page.trim()).toBe(bodyLines(index + 1));
+    }
+  });
+
+  it("removes page numbers that advance with the page, in every supported format", () => {
+    const roman = ["i", "ii", "iii", "iv", "v", "vi"];
+    const formats: ((page: number) => string)[] = [
+      (page) => `${page + 11}`,
+      (page) => `- ${page + 3} -`,
+      (page) => `Page ${page + 1}`,
+      (page) => `${page + 40} / 300`,
+      (page) => `— ${page + 7} —`,
+      (page) => `p. ${page + 2}`,
+      (page) => roman[page],
+      (page) => `- ${roman[page]} -`,
+      (page) => `Page ${page + 1} of 6`,
+    ];
+    for (const format of formats) {
+      // Numbers alternate between page tops and bottoms, like a two-sided book.
+      const pages = Array.from({ length: 6 }, (_, page) => (
+        page % 2 === 0 ? `${format(page)}\n${bodyLines(page)}` : `${bodyLines(page)}\n${format(page)}`
+      ));
+      expect(stripPageFurniture(pages)).toEqual(pages.map((_, page) => bodyLines(page)));
+    }
+  });
+
+  it("removes page numbers set apart from a running title", () => {
+    const pages = Array.from({ length: 6 }, (_, page) => (
+      page % 2 === 0
+        ? `${page + 12}     THE LIGHTHOUSE KEEPER\n${bodyLines(page)}`
+        : `Chapter One | ${page + 12}\n${bodyLines(page)}`
+    ));
+    expect(stripPageFurniture(pages)).toEqual(pages.map((_, page) => bodyLines(page)));
+  });
+
+  it("keeps edge numbers that do not advance with the page", () => {
+    const pages = Array.from({ length: 6 }, (_, page) => `${bodyLines(page)}\n${page + 1}`);
+    pages[2] = "1984";
+    pages[3] = `Year founded\n1887\n${4}`;
+    const stripped = stripPageFurniture(pages);
+    expect(stripped[2]).toBe("1984");
+    expect(stripped[3]).toBe("Year founded\n1887");
+    expect(stripped[4]).toBe(bodyLines(4));
+  });
+
+  it("keeps numbers that never repeat as a page-number sequence", () => {
+    const pages = ["1984\nA novel opens here.", "Second page body.", "Third page body.", "Year founded\n1887"];
+    expect(stripPageFurniture(pages)).toEqual(pages);
+  });
+
+  it("keeps per-page headings whose number changes on every page", () => {
+    for (const heading of [(n: number) => `Question ${n}`, (n: number) => `Step ${n}: Mix`, (n: number) => `Day ${n}`]) {
+      const pages = Array.from({ length: 6 }, (_, page) => `${heading(page + 1)}\n${bodyLines(page)}`);
+      expect(stripPageFurniture(pages)).toEqual(pages);
+    }
+  });
+
+  it("keeps the document title on its first page when the running header repeats it", () => {
+    const pages = [
+      "",
+      "The Lighthouse Keeper\nA Novel",
+      ...Array.from({ length: 5 }, (_, page) => `The Lighthouse Keeper\n${bodyLines(page)}`),
+    ];
+    expect(stripPageFurniture(pages)).toEqual([
+      "",
+      "The Lighthouse Keeper\nA Novel",
+      ...Array.from({ length: 5 }, (_, page) => bodyLines(page)),
+    ]);
+  });
+
+  it("keeps numbers and roman-letter words that sit inside the body or are not page numbers", () => {
+    const pages = [
+      "Intro line\n12\nThe body keeps an inner 12.\nMore body\nOutro line",
+      "mix\nA lone word made of roman letters stays.",
+      "I\nA capital pronoun stays too.",
+    ];
+    expect(stripPageFurniture(pages)).toEqual(pages);
+  });
+
+  it("keeps an edge line that repeats on only a minority of pages", () => {
+    const pages = Array.from({ length: 10 }, (_, index) => (
+      index < 3 ? `Part One\n${bodyLines(index)}` : bodyLines(index)
+    ));
+    expect(stripPageFurniture(pages)).toEqual(pages);
+  });
+
+  it("leaves documents shorter than three pages untouched", () => {
+    const pages = ["Header\nFirst body.\n1", "Header\nSecond body.\n2"];
+    expect(stripPageFurniture(pages)).toEqual(pages);
+  });
+
+  it("never empties a page whose only text is furniture", () => {
+    const pages = [
+      `Shared title\n${bodyLines(0)}\n1`,
+      `Shared title\n${bodyLines(1)}\n2`,
+      `Shared title\n${bodyLines(2)}\n3`,
+      "Shared title\n4",
+      "5",
+    ];
+    expect(stripPageFurniture(pages)).toEqual([
+      `Shared title\n${bodyLines(0)}`,
+      bodyLines(1),
+      bodyLines(2),
+      "Shared title",
+      "5",
+    ]);
+  });
+});
+
+describe("importDocumentFromPath page cleanup", () => {
+  it("strips page furniture from per-page parser output before joining pages", async () => {
+    const parser: DocumentParser = {
+      parse: vi.fn().mockResolvedValue({ pages: bookPages(5), pageCount: 5 }),
+    };
+    const result = await importDocumentFromPath("/tmp/book.pdf", makeParserFactory(parser), makeFs());
+    expect(result.pageCount).toBe(5);
+    expect(result.text).not.toMatch(/Page \d of/);
+    expect(result.text.split("\n\n")).toEqual([
+      RUNNING_HEADER(1),
+      ...Array.from({ length: 5 }, (_, index) => bodyLines(index)),
+    ]);
+  });
+
+  it("joins short per-page output without removing anything", async () => {
+    const parser: DocumentParser = {
+      parse: vi.fn().mockResolvedValue({ pages: ["Title\nOne\n1", "Title\nTwo\n2"], pageCount: 2 }),
+    };
+    const result = await importDocumentFromPath("/tmp/memo.pdf", makeParserFactory(parser), makeFs());
+    expect(result.text).toBe("Title\nOne\n1\n\nTitle\nTwo\n2");
+  });
+
+  it("still enforces the text cap on per-page output", async () => {
+    const parser: DocumentParser = {
+      parse: vi.fn().mockResolvedValue({ pages: ["a".repeat(MAX_IMPORT_TEXT_CHARS + 1)], pageCount: 1 }),
+    };
+    await expect(
+      importDocumentFromPath("/tmp/tome.pdf", makeParserFactory(parser), makeFs()),
+    ).rejects.toThrow("contains too much text to import");
   });
 });
 

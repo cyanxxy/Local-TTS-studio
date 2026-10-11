@@ -1,13 +1,18 @@
 import { describe, expect, it } from "vitest";
 import {
   buildKokoroInferenceUnits,
+  chunkForSupertonicDetailed,
   chunkTextForModel,
   chunkTextForModelDetailed,
   chunkWithConstraints,
   chunkWithConstraintsDetailed,
+  findSplitNearMiddle,
   getAdaptiveChunkLimits,
   getKokoroMaxInferenceChars,
+  KOKORO_FIRST_UNIT_MAX_CHARS,
+  rampedBudget,
   rechunkChunkForRetry,
+  SUPERTONIC_FIRST_CHUNK_MAX_CHARS,
   type TextChunk,
 } from "./chunking";
 
@@ -296,5 +301,145 @@ describe("rechunkChunkForRetry", () => {
     expect(retryChunks[0].start).toBeGreaterThanOrEqual(chunk.start);
     expect(retryChunks[retryChunks.length - 1].pauseAfterSec).toBe(chunk.pauseAfterSec);
     expect(retryChunks[retryChunks.length - 1].pauseKind).toBe(chunk.pauseKind);
+  });
+});
+
+describe("findSplitNearMiddle", () => {
+  const parts = (text: string) => {
+    const offset = findSplitNearMiddle(text);
+    return offset === null ? null : [text.slice(0, offset).trimEnd(), text.slice(offset)];
+  };
+
+  it("prefers the sentence end closest to the middle", () => {
+    expect(parts("The keeper climbed. He counted every step, slowly. The sea was grey and cold."))
+      .toEqual(["The keeper climbed. He counted every step, slowly.", "The sea was grey and cold."]);
+  });
+
+  it("falls back to a clause break, then to the space closest to the middle", () => {
+    expect(parts("One long sentence that rambles on, and then keeps going for a while longer"))
+      .toEqual(["One long sentence that rambles on,", "and then keeps going for a while longer"]);
+    expect(parts("one two three four five six seven eight"))
+      .toEqual(["one two three four", "five six seven eight"]);
+  });
+
+  it("chooses an even split over a natural boundary that leaves one part tiny", () => {
+    expect(parts("Hi. this text runs on for quite a while without any further punctuation at all"))
+      .toEqual(["Hi. this text runs on for quite a while", "without any further punctuation at all"]);
+  });
+
+  it("keeps closing quotes and brackets with the sentence they end", () => {
+    expect(parts('He said "stop." She did (eventually.) Then they all went home together.'))
+      .toEqual(['He said "stop." She did (eventually.)', "Then they all went home together."]);
+  });
+
+  it("splits full-width punctuation that has no trailing space", () => {
+    expect(parts("今日は晴れです。明日は雨が降るでしょう。")).toEqual(["今日は晴れです。", "明日は雨が降るでしょう。"]);
+  });
+
+  it("cuts an unbroken run between graphemes and refuses what cannot be split", () => {
+    expect(parts("12345678")).toEqual(["1234", "5678"]);
+    expect(parts("a😀b😀")).toEqual(["a😀", "b😀"]);
+    expect(findSplitNearMiddle("😀")).toBeNull();
+    expect(findSplitNearMiddle("  a  ")).toBeNull();
+    expect(findSplitNearMiddle("")).toBeNull();
+  });
+
+  it("ignores boundaries in leading or trailing whitespace", () => {
+    expect(parts("  First half here. Second half here.  "))
+      .toEqual(["  First half here.", "Second half here.  "]);
+  });
+});
+
+describe("first-unit ramp", () => {
+  // Thirty 41-character sentences in one paragraph.
+  const prose = Array.from({ length: 30 }, (_, index) => `Sentence ${String(index).padStart(2, "0")} keeps the story going on.`)
+    .join(" ");
+
+  function expectExactCoverage(text: string, chunks: TextChunk[]): void {
+    let cursor = 0;
+    for (const chunk of chunks) {
+      expect(text.slice(chunk.start, chunk.end)).toBe(chunk.text);
+      expect(text.slice(cursor, chunk.start).trim()).toBe("");
+      cursor = chunk.end;
+    }
+    expect(text.slice(cursor).trim()).toBe("");
+  }
+
+  it("doubles the budget from the first cap up to the full budget", () => {
+    expect([0, 1, 2, 3].map((index) => rampedBudget(index, 140, 520))).toEqual([140, 280, 520, 520]);
+    expect(rampedBudget(0, undefined, 520)).toBe(520);
+  });
+
+  it("caps Kokoro's first units and keeps later units full size", () => {
+    const chunks = chunkTextForModelDetailed(prose, "kokoro", { runtime: { backend: "webgpu" } });
+    const lengths = chunks.map((chunk) => chunk.text.length);
+
+    expect(lengths[0]).toBeLessThanOrEqual(KOKORO_FIRST_UNIT_MAX_CHARS);
+    expect(lengths[1]).toBeLessThanOrEqual(KOKORO_FIRST_UNIT_MAX_CHARS * 2);
+    expect(lengths[2]).toBeGreaterThan(KOKORO_FIRST_UNIT_MAX_CHARS * 2);
+    expect(Math.max(...lengths)).toBeLessThanOrEqual(getKokoroMaxInferenceChars("webgpu"));
+    expect(chunks.slice(0, -1).every((chunk) => chunk.pauseKind === "sentence")).toBe(true);
+    expectExactCoverage(prose, chunks);
+    // The worker generates the same units the Reader previews.
+    expect(chunks.map(({ start, end }) => [start, end])).toEqual(
+      buildKokoroInferenceUnits(prose, getKokoroMaxInferenceChars("webgpu"), { firstUnitMaxChars: KOKORO_FIRST_UNIT_MAX_CHARS })
+        .map(({ start, end }) => [start, end]),
+    );
+  });
+
+  it("leaves Kokoro's merge budget alone without a first-unit cap", () => {
+    const units = buildKokoroInferenceUnits(prose, 520);
+    expect(units[0].text.length).toBeGreaterThan(KOKORO_FIRST_UNIT_MAX_CHARS * 2);
+  });
+
+  it("cuts a long first sentence at its last clause break within the cap", () => {
+    const text = "When the storm finally broke over the harbour that night, every boat strained at its rope, "
+      + "and the keeper, who had seen a hundred storms, climbed the stairs to light the lamp. The sea calmed.";
+    const chunks = chunkTextForModelDetailed(text, "kokoro", { runtime: { backend: "webgpu" } });
+
+    expect(chunks[0]).toMatchObject({
+      text: "When the storm finally broke over the harbour that night, every boat strained at its rope, and the keeper, who had seen a hundred storms,",
+      pauseKind: "comma",
+    });
+    expect(chunks[1].text.startsWith("climbed the stairs")).toBe(true);
+    expectExactCoverage(text, chunks);
+  });
+
+  it("keeps a long first sentence whole when no clause break fits the cap", () => {
+    const text = `${"word ".repeat(40).trim()}. Next sentence.`;
+    const chunks = chunkTextForModelDetailed(text, "kokoro", { runtime: { backend: "webgpu" } });
+    expect(chunks[0].text).toBe(`${"word ".repeat(40).trim()}.`);
+    const early = "Yes, the keeper climbed every one of the many worn stone steps of that tall old lighthouse again tonight and then he rested for a while.";
+    expect(chunkTextForModelDetailed(early, "kokoro", { runtime: { backend: "webgpu" } })[0].text).toBe(early);
+  });
+
+  it("caps Supertonic's first chunk, in the preview and the worker alike", () => {
+    const capped = chunkTextForModelDetailed(prose, "supertonic", { runtime: { backend: "webgpu", quality: 5 } });
+    const uncapped = chunkWithConstraintsDetailed(prose, { runtime: { backend: "webgpu", quality: 5 } });
+
+    expect(capped[0].text.length).toBeLessThanOrEqual(SUPERTONIC_FIRST_CHUNK_MAX_CHARS);
+    expect(capped[1].text.length).toBeLessThanOrEqual(SUPERTONIC_FIRST_CHUNK_MAX_CHARS * 2);
+    expect(uncapped[0].text.length).toBeGreaterThan(SUPERTONIC_FIRST_CHUNK_MAX_CHARS);
+    expect(capped.at(-2)!.text.length).toBe(uncapped.at(-2)!.text.length);
+    expectExactCoverage(prose, capped);
+    expect(capped).toEqual(chunkForSupertonicDetailed(prose, { runtime: { backend: "webgpu", quality: 5 } }));
+  });
+
+  it("keeps Supertonic's first-chunk cap when the option is passed as undefined", () => {
+    const options = { runtime: { backend: "webgpu" as const, quality: 5 } };
+    expect(chunkForSupertonicDetailed(prose, { ...options, firstChunkMaxCharacters: undefined }))
+      .toEqual(chunkForSupertonicDetailed(prose, options));
+  });
+
+  it("applies the first-chunk cap under explicit limits and cuts a long first sentence at a clause", () => {
+    const text = "When the storm finally broke over the harbour that night, every boat strained at its rope, "
+      + "and the keeper, who had seen a hundred storms, climbed the stairs to light the lamp. The sea calmed.";
+    const chunks = chunkForSupertonicDetailed(text, { minCharacters: 30, maxCharacters: 280 });
+
+    expect(chunks[0]).toMatchObject({
+      text: "When the storm finally broke over the harbour that night, every boat strained at its rope, and the keeper, who had seen a hundred storms,",
+      pauseKind: "comma",
+    });
+    expectExactCoverage(text, chunks);
   });
 });

@@ -1,4 +1,4 @@
-import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import { IDBFactory, IDBIndex, IDBKeyRange, IDBObjectStore } from "fake-indexeddb";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const DB_NAME = "local-tts-model-cache-v1";
@@ -128,6 +128,51 @@ describe("persistentCache", () => {
     await expect(module.getPersistentCacheNames()).resolves.toEqual(["models"]);
     await expect(module.clearPersistentCacheStorage()).resolves.toEqual(["models"]);
     await expect(module.getPersistentCacheNames()).resolves.toEqual([]);
+  });
+
+  it("lists, deletes, and clears entries from keys without reading cached bodies", async () => {
+    const module = await loadModule();
+    const models = await module.getPersistentCacheAdapter("models");
+    const voices = await module.getPersistentCacheAdapter("voices");
+    await models?.put("https://example.com/model-a.bin", new Response("a"));
+    await models?.put("https://example.com/model-b.bin", new Response("b"));
+    await voices?.put("https://example.com/voice.bin", new Response("voice"));
+
+    // Each record holds a whole model file, so any value read would
+    // deserialize hundreds of MB just to learn a cache name or a URL.
+    const valueReads = [
+      vi.spyOn(IDBObjectStore.prototype, "openCursor"),
+      vi.spyOn(IDBObjectStore.prototype, "get"),
+      vi.spyOn(IDBObjectStore.prototype, "getAll"),
+      vi.spyOn(IDBIndex.prototype, "openCursor"),
+      vi.spyOn(IDBIndex.prototype, "get"),
+      vi.spyOn(IDBIndex.prototype, "getAll"),
+    ];
+
+    await expect(module.getPersistentCacheNames()).resolves.toEqual(["models", "voices"]);
+    expect(await models?.delete?.("https://example.com/missing.bin")).toBe(false);
+    expect(await models?.delete?.("https://example.com/model-a.bin")).toBe(true);
+    await expect(module.clearPersistentCacheEntries(() => true, ["models"])).resolves.toEqual([
+      { cacheName: "models", url: "https://example.com/model-b.bin" },
+    ]);
+    await expect(module.clearPersistentCacheStorage(["voices"])).resolves.toEqual(["voices"]);
+    await expect(module.getPersistentCacheNames()).resolves.toEqual([]);
+
+    for (const spy of valueReads) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("recovers exact URLs from keys when names or URLs contain the key delimiter", async () => {
+    const module = await loadModule();
+    const odd = await module.getPersistentCacheAdapter("odd::cache");
+    await odd?.put("http://[::1]:8080/model.bin", new Response("ipv6"));
+    await odd?.put("https://example.com/keep.bin", new Response("keep"));
+
+    await expect(module.getPersistentCacheNames()).resolves.toEqual(["odd::cache"]);
+    await expect(module.clearPersistentCacheEntries((entry) => entry.url.includes("[::1]"))).resolves.toEqual([
+      { cacheName: "odd::cache", url: "http://[::1]:8080/model.bin" },
+    ]);
+    expect(await (await odd?.match("https://example.com/keep.bin"))?.text()).toBe("keep");
+    expect(await odd?.match("http://[::1]:8080/model.bin")).toBeUndefined();
   });
 
   it("returns no matching deletions when the persistent cache is empty", async () => {

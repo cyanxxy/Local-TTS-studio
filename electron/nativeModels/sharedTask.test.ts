@@ -1,7 +1,7 @@
 // @vitest-environment node
 
 import { describe, expect, it, vi } from "vitest";
-import { SerialTaskQueue, SharedTask, SharedTaskGroup, type SharedTaskContext } from "./audio8SharedTask";
+import { SerialTaskQueue, SharedTask, SharedTaskGroup, type SharedTaskContext } from "./sharedTask";
 
 function cancelled(): Error {
   return new Error("cancelled");

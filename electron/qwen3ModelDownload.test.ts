@@ -1,12 +1,12 @@
 // @vitest-environment node
 
-import { createHash } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import fs from "fs";
 import type { IncomingMessage } from "http";
 import os from "os";
 import path from "path";
-import { Readable } from "stream";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { PassThrough, Readable } from "stream";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Qwen3Profile } from "./qwen3Profiles";
 import {
   adoptLegacyQwen3ModelDir,
@@ -89,8 +89,15 @@ function makeTempDir(): string {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
+
+/** Records which files are opened for hashing; metadata reads do not go through here. */
+function spyOnHashedFiles(): () => string[] {
+  const open = vi.spyOn(fs.promises, "open");
+  return () => open.mock.calls.map(([file]) => path.basename(String(file)));
+}
 
 describe("safe progress and Hub URLs", () => {
   it("drops progress safely after the window is destroyed", () => {
@@ -302,6 +309,125 @@ describe("downloadQwen3Model", () => {
   });
 });
 
+describe("setup verification cache", () => {
+  // Files written by a test are seconds old at most, inside the window in which
+  // the digest cache refuses to remember them. Run the clock a minute ahead so
+  // these tests observe the cache rather than that rule.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 60_000 });
+  });
+
+  it("re-inspects an unchanged verified profile without re-reading its weights", async () => {
+    const modelDir = makeTempDir();
+    await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    const hashed = spyOnHashedFiles();
+
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
+
+    expect(hashed()).toEqual([]);
+  });
+
+  it("still catches a same-size edit whose modification time was put back", async () => {
+    const modelDir = makeTempDir();
+    await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    const weights = path.join(modelDir, "model.safetensors");
+    const { mtime } = fs.statSync(weights);
+    fs.writeFileSync(weights, "WEIGHTS");
+    fs.utimesSync(weights, mtime, mtime);
+    const hashed = spyOnHashedFiles();
+
+    await expect(inspectQwen3ModelDir(modelDir, PROFILE)).resolves.toEqual({
+      readiness: "structural",
+      reason: "model.safetensors does not match its manifest digest.",
+    });
+    expect(hashed()).toEqual(["model.safetensors"]);
+  });
+
+  it("decides legacy adoption without hashing any weights", async () => {
+    const root = makeTempDir();
+    const legacyDir = path.join(root, "example");
+    const revisionDir = path.join(root, `example-${REVISION.slice(0, 12)}`);
+    await downloadQwen3Model(PROFILE, legacyDir, () => {}, fakeHubRequest());
+    const hashed = spyOnHashedFiles();
+
+    await expect(adoptLegacyQwen3ModelDir(PROFILE, revisionDir, legacyDir)).resolves.toBe(revisionDir);
+    await expect(adoptLegacyQwen3ModelDir(PROFILE, revisionDir, legacyDir)).resolves.toBe(revisionDir);
+
+    expect(fs.existsSync(legacyDir)).toBe(false);
+    expect(hashed()).toEqual([]);
+    // Adoption moved the directory, so nothing about it is assumed: the moved
+    // files are identical, and inspection proves it rather than trusting a path.
+    await expect(inspectQwen3ModelDir(revisionDir, PROFILE)).resolves.toEqual({ readiness: "verified" });
+  });
+
+  it("serves the download's skip check from an earlier inspection", async () => {
+    const modelDir = makeTempDir();
+    await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());
+    fs.rmSync(path.join(modelDir, QWEN3_MODEL_MANIFEST));
+    const hashed = spyOnHashedFiles();
+
+    await expect(downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest()))
+      .resolves.toMatchObject({ downloadedFiles: 0, skippedFiles: 2, readiness: "verified" });
+    expect(hashed()).toEqual([]);
+  });
+});
+
+describe("download progress", () => {
+  function chunkedResponse(chunks: Buffer[], headers: Record<string, string> = {}): IncomingMessage {
+    return Object.assign(Readable.from(chunks) as unknown as IncomingMessage, { statusCode: 200, headers });
+  }
+
+  it("throttles each file at its source but always reports its first and last update", async () => {
+    const chunks = Array.from({ length: 20_000 }, () => Buffer.alloc(8, 2));
+    const weights = Buffer.concat(chunks);
+    const files = new Map([["config.json", FILES.get("config.json")!], ["model.safetensors", weights]]);
+    const hubRequest = fakeHubRequest([], files);
+    const progress: Qwen3ModelDownloadProgress[] = [];
+    const started = performance.now();
+
+    await downloadQwen3Model(PROFILE, makeTempDir(), (entry) => progress.push(entry), (url) => (
+      url.endsWith("/model.safetensors") ? Promise.resolve(chunkedResponse(chunks)) : hubRequest(url)
+    ));
+
+    const config = progress.filter((entry) => entry.fileName === "config.json");
+    const model = progress.filter((entry) => entry.fileName === "model.safetensors");
+    expect(config.map((entry) => entry.downloadedBytes)).toEqual([files.get("config.json")!.byteLength]);
+    // At most 200 half-percent steps and one update per elapsed interval, plus
+    // the file's first update and the one reaching 100%.
+    expect(model.length).toBeLessThanOrEqual(200 + Math.ceil((performance.now() - started) / 100) + 2);
+    expect(model.length).toBeLessThan(chunks.length / 20);
+    expect(model[0]).toMatchObject({ downloadedBytes: 8, totalBytes: weights.byteLength, fileIndex: 2, totalFiles: 2 });
+    expect(model.at(-1)).toMatchObject({ downloadedBytes: weights.byteLength, totalBytes: weights.byteLength });
+  });
+
+  it("delivers a file's final byte count even when no total is known", async () => {
+    const chunks = Array.from({ length: 5_000 }, () => Buffer.alloc(4, 3));
+    const weights = Buffer.concat(chunks);
+    const request: UrlRequest = (url) => {
+      if (url.includes("/api/models/")) {
+        return Promise.resolve(fakeResponse(JSON.stringify({
+          siblings: [
+            { rfilename: "config.json", size: FILES.get("config.json")!.byteLength },
+            // No size and no LFS pointer: nothing pins the length up front.
+            { rfilename: "model.safetensors" },
+          ],
+        })));
+      }
+      if (url.endsWith("/config.json")) return Promise.resolve(fakeResponse(FILES.get("config.json")!));
+      return Promise.resolve(chunkedResponse(chunks));
+    };
+    const progress: Qwen3ModelDownloadProgress[] = [];
+
+    await downloadQwen3Model(PROFILE, makeTempDir(), (entry) => progress.push(entry), request);
+
+    const model = progress.filter((entry) => entry.fileName === "model.safetensors");
+    expect(model.at(-1)).toMatchObject({ downloadedBytes: weights.byteLength });
+    expect(model.at(-1)).not.toHaveProperty("totalBytes");
+    expect(model.length).toBeLessThan(chunks.length / 20);
+  });
+});
+
 describe("download stream integrity", () => {
   const url = "https://huggingface.co/x/resolve/revision/model.safetensors";
 
@@ -321,6 +447,35 @@ describe("download stream integrity", () => {
       { sha256: "0".repeat(64) },
     )).rejects.toThrow(/digest mismatch/);
     expect(fs.existsSync(destination)).toBe(false);
+    expect(fs.readdirSync(path.dirname(destination))).toEqual([]);
+  });
+
+  it("writes through a process-unique partial and leaves another instance's transfer alone", async () => {
+    const destination = path.join(makeTempDir(), "model.safetensors");
+    // The fixed name older builds used, and a live transfer by another instance.
+    fs.writeFileSync(`${destination}.download`, "stale half body");
+    const foreign = `${destination}.${process.ppid}.${randomUUID()}.partial`;
+    fs.writeFileSync(foreign, "another instance's bytes");
+    const body = FILES.get("model.safetensors")!;
+
+    await expect(downloadHuggingFaceFile(url, destination, () => {}, () => Promise.resolve(fakeResponse(body)), {
+      sizeBytes: body.byteLength,
+      sha256: digest(body),
+    })).resolves.toEqual({ downloaded: true, sizeBytes: body.byteLength, sha256: digest(body) });
+    expect(fs.readdirSync(path.dirname(destination)).sort())
+      .toEqual(["model.safetensors", path.basename(foreign)].sort());
+  });
+
+  it("stops a body as soon as it overruns the pinned size", async () => {
+    const destination = path.join(makeTempDir(), "model.safetensors");
+    const stream = new PassThrough();
+    const response = Object.assign(stream, { statusCode: 200, headers: {} }) as unknown as IncomingMessage;
+    const pending = downloadHuggingFaceFile(url, destination, () => {}, () => Promise.resolve(response), { sizeBytes: 4 });
+    stream.write(Buffer.alloc(16, 1));
+
+    await expect(pending).rejects.toThrow(`Download size mismatch for ${url}: received 16 of 4 bytes.`);
+    expect(stream.destroyed).toBe(true);
+    expect(fs.readdirSync(path.dirname(destination))).toEqual([]);
   });
 
   it("fails a stalled response on the inactivity deadline", async () => {

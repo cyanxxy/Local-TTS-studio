@@ -14,6 +14,8 @@
  * `vite.audio8Catalogue.test.ts` asserts the two stay in agreement.
  */
 
+import type { NativeModelDescriptor } from "./nativeModels/descriptor";
+
 export const AUDIO8_MODEL_ID = "Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4";
 export const AUDIO8_MODEL_REVISION = "818569c6b832118ad68d61bbd873abe250fcd68a";
 
@@ -27,6 +29,14 @@ export const AUDIO8_VOICE_SPACE_REVISION = "6417ebaafc996620bebc3eb27cde0d5acb19
 /** Directory name under `userData/local-model-cache`. */
 export const AUDIO8_CACHE_NAMESPACE = "audio8";
 
+/** How the shared native model framework names, stores and starts Audio8. */
+export const AUDIO8_DESCRIPTOR: NativeModelDescriptor = {
+  label: "Audio8",
+  cacheNamespace: AUDIO8_CACHE_NAMESPACE,
+  revision: AUDIO8_MODEL_REVISION,
+  workerEntry: "audio8NativeWorker.js",
+};
+
 export const AUDIO8_VOICE_IDS = ["clara", "iris", "arthur", "mia", "ben", "sophie"] as const;
 export type Audio8VoiceId = typeof AUDIO8_VOICE_IDS[number];
 export const AUDIO8_DEFAULT_VOICE: Audio8VoiceId = "clara";
@@ -37,6 +47,24 @@ export const AUDIO8_DEFAULT_VOICE: Audio8VoiceId = "clara";
  * generating tokens for an unbounded prompt.
  */
 export const AUDIO8_MAX_TEXT_CHARACTERS = 1000;
+
+/**
+ * Sampler settings from the reference runtime. A request that leaves `seed`
+ * and `temperature` unset gets exactly the take every earlier build produced
+ * for the same text, voice, and revision; setting them asks for another take.
+ */
+export const AUDIO8_DEFAULT_SEED = 42;
+/** Seeds cross IPC as JSON numbers; 32 bits stays exact and is mulberry32's whole state. */
+export const AUDIO8_MAX_SEED = 0xFFFF_FFFF;
+export const AUDIO8_DEFAULT_TEMPERATURE = 0.3;
+/**
+ * Bounds for the nucleus temperature of the semantic and acoustic draws.
+ * Below 0.1 the draws are close to greedy, so different seeds stop producing
+ * different takes; hotter than the reference runtime's own 1.0 repeat-escape
+ * draw is untested and drifts toward noise.
+ */
+export const AUDIO8_MIN_TEMPERATURE = 0.1;
+export const AUDIO8_MAX_TEMPERATURE = 1;
 
 /**
  * Integrity digests come in two flavours because the Hub serves LFS files and
