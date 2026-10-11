@@ -54,6 +54,24 @@ describe("buildOverlayParts", () => {
     expect(parts.every((part) => !part.isActive)).toBe(true);
   });
 
+  it("colours spans by the innermost highlight over them, independent of the spoken range", () => {
+    const text = "Alpha beta gamma delta.";
+    const parts = buildOverlayParts(text, splitTextBlocks(text), { start: 6, end: 16 }, [
+      { start: 0, end: 16, color: "yellow" },
+      { start: 6, end: 10, color: "blue" },
+      { start: 17, end: 400, color: "pink" },
+    ]);
+
+    expect(parts.map((part) => [part.text, part.isActive, part.highlight])).toEqual([
+      ["Alpha ", false, "yellow"],
+      ["beta", true, "blue"],
+      [" gamma", true, "yellow"],
+      [" ", false, undefined],
+      ["delta.", false, "pink"],
+    ]);
+    expect(parts.map((part) => part.text).join("")).toBe(text);
+  });
+
   it("clamps a spoken range that runs past the section", () => {
     const text = "Short text.";
     const parts = buildOverlayParts(text, splitTextBlocks(text), { start: -5, end: 400 });

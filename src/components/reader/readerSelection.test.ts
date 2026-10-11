@@ -42,14 +42,41 @@ describe("readArticleSelection", () => {
     const secondSpan = article.querySelectorAll("p")[1].lastChild!.firstChild!;
     select(secondSpan, 0, secondSpan, 4);
 
-    expect(readArticleSelection(article, 29)).toEqual({ start: 19, collapsed: false, quote: "line" });
+    expect(readArticleSelection(article, 29)).toEqual({ start: 19, end: 23, collapsed: false, quote: "line" });
+  });
+
+  it("maps a selection that spans paragraphs, as a triple-click leaves it", () => {
+    const article = renderArticle([
+      { start: 0, parts: ["First line."] },
+      { start: 12, parts: ["Second line here."] },
+    ]);
+    const firstText = article.querySelector("span")!.firstChild!;
+
+    select(article, 0, article, 1);
+    expect(readArticleSelection(article, 29)).toMatchObject({ start: 0, end: 11 });
+
+    select(firstText, 6, article.querySelectorAll("span")[1].firstChild!, 6);
+    expect(readArticleSelection(article, 29)).toMatchObject({ start: 6, end: 18 });
+  });
+
+  it("falls back to the start when the end lands outside every paragraph", () => {
+    const article = renderArticle([{ start: 0, parts: ["Text"] }]);
+    const stray = document.createElement("div");
+    stray.textContent = "Not a block";
+    article.append(stray);
+
+    select(article.querySelector("span")!.firstChild!, 1, stray.firstChild!, 3);
+    expect(readArticleSelection(article, 4)).toMatchObject({ start: 1, end: 1, collapsed: false });
+
+    select(article.querySelector("span")!.firstChild!, 1, article, 2);
+    expect(readArticleSelection(article, 4)).toMatchObject({ start: 1, end: 1 });
   });
 
   it("reports a collapsed caret, clamped to the section", () => {
     const article = renderArticle([{ start: 40, parts: ["Tail"] }]);
     select(article.querySelector("span")!.firstChild!, 2);
 
-    expect(readArticleSelection(article, 41)).toEqual({ start: 41, collapsed: true, quote: "" });
+    expect(readArticleSelection(article, 41)).toEqual({ start: 41, end: 41, collapsed: true, quote: "" });
   });
 
   it("ignores selections that start or end outside the article", () => {

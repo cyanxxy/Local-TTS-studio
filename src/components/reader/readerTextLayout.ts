@@ -1,3 +1,5 @@
+import type { ReaderHighlightColor } from "../../lib/readerDocument";
+
 /**
  * Pure text-layout helpers for the Reader's reading pane. Everything here maps
  * section text to paragraph blocks and styled spans by character offset, so the
@@ -14,7 +16,16 @@ export interface OverlayPart {
   text: string;
   start: number;
   isActive: boolean;
+  /** Colour of the highlight over this span, if any. */
+  highlight?: ReaderHighlightColor;
 }
+
+/** A highlight in section-local offsets. */
+export interface HighlightRange extends TextRange {
+  color: ReaderHighlightColor;
+}
+
+const NO_HIGHLIGHTS: readonly HighlightRange[] = [];
 
 export interface ParagraphParts {
   block: TextBlock;
@@ -64,11 +75,16 @@ export function splitTextBlocks(text: string): TextBlock[] {
  * Deliberately independent of the spoken word: the word moves several times a
  * second and splitting on it here would rebuild every span in the section each
  * time. The word highlight is applied per paragraph at render time instead.
+ *
+ * Highlights split spans at their own edges. Where two overlap, the inner one
+ * shows its colour: the one that starts later, or ends sooner from the same
+ * start.
  */
 export function buildOverlayParts(
   text: string,
   blocks: readonly TextBlock[],
   activeRange: TextRange | null,
+  highlights: readonly HighlightRange[] = NO_HIGHLIGHTS,
 ): OverlayPart[] {
   if (!text) return [];
 
@@ -77,10 +93,12 @@ export function buildOverlayParts(
     offsets.add(block.start);
     offsets.add(block.end);
   }
-  if (activeRange) {
-    offsets.add(clamp(activeRange.start, 0, text.length));
-    offsets.add(clamp(activeRange.end, 0, text.length));
+  for (const range of activeRange ? [activeRange, ...highlights] : highlights) {
+    offsets.add(clamp(range.start, 0, text.length));
+    offsets.add(clamp(range.end, 0, text.length));
   }
+  // Outer before inner, so the last range that covers a span is the innermost.
+  const byStart = [...highlights].sort((a, b) => a.start - b.start || b.end - a.end);
 
   const sorted = [...offsets].sort((a, b) => a - b);
   const parts: OverlayPart[] = [];
@@ -92,11 +110,16 @@ export function buildOverlayParts(
     const isActive = activeRange
       ? partStart >= activeRange.start && partEnd <= activeRange.end
       : false;
+    let highlight: HighlightRange | undefined;
+    for (const range of byStart) {
+      if (partStart >= range.start && partEnd <= range.end) highlight = range;
+    }
 
     parts.push({
       text: text.slice(partStart, partEnd),
       start: partStart,
       isActive,
+      ...(highlight ? { highlight: highlight.color } : {}),
     });
   }
 

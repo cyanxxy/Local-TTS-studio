@@ -11,8 +11,16 @@ import {
   X,
 } from "lucide-react";
 import type { PlaybackClock } from "../lib/playbackClock";
-import { chapterAtOffset, type ReaderChapter, type ReaderDocumentRecord } from "../lib/readerDocument";
+import {
+  chapterAtOffset,
+  type ReaderChapter,
+  type ReaderDocumentRecord,
+  type ReaderHighlightColor,
+} from "../lib/readerDocument";
 import { findDocumentMatches } from "../lib/readerSearch";
+import { ReaderAnnotationExportBar } from "./reader/ReaderAnnotationExportBar";
+import { ReaderHighlightList } from "./reader/ReaderHighlightList";
+import { countReaderAnnotations } from "./reader/readerAnnotationExport";
 import { useFocusTrap } from "./reader/useFocusTrap";
 
 export type ReaderSidebarTab = "library" | "contents" | "search" | "bookmarks" | "notes";
@@ -48,6 +56,10 @@ interface ReaderLibrarySidebarProps {
   onAddNote: (input: { text: string; quote: string; textOffset: number }) => void;
   onUpdateNote: (id: string, text: string) => void;
   onRemoveNote: (id: string) => void;
+  /** Absent when highlights cannot be recoloured. */
+  onUpdateHighlight?: (id: string, patch: { color: ReaderHighlightColor }) => void;
+  /** Absent when highlights cannot be removed. */
+  onRemoveHighlight?: (id: string) => void;
   selectedPassage?: { quote: string; textOffset: number } | null;
   tab: ReaderSidebarTab;
   onTabChange: (tab: ReaderSidebarTab) => void;
@@ -212,6 +224,8 @@ export function ReaderLibrarySidebar({
   onAddNote,
   onUpdateNote,
   onRemoveNote,
+  onUpdateHighlight,
+  onRemoveHighlight,
   selectedPassage = null,
   tab,
   onTabChange,
@@ -410,6 +424,10 @@ export function ReaderLibrarySidebar({
   const bookmarkChapterLabel = currentChapter && currentChapter.title.length > BOOKMARK_LABEL_LIMIT
     ? `${currentChapter.title.slice(0, BOOKMARK_LABEL_LIMIT).trimEnd()}…`
     : currentChapter?.title ?? "";
+  const highlights = activeDocument?.highlights ?? [];
+  const exportBar = activeDocument && countReaderAnnotations(activeDocument) > 0
+    ? <ReaderAnnotationExportBar document={activeDocument} />
+    : null;
 
   return (
     <>
@@ -665,6 +683,7 @@ export function ReaderLibrarySidebar({
 
           {tab === "bookmarks" && activeDocument && (
             <div className="space-y-3">
+              {exportBar}
               <button
                 type="button"
                 onClick={() => onAddBookmark({
@@ -726,6 +745,7 @@ export function ReaderLibrarySidebar({
 
           {tab === "notes" && activeDocument && (
             <div className="space-y-3">
+              {exportBar}
               <label className="block text-xs font-semibold text-text-secondary">
                 {selectedPassage ? "New note for selected passage" : "New note at current position"}
                 {selectedPassage && (
@@ -756,6 +776,15 @@ export function ReaderLibrarySidebar({
                 <NotebookPen size={15} />
                 Save note
               </button>
+              {highlights.length > 0 && (
+                <ReaderHighlightList
+                  text={activeDocument.text}
+                  highlights={highlights}
+                  onJumpToOffset={onJumpToOffset}
+                  onUpdateHighlight={onUpdateHighlight}
+                  onRemoveHighlight={onRemoveHighlight}
+                />
+              )}
               {activeDocument.notes.length === 0 ? (
                 <p className="rounded-2xl border border-dashed border-border p-5 text-center text-sm text-text-muted">
                   Notes stay attached to this document.

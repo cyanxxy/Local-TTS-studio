@@ -991,6 +991,86 @@ describe("AdvancedReaderPage", () => {
     expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
   });
 
+  /** Selects `[start, end)` of the first paragraph, across however many spans it is split into. */
+  function selectArticleText(container: HTMLElement, start: number, end: number) {
+    const paragraph = container.querySelector("article [data-block-start]")!;
+    const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    let seen = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const length = node.textContent!.length;
+      if (start >= seen && start <= seen + length) range.setStart(node, start - seen);
+      if (end >= seen && end <= seen + length) {
+        range.setEnd(node, end - seen);
+        break;
+      }
+      seen += length;
+    }
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.mouseUp(container.querySelector("article")!);
+  }
+
+  it("highlights a selected passage over its whole range in the picked colour", () => {
+    const book = createReaderDocument({ id: "select-highlight", text: "A memorable passage belongs with its note." });
+    const onAddHighlight = vi.fn();
+    const { container } = renderReader({ text: book.text, documents: [book], activeDocument: book, onAddHighlight });
+
+    selectArticleText(container, 2, 19);
+    expect(screen.getByRole("group", { name: "Highlight" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove highlight" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Green highlight" }));
+
+    expect(onAddHighlight).toHaveBeenCalledWith({ start: 2, end: 19, color: "green" });
+    expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+  });
+
+  it("hides the highlight colours when highlights cannot be saved", () => {
+    const book = createReaderDocument({ id: "no-highlight", text: "A memorable passage belongs with its note." });
+    const { container } = renderReader({ text: book.text, documents: [book], activeDocument: book });
+
+    selectArticleText(container, 2, 19);
+    expect(screen.getByRole("toolbar", { name: "Selected passage" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Highlight" })).toBeNull();
+  });
+
+  it("paints saved highlights and recolours or removes the one a selection lies in", () => {
+    const text = "A memorable passage belongs with its note.";
+    const book = {
+      ...createReaderDocument({ id: "painted", text }),
+      highlights: [
+        { id: "hl-1", start: 2, end: 19, color: "pink" as const, quote: "memorable passage", createdAt: 1, updatedAt: 1 },
+        // Its words moved away in an edit, so it must not colour what is there now.
+        { id: "hl-2", start: 28, end: 32, color: "blue" as const, quote: "gone", createdAt: 1, updatedAt: 1 },
+      ],
+    };
+    const onAddHighlight = vi.fn();
+    const onUpdateHighlight = vi.fn();
+    const onRemoveHighlight = vi.fn();
+    const { container } = renderReader({
+      text,
+      documents: [book],
+      activeDocument: book,
+      onAddHighlight,
+      onUpdateHighlight,
+      onRemoveHighlight,
+    });
+
+    const painted = [...container.querySelectorAll<HTMLElement>("article [data-highlight]")];
+    expect(painted.map((span) => [span.textContent, span.dataset.highlight])).toEqual([["memorable passage", "pink"]]);
+
+    selectArticleText(container, 2, 11);
+    expect(screen.getByRole("group", { name: "Change highlight colour" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pink highlight" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Purple highlight" }));
+    expect(onUpdateHighlight).toHaveBeenCalledWith("hl-1", { color: "purple" });
+    expect(onAddHighlight).not.toHaveBeenCalled();
+
+    selectArticleText(container, 2, 11);
+    fireEvent.click(screen.getByRole("button", { name: "Remove highlight" }));
+    expect(onRemoveHighlight).toHaveBeenCalledWith("hl-1");
+  });
+
   it("reports a failed generation in the dock instead of reading as ready", () => {
     renderReader({ generationError: "Invalid language identifier" });
     const props = audioPlayerMock.mock.calls.at(-1)?.[0] as {

@@ -8,16 +8,23 @@ import {
 } from "react";
 import type { AudioSegment } from "../../hooks/useAudioPlayer";
 import type { PlaybackClock } from "../../lib/playbackClock";
+import type { ReaderHighlightColor } from "../../lib/readerDocument";
 import { ReaderParagraph } from "./ReaderParagraph";
 import { ReaderSelectionToolbar, type SelectedPassage } from "./ReaderSelectionToolbar";
 import { normalizeQuote, readArticleSelection } from "./readerSelection";
 import {
   buildOverlayParts,
   groupPartsByBlock,
+  type HighlightRange,
   type TextBlock,
   type TextRange,
 } from "./readerTextLayout";
 import { useReaderWordTracking } from "./useReaderWordTracking";
+
+/** A saved highlight that marks this section, in section-local offsets. */
+export interface SectionHighlight extends HighlightRange {
+  id: string;
+}
 
 /* Shared metrics for the overlay and the transparent textarea beneath it.
    Both must be glyph-for-glyph identical, so they always use this one string. */
@@ -43,6 +50,7 @@ interface ReaderTextPaneProps {
   blocks: TextBlock[];
   /** Section-local range of the passage being spoken. */
   activeRange: TextRange | null;
+  highlights: readonly SectionHighlight[];
   /** Document offset of the section, for mapping selections back to the book. */
   sectionStart: number;
   /** Shown above the text when the chapter does not open with its own title line. */
@@ -73,6 +81,12 @@ interface ReaderTextPaneProps {
   onListenFrom: (documentOffset: number) => void;
   onBookmarkPassage?: (passage: SelectedPassage) => void;
   onNotePassage: () => void;
+  /**
+   * Highlights the passage in a colour; `highlightId` names the highlight the
+   * selection already lies in, which the colour should go to instead.
+   */
+  onHighlightPassage?: (passage: SelectedPassage, color: ReaderHighlightColor, highlightId?: string) => void;
+  onRemoveHighlight?: (highlightId: string) => void;
 }
 
 /**
@@ -91,6 +105,7 @@ export const ReaderTextPane = memo(function ReaderTextPane({
   text,
   blocks,
   activeRange,
+  highlights,
   sectionStart,
   chapterHeading,
   headingBlockStart,
@@ -116,12 +131,29 @@ export const ReaderTextPane = memo(function ReaderTextPane({
   onListenFrom,
   onBookmarkPassage,
   onNotePassage,
+  onHighlightPassage,
+  onRemoveHighlight,
 }: ReaderTextPaneProps) {
   const { wordIndex, wordRange } = useReaderWordTracking(clock, activeSegment, estimatedWordTrackingStable);
   const paragraphs = useMemo(
-    () => groupPartsByBlock(blocks, buildOverlayParts(text, blocks, activeRange)),
-    [activeRange, blocks, text],
+    () => groupPartsByBlock(blocks, buildOverlayParts(text, blocks, activeRange, highlights)),
+    [activeRange, blocks, highlights, text],
   );
+  // The highlight a selection lies in takes the colour picked for it, the way
+  // the page shows the innermost highlight where several overlap.
+  const selectionHighlight = useMemo(() => {
+    if (!selectedPassage) return undefined;
+    const start = selectedPassage.textOffset - sectionStart;
+    const end = selectedPassage.endOffset - sectionStart;
+    let found: SectionHighlight | undefined;
+    for (const highlight of highlights) {
+      if (highlight.start > start || highlight.end < end) continue;
+      if (!found || highlight.start > found.start || (highlight.start === found.start && highlight.end < found.end)) {
+        found = highlight;
+      }
+    }
+    return found;
+  }, [highlights, sectionStart, selectedPassage]);
 
   useEffect(() => {
     if (!isPlaying || followPaused) return;
@@ -142,7 +174,13 @@ export const ReaderTextPane = memo(function ReaderTextPane({
     if (!selection) return;
     if (!selection.collapsed) {
       const quote = normalizeQuote(selection.quote);
-      if (quote) onSelectPassage({ quote, textOffset: sectionStart + selection.start });
+      if (quote) {
+        onSelectPassage({
+          quote,
+          textOffset: sectionStart + selection.start,
+          endOffset: sectionStart + selection.end,
+        });
+      }
       return;
     }
     // A plain click only dismisses the note pill — seeking is double-click.
@@ -166,6 +204,16 @@ export const ReaderTextPane = memo(function ReaderTextPane({
     onBookmarkPassage?.(passage);
     clearDomSelection();
   }, [clearDomSelection, onBookmarkPassage]);
+
+  const handleHighlight = useCallback((passage: SelectedPassage, color: ReaderHighlightColor) => {
+    onHighlightPassage?.(passage, color, selectionHighlight?.id);
+    clearDomSelection();
+  }, [clearDomSelection, onHighlightPassage, selectionHighlight]);
+
+  const handleRemoveHighlight = useCallback(() => {
+    if (selectionHighlight) onRemoveHighlight?.(selectionHighlight.id);
+    clearDomSelection();
+  }, [clearDomSelection, onRemoveHighlight, selectionHighlight]);
 
   const textStyle = { fontSize, lineHeight };
 
@@ -253,6 +301,9 @@ export const ReaderTextPane = memo(function ReaderTextPane({
               onListen={handleListen}
               onBookmark={onBookmarkPassage ? handleBookmark : undefined}
               onNote={onNotePassage}
+              onHighlight={onHighlightPassage ? handleHighlight : undefined}
+              currentHighlight={selectionHighlight?.color}
+              onRemoveHighlight={selectionHighlight && onRemoveHighlight ? handleRemoveHighlight : undefined}
               onDismiss={clearDomSelection}
             />
           )}

@@ -1,4 +1,5 @@
 import { memo } from "react";
+import { READER_HIGHLIGHT_SWATCHES } from "./readerHighlightColors";
 import type { OverlayPart, TextBlock } from "./readerTextLayout";
 
 interface ReaderParagraphProps {
@@ -40,12 +41,16 @@ export const ReaderParagraph = memo(function ReaderParagraph({
     >
       {parts.map((part) => {
         const className = overlayPartClassName(part.isActive);
+        // A highlight's wash outranks the spoken passage's, so the colour holds
+        // while the passage is read; the word marker keeps its own look.
+        const highlight = part.highlight;
+        const style = highlight ? READER_HIGHLIGHT_SWATCHES[highlight].wash : undefined;
         const partEnd = part.start + part.text.length;
         const overlaps = wordStart >= 0 && wordStart < partEnd && wordEnd > part.start;
 
         if (!overlaps) {
           return (
-            <span key={`part-${part.start}`} className={className}>
+            <span key={`part-${part.start}`} className={className} style={style} data-highlight={highlight}>
               {part.text}
             </span>
           );
@@ -65,7 +70,7 @@ export const ReaderParagraph = memo(function ReaderParagraph({
 
         return [
           before && (
-            <span key={`part-${part.start}`} className={className}>
+            <span key={`part-${part.start}`} className={className} style={style} data-highlight={highlight}>
               {before}
             </span>
           ),
@@ -74,12 +79,13 @@ export const ReaderParagraph = memo(function ReaderParagraph({
               key={`word-${part.start + localStart}`}
               className={wordClassName}
               data-reader-active-word="true"
+              data-highlight={highlight}
             >
               {word}
             </span>
           ),
           after && (
-            <span key={`tail-${part.start + localEnd}`} className={className}>
+            <span key={`tail-${part.start + localEnd}`} className={className} style={style} data-highlight={highlight}>
               {after}
             </span>
           ),

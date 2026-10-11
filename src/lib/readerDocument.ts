@@ -58,6 +58,29 @@ export interface ReaderNote {
   updatedAt: number;
 }
 
+export const READER_HIGHLIGHT_COLORS = ["yellow", "green", "blue", "pink", "purple"] as const;
+export type ReaderHighlightColor = (typeof READER_HIGHLIGHT_COLORS)[number];
+
+/** Long highlights keep only this much of their text as the re-anchoring quote. */
+export const READER_HIGHLIGHT_QUOTE_LIMIT = 2_000;
+
+export interface ReaderHighlight {
+  id: string;
+  /** Document offsets of the highlighted range, end exclusive. */
+  start: number;
+  end: number;
+  color: ReaderHighlightColor;
+  /**
+   * The highlighted text (capped) as it read when highlighted. While the book
+   * text at `start` still reads this way the range is anchored; otherwise it
+   * is looked up again, so an edit that moved the passage cannot leave the
+   * colour over different words.
+   */
+  quote: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ReaderDocumentRecord {
   id: string;
   title: string;
@@ -72,6 +95,8 @@ export interface ReaderDocumentRecord {
   progress: ReaderProgress;
   bookmarks: ReaderBookmark[];
   notes: ReaderNote[];
+  /** Absent on records saved before highlights existed. */
+  highlights?: ReaderHighlight[];
   createdAt: number;
   updatedAt: number;
   lastOpenedAt: number;
@@ -587,6 +612,7 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
 
 /** Add fields introduced by newer Reader versions without rewriting book text. */
 export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): ReaderDocumentRecord {
+  const { highlights, ...record } = document;
   const chapters = normalizeReaderChapters(document.text, document.chapters ?? [], document.title);
   const sections = buildReaderSections(document.text, chapters);
   const progressOffset = Math.max(0, Math.min(document.text.length, document.progress?.textOffset ?? 0));
@@ -595,7 +621,7 @@ export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): R
     ?? readerSectionAtOffset(sections, progressOffset);
 
   return {
-    ...document,
+    ...record,
     chapters,
     progress: {
       positionSec: Math.max(0, document.progress?.positionSec ?? 0),
@@ -616,6 +642,8 @@ export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): R
       chapterId: chapterAtOffset(chapters, note.textOffset)?.id ?? null,
       sectionId: readerSectionAtOffset(sections, note.textOffset)?.id ?? null,
     })),
+    // Records from before highlights existed stay without the field.
+    ...(Array.isArray(highlights) ? { highlights: normalizeReaderHighlights(document.text, highlights) } : {}),
   };
 }
 
@@ -697,6 +725,137 @@ export function createReaderBookmark(input: Omit<ReaderBookmark, "id" | "created
 export function createReaderNote(input: Omit<ReaderNote, "id" | "createdAt" | "updatedAt">): ReaderNote {
   const now = Date.now();
   return { ...input, id: createId("note"), createdAt: now, updatedAt: now };
+}
+
+export function isReaderHighlightColor(value: unknown): value is ReaderHighlightColor {
+  return typeof value === "string" && (READER_HIGHLIGHT_COLORS as readonly string[]).includes(value);
+}
+
+export interface ReaderHighlightInput {
+  start: number;
+  end: number;
+  color: ReaderHighlightColor;
+}
+
+/**
+ * A highlight over `text[start, end)`, trimmed to the words inside it, or null
+ * when the range holds nothing to highlight.
+ */
+export function createReaderHighlight(
+  text: string,
+  input: ReaderHighlightInput,
+  now = Date.now(),
+): ReaderHighlight | null {
+  if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || !isReaderHighlightColor(input.color)) {
+    return null;
+  }
+  let start = Math.max(0, Math.min(text.length, Math.floor(input.start)));
+  let end = Math.max(start, Math.min(text.length, Math.floor(input.end)));
+  // A drag usually catches the space or line break around the words.
+  while (start < end && /\s/.test(text[start])) start += 1;
+  while (end > start && /\s/.test(text[end - 1])) end -= 1;
+  if (end <= start) return null;
+  return {
+    id: createId("highlight"),
+    start,
+    end,
+    color: input.color,
+    quote: text.slice(start, Math.min(end, start + READER_HIGHLIGHT_QUOTE_LIMIT)),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/** The highlighted text still sits exactly where the highlight says. */
+export function isReaderHighlightAnchored(text: string, highlight: ReaderHighlight): boolean {
+  return highlight.end > highlight.start
+    && highlight.end <= text.length
+    && highlight.quote.length > 0
+    && text.startsWith(highlight.quote, highlight.start);
+}
+
+/**
+ * Where a highlight's text sits in `text` now: in place when it is anchored,
+ * else the occurrence of its quote nearest to where it was, or null when its
+ * text is gone.
+ */
+export function resolveReaderHighlightRange(
+  text: string,
+  highlight: ReaderHighlight,
+): { start: number; end: number } | null {
+  if (isReaderHighlightAnchored(text, highlight)) return { start: highlight.start, end: highlight.end };
+  if (!highlight.quote) return null;
+  let found = -1;
+  let foundDistance = Infinity;
+  for (let index = text.indexOf(highlight.quote); index !== -1; index = text.indexOf(highlight.quote, index + 1)) {
+    const distance = Math.abs(index - highlight.start);
+    if (distance < foundDistance) {
+      found = index;
+      foundDistance = distance;
+    } else if (index > highlight.start) {
+      break;
+    }
+  }
+  if (found === -1) return null;
+  const length = Math.max(highlight.quote.length, highlight.end - highlight.start);
+  return { start: found, end: Math.min(text.length, found + length) };
+}
+
+function isStoredHighlight(value: unknown): value is ReaderHighlight {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Partial<ReaderHighlight>;
+  return typeof entry.id === "string" && entry.id.length > 0
+    && Number.isFinite(entry.start)
+    && Number.isFinite(entry.end)
+    && isReaderHighlightColor(entry.color)
+    && typeof entry.quote === "string"
+    && Number.isFinite(entry.createdAt)
+    && Number.isFinite(entry.updatedAt);
+}
+
+/**
+ * Keeps well-formed stored highlights, in reading order, and re-anchors any
+ * whose text has moved. One whose text is gone keeps its record (and stays
+ * listed and exported) but no longer marks the page.
+ */
+function normalizeReaderHighlights(text: string, highlights: readonly unknown[]): ReaderHighlight[] {
+  return highlights
+    .filter(isStoredHighlight)
+    .map((highlight) => {
+      const range = resolveReaderHighlightRange(text, highlight);
+      if (range) return range.start === highlight.start && range.end === highlight.end ? highlight : { ...highlight, ...range };
+      const start = Math.max(0, Math.min(text.length, Math.floor(highlight.start)));
+      return { ...highlight, start, end: Math.max(start, Math.min(text.length, Math.floor(highlight.end))) };
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+/**
+ * Carries highlights across a text edit. Anchored ones move with their words
+ * and take their quote from the edited text, so a fix inside a highlighted
+ * passage keeps the highlight, while one whose words were all deleted goes
+ * with them. Detached ones are left for their quote to find.
+ */
+export function rebaseReaderHighlights(
+  previousText: string,
+  nextText: string,
+  highlights: readonly ReaderHighlight[],
+  hint?: ReaderTextChangeHint,
+): ReaderHighlight[] {
+  if (highlights.length === 0) return [];
+  const rebase = createReaderOffsetRebaser(previousText, nextText, hint);
+  return highlights.flatMap((highlight) => {
+    if (!isReaderHighlightAnchored(previousText, highlight)) return [highlight];
+    const start = rebase(highlight.start);
+    const end = rebase(highlight.end);
+    if (end <= start) return [];
+    return [{
+      ...highlight,
+      start,
+      end,
+      quote: nextText.slice(start, Math.min(end, start + READER_HIGHLIGHT_QUOTE_LIMIT)),
+    }];
+  });
 }
 
 export function buildAudioSignature(parts: {

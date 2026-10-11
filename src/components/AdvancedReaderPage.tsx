@@ -13,7 +13,14 @@ import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
 import type { PlaybackClock } from "../lib/playbackClock";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
-import type { ReaderChapter, ReaderDocumentRecord, ReaderSection } from "../lib/readerDocument";
+import {
+  isReaderHighlightAnchored,
+  type ReaderChapter,
+  type ReaderDocumentRecord,
+  type ReaderHighlightColor,
+  type ReaderHighlightInput,
+  type ReaderSection,
+} from "../lib/readerDocument";
 import {
   DEFAULT_READER_VIEW_PREFERENCES,
   readerColumnWidthRem,
@@ -29,7 +36,7 @@ import { ReaderImportMenu } from "./reader/ReaderImportMenu";
 import { ReaderPlayerDock } from "./reader/ReaderPlayerDock";
 import type { SelectedPassage } from "./reader/ReaderSelectionToolbar";
 import { ReaderShortcutsDialog } from "./reader/ReaderShortcutsDialog";
-import { ReaderTextPane } from "./reader/ReaderTextPane";
+import { ReaderTextPane, type SectionHighlight } from "./reader/ReaderTextPane";
 import { ReaderToolbar } from "./reader/ReaderToolbar";
 import { ReaderVoiceMenu, type ReaderDesktopModelOption } from "./reader/ReaderVoiceMenu";
 import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
@@ -76,6 +83,14 @@ interface AdvancedReaderPageProps {
   onAddNote?: (input: { text: string; quote: string; textOffset: number }) => void;
   onUpdateNote?: (id: string, text: string) => void;
   onRemoveNote?: (id: string) => void;
+  /**
+   * Saves a highlight over the document range `[start, end)`; see
+   * `createReaderHighlight`. The highlight controls are hidden without it.
+   */
+  onAddHighlight?: (input: ReaderHighlightInput) => void;
+  /** Recolours a saved highlight. */
+  onUpdateHighlight?: (id: string, patch: { color: ReaderHighlightColor }) => void;
+  onRemoveHighlight?: (id: string) => void;
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
@@ -136,6 +151,7 @@ interface AdvancedReaderPageProps {
 }
 
 const BOOKMARK_LABEL_LIMIT = 40;
+const NO_SECTION_HIGHLIGHTS: readonly SectionHighlight[] = [];
 
 /**
  * The Reader page: a composition root that owns the cross-cutting session
@@ -173,6 +189,9 @@ export function AdvancedReaderPage({
   onAddNote,
   onUpdateNote,
   onRemoveNote,
+  onAddHighlight,
+  onUpdateHighlight,
+  onRemoveHighlight,
   activeModel,
   onModelChange,
   desktopModelOptions = [],
@@ -465,6 +484,40 @@ export function AdvancedReaderPage({
     });
   }, [onAddBookmark, sectionStart, segments]);
 
+  /* ── Highlights ───────────────────────────────────────────── */
+  const documentText = activeDocument?.text;
+  const documentHighlights = activeDocument?.highlights;
+  // Only a highlight whose words still sit where it says marks the page; one
+  // left behind by an edit waits for the library to find its words again.
+  const sectionHighlights = useMemo(() => {
+    if (!documentHighlights?.length || documentText === undefined) return NO_SECTION_HIGHLIGHTS;
+    const sectionEnd = sectionStart + text.length;
+    return documentHighlights
+      .filter((highlight) => (
+        highlight.start < sectionEnd
+        && highlight.end > sectionStart
+        && isReaderHighlightAnchored(documentText, highlight)
+      ))
+      .map((highlight) => ({
+        id: highlight.id,
+        color: highlight.color,
+        start: Math.max(0, highlight.start - sectionStart),
+        end: Math.min(text.length, highlight.end - sectionStart),
+      }));
+  }, [documentHighlights, documentText, sectionStart, text.length]);
+  const handleHighlightPassage = useStableCallback((
+    passage: SelectedPassage,
+    color: ReaderHighlightColor,
+    highlightId?: string,
+  ) => {
+    if (highlightId && onUpdateHighlight) onUpdateHighlight(highlightId, { color });
+    else onAddHighlight?.({ start: passage.textOffset, end: passage.endOffset, color });
+  });
+  const handleUpdateHighlight = useStableCallback(
+    (id: string, patch: { color: ReaderHighlightColor }) => onUpdateHighlight?.(id, patch),
+  );
+  const handleRemoveHighlight = useStableCallback((id: string) => onRemoveHighlight?.(id));
+
   /* ── Sleep timer and keyboard ─────────────────────────────── */
   const sleepTimer = useReaderSleepTimer({
     sectionKey: `${activeDocumentId ?? ""}\u0000${activeSection?.id ?? ""}`,
@@ -525,6 +578,8 @@ export function AdvancedReaderPage({
         onAddNote={handleAddNote}
         onUpdateNote={handleUpdateNote}
         onRemoveNote={handleRemoveNote}
+        onUpdateHighlight={onUpdateHighlight ? handleUpdateHighlight : undefined}
+        onRemoveHighlight={onRemoveHighlight ? handleRemoveHighlight : undefined}
         selectedPassage={selectedPassage}
         tab={libraryTab}
         onTabChange={setLibraryTab}
@@ -656,6 +711,7 @@ export function AdvancedReaderPage({
           text={text}
           blocks={textBlocks}
           activeRange={activeRange}
+          highlights={sectionHighlights}
           sectionStart={sectionStart}
           chapterHeading={chapterHeading}
           headingBlockStart={headingBlockStart}
@@ -681,6 +737,8 @@ export function AdvancedReaderPage({
           onListenFrom={handleJumpToOffset}
           onBookmarkPassage={onAddBookmark ? handleBookmarkPassage : undefined}
           onNotePassage={openNotes}
+          onHighlightPassage={onAddHighlight ? handleHighlightPassage : undefined}
+          onRemoveHighlight={onRemoveHighlight ? handleRemoveHighlight : undefined}
         />
       </section>
 

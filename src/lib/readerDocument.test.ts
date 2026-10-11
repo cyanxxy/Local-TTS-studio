@@ -5,16 +5,23 @@ import {
   calculateReaderProgress,
   chapterAtOffset,
   createReaderDocument,
+  createReaderHighlight,
   createReaderOffsetRebaser,
   estimateWordRanges,
+  isReaderHighlightAnchored,
+  isReaderHighlightColor,
   unwrapHardLineBreaks,
   normalizeReaderDocumentRecord,
   normalizeReaderTextFragment,
+  READER_HIGHLIGHT_QUOTE_LIMIT,
   rebaseReaderChapters,
+  rebaseReaderHighlights,
   rebaseReaderTextOffset,
   READER_SECTION_MAX_CHARS,
   readerSectionAtOffset,
+  resolveReaderHighlightRange,
   structureTextChapters,
+  type ReaderHighlight,
 } from "./readerDocument";
 
 describe("readerDocument", () => {
@@ -204,6 +211,126 @@ describe("readerDocument", () => {
     expect(rebaseReaderTextOffset(previous, next, 2)).toBe(2);
     expect(rebaseReaderTextOffset(previous, next, previous.indexOf("after")))
       .toBe(next.indexOf("after"));
+  });
+});
+
+describe("reader highlights", () => {
+  const text = "Call me Ishmael. Some years ago, never mind how long precisely, I went to sea.";
+
+  function highlightOf(phrase: string, overrides: Partial<ReaderHighlight> = {}): ReaderHighlight {
+    const start = text.indexOf(phrase);
+    return {
+      id: `highlight-${phrase}`,
+      start,
+      end: start + phrase.length,
+      color: "yellow",
+      quote: phrase,
+      createdAt: 1,
+      updatedAt: 1,
+      ...overrides,
+    };
+  }
+
+  it("creates a highlight trimmed to the words it covers", () => {
+    const start = text.indexOf("Some") - 1;
+    const highlight = createReaderHighlight(text, { start, end: text.indexOf(",") + 2, color: "green" }, 42);
+
+    expect(highlight).toMatchObject({
+      start: start + 1,
+      end: text.indexOf(",") + 1,
+      color: "green",
+      quote: "Some years ago,",
+      createdAt: 42,
+      updatedAt: 42,
+    });
+    expect(highlight?.id).toMatch(/^highlight-/);
+  });
+
+  it("refuses ranges with nothing to highlight or an unknown colour", () => {
+    expect(createReaderHighlight(text, { start: 4, end: 4, color: "yellow" })).toBeNull();
+    expect(createReaderHighlight("a   b", { start: 1, end: 4, color: "yellow" })).toBeNull();
+    expect(createReaderHighlight(text, { start: Number.NaN, end: 4, color: "yellow" })).toBeNull();
+    expect(createReaderHighlight(text, { start: 0, end: 4, color: "orange" as never })).toBeNull();
+    expect(isReaderHighlightColor("purple")).toBe(true);
+    expect(isReaderHighlightColor(3)).toBe(false);
+  });
+
+  it("keeps only the start of a long highlight as its quote", () => {
+    const long = "word ".repeat(1_000);
+    const highlight = createReaderHighlight(long, { start: 0, end: long.length, color: "blue" });
+
+    expect(highlight?.end).toBe(long.length - 1);
+    expect(highlight?.quote).toHaveLength(READER_HIGHLIGHT_QUOTE_LIMIT);
+    expect(isReaderHighlightAnchored(long, highlight!)).toBe(true);
+  });
+
+  it("finds a moved highlight at the nearest place its quote occurs", () => {
+    const doubled = `${text} Call me Ishmael again.`;
+    const moved = highlightOf("Call me Ishmael", { start: 3, end: 18 });
+
+    expect(resolveReaderHighlightRange(doubled, moved)).toEqual({ start: 0, end: 15 });
+    expect(resolveReaderHighlightRange(doubled, { ...moved, start: doubled.length - 10, end: doubled.length }))
+      .toEqual({ start: doubled.lastIndexOf("Call"), end: doubled.lastIndexOf("Call") + 15 });
+    expect(resolveReaderHighlightRange("Gone entirely.", moved)).toBeNull();
+    expect(resolveReaderHighlightRange(text, { ...moved, quote: "" })).toBeNull();
+  });
+
+  it("normalizes stored highlights without adding them to older records", () => {
+    const document = createReaderDocument({ id: "whale", text });
+    expect("highlights" in normalizeReaderDocumentRecord(document)).toBe(false);
+
+    const stored = {
+      ...document,
+      highlights: [
+        highlightOf("went to sea"),
+        { ...highlightOf("Some years ago"), start: 0, end: 14 },
+        { ...highlightOf("Call me"), quote: "Vanished words" },
+        { ...highlightOf("Ishmael"), color: "orange" },
+        { id: "", start: 0, end: 4 },
+        null,
+      ],
+    } as unknown as typeof document;
+
+    const normalized = normalizeReaderDocumentRecord(stored).highlights;
+
+    expect(normalized?.map((highlight) => [highlight.quote, highlight.start, highlight.end])).toEqual([
+      ["Vanished words", 0, 7],
+      ["Some years ago", text.indexOf("Some"), text.indexOf("Some") + 14],
+      ["went to sea", text.indexOf("went"), text.indexOf("went") + 11],
+    ]);
+  });
+
+  it("survives the JSON round trip both storage backends load records through", () => {
+    const document = { ...createReaderDocument({ id: "whale", text }), highlights: [highlightOf("went to sea")] };
+
+    const loaded = normalizeReaderDocumentRecord(JSON.parse(JSON.stringify(document)));
+
+    expect(loaded.highlights).toEqual(document.highlights);
+    expect(loaded.text).toBe(text);
+  });
+
+  it("moves anchored highlights with an edit and refreshes their quote", () => {
+    const next = text.replace("never mind", "no matter");
+    const detached = { ...highlightOf("Some years"), quote: "lost words" };
+    const [before, inside, after, untouched] = rebaseReaderHighlights(text, next, [
+      highlightOf("Call me Ishmael"),
+      highlightOf("never mind how long"),
+      highlightOf("went to sea"),
+      detached,
+    ]);
+
+    expect(before).toEqual(highlightOf("Call me Ishmael"));
+    expect(inside.quote).toBe("no matter how long");
+    expect(next.slice(inside.start, inside.end)).toBe("no matter how long");
+    expect(next.slice(after.start, after.end)).toBe("went to sea");
+    expect(untouched).toBe(detached);
+    expect(rebaseReaderHighlights(text, next, [])).toEqual([]);
+  });
+
+  it("drops a highlight whose words were all deleted", () => {
+    const next = text.replace(" Some years ago,", "");
+
+    expect(rebaseReaderHighlights(text, next, [highlightOf("Some years ago")])).toEqual([]);
   });
 });
 
