@@ -34,6 +34,8 @@ export default defineConfig({
         "src/lib/audioTimeline.ts",
         "src/lib/onnxWasmAssets.ts",
         "src/lib/textValidation.ts",
+        "src/shared/asyncChannel.ts",
+        "src/shared/synthesisQueue.ts",
         "src/workers/export.worker.ts",
       ],
       exclude: [
