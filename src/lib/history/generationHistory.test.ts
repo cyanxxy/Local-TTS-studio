@@ -226,6 +226,16 @@ describe("generation history store", () => {
     expect(keys).toEqual(["future", favorite.id]);
   });
 
+  it("explains a history upgraded by a newer build", async () => {
+    (await openVersionedDatabase({
+      name: GENERATION_HISTORY_DATABASE_NAME,
+      migrations: [...GENERATION_HISTORY_MIGRATIONS, { version: 99, migrate: () => {} }],
+      blockedMessage: "blocked",
+      unsupportedMessage: "unsupported",
+    })).close();
+    await expect(store.listEntries()).rejects.toThrow("Generation history was saved by a newer version of Open TTS. Update Open TTS to use it.");
+  });
+
   it("validates input", async () => {
     await expect(store.saveGeneration(generation({ text: "  " }))).rejects.toThrow(/needs its text/);
     await expect(store.saveGeneration(generation({ text: "x".repeat(200_001) }))).rejects.toThrow(/too long/);

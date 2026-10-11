@@ -49,6 +49,15 @@ describe("indexedDb helpers", () => {
     expect(() => latestMigrationVersion([V1, V1])).toThrow(/strictly increasing/);
   });
 
+  it("explains a database already upgraded by a newer build", async () => {
+    const V2: IndexedDbMigration = { version: 2, migrate: () => {} };
+    (await openVersionedDatabase(options([V1, V2]))).close();
+    const failure = await openVersionedDatabase(options([V1])).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ message: "This data was saved by a newer version of Open TTS. Update Open TTS to use it." });
+    expect((failure as Error).cause).toMatchObject({ name: "VersionError" });
+    await expect(openVersionedDatabase({ ...options([V1]), newerVersionMessage: "Update the app." })).rejects.toThrow("Update the app.");
+  });
+
   it("runs only the migrations newer than the stored version", async () => {
     const database = await openVersionedDatabase(options([V1]));
     const transaction = database.transaction("items", "readwrite");

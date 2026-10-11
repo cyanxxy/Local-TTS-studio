@@ -346,6 +346,7 @@ export function createGenerationHistoryStore(options: GenerationHistoryStoreOpti
       migrations: GENERATION_HISTORY_MIGRATIONS,
       blockedMessage: "The generation history upgrade is blocked by another open tab. Close the other tab and try again.",
       unsupportedMessage: "This browser does not provide IndexedDB, so generation history cannot persist.",
+      newerVersionMessage: "Generation history was saved by a newer version of Open TTS. Update Open TTS to use it.",
     });
   }
 

@@ -177,6 +177,16 @@ describe("voice library store", () => {
     await expect(fixedId.createVoice(PRESET)).rejects.toThrow(/already exists/);
   });
 
+  it("explains a library upgraded by a newer build", async () => {
+    (await openVersionedDatabase({
+      name: VOICE_LIBRARY_DATABASE_NAME,
+      migrations: [...VOICE_LIBRARY_MIGRATIONS, { version: 99, migrate: () => {} }],
+      blockedMessage: "blocked",
+      unsupportedMessage: "unsupported",
+    })).close();
+    await expect(store.listVoices()).rejects.toThrow("The voice library was saved by a newer version of Open TTS. Update Open TTS to use it.");
+  });
+
   it("saves several voices atomically with linked caller-chosen ids", async () => {
     const [designed, clone] = await store.createVoices([
       { ...DESIGNED, id: "design-1" },

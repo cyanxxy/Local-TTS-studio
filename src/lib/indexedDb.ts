@@ -21,7 +21,14 @@ export interface OpenVersionedDatabaseOptions {
   blockedMessage: string;
   /** Shown when the browser provides no IndexedDB at all. */
   unsupportedMessage: string;
+  /**
+   * Shown when a newer build already upgraded the database past this build's
+   * latest migration (a downgrade, or a stale cached web app).
+   */
+  newerVersionMessage?: string;
 }
+
+const DEFAULT_NEWER_VERSION_MESSAGE = "This data was saved by a newer version of Open TTS. Update Open TTS to use it.";
 
 export function isIndexedDbSupported(): boolean {
   return typeof indexedDB !== "undefined";
@@ -95,6 +102,10 @@ export function openVersionedDatabase(options: OpenVersionedDatabaseOptions): Pr
     request.onerror = () => {
       if (settled) return;
       settled = true;
+      if (request.error?.name === "VersionError") {
+        reject(new Error(options.newerVersionMessage ?? DEFAULT_NEWER_VERSION_MESSAGE, { cause: request.error }));
+        return;
+      }
       reject(request.error ?? new Error(`Failed to open ${options.name}.`));
     };
     request.onblocked = () => {

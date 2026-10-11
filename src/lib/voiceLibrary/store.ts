@@ -192,6 +192,7 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
       migrations: VOICE_LIBRARY_MIGRATIONS,
       blockedMessage: "The voice library upgrade is blocked by another open tab. Close the other tab and try again.",
       unsupportedMessage: "This browser does not provide IndexedDB, so the voice library cannot persist.",
+      newerVersionMessage: "The voice library was saved by a newer version of Open TTS. Update Open TTS to use it.",
     });
   }
 
