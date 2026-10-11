@@ -6,7 +6,7 @@ import type { IncomingMessage } from "http";
 import os from "os";
 import path from "path";
 import { PassThrough, Readable } from "stream";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Qwen3Profile } from "./qwen3Profiles";
 import {
   adoptLegacyQwen3ModelDir,
@@ -310,6 +310,13 @@ describe("downloadQwen3Model", () => {
 });
 
 describe("setup verification cache", () => {
+  // Files written by a test are seconds old at most, inside the window in which
+  // the digest cache refuses to remember them. Run the clock a minute ahead so
+  // these tests observe the cache rather than that rule.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 60_000 });
+  });
+
   it("re-inspects an unchanged verified profile without re-reading its weights", async () => {
     const modelDir = makeTempDir();
     await downloadQwen3Model(PROFILE, modelDir, () => {}, fakeHubRequest());

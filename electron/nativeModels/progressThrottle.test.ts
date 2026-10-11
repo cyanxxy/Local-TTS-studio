@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createProgressThrottle,
   PROGRESS_MIN_FRACTION,
@@ -29,6 +29,10 @@ function harness(options: Partial<ProgressThrottleOptions<Bytes>> = {}) {
     },
   };
 }
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("createProgressThrottle", () => {
   it("defaults to ten updates a second or every half percent", () => {
@@ -129,6 +133,63 @@ describe("createProgressThrottle", () => {
     throttle.push({ done: 93, total: 100 });
 
     expect(emitted()).toEqual([10, 42, 93]);
+  });
+
+  describe("during a stall", () => {
+    /** Moves the injected clock and the trailing timer together. */
+    function stalledHarness(options: Partial<ProgressThrottleOptions<Bytes>> = {}) {
+      vi.useFakeTimers();
+      const result = harness(options);
+      return {
+        ...result,
+        advance: (ms: number) => {
+          result.advance(ms);
+          vi.advanceTimersByTime(ms);
+        },
+      };
+    }
+
+    it("delivers a held-back update once the interval has passed", () => {
+      const { throttle, emitted, advance } = stalledHarness();
+
+      throttle.push({ done: 1, total: 10_000 });
+      advance(30);
+      throttle.push({ done: 2, total: 10_000 });
+      throttle.push({ done: 3, total: 10_000 });
+      advance(69);
+      expect(emitted()).toEqual([1]);
+
+      advance(1);
+      expect(emitted()).toEqual([1, 3]);
+      // Nothing new is held, so nothing more arrives.
+      advance(1_000);
+      expect(emitted()).toEqual([1, 3]);
+    });
+
+    it("does not deliver twice when a later update goes through first", () => {
+      const { throttle, emitted, advance } = stalledHarness();
+
+      throttle.push({ done: 1, total: 10_000 });
+      throttle.push({ done: 2, total: 10_000 });
+      throttle.push({ done: 9_999, total: 10_000 }, true);
+      advance(1_000);
+
+      expect(emitted()).toEqual([1, 9_999]);
+    });
+
+    it("reports nothing after close, held, pushed or flushed", () => {
+      const { throttle, emitted, advance } = stalledHarness();
+
+      throttle.push({ done: 1, total: 10_000 });
+      throttle.push({ done: 2, total: 10_000 });
+      throttle.close();
+      advance(1_000);
+      throttle.push({ done: 10_000, total: 10_000 }, true);
+      throttle.flush();
+      throttle.close();
+
+      expect(emitted()).toEqual([1]);
+    });
   });
 
   it("reads the real clock by default", () => {

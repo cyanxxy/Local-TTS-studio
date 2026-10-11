@@ -240,6 +240,10 @@ export async function downloadVerifiedFile(options: VerifiedDownloadOptions): Pr
     }
     return { sizeBytes: receivedBytes, digest };
   } catch (error) {
+    // Setup that fails before streaming starts (mkdir, a sweep, the hash)
+    // would otherwise leave the body unread and its socket open until the
+    // reader's idle timeout. After streaming this is a no-op.
+    response.destroy();
     await fs.rm(temporaryPath, { force: true }).catch(() => undefined);
     if (signal?.aborted) throw cancelledError();
     throw error;

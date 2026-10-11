@@ -269,6 +269,31 @@ describe("downloadVerifiedFile", () => {
     expect(stream.destroyed).toBe(true);
   });
 
+  it.each([
+    {
+      name: "its directory cannot be created",
+      setup: (dir: string) => {
+        fs.writeFileSync(path.join(dir, "blocker"), "a file, not a directory");
+        return { destination: path.join(dir, "blocker", "model.bin") };
+      },
+      error: /EEXIST|ENOTDIR/,
+    },
+    {
+      name: "a git blob pin arrives without its size",
+      setup: (dir: string) => ({
+        destination: path.join(dir, "model.bin"),
+        expected: { digest: { algorithm: "gitBlobSha1" as const, value: "0".repeat(40) } },
+      }),
+      error: /needs the file size up front/,
+    },
+  ])("closes the response when setup fails before streaming because $name", async ({ setup, error }) => {
+    const stream = new PassThrough();
+    const options = setup(makeTempDir());
+
+    await expect(download({ ...options, request: () => Promise.resolve(respond(stream)) })).rejects.toThrow(error);
+    expect(stream.destroyed).toBe(true);
+  });
+
   it("sweeps the fixed partial names older builds left behind", async () => {
     const dir = makeTempDir();
     const destination = path.join(dir, "model.bin");

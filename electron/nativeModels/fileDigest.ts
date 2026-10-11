@@ -82,21 +82,6 @@ async function hashHandle(
   return { sizeBytes, digest: hash.digest("hex") };
 }
 
-/** Reads a whole file once. Rejects when it cannot be opened or read. */
-export async function hashFile(
-  filePath: string,
-  algorithm: DigestAlgorithm,
-  cancellation: CancellationOptions,
-): Promise<FileDigestResult> {
-  if (cancellation.signal?.aborted) throw cancellation.cancelledError();
-  const handle = await fs.open(filePath, "r");
-  try {
-    return await hashHandle(handle, algorithm, cancellation);
-  } finally {
-    await handle.close();
-  }
-}
-
 /**
  * True when `filePath` is a regular file of exactly the pinned length whose
  * digest matches. A file that is missing or cannot be opened is simply not
@@ -154,9 +139,20 @@ interface CachedDigest {
   result: FileDigestResult;
 }
 
+/**
+ * A file changed this recently may be written again within the same timestamp
+ * tick, leaving its identity untouched. Ticks are up to two seconds on FAT and
+ * HFS+, so a digest is remembered only for a file whose newest timestamp is
+ * older than this when the read starts — git's "racy clean" rule. A file
+ * inside the window is simply hashed again on its next inspection.
+ */
+export const RACY_TIMESTAMP_WINDOW_MS = 3_000;
+
 export interface FileDigestCacheOptions {
   /** Paths remembered at once; the least recently hashed is forgotten first. */
   maxEntries?: number;
+  /** Wall-clock milliseconds since the epoch. Seam for tests. */
+  now?: () => number;
 }
 
 /**
@@ -166,22 +162,26 @@ export interface FileDigestCacheOptions {
  * with whatever pin or manifest applies to that call, so a changed manifest,
  * revision or expected digest is judged afresh every time. A file whose
  * identity moves while it is being read is hashed for the caller but not
- * remembered. Concurrent requests for the same unchanged file share one read,
- * abandoned only once every caller has cancelled.
+ * remembered, and neither is one modified too recently to rule out a second
+ * write within the same timestamp tick. Concurrent requests for the same
+ * unchanged file share one read, abandoned only once every caller has
+ * cancelled.
  */
 export class FileDigestCache {
   readonly #cancelledError: () => Error;
   readonly #maxEntries: number;
+  readonly #now: () => number;
   readonly #entries = new Map<string, CachedDigest>();
   readonly #reads: SharedTaskGroup<FileDigestResult>;
 
-  constructor(cancelledError: () => Error, { maxEntries = 256 }: FileDigestCacheOptions = {}) {
+  constructor(cancelledError: () => Error, { maxEntries = 256, now = () => Date.now() }: FileDigestCacheOptions = {}) {
     this.#cancelledError = cancelledError;
     this.#maxEntries = Math.max(1, maxEntries);
+    this.#now = now;
     this.#reads = new SharedTaskGroup<FileDigestResult>(cancelledError);
   }
 
-  /** Rejects like `hashFile` when the file cannot be opened or read. */
+  /** Rejects with the filesystem error when the file cannot be opened or read. */
   async digest(filePath: string, algorithm: DigestAlgorithm, signal?: AbortSignal): Promise<FileDigestResult> {
     if (signal?.aborted) throw this.#cancelledError();
     const resolved = path.resolve(filePath);
@@ -197,11 +197,6 @@ export class FileDigestCache {
     return { ...result };
   }
 
-  /** Forgets every remembered digest. */
-  clear(): void {
-    this.#entries.clear();
-  }
-
   async #read(
     filePath: string,
     entryKey: string,
@@ -209,12 +204,16 @@ export class FileDigestCache {
     expected: string,
     signal: AbortSignal,
   ): Promise<FileDigestResult> {
+    const startedAt = this.#now();
     const handle = await fs.open(filePath, "r");
     try {
-      const before = identityKey(identityOf(await handle.stat({ bigint: true })));
+      const stat = await handle.stat({ bigint: true });
+      const before = identityKey(identityOf(stat));
       const result = await hashHandle(handle, algorithm, { signal, cancelledError: this.#cancelledError });
       const after = identityKey(identityOf(await handle.stat({ bigint: true })));
-      if (before === expected && after === expected) this.#remember(entryKey, expected, result);
+      const newestChangeMs = Number((stat.mtimeNs > stat.ctimeNs ? stat.mtimeNs : stat.ctimeNs) / 1_000_000n);
+      const settled = startedAt - newestChangeMs >= RACY_TIMESTAMP_WINDOW_MS;
+      if (settled && before === expected && after === expected) this.#remember(entryKey, expected, result);
       return result;
     } finally {
       await handle.close();

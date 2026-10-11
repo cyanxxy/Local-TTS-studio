@@ -188,7 +188,7 @@ async function getHubFiles(
  */
 const modelFileDigests = new FileDigestCache(downloadCancelledError);
 
-async function hashFile(filePath: string, signal?: AbortSignal): Promise<{ sizeBytes: number; sha256: string }> {
+async function digestModelFile(filePath: string, signal?: AbortSignal): Promise<{ sizeBytes: number; sha256: string }> {
   const { sizeBytes, digest } = await modelFileDigests.digest(filePath, "sha256", signal);
   return { sizeBytes, sha256: digest };
 }
@@ -302,7 +302,7 @@ export async function inspectQwen3ModelDir(
     const expected = byPath.get(requiredPath);
     if (!expected) return { readiness: "structural", reason: `Manifest is missing ${requiredPath}.` };
     try {
-      const actual = await hashFile(resolveDownloadDestination(modelDir, requiredPath), signal);
+      const actual = await digestModelFile(resolveDownloadDestination(modelDir, requiredPath), signal);
       if (actual.sizeBytes !== expected.sizeBytes || actual.sha256 !== expected.sha256) {
         return { readiness: "structural", reason: `${requiredPath} does not match its manifest digest.` };
       }
@@ -314,7 +314,7 @@ export async function inspectQwen3ModelDir(
     throwIfDownloadCancelled(signal);
     let actual: { sizeBytes: number; sha256: string };
     try {
-      actual = await hashFile(resolveDownloadDestination(modelDir, optionalPath), signal);
+      actual = await digestModelFile(resolveDownloadDestination(modelDir, optionalPath), signal);
     } catch (error) {
       throwIfDownloadCancelled(signal);
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
@@ -378,7 +378,7 @@ export async function downloadQwen3Model(
   for (const [index, file] of hubFiles.entries()) {
     throwIfDownloadCancelled(signal);
     const destination = resolveDownloadDestination(modelDir, file.path);
-    const existing = await hashFile(destination, signal).catch(() => {
+    const existing = await digestModelFile(destination, signal).catch(() => {
       throwIfDownloadCancelled(signal);
       return undefined;
     });
@@ -422,33 +422,38 @@ export async function downloadQwen3Model(
     };
     let result: DownloadedFile;
     try {
-      result = await downloadHuggingFaceFile(url, destination, reportProgress, request, file, signal);
-    } catch (error) {
-      const shouldUseXet = xetDownloader
-        && error instanceof HuggingFaceDownloadStatusError
-        && error.statusCode === 403
-        && file.path.endsWith(".safetensors");
-      if (!shouldUseXet) throw error;
-      await fs.rm(destination, { force: true });
-      const downloaded = await xetDownloader({
-        modelRepo: profile.repo,
-        revision: profile.revision,
-        fileName: file.path,
-        destination,
-        onProgress: reportProgress,
-        signal,
-      });
-      throwIfDownloadCancelled(signal);
-      const verified = await hashFile(destination, signal);
-      if (file.sizeBytes != null && verified.sizeBytes !== file.sizeBytes) {
-        throw new Error(`Xet download size mismatch for ${file.path}.`);
+      try {
+        result = await downloadHuggingFaceFile(url, destination, reportProgress, request, file, signal);
+      } catch (error) {
+        const shouldUseXet = xetDownloader
+          && error instanceof HuggingFaceDownloadStatusError
+          && error.statusCode === 403
+          && file.path.endsWith(".safetensors");
+        if (!shouldUseXet) throw error;
+        await fs.rm(destination, { force: true });
+        const downloaded = await xetDownloader({
+          modelRepo: profile.repo,
+          revision: profile.revision,
+          fileName: file.path,
+          destination,
+          onProgress: reportProgress,
+          signal,
+        });
+        throwIfDownloadCancelled(signal);
+        const verified = await digestModelFile(destination, signal);
+        if (file.sizeBytes != null && verified.sizeBytes !== file.sizeBytes) {
+          throw new Error(`Xet download size mismatch for ${file.path}.`);
+        }
+        if (file.sha256 != null && verified.sha256 !== file.sha256) {
+          throw new Error(`Xet download digest mismatch for ${file.path}.`);
+        }
+        result = { downloaded, ...verified };
       }
-      if (file.sha256 != null && verified.sha256 !== file.sha256) {
-        throw new Error(`Xet download digest mismatch for ${file.path}.`);
-      }
-      result = { downloaded, ...verified };
+      fileProgress.flush();
+    } finally {
+      // Nothing about this file is reported once it has finished or failed.
+      fileProgress.close();
     }
-    fileProgress.flush();
     downloadedFiles += result.downloaded ? 1 : 0;
     manifestFiles.push({ path: file.path, sizeBytes: result.sizeBytes, sha256: result.sha256 });
   }

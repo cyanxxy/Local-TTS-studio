@@ -5,7 +5,14 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createFileHash, FileDigestCache, hashFile, isVerifiedFile, type PinnedFile } from "./fileDigest";
+import {
+  createFileHash,
+  FileDigestCache,
+  isVerifiedFile,
+  RACY_TIMESTAMP_WINDOW_MS,
+  type FileDigestCacheOptions,
+  type PinnedFile,
+} from "./fileDigest";
 
 function cancelled(): Error {
   return new Error("Example download cancelled.");
@@ -37,6 +44,14 @@ function abortsAfter(afterChecks: number): AbortSignal {
   } as AbortSignal;
 }
 
+/**
+ * A cache whose clock runs a minute ahead, so files a test has just written
+ * are already outside the racy-timestamp window and may be remembered.
+ */
+function settledCache(options: FileDigestCacheOptions = {}): FileDigestCache {
+  return new FileDigestCache(cancelled, { now: () => Date.now() + 60_000, ...options });
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
@@ -63,32 +78,6 @@ describe("createFileHash", () => {
 
   it("refuses a git blob digest without the size its header needs", () => {
     expect(() => createFileHash("gitBlobSha1")).toThrow("A git blob digest needs the file size up front.");
-  });
-});
-
-describe("hashFile", () => {
-  it("returns the size and digest in either algorithm", async () => {
-    const body = Buffer.alloc(3 * 1024 * 1024 + 17, 0x5a);
-    const file = writeTemp("weights.bin", body);
-
-    await expect(hashFile(file, "sha256", CANCELLATION)).resolves.toEqual({ sizeBytes: body.byteLength, digest: sha256(body) });
-    await expect(hashFile(writeTemp("hello.txt", "hello\n"), "gitBlobSha1", CANCELLATION))
-      .resolves.toEqual({ sizeBytes: 6, digest: "ce013625030ba8dba906f756967f9e9ca394464a" });
-  });
-
-  it("rejects with the filesystem error for a missing file", async () => {
-    await expect(hashFile(path.join(os.tmpdir(), "open-tts-no-such-file"), "sha256", CANCELLATION))
-      .rejects.toMatchObject({ code: "ENOENT" });
-  });
-
-  it("stops with the caller's cancellation before and between chunks", async () => {
-    const file = writeTemp("weights.bin", Buffer.alloc(2 * 1024 * 1024 + 1));
-
-    await expect(hashFile(file, "sha256", { signal: AbortSignal.abort(), cancelledError: cancelled }))
-      .rejects.toThrow("Example download cancelled.");
-    // Passes the entry check and the first chunk, then aborts.
-    await expect(hashFile(file, "sha256", { signal: abortsAfter(2), cancelledError: cancelled }))
-      .rejects.toThrow("Example download cancelled.");
   });
 });
 
@@ -134,7 +123,7 @@ describe("FileDigestCache", () => {
 
   it("reads an unchanged file once, however often it is asked for", async () => {
     const file = writeTemp("model.bin", body);
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
     const { reads } = await spyOnFileReads();
 
     await expect(cache.digest(file, "sha256")).resolves.toEqual({ sizeBytes: body.byteLength, digest: sha256(body) });
@@ -150,7 +139,7 @@ describe("FileDigestCache", () => {
 
   it("re-reads a same-size rewrite even when the modification time is put back", async () => {
     const file = writeTemp("model.bin", body);
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
     await cache.digest(file, "sha256");
     const { mtime } = fs.statSync(file);
     const tampered = Buffer.alloc(body.byteLength, 0x41);
@@ -163,7 +152,7 @@ describe("FileDigestCache", () => {
 
   it("re-reads a file that was replaced by another of the same size", async () => {
     const file = writeTemp("model.bin", body);
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
     await cache.digest(file, "sha256");
     const replacement = Buffer.alloc(body.byteLength, 0x42);
     fs.writeFileSync(`${file}.new`, replacement);
@@ -176,7 +165,7 @@ describe("FileDigestCache", () => {
 
   it("keeps digests per algorithm", async () => {
     const file = writeTemp("hello.txt", "hello\n");
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
 
     await expect(cache.digest(file, "sha256")).resolves.toMatchObject({ digest: sha256(Buffer.from("hello\n")) });
     await expect(cache.digest(file, "gitBlobSha1")).resolves.toEqual({
@@ -188,9 +177,9 @@ describe("FileDigestCache", () => {
   it("shares one read between concurrent callers", async () => {
     const file = writeTemp("model.bin", body);
     const { reads } = await spyOnFileReads();
-    await new FileDigestCache(cancelled).digest(file, "sha256");
+    await settledCache().digest(file, "sha256");
     const readsPerPass = reads();
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
 
     const results = await Promise.all([cache.digest(file, "sha256"), cache.digest(file, "sha256")]);
 
@@ -200,7 +189,7 @@ describe("FileDigestCache", () => {
 
   it("lets one caller cancel without failing another", async () => {
     const file = writeTemp("model.bin", Buffer.alloc(3 * 1024 * 1024, 3));
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
     const leaving = new AbortController();
 
     const left = cache.digest(file, "sha256", leaving.signal);
@@ -214,7 +203,7 @@ describe("FileDigestCache", () => {
 
   it("abandons a read once its only caller cancels, and remembers nothing from it", async () => {
     const file = writeTemp("model.bin", Buffer.alloc(3 * 1024 * 1024, 3));
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
     const { reads, read, realRead } = await spyOnFileReads();
     const controller = new AbortController();
     read.mockImplementationOnce(function (this: unknown, ...args: unknown[]) {
@@ -234,7 +223,7 @@ describe("FileDigestCache", () => {
 
   it("does not remember a digest whose file changed while it was read", async () => {
     const file = writeTemp("model.bin", body);
-    const cache = new FileDigestCache(cancelled);
+    const cache = settledCache();
     const { reads, prototype, realStat } = await spyOnFileReads();
     let stats = 0;
     vi.spyOn(prototype, "stat").mockImplementation(async function (this: unknown, ...args: unknown[]) {
@@ -252,14 +241,14 @@ describe("FileDigestCache", () => {
   });
 
   it("rejects with the filesystem error for a missing file", async () => {
-    await expect(new FileDigestCache(cancelled).digest(path.join(os.tmpdir(), "open-tts-no-such-file"), "sha256"))
+    await expect(settledCache().digest(path.join(os.tmpdir(), "open-tts-no-such-file"), "sha256"))
       .rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("forgets the least recently hashed path beyond its bound, and everything on clear", async () => {
+  it("forgets the least recently hashed path beyond its bound", async () => {
     const first = writeTemp("first.bin", body);
     const second = writeTemp("second.bin", body);
-    const cache = new FileDigestCache(cancelled, { maxEntries: 1 });
+    const cache = settledCache({ maxEntries: 1 });
     const { reads } = await spyOnFileReads();
 
     await cache.digest(first, "sha256");
@@ -268,11 +257,52 @@ describe("FileDigestCache", () => {
     await cache.digest(first, "sha256");
     expect(reads()).toBeGreaterThan(beforeEvicted);
 
-    const beforeCleared = reads();
+    const beforeRemembered = reads();
     await cache.digest(first, "sha256");
-    expect(reads()).toBe(beforeCleared);
-    cache.clear();
-    await cache.digest(first, "sha256");
-    expect(reads()).toBeGreaterThan(beforeCleared);
+    expect(reads()).toBe(beforeRemembered);
+  });
+
+  it("hashes large files in either algorithm", async () => {
+    const large = Buffer.alloc(3 * 1024 * 1024 + 17, 0x5a);
+    const cache = settledCache();
+
+    await expect(cache.digest(writeTemp("weights.bin", large), "sha256"))
+      .resolves.toEqual({ sizeBytes: large.byteLength, digest: sha256(large) });
+    await expect(cache.digest(writeTemp("weights.bin", large), "gitBlobSha1")).resolves.toEqual({
+      sizeBytes: large.byteLength,
+      digest: createHash("sha1").update(`blob ${large.byteLength}\0`).update(large).digest("hex"),
+    });
+  });
+
+  it("does not remember a file modified too recently to rule out a same-tick rewrite", async () => {
+    const file = writeTemp("model.bin", body);
+    const { mtimeMs, ctimeMs } = fs.statSync(file);
+    const newestChange = Math.max(mtimeMs, ctimeMs);
+    let clock = newestChange + RACY_TIMESTAMP_WINDOW_MS - 1;
+    const cache = new FileDigestCache(cancelled, { now: () => clock });
+    const { reads } = await spyOnFileReads();
+
+    await cache.digest(file, "sha256");
+    const afterRacy = reads();
+    await cache.digest(file, "sha256");
+    expect(reads()).toBeGreaterThan(afterRacy);
+
+    clock = newestChange + RACY_TIMESTAMP_WINDOW_MS + 1;
+    await cache.digest(file, "sha256");
+    const afterSettled = reads();
+    await cache.digest(file, "sha256");
+    expect(reads()).toBe(afterSettled);
+  });
+
+  it("does not remember a file it has just written under the real clock", async () => {
+    const file = writeTemp("model.bin", body);
+    const cache = new FileDigestCache(cancelled);
+    const { reads } = await spyOnFileReads();
+
+    await cache.digest(file, "sha256");
+    const afterFirst = reads();
+    await cache.digest(file, "sha256");
+
+    expect(reads()).toBeGreaterThan(afterFirst);
   });
 });

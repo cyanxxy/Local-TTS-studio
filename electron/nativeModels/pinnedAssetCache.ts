@@ -76,13 +76,17 @@ export class PinnedAssetCache<TAsset extends PinnedAsset> {
       fraction: ({ receivedBytes }) => (totalBytes > 0 ? receivedBytes / totalBytes : undefined),
     });
     let completedBytes = 0;
-    for (const asset of assets) {
-      if (signal?.aborted) throw this.#options.cancelledError();
-      await this.#ensureAsset(asset, (receivedBytes) => {
-        progress.push({ receivedBytes: completedBytes + receivedBytes, totalBytes });
-      }, signal);
-      completedBytes += asset.size;
-      progress.push({ receivedBytes: completedBytes, totalBytes }, true);
+    try {
+      for (const asset of assets) {
+        if (signal?.aborted) throw this.#options.cancelledError();
+        await this.#ensureAsset(asset, (receivedBytes) => {
+          progress.push({ receivedBytes: completedBytes + receivedBytes, totalBytes });
+        }, signal);
+        completedBytes += asset.size;
+        progress.push({ receivedBytes: completedBytes, totalBytes }, true);
+      }
+    } finally {
+      progress.close();
     }
   }
 
