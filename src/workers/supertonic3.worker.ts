@@ -1,5 +1,5 @@
 /** Electron-renderer-only Supertonic 3 worker. */
-import * as ort from "onnxruntime-web";
+import * as ort from "onnxruntime-web/webgpu";
 import type { InferenceBackend, WorkerInMessage } from "../types";
 import {
   SUPERTONIC3_LANGUAGES,
@@ -238,6 +238,9 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
     if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
     const progress = createModelLoadProgress();
     progress.reset();
+    // The asyncify build is the one the onnxruntime-web/webgpu entry runs
+    // WebGPU on; the default entry would need the JSEP build instead and fail
+    // every WebGPU session.
     ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;
     ort.env.wasm.numThreads = getSafeWasmThreadCount(MAX_WASM_THREADS);
     const models = createPrefetcher({
@@ -266,7 +269,8 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
       load: (candidate) => createSupertonic3RuntimeStreaming(config, indexer, loadModelBuffer, candidate),
       warmUp: (instance, candidate) => (candidate === "webgpu" ? warmUpRuntime(instance, defaultStyle) : Promise.resolve()),
       dispose: (instance) => instance.dispose(),
-      onFallback: () => {
+      onFallback: (failed, error) => {
+        console.warn(`[supertonic3] ${failed} load failed; falling back to WASM.`, error);
         // The WASM attempt re-reads the model files from the cache.
         progress.reset();
         for (const file of ["onnx/tts.json", "onnx/unicode_indexer.json", styleFile(DEFAULT_VOICE)]) progress.complete(file);

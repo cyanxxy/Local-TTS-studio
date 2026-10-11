@@ -1,4 +1,5 @@
-import * as ort from "onnxruntime-web";
+import { readFileSync } from "node:fs";
+import * as ort from "onnxruntime-web/webgpu";
 import { describe, expect, it, vi } from "vitest";
 import {
   createSeededRandom,
@@ -230,5 +231,20 @@ describe("Supertonic 3 seeded noise", () => {
     mathRandom.mockRestore();
     style.ttl.dispose();
     style.dp.dispose();
+  });
+});
+
+describe("Supertonic 3 ONNX Runtime entry", () => {
+  // The worker points ORT at the asyncify WASM build, which only the webgpu
+  // entry runs WebGPU on. The default entry needs the JSEP build, so every
+  // WebGPU session failed and Supertonic 3 always fell back to WASM.
+  it.each(["src/lib/supertonic3Runtime.ts", "src/workers/supertonic3.worker.ts"])("%s imports onnxruntime-web/webgpu", (file) => {
+    const imports = [...readFileSync(file, "utf8").matchAll(/from "(onnxruntime-web[^"]*)"/g)].map((match) => match[1]);
+    expect(imports).toEqual(["onnxruntime-web/webgpu"]);
+  });
+
+  it("pairs that entry with the asyncify WASM build", () => {
+    expect(readFileSync("src/workers/supertonic3.worker.ts", "utf8"))
+      .toContain("ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;");
   });
 });

@@ -1,6 +1,6 @@
 // Adapted from Supertone's MIT-licensed ONNX web example at
 // https://github.com/supertone-inc/supertonic (dff55dc00064c398736080c78195f577527832ae).
-import * as ort from "onnxruntime-web";
+import * as ort from "onnxruntime-web/webgpu";
 
 interface Supertonic3Config {
   ae: {
