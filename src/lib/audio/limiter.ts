@@ -85,6 +85,7 @@ export class TruePeakLimiter {
   private nextMinimum = 0;
   private finished = false;
   private reduction = 1;
+  private lastOutput = 0;
 
   constructor(sampleRate: number, options: LimiterOptions) {
     this.ceiling = dbToGain(options.ceilingDb);
@@ -95,7 +96,7 @@ export class TruePeakLimiter {
     this.released = new Float64Array(this.window).fill(1);
     this.releasedSum = this.window;
     // Virtual silence before the signal lets the gain fall ahead of an opening peak.
-    for (let index = 0; index < this.window; index += 1) this.pushRequired(1, []);
+    for (let index = 0; index < this.window; index += 1) this.pushRequired(1);
   }
 
   /** Lowest gain applied so far (1 = never limited). */
@@ -112,23 +113,38 @@ export class TruePeakLimiter {
   flush(): Float32Array {
     if (this.finished) throw new Error("TruePeakLimiter was already flushed.");
     this.finished = true;
-    const output = [...this.consume(this.detector.flush())];
     // Virtual silence after the end completes the last windows.
-    const tail: number[] = [];
-    for (let index = 0; index < this.window; index += 1) this.pushRequired(1, tail);
-    return Float32Array.from([...output, ...tail]);
+    const peaks = this.detector.flush();
+    const required = new Float32Array(peaks.length + this.window).fill(1);
+    for (let index = 0; index < peaks.length; index += 1) required[index] = this.requiredGain(peaks[index]);
+    return this.emitAll(required);
+  }
+
+  private requiredGain(peak: number): number {
+    return peak > this.ceiling ? this.ceiling / peak : 1;
   }
 
   private consume(peaks: Float32Array): Float32Array {
-    const output: number[] = [];
-    for (let index = 0; index < peaks.length; index += 1) {
-      this.pushRequired(peaks[index] > this.ceiling ? this.ceiling / peaks[index] : 1, output);
-    }
-    return Float32Array.from(output);
+    return this.emitAll(peaks.map((peak) => this.requiredGain(peak)));
   }
 
-  /** Adds the next required gain and emits every sample whose gain is now known. */
-  private pushRequired(gain: number, output: number[]): void {
+  private emitAll(required: Float32Array): Float32Array {
+    const output = new Float32Array(required.length);
+    let length = 0;
+    for (let index = 0; index < required.length; index += 1) {
+      if (this.pushRequired(required[index])) {
+        output[length] = this.lastOutput;
+        length += 1;
+      }
+    }
+    return output.subarray(0, length);
+  }
+
+  /**
+   * Adds the next required gain; returns true when that completes a real
+   * sample, which is then in `lastOutput`.
+   */
+  private pushRequired(gain: number): boolean {
     const index = this.required.end;
     this.required.push(gain);
     const minimum = this.minimumIndices;
@@ -140,7 +156,7 @@ export class TruePeakLimiter {
     }
     minimum[(this.minimumHead + this.minimumLength) % slots] = index;
     this.minimumLength += 1;
-    if (index - this.nextMinimum + 1 < this.window) return;
+    if (index - this.nextMinimum + 1 < this.window) return false;
 
     // Window minimum for virtual index `nextMinimum` covers [nextMinimum, nextMinimum + window).
     const virtual = this.nextMinimum;
@@ -157,15 +173,15 @@ export class TruePeakLimiter {
     this.nextMinimum += 1;
 
     const real = virtual - this.window;
-    if (real >= 0 && real < this.input.end) {
-      // Guard against rounding in the running sum: never exceed this sample's requirement.
-      const appliedGain = Math.min(this.releasedSum / this.window, this.required.at(virtual));
-      this.reduction = Math.min(this.reduction, appliedGain);
-      output.push(this.input.at(real) * appliedGain);
-      this.input.dropBefore(real + 1);
-    }
     // Keep `virtual` itself: the running minimum may still point at it.
     this.required.dropBefore(virtual);
+    if (real < 0 || real >= this.input.end) return false;
+    // Guard against rounding in the running sum: never exceed this sample's requirement.
+    const appliedGain = Math.min(this.releasedSum / this.window, this.required.at(virtual));
+    this.reduction = Math.min(this.reduction, appliedGain);
+    this.lastOutput = this.input.at(real) * appliedGain;
+    this.input.dropBefore(real + 1);
+    return true;
   }
 }
 

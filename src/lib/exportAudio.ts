@@ -213,6 +213,8 @@ function flacEncoder(sampleRate: number, bitsPerSample: 16 | 24): Encoder {
 interface RenderSettings {
   gain: number;
   ceilingDb: number | null;
+  /** Measure true peak (not needed for mastering trial passes). */
+  truePeak?: boolean;
 }
 
 interface RenderOutcome {
@@ -256,7 +258,7 @@ function render(
   const post = options.post ? new ChunkPostProcessor(sourceRate, options.post) : null;
   const resampler = new PolyphaseResampler(sourceRate, targetRate);
   const limiter = settings.ceilingDb === null ? null : new TruePeakLimiter(targetRate, { ceilingDb: settings.ceilingDb });
-  const meter = new LoudnessMeter(targetRate);
+  const meter = new LoudnessMeter(targetRate, { truePeak: settings.truePeak });
 
   const emit = (samples: Float32Array) => {
     if (samples.length === 0) return;
@@ -353,7 +355,7 @@ export async function buildExportAudio(
         correction < MAX_MASTERING_CORRECTIONS && analysis.report.truePeakDbtp + gainDb > mastering.truePeakDb;
         correction += 1
       ) {
-        const trial = render(chunks, options, settings, targetRate, null, progress("analyzing"), hooks.signal);
+        const trial = render(chunks, options, { ...settings, truePeak: false }, targetRate, null, progress("analyzing"), hooks.signal);
         passIndex += 1;
         const error = mastering.targetLufs - measuredLevel(trial.report, mastering.measure);
         if (Math.abs(error) <= MASTERING_TOLERANCE_LU) break;

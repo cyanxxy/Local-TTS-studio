@@ -92,6 +92,15 @@ describe("LoudnessMeter", () => {
     expect(report.truePeakDbtp).toBeLessThan(0.5);
   });
 
+  it("can skip the true-peak search", () => {
+    const signal = sine(12000, 48000, 1, 1, Math.PI / 4);
+    const meter = new LoudnessMeter(48000, { truePeak: false });
+    meter.process(signal);
+    const report = meter.result();
+    expect(report.truePeakDbtp).toBe(report.samplePeakDbfs);
+    expect(report.integratedLufs).toBeCloseTo(measureLoudness(signal, 48000).integratedLufs, 9);
+  });
+
   it("gives the same result for any chunking", () => {
     const signal = concat(sine(440, 24000, 2, 0.3), sine(3000, 24000, 1.3, 0.05));
     const whole = measureLoudness(signal, 24000);
@@ -119,5 +128,9 @@ describe("TruePeakDetector", () => {
     const peaks = [...detector.process(input), ...detector.flush()];
     expect(peaks).toHaveLength(input.length);
     peaks.forEach((peak, index) => expect(peak).toBeGreaterThanOrEqual(Math.abs(input[index])));
+  });
+
+  it("rejects invalid sample rates", () => {
+    expect(() => new TruePeakDetector(0)).toThrow(/positive integer/);
   });
 });
