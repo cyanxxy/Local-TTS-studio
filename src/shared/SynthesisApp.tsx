@@ -26,6 +26,7 @@ import { Qwen3InlineSettings } from "../components/Qwen3InlineSettings";
 import { Supertonic3InlineSettings } from "../components/Supertonic3InlineSettings";
 import { Audio8InlineSettings } from "../components/Audio8InlineSettings";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
+import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
 import { AppFooter } from "../components/AppFooter";
 import { AppHeader } from "../components/AppHeader";
@@ -65,17 +66,12 @@ import {
 import { resolveKokoroVoice } from "../lib/voices";
 import { hasMinimumSynthesisText } from "../lib/textValidation";
 import {
-  buildReaderSections,
   buildAudioSignature,
-  chapterAtOffset,
   createReaderAudioCacheKey,
   getCachedReaderAudioByteLength,
-  getReaderSectionText,
   normalizeReaderTextFragment,
   readerSectionAtOffset,
   unwrapHardLineBreaks,
-  type ReaderDocumentRecord,
-  type ReaderSection,
 } from "../lib/readerDocument";
 import { isReaderLibraryShutdownError } from "../lib/readerLibrary";
 import {
@@ -219,34 +215,15 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   } = useReaderViewPreferences();
   const activeReaderDocument = readerLibrary.activeDocument;
   const activeReaderDocumentId = activeReaderDocument?.id ?? null;
-  const readerSectionsCacheRef = useRef<{
-    documentId: string;
-    text: string;
-    chapters: ReaderDocumentRecord["chapters"];
-    sections: ReaderSection[];
-  } | null>(null);
-  const readerSections = useMemo(() => {
-    if (!activeReaderDocument) return [];
-    const cached = readerSectionsCacheRef.current;
-    if (
-      cached?.documentId === activeReaderDocument.id
-      && cached.text === activeReaderDocument.text
-      && cached.chapters === activeReaderDocument.chapters
-    ) return cached.sections;
-    const sections = buildReaderSections(activeReaderDocument.text, activeReaderDocument.chapters);
-    readerSectionsCacheRef.current = {
-      documentId: activeReaderDocument.id,
-      text: activeReaderDocument.text,
-      chapters: activeReaderDocument.chapters,
-      sections,
-    };
-    return sections;
-  }, [activeReaderDocument]);
-  const activeReaderSection = useMemo(() => {
-    if (!activeReaderDocument) return null;
-    return readerSections.find((section) => section.id === activeReaderDocument.progress.sectionId)
-      ?? readerSectionAtOffset(readerSections, activeReaderDocument.progress.textOffset);
-  }, [activeReaderDocument, readerSections]);
+  const {
+    sections: readerSections,
+    activeSection: activeReaderSection,
+    activeSectionIndex: activeReaderSectionIndex,
+    activeChapter: activeReaderChapter,
+    previousSection: previousReaderSection,
+    nextSection: nextReaderSection,
+    activeSectionText: activeReaderSectionText,
+  } = useReaderSections(activeReaderDocument);
   const activeReaderSectionRef = useRef(activeReaderSection);
   activeReaderSectionRef.current = activeReaderSection;
   const readerSectionEditRef = useRef<{
@@ -260,23 +237,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   useEffect(() => {
     readerAudioClearedForEditRef.current = null;
   }, [activeReaderDocumentId, activeReaderSection?.id]);
-  const activeReaderChapter = useMemo(() => {
-    if (!activeReaderDocument || !activeReaderSection) return null;
-    return activeReaderDocument.chapters.find((chapter) => chapter.id === activeReaderSection.chapterId)
-      ?? chapterAtOffset(activeReaderDocument.chapters, activeReaderSection.start);
-  }, [activeReaderDocument, activeReaderSection]);
-  const activeReaderSectionIndex = activeReaderSection
-    ? readerSections.findIndex((section) => section.id === activeReaderSection.id)
-    : -1;
-  const previousReaderSection = activeReaderSectionIndex > 0
-    ? readerSections[activeReaderSectionIndex - 1]
-    : null;
-  const nextReaderSection = activeReaderSectionIndex >= 0
-    ? readerSections[activeReaderSectionIndex + 1] ?? null
-    : null;
-  const activeReaderSectionText = activeReaderDocument
-    ? getReaderSectionText(activeReaderDocument.text, activeReaderSection)
-    : "";
   const synthesisText = isReaderPage && activeReaderSection
     ? activeReaderSectionText
     : text;
