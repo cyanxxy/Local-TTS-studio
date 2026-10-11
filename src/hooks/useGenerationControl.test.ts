@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { GenerationTuningSettings, WorkerInMessage, WorkerOutMessage } from "../types";
+import type { GenerationTuningSettings, ModelType, WorkerInMessage, WorkerOutMessage } from "../types";
 import { useGenerationControl } from "./useGenerationControl";
 import type { AudioSegment, UseAudioPlayerReturn } from "./useAudioPlayer";
 import type { UseTTSReturn } from "./useTTS";
@@ -105,6 +105,12 @@ function makeSegment(overrides: Partial<AudioSegment> = {}): AudioSegment {
   };
 }
 
+
+/** A `getWorker` over per-engine worker refs, read at call time. */
+function workerLookup(refs: Record<ModelType, { current: Worker | null }>) {
+  return (model: ModelType) => refs[model].current;
+}
+
 describe("useGenerationControl", () => {
   it("cancels TTS only when forced or currently generating", () => {
     const worker = new MockWorker();
@@ -120,8 +126,7 @@ describe("useGenerationControl", () => {
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker,
-        supertonicWorker,
+        getWorker: workerLookup({ kokoro: kokoroWorker, supertonic: supertonicWorker }),
         hardRestartModel,
         player,
         setShowPlayer,
@@ -152,8 +157,7 @@ describe("useGenerationControl", () => {
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker: { current: null },
-        supertonicWorker: { current: null },
+        getWorker: workerLookup({ kokoro: { current: null }, supertonic: { current: null } }),
         hardRestartModel,
         player,
         setShowPlayer: vi.fn(),
@@ -188,8 +192,7 @@ describe("useGenerationControl", () => {
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker,
-        supertonicWorker,
+        getWorker: workerLookup({ kokoro: kokoroWorker, supertonic: supertonicWorker }),
         hardRestartModel: vi.fn(),
         player,
         setShowPlayer,
@@ -272,8 +275,7 @@ describe("useGenerationControl", () => {
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker,
-        supertonicWorker,
+        getWorker: workerLookup({ kokoro: kokoroWorker, supertonic: supertonicWorker }),
         hardRestartModel: vi.fn(),
         player,
         setShowPlayer,
@@ -301,8 +303,7 @@ describe("useGenerationControl", () => {
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
         hardRestartModel,
-        kokoroWorker: { current: worker as unknown as Worker },
-        supertonicWorker: { current: null },
+        getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
         player: createPlayerMock({ segments: [segment] }),
         setShowPlayer: vi.fn(),
         text: "Hello world",

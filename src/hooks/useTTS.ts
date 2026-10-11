@@ -8,10 +8,11 @@ import type {
   WorkerOutMessage,
 } from "../types";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
+import { workerEventMessage, workerGenerateRequest } from "./workerGeneration";
 
-interface UseTTSOptions {
-  kokoroWorker: React.RefObject<Worker | null>;
-  supertonicWorker: React.RefObject<Worker | null>;
+interface UseTTSOptions<Model extends string> {
+  /** The worker that synthesizes `model`, or null while it is not running. */
+  getWorker: (model: Model) => Worker | null;
   onAudioChunk: (chunk: {
     audio: Float32Array;
     samplingRate: number;
@@ -26,12 +27,12 @@ interface UseTTSOptions {
   onComplete: () => void;
 }
 
-export interface UseTTSReturn {
+export interface UseTTSReturn<Model extends string = ModelType> {
   isGenerating: boolean;
   error: string | null;
   stats: GenerationStats;
   generationProgress: number;
-  generate: (text: string, model: ModelType, voice: string, settings: GenerationTuningSettings) => void;
+  generate: (text: string, model: Model, voice: string, settings: GenerationTuningSettings) => void;
   cancel: () => void;
 }
 
@@ -44,22 +45,15 @@ const INITIAL_STATS: GenerationStats = {
   currentDuration: 0,
 };
 
-function workerEventMessage(event: Event, fallback: string): string {
-  if (event instanceof ErrorEvent && event.message) return event.message;
-  if (event.type === "messageerror") return `${fallback} The worker sent an unreadable message.`;
-  return fallback;
-}
-
 /**
  * Unified TTS hook. Model-agnostic — delegates to the right worker
  * based on the active model. Tracks generation stats.
  */
-export function useTTS({
-  kokoroWorker,
-  supertonicWorker,
+export function useTTS<Model extends string>({
+  getWorker,
   onAudioChunk,
   onComplete,
-}: UseTTSOptions): UseTTSReturn {
+}: UseTTSOptions<Model>): UseTTSReturn<Model> {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<GenerationStats>(INITIAL_STATS);
@@ -137,8 +131,8 @@ export function useTTS({
   useEffect(() => cleanup, [cleanup]);
 
   const generate = useCallback(
-    (text: string, model: ModelType, voice: string, settings: GenerationTuningSettings) => {
-      const worker = model === "kokoro" ? kokoroWorker.current : supertonicWorker.current;
+    (text: string, model: Model, voice: string, settings: GenerationTuningSettings) => {
+      const worker = getWorker(model);
       if (!worker) return;
 
       // Cleanup previous listener
@@ -234,15 +228,7 @@ export function useTTS({
       const message: WorkerInMessage = {
         type: "GENERATE",
         generationId,
-        text,
-        voice,
-        language: settings.language,
-        speed: settings.speed,
-        quality: settings.quality,
-        pauseOverridesSec: settings.pauseOverridesSec,
-        sentenceSpeedVariance: settings.sentenceSpeedVariance,
-        pronunciationRules: settings.pronunciationRules,
-        emphasisStrength: settings.emphasisStrength,
+        ...workerGenerateRequest(text, voice, settings),
       };
       try {
         worker.postMessage(message);
@@ -250,7 +236,7 @@ export function useTTS({
         failGeneration(error instanceof Error ? error.message : String(error));
       }
     },
-    [kokoroWorker, supertonicWorker, onAudioChunk, onComplete, cleanup, flushGenerationUiNow, queueGenerationUiFlush],
+    [getWorker, onAudioChunk, onComplete, cleanup, flushGenerationUiNow, queueGenerationUiFlush],
   );
 
   const cancel = useCallback(() => {

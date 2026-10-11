@@ -90,11 +90,12 @@ const mock = vi.hoisted(() => {
       masteringEnabled: true,
     },
     modelLoader: {
-      kokoroState: readyState,
-      supertonicState: readyState,
-      kokoroWorker: { current: null },
-      supertonicWorker: { current: null },
-      kokoroVoices: ["af_heart", "af_bella"],
+      states: { kokoro: readyState, supertonic: readyState },
+      getWorker: vi.fn(() => null),
+      voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] as string[] },
+      getWorkerLease: vi.fn(() => null),
+      acquireWorker: vi.fn(),
+      hardRestartModel: vi.fn(),
       loadModel: vi.fn(),
       reloadModel: vi.fn(),
     },
@@ -636,9 +637,10 @@ function resetMockState() {
   };
   mock.modelLoader = {
     ...mock.modelLoader,
-    kokoroState: mock.readyState,
-    supertonicState: mock.readyState,
-    kokoroVoices: ["af_heart", "af_bella"],
+    states: { kokoro: mock.readyState, supertonic: mock.readyState },
+    voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] },
+    getWorkerLease: vi.fn(() => null),
+    hardRestartModel: vi.fn(),
     loadModel: vi.fn(),
     reloadModel: vi.fn(),
   };
@@ -1034,7 +1036,7 @@ describe("SynthesisApp", () => {
     view.rerender(<WebApp />);
     expect(await screen.findByTestId("reader-text-value")).toBeInTheDocument();
     expect(screen.queryByTestId("reader-desktop-voice")).not.toBeInTheDocument();
-    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ enabled: true }));
+    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ active: true }));
     // A launch where the engine is available again reopens on it.
     await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
       expect.objectContaining({ desktopModels: { studio: "supertonic3", reader: "qwen3" } }),
@@ -1364,7 +1366,7 @@ describe("SynthesisApp", () => {
 
     await waitFor(() => expect(createSupertonic3Worker).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1])
-      .toEqual(expect.objectContaining({ enabled: false })));
+      .toEqual(expect.objectContaining({ active: false })));
     expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
     unmount();
     expect(worker.terminate).toHaveBeenCalledTimes(1);
@@ -2088,7 +2090,7 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
     await waitFor(() => expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1])
-      .toEqual(expect.objectContaining({ enabled: false })));
+      .toEqual(expect.objectContaining({ active: false })));
 
     fireEvent.click(screen.getByRole("button", { name: "Open app settings" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "Optional models" }))[0]);

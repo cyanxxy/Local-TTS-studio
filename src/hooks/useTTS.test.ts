@@ -1,6 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GenerationTuningSettings, WorkerInMessage, WorkerOutMessage } from "../types";
+import type { GenerationTuningSettings, ModelType, WorkerInMessage, WorkerOutMessage } from "../types";
 import { useTTS } from "./useTTS";
 
 class MockWorker {
@@ -44,6 +44,12 @@ const SETTINGS: GenerationTuningSettings = {
   emphasisStrength: 0.5,
 };
 
+
+/** A `getWorker` over per-engine worker refs, read at call time. */
+function workerLookup(refs: Record<ModelType, { current: Worker | null }>) {
+  return (model: ModelType) => refs[model].current;
+}
+
 describe("useTTS", () => {
   let now = 0;
   let animationFrameCallbacks: FrameRequestCallback[];
@@ -76,8 +82,7 @@ describe("useTTS", () => {
     const onComplete = vi.fn();
 
     const { result } = renderHook(() => useTTS({
-      kokoroWorker: { current: kokoroWorker as unknown as Worker },
-      supertonicWorker: { current: null },
+      getWorker: workerLookup({ kokoro: { current: kokoroWorker as unknown as Worker }, supertonic: { current: null } }),
       onAudioChunk,
       onComplete,
     }));
@@ -147,8 +152,7 @@ describe("useTTS", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const { result } = renderHook(() => useTTS({
-      kokoroWorker: { current: null },
-      supertonicWorker: { current: worker as unknown as Worker },
+      getWorker: workerLookup({ kokoro: { current: null }, supertonic: { current: worker as unknown as Worker } }),
       onAudioChunk: vi.fn(),
       onComplete: vi.fn(),
     }));
@@ -184,8 +188,7 @@ describe("useTTS", () => {
   it("ignores missing workers and can cancel an active generation", () => {
     const worker = new MockWorker();
     const { result } = renderHook(() => useTTS({
-      kokoroWorker: { current: worker as unknown as Worker },
-      supertonicWorker: { current: null },
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
       onAudioChunk: vi.fn(),
       onComplete: vi.fn(),
     }));
@@ -208,8 +211,7 @@ describe("useTTS", () => {
   it("keeps its identity across renders until its state changes", () => {
     const worker = new MockWorker();
     const options = {
-      kokoroWorker: { current: worker as unknown as Worker },
-      supertonicWorker: { current: null },
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
       onAudioChunk: vi.fn(),
       onComplete: vi.fn(),
     };

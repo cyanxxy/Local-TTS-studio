@@ -269,21 +269,25 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   // The engine whose audio the visible surface plays and saves.
   const visibleEngineId: SurfaceEngineId = isReaderPage ? readerEngineId : studioEngineId;
 
+  const supertonicPreferredVoices = useMemo(() => ({ supertonic: supertonicVoice }), [supertonicVoice]);
   const {
-    kokoroState,
-    supertonicState,
-    kokoroWorker,
-    supertonicWorker,
-    kokoroVoices,
+    states: browserModelStates,
+    getWorker: getBrowserWorker,
+    voices: browserVoices,
     hardRestartModel,
     loadModel,
     reloadModel,
   } = useModelLoader(activeModel, {
-    enabled: localInferenceSupported && !isUsingQwen3Inline && !isUsingSupertonic3Inline && !isUsingAudio8Inline,
-    preferredSupertonicVoice: supertonicVoice,
+    active: localInferenceSupported && !isUsingQwen3Inline && !isUsingSupertonic3Inline && !isUsingAudio8Inline,
+    // Studio and the Reader share the browser model, so a page switch keeps it
+    // loaded while the other surface still selects it.
+    retain: localInferenceSupported && (studioDesktopModel === null || readerDesktopModel === null),
+    preferredVoices: supertonicPreferredVoices,
     debugProfiling,
     supportedModels: browserSupport.supportedModels,
   });
+  const { kokoro: kokoroState, supertonic: supertonicState } = browserModelStates;
+  const kokoroVoices = browserVoices.kokoro;
 
   const player = useAudioPlayer();
   // The player object changes identity with its state; its functions never do.
@@ -338,7 +342,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const endStream = player.endStream;
   const onComplete = useCallback(() => endStream({ completed: true }), [endStream]);
 
-  const tts = useTTS({ kokoroWorker, supertonicWorker, onAudioChunk, onComplete });
+  const tts = useTTS({ getWorker: getBrowserWorker, onAudioChunk, onComplete });
   const currentModelState = activeModel === "kokoro" ? kokoroState : supertonicState;
   const activeModelSupported = isModelSupportedInBrowser(activeModel, browserSupport);
   const canGenerate = localInferenceSupported
@@ -408,8 +412,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     canGenerate,
     generationSettings: creator.generationSettings,
     hardRestartModel,
-    kokoroWorker,
-    supertonicWorker,
+    getWorker: getBrowserWorker,
     player,
     setShowPlayer,
     text: synthesisText,

@@ -4,17 +4,17 @@ import type {
   GenerationTuningSettings,
   ModelType,
   WorkerInMessage,
-  WorkerOutMessage,
 } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import type { UseModelLoaderReturn } from "./useModelLoader";
 import type { UseTTSReturn } from "./useTTS";
+import { observeWorkerGeneration, workerGenerateRequest } from "./workerGeneration";
 
 interface UseGenerationControlOptions {
   activeModel: ModelType;
   canGenerate: boolean;
   generationSettings: GenerationTuningSettings;
-  kokoroWorker: React.RefObject<Worker | null>;
-  supertonicWorker: React.RefObject<Worker | null>;
+  getWorker: UseModelLoaderReturn["getWorker"];
   hardRestartModel: (model: ModelType) => void;
   player: UseAudioPlayerReturn;
   setShowPlayer: (showPlayer: boolean) => void;
@@ -35,18 +35,18 @@ interface UseGenerationControlReturn {
   handleRetakeSegment: (segmentId: string) => void;
 }
 
-function workerEventMessage(event: Event, fallback: string): string {
-  if (event instanceof ErrorEvent && event.message) return event.message;
-  if (event.type === "messageerror") return `${fallback} The worker sent an unreadable message.`;
-  return fallback;
+/** The retake in flight: its worker, its model, and how to stop listening to it. */
+interface ActiveRetake {
+  worker: Worker;
+  model: ModelType;
+  detach: () => void;
 }
 
 export function useGenerationControl({
   activeModel,
   canGenerate,
   generationSettings,
-  kokoroWorker,
-  supertonicWorker,
+  getWorker,
   hardRestartModel,
   player,
   setShowPlayer,
@@ -67,28 +67,12 @@ export function useGenerationControl({
   } = player;
   const { cancel: cancelTts, generate: generateTts, isGenerating: isTtsGenerating } = tts;
 
-  const retakeWorkerRef = useRef<Worker | null>(null);
-  const retakeListenerRef = useRef<((event: MessageEvent<WorkerOutMessage>) => void) | null>(null);
-  const retakeErrorListenerRef = useRef<((event: Event) => void) | null>(null);
-  const retakeMessageErrorListenerRef = useRef<((event: Event) => void) | null>(null);
+  const retakeRef = useRef<ActiveRetake | null>(null);
   const retakeGenerationSeqRef = useRef(0);
-  const retakeModelRef = useRef<ModelType | null>(null);
 
   const clearRetakeListener = useCallback(() => {
-    if (retakeWorkerRef.current && retakeListenerRef.current) {
-      retakeWorkerRef.current.removeEventListener("message", retakeListenerRef.current as EventListener);
-    }
-    if (retakeWorkerRef.current && retakeErrorListenerRef.current) {
-      retakeWorkerRef.current.removeEventListener("error", retakeErrorListenerRef.current as EventListener);
-    }
-    if (retakeWorkerRef.current && retakeMessageErrorListenerRef.current) {
-      retakeWorkerRef.current.removeEventListener("messageerror", retakeMessageErrorListenerRef.current as EventListener);
-    }
-    retakeWorkerRef.current = null;
-    retakeModelRef.current = null;
-    retakeListenerRef.current = null;
-    retakeErrorListenerRef.current = null;
-    retakeMessageErrorListenerRef.current = null;
+    retakeRef.current?.detach();
+    retakeRef.current = null;
     setIsRetakingSegment(false);
   }, []);
 
@@ -103,10 +87,10 @@ export function useGenerationControl({
   }, [endStream, isTtsGenerating]);
 
   const cancelRetake = useCallback((notifyWorker: boolean) => {
-    const retakeModel = retakeModelRef.current;
-    if (notifyWorker && retakeWorkerRef.current && retakeModel) {
-      retakeWorkerRef.current.postMessage({ type: "CANCEL" } satisfies WorkerInMessage);
-      hardRestartModel(retakeModel);
+    const retake = retakeRef.current;
+    if (notifyWorker && retake) {
+      retake.worker.postMessage({ type: "CANCEL" } satisfies WorkerInMessage);
+      hardRestartModel(retake.model);
     }
     clearRetakeListener();
   }, [clearRetakeListener, hardRestartModel]);
@@ -118,7 +102,7 @@ export function useGenerationControl({
   }, [resetPlayer, setShowPlayer]);
 
   const cancelActiveGeneration = useCallback((forceCancelTts: boolean = false) => {
-    const hadRetake = retakeWorkerRef.current !== null;
+    const hadRetake = retakeRef.current !== null;
     cancelRetake(true);
     if (forceCancelTts || isTtsGenerating) {
       cancelTts();
@@ -161,98 +145,59 @@ export function useGenerationControl({
     if (!segmentId || isGenerationBusy) return;
 
     const segment = segments.find((entry) => entry.id === segmentId);
-    const worker = activeModel === "kokoro" ? kokoroWorker.current : supertonicWorker.current;
+    const worker = getWorker(activeModel);
 
     if (!segment || !worker) return;
 
     clearRetakeListener();
     setRetakeError(null);
-    retakeWorkerRef.current = worker;
-    retakeModelRef.current = activeModel;
     retakeGenerationSeqRef.current += 1;
     const generationId = `retake-${retakeGenerationSeqRef.current}`;
 
     const chunks: Array<{ audio: Float32Array; samplingRate: number }> = [];
-    const failRetake = (message: string) => {
-      console.error("Retake generation error:", message);
-      setRetakeError(message);
-      clearRetakeListener();
-    };
-    const handleMessage = (event: MessageEvent<WorkerOutMessage>) => {
-      const msg = event.data;
-      if ("generationId" in msg && msg.generationId !== undefined && msg.generationId !== generationId) {
-        return;
-      }
-      switch (msg.type) {
-        case "AUDIO_CHUNK":
-          chunks.push({ audio: msg.audio, samplingRate: msg.samplingRate });
-          break;
-        case "GENERATION_COMPLETE": {
-          clearRetakeListener();
-          if (chunks.length === 0) return;
-          const samplingRate = chunks[0].samplingRate;
-          const merged = concatFloat32Arrays(chunks.map((chunk) => chunk.audio));
-          replaceSegment(segment.id, {
-            audio: merged,
-            samplingRate,
-            text: segment.text,
-            index: segment.index,
-            total: segment.total,
-            textStart: segment.textStart,
-            textEnd: segment.textEnd,
-            pauseAfterSec: segment.pauseAfterSec,
-            pauseKind: segment.pauseKind,
-          });
-          setShowPlayer(true);
-          break;
-        }
-        case "ERROR":
-          failRetake(msg.message);
-          break;
-      }
-    };
-    const handleWorkerError = (event: Event) => {
-      failRetake(workerEventMessage(event, "Retake worker failed."));
-    };
-    const handleWorkerMessageError = (event: Event) => {
-      failRetake(workerEventMessage(event, "Retake worker failed."));
-    };
-
-    retakeListenerRef.current = handleMessage;
-    retakeErrorListenerRef.current = handleWorkerError;
-    retakeMessageErrorListenerRef.current = handleWorkerMessageError;
-    worker.addEventListener("message", handleMessage as EventListener);
-    worker.addEventListener("error", handleWorkerError as EventListener);
-    worker.addEventListener("messageerror", handleWorkerMessageError as EventListener);
+    const retake: ActiveRetake = { worker, model: activeModel, detach: () => undefined };
+    retakeRef.current = retake;
     setIsRetakingSegment(true);
-    try {
-      worker.postMessage({
-        type: "GENERATE",
-        generationId,
-        text: segment.text,
-        voice,
-        speed: generationSettings.speed,
-        quality: generationSettings.quality,
-        language: generationSettings.language,
-        finalPauseSec: segment.pauseAfterSec,
-        pauseOverridesSec: generationSettings.pauseOverridesSec,
-        sentenceSpeedVariance: generationSettings.sentenceSpeedVariance,
-        pronunciationRules: generationSettings.pronunciationRules,
-        emphasisStrength: generationSettings.emphasisStrength,
-      } satisfies WorkerInMessage);
-    } catch (error) {
-      failRetake(error instanceof Error ? error.message : String(error));
-    }
+    retake.detach = observeWorkerGeneration(worker, generationId, {
+      ...workerGenerateRequest(segment.text, voice, generationSettings),
+      finalPauseSec: segment.pauseAfterSec,
+    }, {
+      onChunk: (chunk) => {
+        chunks.push({ audio: chunk.audio, samplingRate: chunk.samplingRate });
+      },
+      onComplete: () => {
+        clearRetakeListener();
+        if (chunks.length === 0) return;
+        const samplingRate = chunks[0].samplingRate;
+        const merged = concatFloat32Arrays(chunks.map((chunk) => chunk.audio));
+        replaceSegment(segment.id, {
+          audio: merged,
+          samplingRate,
+          text: segment.text,
+          index: segment.index,
+          total: segment.total,
+          textStart: segment.textStart,
+          textEnd: segment.textEnd,
+          pauseAfterSec: segment.pauseAfterSec,
+          pauseKind: segment.pauseKind,
+        });
+        setShowPlayer(true);
+      },
+      onError: (message) => {
+        console.error("Retake generation error:", message);
+        setRetakeError(message);
+        clearRetakeListener();
+      },
+    }, "Retake worker failed.");
   }, [
     activeModel,
     clearRetakeListener,
     generationSettings,
     isGenerationBusy,
-    kokoroWorker,
     replaceSegment,
     segments,
     setShowPlayer,
-    supertonicWorker,
+    getWorker,
     voice,
   ]);
 
