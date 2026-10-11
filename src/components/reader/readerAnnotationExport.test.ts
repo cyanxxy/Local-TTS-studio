@@ -90,6 +90,31 @@ describe("readerAnnotationExport", () => {
     expect(markdown).toContain("> First line\n>\n> Second line of the passage.\n\n*Green highlight · 0% through*");
   });
 
+  it("omits empty quotes and zero times, and tolerates unreadable dates and empty text", () => {
+    const book: ReaderDocumentRecord = {
+      ...createReaderDocument({ id: "sparse", title: "Sparse", text: "Short." }),
+      text: "",
+      bookmarks: [
+        { id: "bm-a", label: "Start", textOffset: 0, positionSec: 0, chapterId: null, sectionId: null, createdAt: Number.NaN },
+        { id: "bm-b", label: "Later", textOffset: 0, positionSec: 75, chapterId: null, sectionId: null, createdAt: 1 },
+      ],
+      notes: [
+        { id: "note-a", text: "Loose thought", quote: "  ", textOffset: 0, chapterId: null, sectionId: null, createdAt: 1, updatedAt: 1 },
+      ],
+    };
+
+    const markdown = buildReaderAnnotationsMarkdown(book, EXPORTED_AT);
+    expect(markdown).toContain("0 highlights · 1 note · 2 bookmarks");
+    expect(markdown).toContain("- Bookmark: Start (0% through)\n");
+    expect(markdown).toContain("- Bookmark: Later (0% through, 1:15)");
+    expect(markdown).toContain("\n\nLoose thought\n\n*Note · 0% through*");
+    expect(markdown).not.toContain(">");
+
+    const parsed = JSON.parse(buildReaderAnnotationsJson(book, EXPORTED_AT));
+    expect(parsed.highlights).toEqual([]);
+    expect(parsed.bookmarks[0]).toMatchObject({ createdAt: null, percent: 0 });
+  });
+
   it("writes versioned JSON with offsets, chapters and ISO times", () => {
     const parsed = JSON.parse(buildReaderAnnotationsJson(annotatedBook(), EXPORTED_AT));
 
