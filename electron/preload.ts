@@ -92,10 +92,17 @@ ipcRenderer.on("local-tts:audio-stream", (_event: IpcRendererEvent, message: unk
   for (const listener of [...audioChunkSubscribers]) callListener(listener, chunk);
 });
 
-async function generateLocalTts(request: LocalBridgeRequest, options?: GenerateOptions): Promise<unknown> {
+// The id main runs a request under, and so stamps on its stream messages:
+// main trims the id it is given (see parseRequestId in localTtsIpc.ts).
+function localTtsRequestId(request: unknown): string | undefined {
   const requestId = isRecord(request) ? request.requestId : undefined;
+  return typeof requestId === "string" ? requestId.trim() : undefined;
+}
+
+async function generateLocalTts(request: LocalBridgeRequest, options?: GenerateOptions): Promise<unknown> {
+  const requestId = localTtsRequestId(request);
   // Main rejects a request without a usable id before streaming anything.
-  if (typeof requestId !== "string") return ipcRenderer.invoke("local-tts:generate", request);
+  if (requestId === undefined) return ipcRenderer.invoke("local-tts:generate", request);
   if (localTtsAudioStreams.has(requestId)) {
     throw new Error(`A local TTS request with id ${requestId} is already active.`);
   }
@@ -122,8 +129,8 @@ async function generateLocalTts(request: LocalBridgeRequest, options?: GenerateO
 function cancelLocalTts(request: CancelRequest): Promise<unknown> {
   // Stop delivery here at once: chunks already queued behind the cancel must
   // not reach a renderer that has moved on.
-  const requestId = isRecord(request) ? request.requestId : undefined;
-  const stream = typeof requestId === "string" ? localTtsAudioStreams.get(requestId) : undefined;
+  const requestId = localTtsRequestId(request);
+  const stream = requestId === undefined ? undefined : localTtsAudioStreams.get(requestId);
   if (stream) stream.stopped = true;
   return ipcRenderer.invoke("local-tts:cancel", request);
 }

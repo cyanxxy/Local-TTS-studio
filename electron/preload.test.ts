@@ -400,6 +400,23 @@ describe("preload local TTS audio delivery", () => {
     await first;
   });
 
+  it("matches a padded id to the trimmed id main streams under", async () => {
+    const reply = pendingReply();
+    const onAudioChunk = vi.fn();
+    const generation = generate({ model: "qwen3", requestId: " qwen-padded ", payload: {} }, { onAudioChunk });
+
+    emitIpc("local-tts:audio-stream", chunk("qwen-padded", 0));
+    await exposed.localTts!.cancel({ model: "qwen3", requestId: " qwen-padded " });
+    emitIpc("local-tts:audio-stream", chunk("qwen-padded", 1));
+    endStream("qwen-padded");
+    reply({ audioChunkCount: 2 });
+
+    await expect(generation).resolves.toEqual({ audioChunkCount: 2 });
+    expect(onAudioChunk).toHaveBeenCalledTimes(1);
+    // Main validates the id exactly as the renderer sent it.
+    expect(ipcInvoke).toHaveBeenCalledWith("local-tts:generate", expect.objectContaining({ requestId: " qwen-padded " }));
+  });
+
   it("passes a request without a string id straight to main", async () => {
     ipcInvoke.mockRejectedValueOnce(new Error("`requestId` is required."));
 
