@@ -5,11 +5,9 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
-  useLayoutEffect,
   useMemo,
   useRef,
 } from "react";
-import { Settings2, X } from "lucide-react";
 import type { ChunkPauseKind, ModelType } from "../types";
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useModelLoader } from "../hooks/useModelLoader";
@@ -29,6 +27,10 @@ import { Supertonic3InlineSettings } from "../components/Supertonic3InlineSettin
 import { Audio8InlineSettings } from "../components/Audio8InlineSettings";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
+import { AppFooter } from "../components/AppFooter";
+import { AppHeader } from "../components/AppHeader";
+import { BrowserSupportPanel } from "../components/BrowserSupportPanel";
+import { ErrorBanner } from "../components/ErrorBanner";
 import { TextInput } from "../components/TextInput";
 import { ModelToggle } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
@@ -39,7 +41,7 @@ import { DownloadProgress } from "../components/DownloadProgress";
 import { SettingsPanel } from "../components/SettingsPanel";
 import { SupertonicLanguageSettings } from "../components/SupertonicLanguageSettings";
 import { CreatorToolsPanel, type CreatorEngineSupport } from "../components/CreatorToolsPanel";
-import { getPagePath, isSetupPage, type AppPage } from "../lib/appRouting";
+import { isSetupPage, type AppPage } from "../lib/appRouting";
 import {
   getDefaultSupportedModel,
   getLocalBrowserSupport,
@@ -50,7 +52,6 @@ import { getWebGPUStatus, type WebGPUStatus } from "../lib/webgpu";
 import {
   hasPrimaryShortcutModifier,
   isEditableShortcutTarget,
-  isMacPlatform,
 } from "../lib/appShortcuts";
 import {
   getInitialAppState,
@@ -132,8 +133,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   // Reader focus layout: hides the app header and page tabs for reading.
   const [readerImmersive, setReaderImmersive] = useState(false);
-  // The error banner is dismissible; a new, different error shows again.
-  const [dismissedError, setDismissedError] = useState<string | null>(null);
   const qwen3Settings = useQwen3Runtime();
   const debugProfiling = useMemo(
     () => typeof window !== "undefined"
@@ -176,34 +175,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     if (tab.key === "qwen3") return preferences.showQwen3TTS && qwen3Settings.available;
     return true;
   }), [preferences.showNeuTTS, preferences.showQwen3TTS, qwen3Settings.available, routeTabs]);
-
-  /* ── Page tab indicator ───────────────────────────────────── */
-  // Tab widths follow their labels and the row reflows between grid and inline
-  // layouts, so the travelling pill is measured rather than computed from an
-  // index. `animate` stays false until the first measurement lands, otherwise
-  // the pill would slide in from the left edge on the very first paint.
-  const pageTabsRef = useRef<HTMLElement>(null);
-  const [pageTabIndicator, setPageTabIndicator] = useState({ left: 0, width: 0, animate: false });
-
-  useLayoutEffect(() => {
-    const nav = pageTabsRef.current;
-    if (!nav) return;
-    const measure = () => {
-      const active = nav.querySelector<HTMLElement>("[data-page-tab][aria-current='page']");
-      if (!active) return;
-      setPageTabIndicator((previous) => {
-        const left = active.offsetLeft;
-        const width = active.offsetWidth;
-        if (previous.left === left && previous.width === width) return previous;
-        return { left, width, animate: previous.width > 0 };
-      });
-    };
-    measure();
-    const observer = new ResizeObserver(measure);
-    observer.observe(nav);
-    for (const tab of nav.querySelectorAll("[data-page-tab]")) observer.observe(tab);
-    return () => observer.disconnect();
-  }, [activePage, availableTabs, isReaderPage]);
 
   const [text, setText] = useState(initialState.text);
   const [activeModel, setActiveModel] = useState<ModelType>(() => (
@@ -320,6 +291,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   } | null>(null);
   const flushReaderAudioRef = useRef<() => void>(() => undefined);
 
+  const openAppSettings = useCallback(() => setAppSettingsOpen(true), []);
   const closeAppSettings = useCallback(() => setAppSettingsOpen(false), []);
 
   useEffect(() => {
@@ -1506,141 +1478,33 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
     : -1;
   const activeSegmentNumber = activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null;
-  const browserSupportPanel = browserSupport.message ? (
-    <div className="rounded-[22px] border border-accent/20 bg-accent-light/50 backdrop-blur-xl shadow-glass-md">
-      <div className="p-4 sm:p-6 md:p-8">
-        <div className="inline-flex items-center rounded-full border border-accent/20 bg-panel/80 px-3 py-1 text-sm font-semibold text-accent shadow-glass-sm">
-          iOS rollout
-        </div>
-        <h2 className="mt-4 text-2xl font-display font-bold tracking-tight text-text-primary sm:text-3xl">
-          Open TTS runs on iPhone and iPad browsers with a limited set of models
-        </h2>
-        <p className="mt-3 max-w-2xl text-sm leading-6 text-text-secondary">
-          {browserSupport.message}
-        </p>
-      </div>
-    </div>
-  ) : null;
+  const browserSupportPanel = browserSupport.message
+    ? <BrowserSupportPanel message={browserSupport.message} />
+    : null;
 
   return (
     <div className="min-h-screen font-sans text-text-primary">
       <div className={`app-page ${isReaderPage ? "w-full px-3 py-3 sm:px-4 sm:py-4 md:px-6 md:py-6" : "w-full px-4 py-6 sm:px-6 sm:py-8 md:px-8 md:py-6 lg:py-10"}`}>
 
-        {/* Header */}
-        {isReaderPage && readerImmersive ? (
-          // Kept as an empty header so the macOS title-bar strip still reserves
-          // the traffic lights and stays draggable in the focus layout.
-          <header aria-hidden className="h-2" />
-        ) : (
-        <header className={isReaderPage ? "mb-4" : "mb-8 lg:mb-10"}>
-          <div className={`flex flex-nowrap justify-between gap-2 sm:gap-4 ${isReaderPage ? "items-center" : "items-start"}`}>
-            <div className="min-w-0 flex-1">
-              <h1
-                className={`${isReaderPage ? "text-3xl sm:text-4xl" : "text-[2.5rem] sm:text-6xl"} whitespace-nowrap font-display leading-none font-bold tracking-tight text-transparent bg-clip-text bg-gradient-to-br from-text-primary to-accent/70`}
-              >
-                Open TTS
-              </h1>
-              {!isReaderPage && (
-                <p className="mt-3 text-base font-medium tracking-wide text-text-secondary sm:text-lg">
-                  {isStudioUsingAudio8
-                    ? "Audio8 ONNX INT4 synthesis runs locally after its one-time model download."
-                    : "Text to speech, entirely on your device."}
-                </p>
-              )}
-            </div>
-
-            <div className="mt-1 flex shrink-0 items-start gap-2">
-              {showWasmBadge && (
-                <div className="flex flex-col items-end gap-1">
-                  <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-accent/25 bg-accent-light text-accent text-base font-semibold shadow-glass-sm">
-                    <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse" />
-                    CPU mode
-                  </div>
-                  {webgpuModeNote && (
-                    <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[240px] sm:text-right">
-                      {webgpuModeNote}
-                    </p>
-                  )}
-                  {showSingleThreadedNote && (
-                    <p className="max-w-full text-left text-sm leading-4 text-text-muted sm:max-w-[220px] sm:text-right">
-                      Cross-origin isolation is off, so CPU mode runs single-threaded.
-                    </p>
-                  )}
-                </div>
-              )}
-              <button
-                type="button"
-                onClick={() => setAppSettingsOpen(true)}
-                aria-label="Open app settings"
-                title={`Settings (${isMacPlatform(window.electron?.platform ?? navigator.platform) ? "⌘," : "Ctrl+,"})`}
-                className="glass-control no-drag flex h-11 w-11 items-center justify-center rounded-full text-text-secondary hover:text-text-primary"
-              >
-                <Settings2 size={18} />
-              </button>
-            </div>
-          </div>
-
-          {/* Page navigation. One pill travels between the tabs instead of
-              blinking out of one and into the next. */}
-          <nav
-            ref={pageTabsRef}
-            className={`${isReaderPage ? "mt-4" : "mt-6 lg:mt-8"} relative grid w-full grid-cols-2 gap-1 rounded-full glass p-1 sm:inline-flex sm:w-auto`}
-          >
-            <span
-              aria-hidden
-              className={`pointer-events-none absolute inset-y-1 left-0 rounded-full bg-panel shadow-glass-sm ${
-                pageTabIndicator.animate
-                  ? "transition-[transform,width] duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]"
-                  : ""
-              } ${pageTabIndicator.width > 0 ? "opacity-100" : "opacity-0"}`}
-              style={{
-                transform: `translateX(${pageTabIndicator.left}px)`,
-                width: pageTabIndicator.width,
-              }}
-            />
-            {availableTabs.map((tab) => (
-              <a
-                key={tab.key}
-                href={getPagePath(tab.key, routeBasePath)}
-                data-page-tab={tab.key}
-                aria-current={activePage === tab.key ? "page" : undefined}
-                onClick={(event) => {
-                  event.preventDefault();
-                  handlePageNavigation(tab.key);
-                }}
-                className={`relative z-10 rounded-full px-5 py-2 text-center text-base font-semibold transition-colors duration-200 active:scale-[0.98] ${
-                  activePage === tab.key
-                    ? "text-text-primary"
-                    : "text-text-muted hover:text-text-secondary"
-                }`}
-              >
-                {tab.label}
-              </a>
-            ))}
-          </nav>
-        </header>
-        )}
+        <AppHeader
+          immersive={isReaderPage && readerImmersive}
+          compact={isReaderPage}
+          subtitle={isStudioUsingAudio8
+            ? "Audio8 ONNX INT4 synthesis runs locally after its one-time model download."
+            : "Text to speech, entirely on your device."}
+          cpuMode={showWasmBadge ? { note: webgpuModeNote, singleThreaded: showSingleThreadedNote } : null}
+          onOpenSettings={openAppSettings}
+          tabs={availableTabs}
+          activePage={activePage}
+          routeBasePath={routeBasePath}
+          onNavigate={handlePageNavigation}
+        />
 
         {(isStudioPage || isReaderPage) && browserSupportPanel && (
           <div className="mb-4">{browserSupportPanel}</div>
         )}
 
-        {localInferenceSupported && (isStudioPage || isReaderPage) && visibleError && visibleError !== dismissedError && (
-          <div
-            role="alert"
-            className="mb-4 flex items-start gap-3 rounded-xl border border-danger/30 bg-danger-light px-3.5 py-2.5 text-xs text-danger shadow-glass-sm"
-          >
-            <p className="min-w-0 flex-1 break-words">{visibleError}</p>
-            <button
-              type="button"
-              onClick={() => setDismissedError(visibleError)}
-              aria-label="Dismiss error"
-              className="-my-1 -mr-1.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-danger/80 transition-colors hover:bg-danger/10 hover:text-danger"
-            >
-              <X size={13} />
-            </button>
-          </div>
-        )}
+        <ErrorBanner error={localInferenceSupported && (isStudioPage || isReaderPage) ? visibleError : null} />
 
         {/* Studio and Reader swap in place. Keying the wrapper on the page
             replays the fade; the animation is opacity-only so the Reader's
@@ -1935,40 +1799,17 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           );
         })}
 
-        {/* Footer */}
         {!isReaderPage && (
-          <footer className="mt-16 border-t border-border/40 pt-5">
-            {isStudioPage && localInferenceSupported && !browserSupport.message ? (
-              <div className="flex items-center flex-wrap gap-1.5">
-                {/* The badges name the runtimes this build ships, not the one
-                    that happens to be selected, so Audio8 is listed on the
-                    same terms as Kokoro and Supertonic wherever it exists. */}
-                {["Kokoro", "Supertonic", "WebGPU · CPU", ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : [])].map((label) => (
-                  <span
-                    key={label}
-                    className="px-2.5 py-1 rounded-full border border-border bg-text-primary/[0.04] font-mono text-xs text-text-muted/70"
-                  >
-                    {label}
-                  </span>
-                ))}
-                <span className="flex items-center gap-1.5 rounded-full border border-success/25 bg-success/[0.07] px-2.5 py-1 font-mono text-xs text-success/80">
-                  <span
-                    className="h-1 w-1 animate-pulse rounded-full bg-success opacity-80"
-                    style={{ boxShadow: "0 0 5px var(--color-success)" }}
-                  />
-                  all local
-                </span>
-              </div>
-            ) : (
-              <p className="font-mono text-xs text-text-muted/60">
-                {isStudioPage
-                  ? activeModelSupportMessage
-                    ?? browserSupport.message
-                    ?? "More local models as compatible runtimes land."
-                  : "More local models as compatible runtimes land."}
-              </p>
-            )}
-          </footer>
+          <AppFooter
+            // The badges name the runtimes this build ships, not the one that
+            // happens to be selected, so Audio8 is listed on the same terms as
+            // Kokoro and Supertonic wherever it exists.
+            runtimeBadges={isStudioPage && localInferenceSupported && !browserSupport.message
+              ? ["Kokoro", "Supertonic", "WebGPU · CPU", ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : [])]
+              : null}
+            note={(isStudioPage ? activeModelSupportMessage ?? browserSupport.message : null)
+              ?? "More local models as compatible runtimes land."}
+          />
         )}
 
       </div>
