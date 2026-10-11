@@ -21,7 +21,11 @@ interface ReaderLibraryBridge {
 }
 
 interface LocalTtsBridge {
-  generate: (request: { model: "qwen3"; requestId: string; payload: Record<string, unknown> }) => Promise<unknown>;
+  generate: (
+    request: { model: "qwen3"; requestId: string; payload: Record<string, unknown> },
+    options?: { onAudioChunk?: (payload: unknown) => void },
+  ) => Promise<unknown>;
+  cancel: (request: { model: "qwen3"; requestId: string }) => Promise<unknown>;
   subscribeAudioChunk: (listener: (payload: unknown) => void) => () => void;
 }
 
@@ -245,58 +249,184 @@ describe("preload reader flush handshake", () => {
 });
 
 describe("preload local TTS audio delivery", () => {
+  const generate: LocalTtsBridge["generate"] = (request, options) => exposed.localTts!.generate(request, options);
+
+  function chunk(requestId: string, index: number) {
+    return { type: "chunk", requestId, model: "qwen3", index, total: 0, audio: new ArrayBuffer(8) };
+  }
+
+  function endStream(requestId: string) {
+    emitIpc("local-tts:audio-stream", { type: "end", requestId, model: "qwen3" });
+  }
+
+  /** A generate whose invoke reply the test releases by hand. */
+  function pendingReply(): (value: unknown) => void {
+    let resolveGenerate!: (value: unknown) => void;
+    ipcInvoke.mockImplementationOnce(() => new Promise((resolve) => { resolveGenerate = resolve; }));
+    return (value) => resolveGenerate(value);
+  }
+
   afterEach(() => {
     ipcInvoke.mockReset();
-    vi.useRealTimers();
   });
 
-  it("does not resolve generation until renderer listeners receive every declared audio chunk", async () => {
-    let resolveGenerate!: (value: unknown) => void;
-    ipcInvoke.mockReturnValue(new Promise((resolve) => { resolveGenerate = resolve; }));
+  it("resolves only once the end marker shows every chunk was delivered, even when the reply overtakes them", async () => {
+    const reply = pendingReply();
     const deliveryOrder: string[] = [];
-    const unsubscribe = exposed.localTts!.subscribeAudioChunk(() => {
-      deliveryOrder.push("audio-listener");
+    const unsubscribe = exposed.localTts!.subscribeAudioChunk((payload) => {
+      deliveryOrder.push(`chunk ${(payload as { index: number }).index}`);
     });
-    const generation = exposed.localTts!.generate({
-      model: "qwen3",
-      requestId: "qwen-race",
-      payload: { text: "hello" },
-    }).then((result) => {
-      deliveryOrder.push("generate-resolved");
-      return result;
-    });
+    const generation = generate({ model: "qwen3", requestId: "qwen-race", payload: { text: "hello" } })
+      .then((result) => {
+        deliveryOrder.push("generate-resolved");
+        return result;
+      });
 
-    resolveGenerate({ audioChunkCount: 2, sampleRate: 24_000 });
-    await Promise.resolve();
-    await Promise.resolve();
+    reply({ audioChunkCount: 2, sampleRate: 24_000 });
+    await vi.waitFor(() => expect(ipcInvoke).toHaveBeenCalled());
+    await new Promise((resolve) => setImmediate(resolve));
     expect(deliveryOrder).toEqual([]);
 
-    emitIpc("local-tts:audio-chunk", { requestId: "qwen-race", index: 0 });
-    await Promise.resolve();
-    expect(deliveryOrder).toEqual(["audio-listener"]);
+    emitIpc("local-tts:audio-stream", chunk("qwen-race", 0));
+    emitIpc("local-tts:audio-stream", chunk("qwen-race", 1));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(deliveryOrder).toEqual(["chunk 0", "chunk 1"]);
 
-    emitIpc("local-tts:audio-chunk", { requestId: "qwen-race", index: 1 });
+    endStream("qwen-race");
     await expect(generation).resolves.toMatchObject({ audioChunkCount: 2 });
-    expect(deliveryOrder).toEqual([
-      "audio-listener",
-      "audio-listener",
-      "generate-resolved",
-    ]);
+    expect(deliveryOrder).toEqual(["chunk 0", "chunk 1", "generate-resolved"]);
     unsubscribe();
   });
 
-  it("times out instead of reporting success when Electron drops an audio chunk", async () => {
-    vi.useFakeTimers();
-    ipcInvoke.mockResolvedValue({ audioChunkCount: 2, sampleRate: 24_000 });
-    const generation = exposed.localTts!.generate({
-      model: "qwen3",
-      requestId: "qwen-missing",
-      payload: { text: "hello" },
-    });
+  it("hands a subscriber the chunk without the stream's message type", async () => {
+    const received: unknown[] = [];
+    const unsubscribe = exposed.localTts!.subscribeAudioChunk((payload) => received.push(payload));
+    const reply = pendingReply();
+    const generation = generate({ model: "qwen3", requestId: "shape", payload: {} });
 
-    emitIpc("local-tts:audio-chunk", { requestId: "qwen-missing", index: 0 });
-    const rejected = expect(generation).rejects.toThrow(/receiving 1 of 2 chunks/i);
-    await vi.advanceTimersByTimeAsync(10_000);
-    await rejected;
+    const message = chunk("shape", 0);
+    emitIpc("local-tts:audio-stream", message);
+    endStream("shape");
+    reply({});
+    await generation;
+
+    const { type, ...expected } = message;
+    expect(type).toBe("chunk");
+    expect(received).toEqual([expected]);
+    unsubscribe();
+  });
+
+  it("delivers a request's chunks only to its own listener when it has one", async () => {
+    const subscriber = vi.fn();
+    const unsubscribe = exposed.localTts!.subscribeAudioChunk(subscriber);
+    const ownA = vi.fn();
+    const ownB = vi.fn();
+    const replyA = pendingReply();
+    const replyB = pendingReply();
+    const generationA = generate({ model: "qwen3", requestId: "a", payload: {} }, { onAudioChunk: ownA });
+    const generationB = generate({ model: "qwen3", requestId: "b", payload: {} }, { onAudioChunk: ownB });
+
+    emitIpc("local-tts:audio-stream", chunk("a", 0));
+    emitIpc("local-tts:audio-stream", chunk("b", 0));
+    emitIpc("local-tts:audio-stream", chunk("b", 1));
+    endStream("a");
+    endStream("b");
+    replyA({});
+    replyB({});
+    await Promise.all([generationA, generationB]);
+
+    expect(ownA.mock.calls.map(([payload]) => (payload as { requestId: string }).requestId)).toEqual(["a"]);
+    expect(ownB.mock.calls.map(([payload]) => (payload as { index: number }).index)).toEqual([0, 1]);
+    expect(subscriber).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("drops chunks of requests this window is not running", () => {
+    const subscriber = vi.fn();
+    const unsubscribe = exposed.localTts!.subscribeAudioChunk(subscriber);
+
+    emitIpc("local-tts:audio-stream", chunk("unknown", 0));
+    emitIpc("local-tts:audio-stream", { type: "chunk" });
+    emitIpc("local-tts:audio-stream", null);
+
+    expect(subscriber).not.toHaveBeenCalled();
+    unsubscribe();
+  });
+
+  it("stops delivering a request's chunks the moment it is cancelled", async () => {
+    const own = vi.fn();
+    const reply = pendingReply();
+    const generation = generate({ model: "qwen3", requestId: "stop-me", payload: {} }, { onAudioChunk: own });
+    emitIpc("local-tts:audio-stream", chunk("stop-me", 0));
+
+    ipcInvoke.mockResolvedValueOnce({ cancelled: true });
+    await exposed.localTts!.cancel({ model: "qwen3", requestId: "stop-me" });
+    emitIpc("local-tts:audio-stream", chunk("stop-me", 1));
+
+    expect(own).toHaveBeenCalledTimes(1);
+    expect(ipcInvoke).toHaveBeenLastCalledWith("local-tts:cancel", { model: "qwen3", requestId: "stop-me" });
+    reply(Promise.reject(new Error("Generation cancelled.")));
+    await expect(generation).rejects.toThrow("Generation cancelled.");
+  });
+
+  it("still forwards a cancel for a request it is not streaming", async () => {
+    ipcInvoke.mockResolvedValueOnce({ cancelled: false });
+    await expect(exposed.localTts!.cancel({ model: "qwen3", requestId: "elsewhere" }))
+      .resolves.toEqual({ cancelled: false });
+  });
+
+  it("rejects at once when the generation fails, without waiting for an end marker", async () => {
+    ipcInvoke.mockRejectedValueOnce(new Error("The selected Qwen3 model directory is missing required files."));
+
+    await expect(generate({ model: "qwen3", requestId: "broken", payload: {} }))
+      .rejects.toThrow("missing required files");
+    // The id is free again.
+    const reply = pendingReply();
+    const retry = generate({ model: "qwen3", requestId: "broken", payload: {} });
+    endStream("broken");
+    reply({ ok: true });
+    await expect(retry).resolves.toEqual({ ok: true });
+  });
+
+  it("refuses a second generation with an id that is still streaming", async () => {
+    const reply = pendingReply();
+    const first = generate({ model: "qwen3", requestId: "twice", payload: {} });
+
+    await expect(generate({ model: "qwen3", requestId: "twice", payload: {} })).rejects.toThrow(/already active/);
+    endStream("twice");
+    reply({});
+    await first;
+  });
+
+  it("passes a request without a string id straight to main", async () => {
+    ipcInvoke.mockRejectedValueOnce(new Error("`requestId` is required."));
+
+    await expect(generate({ model: "qwen3", requestId: 7 as unknown as string, payload: {} }))
+      .rejects.toThrow("`requestId` is required.");
+  });
+
+  it("keeps delivering to other listeners when one throws, and reports the failure", async () => {
+    const thrown: unknown[] = [];
+    const onUncaught = (error: unknown) => thrown.push(error);
+    process.on("uncaughtException", onUncaught);
+    const failing = exposed.localTts!.subscribeAudioChunk(() => {
+      throw new Error("listener bug");
+    });
+    const healthy = vi.fn();
+    const unsubscribe = exposed.localTts!.subscribeAudioChunk(healthy);
+    const reply = pendingReply();
+    const generation = generate({ model: "qwen3", requestId: "throws", payload: {} });
+
+    emitIpc("local-tts:audio-stream", chunk("throws", 0));
+    endStream("throws");
+    reply({});
+    await generation;
+    await new Promise((resolve) => setImmediate(resolve));
+    process.off("uncaughtException", onUncaught);
+
+    expect(healthy).toHaveBeenCalledTimes(1);
+    expect(thrown).toEqual([new Error("listener bug")]);
+    failing();
+    unsubscribe();
   });
 });

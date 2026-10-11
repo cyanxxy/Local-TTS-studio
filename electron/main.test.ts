@@ -1411,6 +1411,78 @@ describe("local model cache lifecycle IPC", () => {
     expect(mocks.localWsRun).not.toHaveBeenCalled();
   });
 
+  describe("audio stream", () => {
+    const audioChunk = {
+      requestId: "local-generate",
+      index: 0,
+      total: 1,
+      sampleRate: 24_000,
+      sampleCount: 2,
+      silenceAfterSamples: 0,
+      audio: new ArrayBuffer(8),
+    };
+
+    function generateWithEvent(event: ReturnType<typeof createEvent>): Promise<unknown> {
+      return Promise.resolve(mocks.invokeHandlers.get("local-tts:generate")!(event, generateRequest));
+    }
+
+    it("sends every chunk and then the end marker on one channel before replying", async () => {
+      const event = createEvent(undefined);
+      const order: string[] = [];
+      event.sender.send.mockImplementation((channel: string, payload: { type: string }) => {
+        order.push(`${channel} ${payload.type}`);
+      });
+      mocks.localWsRun.mockImplementationOnce(async (_model, options: { onAudioChunk: (chunk: unknown) => void }) => {
+        options.onAudioChunk(audioChunk);
+        options.onAudioChunk({ ...audioChunk, index: 1, total: 2 });
+        return { response: { ok: true, result: {
+          sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+          audioTransport: "websocket-binary", audioChunkCount: 2, phaseTimingsSec: {},
+        } } };
+      });
+
+      await generateWithEvent(event).then(() => order.push("reply"));
+
+      expect(order).toEqual([
+        "local-tts:audio-stream chunk",
+        "local-tts:audio-stream chunk",
+        "local-tts:audio-stream end",
+        "reply",
+      ]);
+      expect(event.sender.send).toHaveBeenNthCalledWith(1, "local-tts:audio-stream", {
+        type: "chunk", model: "neutts", ...audioChunk,
+      });
+      expect(event.sender.send).toHaveBeenLastCalledWith("local-tts:audio-stream", {
+        type: "end", model: "neutts", requestId: "local-generate",
+      });
+    });
+
+    it("ends the stream of a generation that fails", async () => {
+      const event = createEvent(undefined);
+      mocks.localWsRun.mockRejectedValueOnce(new Error("Rust local bridge exited before returning a result."));
+
+      await expect(generateWithEvent(event)).rejects.toThrow("exited before returning a result");
+      expect(event.sender.send).toHaveBeenCalledWith("local-tts:audio-stream", {
+        type: "end", model: "neutts", requestId: "local-generate",
+      });
+    });
+
+    it("sends nothing to a window that has closed", async () => {
+      const event = createEvent(undefined);
+      event.sender.isDestroyed = () => true;
+      mocks.localWsRun.mockImplementationOnce(async (_model, options: { onAudioChunk: (chunk: unknown) => void }) => {
+        options.onAudioChunk(audioChunk);
+        return { response: { ok: true, result: {
+          sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+          audioTransport: "websocket-binary", audioChunkCount: 1, phaseTimingsSec: {},
+        } } };
+      });
+
+      await generateWithEvent(event);
+      expect(event.sender.send).not.toHaveBeenCalled();
+    });
+  });
+
   describe("Qwen3 model folder checks", () => {
     async function writeModelDir(directory: string): Promise<void> {
       for (const file of qwenProfile.requiredFiles) {

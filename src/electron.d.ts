@@ -144,6 +144,10 @@ interface LocalTtsBridge {
     requestId: string;
     payload?: Record<string, unknown>;
   }) => Promise<LocalTtsProbeResult>;
+  // Resolves once every audio chunk of the request has been delivered. With
+  // `onAudioChunk`, the request's chunks go to that listener alone instead of
+  // every `subscribeAudioChunk` listener. Cancelling the request stops its
+  // delivery at once.
   generate: (request: {
     model: LocalTtsModel;
     requestId: string;
@@ -153,6 +157,8 @@ interface LocalTtsBridge {
       sectionIndex: number;
       sectionCount: number;
     };
+  }, options?: {
+    onAudioChunk?: (event: LocalTtsAudioChunkEvent) => void;
   }) => Promise<LocalTtsGenerateResult>;
   warm?: (request: {
     model: LocalTtsModel;
@@ -177,6 +183,7 @@ interface LocalTtsBridge {
     listener: (event: LocalTtsQwen3DownloadProgress) => void,
   ) => () => void;
   subscribeProgress: (listener: (event: LocalTtsProgressEvent) => void) => () => void;
+  // Chunks of the requests started without their own `onAudioChunk`.
   subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;
 }
 

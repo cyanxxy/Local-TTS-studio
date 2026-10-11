@@ -63,8 +63,14 @@ vi.mock("electron", () => ({
     exposeInMainWorld: (_key: string, api: Record<string, unknown>) => Object.assign(ipc.exposed, api),
   },
   ipcRenderer: {
-    invoke: (channel: string) => {
+    invoke: (channel: string, request?: { requestId?: string }) => {
       ipc.invoked.add(channel);
+      // Main ends every generation's audio stream before it replies.
+      if (channel === "local-tts:generate") {
+        for (const listener of ipc.subscribed.get("local-tts:audio-stream") ?? []) {
+          listener({}, { type: "end", requestId: request?.requestId });
+        }
+      }
       // Reaching `document:read-epub` needs an import that staged an EPUB.
       return Promise.resolve(channel === "document:import"
         ? { canceled: false, fileName: "book.epub", text: "", epubTransferId: "transfer", epubByteLength: 0 }

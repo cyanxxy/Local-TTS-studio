@@ -48,7 +48,8 @@ export const IPC_PORT_CHANNELS = [
 export const RENDERER_EVENT_CHANNELS = [
   "reader-library:flush",
   "local-tts:progress",
-  "local-tts:audio-chunk",
+  // Audio chunks of a generation, then its end marker, in one ordered stream.
+  "local-tts:audio-stream",
   "local-tts:qwen3-download-progress",
   "audio8:progress",
 ] as const;

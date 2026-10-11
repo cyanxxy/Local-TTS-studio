@@ -274,7 +274,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
 
       const onAudioChunk = (chunk: WebSocketAudioChunk) => {
         if (event.sender.isDestroyed()) return;
-        event.sender.send("local-tts:audio-chunk", { model, ...chunk });
+        event.sender.send("local-tts:audio-stream", { type: "chunk", model, ...chunk });
       };
 
       // run() registers the request with the pool synchronously, so once it
@@ -293,8 +293,18 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
     } finally {
       warmups.removeWaiter(requestId);
     }
-    const { response } = await runPromise;
-    return parseBridgeEnvelopeResult(response);
+    try {
+      const { response } = await runPromise;
+      return parseBridgeEnvelopeResult(response);
+    } finally {
+      // The end marker follows the last chunk on the same ordered channel and
+      // goes out before the invoke reply, which Electron may still deliver
+      // first: once the preload sees it, every chunk of this request has
+      // reached the renderer.
+      if (!event.sender.isDestroyed()) {
+        event.sender.send("local-tts:audio-stream", { type: "end", model, requestId });
+      }
+    }
   }
 
   const qwen3 = createQwen3SetupHandlers({
