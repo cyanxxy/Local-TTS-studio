@@ -196,11 +196,9 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
     return runTransaction(open, stores, mode, operation);
   }
 
-
   function emitChange(): void {
     changes.emit();
   }
-
 
   async function readAudioInfo(bytes: Uint8Array, maxDurationSec?: number): Promise<StoredAudioInfo> {
     if (!isUint8ArrayLike(bytes) || bytes.byteLength === 0) {
@@ -501,7 +499,6 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
     subscribe(listener) {
       return changes.subscribe(listener);
     },
-
 
     async destroy() {
       await deleteIndexedDatabase(databaseName);
