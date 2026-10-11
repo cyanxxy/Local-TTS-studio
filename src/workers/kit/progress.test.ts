@@ -90,4 +90,18 @@ describe("createLoadProgress", () => {
 
     expect(reports).toEqual([90, 10, 50]);
   });
+
+  it("reports nothing once closed, even when abandoned downloads keep going", () => {
+    const { report, reports } = collect();
+    const progress = createLoadProgress({ report, expectedBytes: { "model.onnx": 100 } });
+
+    progress.update("model.onnx", 40);
+    progress.close();
+    progress.update("model.onnx", 80);
+    progress.complete("model.onnx");
+    progress.handleTransformersEvent({ status: "progress_total", progress: 90 });
+    progress.reset();
+
+    expect(reports).toEqual([40]);
+  });
 });

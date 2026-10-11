@@ -103,6 +103,7 @@ async function readPinnedBody(
   file: string,
   byteLength: number,
   progress?: LoadProgress,
+  signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
   const reader = response.body?.getReader();
   if (!reader) {
@@ -118,6 +119,7 @@ async function readPinnedBody(
   try {
     while (true) {
       const { done, value } = await reader.read();
+      signal?.throwIfAborted();
       if (done) break;
       if (received + value.byteLength > byteLength) {
         throw new Error(`Supertonic 3 ${file} exceeded its pinned size.`);
@@ -145,7 +147,12 @@ function cacheHeaders(response: Response, byteLength: number): Headers {
   return headers;
 }
 
-async function fetchAsset(file: string, progress?: LoadProgress): Promise<ArrayBuffer> {
+/**
+ * Downloads (or reads from the cache) one pinned asset and verifies it.
+ * Aborting `signal` stops a download the load no longer needs, before it
+ * reports any more progress.
+ */
+async function fetchAsset(file: string, progress?: LoadProgress, signal?: AbortSignal): Promise<ArrayBuffer> {
   const expected = ASSET_INTEGRITY[file];
   if (!expected) throw new Error(`Supertonic 3 ${file} is not a pinned asset.`);
   const url = assetUrl(file);
@@ -160,13 +167,14 @@ async function fetchAsset(file: string, progress?: LoadProgress): Promise<ArrayB
     await cache?.delete(url);
   }
 
-  const response = await fetch(url);
+  const response = await fetch(url, { signal });
   if (!response.ok) throw new Error(`Failed to download ${file}: HTTP ${response.status}.`);
-  const buffer = await readPinnedBody(response, file, expected.byteLength, progress);
+  const buffer = await readPinnedBody(response, file, expected.byteLength, progress, signal);
   if (!await verifyPinnedAssetIntegrity(buffer, expected)) {
     throw new Error(`Supertonic 3 ${file} failed integrity verification.`);
   }
   await cache?.put(url, new Response(buffer, { headers: cacheHeaders(response, buffer.byteLength) }));
+  signal?.throwIfAborted();
   progress?.complete(file);
   return buffer;
 }
@@ -229,6 +237,11 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
   const previousRuntime = runtime;
   runtime = null;
   backend = null;
+  const progress = createModelLoadProgress();
+  // Aborted when a backend attempt ends: model files it prefetched but no
+  // longer needs stop downloading instead of reporting progress after the
+  // load failed or fell back, and a fallback never reuses their buffers.
+  let attempt = new AbortController();
   try {
     // The runtime superseded the running generation when this reload
     // arrived; never release sessions under its in-flight inference.
@@ -236,19 +249,19 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
     clearStyles();
     await disposeRuntime(previousRuntime);
     if (forceReload && typeof caches !== "undefined") await caches.delete(CACHE_NAME);
-    const progress = createModelLoadProgress();
     progress.reset();
     // The asyncify build is the one the onnxruntime-web/webgpu entry runs
     // WebGPU on; the default entry would need the JSEP build instead and fail
     // every WebGPU session.
     ort.env.wasm.wasmPaths = TRANSFORMERS_ONNX_WASM_ASSETS.asyncify;
     ort.env.wasm.numThreads = getSafeWasmThreadCount(MAX_WASM_THREADS);
-    const models = createPrefetcher({
+    const createModelPrefetcher = (signal: AbortSignal) => createPrefetcher({
       order: SESSION_FILES,
-      fetch: (file) => fetchAsset(file, progress),
+      fetch: (file) => fetchAsset(file, progress, signal),
       sizeOf: (file) => ASSET_INTEGRITY[file].byteLength,
       maxAheadBytes: PREFETCH_AHEAD_MAX_BYTES,
     });
+    let models = createModelPrefetcher(attempt.signal);
     // The small JSON assets and the first model file download together.
     models.prefetch(SESSION_FILES[0]);
     const [configBuffer, indexerBuffer, defaultStyle] = await Promise.all([
@@ -271,7 +284,10 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
       dispose: (instance) => instance.dispose(),
       onFallback: (failed, error) => {
         console.warn(`[supertonic3] ${failed} load failed; falling back to WASM.`, error);
+        attempt.abort();
+        attempt = new AbortController();
         // The WASM attempt re-reads the model files from the cache.
+        models = createModelPrefetcher(attempt.signal);
         progress.reset();
         for (const file of ["onnx/tts.json", "onnx/unicode_indexer.json", styleFile(DEFAULT_VOICE)]) progress.complete(file);
       },
@@ -284,6 +300,9 @@ async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {
   } catch (error) {
     clearStyles();
     throw error;
+  } finally {
+    attempt.abort();
+    progress.close();
   }
 }
 

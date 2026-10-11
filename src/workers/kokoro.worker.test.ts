@@ -487,6 +487,29 @@ describe("Kokoro load watchdog", () => {
     expect(fromPretrained).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ dtype: "q8", device: "wasm" }));
   });
 
+  it("drops progress the abandoned WebGPU attempt reports after the WASM model is ready", async () => {
+    const wasm = createInstance([], { af_heart: {} });
+    const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ canUseWebGPU: true, instances: [wasm] });
+    vi.useFakeTimers();
+    let abandonedProgress: ((info: unknown) => void) | undefined;
+    fromPretrained.mockImplementationOnce((_modelId: string, options: FromPretrainedOptions) => {
+      abandonedProgress = options.progress_callback;
+      abandonedProgress?.({ status: "progress", file: "onnx/model.onnx", loaded: 1_000, total: FILE_SIZES["onnx/model.onnx"] });
+      return new Promise<MockKokoroInstance>(() => undefined);
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.advanceTimersByTimeAsync(60_001);
+    await vi.waitFor(() => expect(postedMessages.at(-1)).toMatchObject({ type: "READY", backend: "wasm" }));
+    const afterReady = postedMessages.length;
+
+    // from_pretrained cannot be cancelled, so its download keeps reporting.
+    abandonedProgress?.({ status: "progress", file: "onnx/model.onnx", loaded: FILE_SIZES["onnx/model.onnx"] / 2, total: FILE_SIZES["onnx/model.onnx"] });
+    abandonedProgress?.({ status: "done", file: "onnx/model.onnx" });
+
+    expect(postedMessages.slice(afterReady)).toEqual([]);
+  });
+
   it("gives session creation two minutes once every download has finished", async () => {
     const wasm = createInstance([], { af_heart: {} });
     const { dispatch, fromPretrained, postedMessages } = await loadWorkerModule({ canUseWebGPU: true, instances: [wasm] });

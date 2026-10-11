@@ -210,19 +210,25 @@ async function loadKokoroOn(kokoroModule: KokoroModule, backend: InferenceBacken
     maxWasmThreads: MAX_WASM_THREADS,
   });
   const progress = createKokoroLoadProgress(backend);
-  return withLoadWatchdog<KokoroTTSInstance>(
-    (watchdog) => kokoroModule.KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
-      dtype: BACKEND_CONFIG[backend].dtype,
-      device: backend,
-      progress_callback: createProgressListener(progress, watchdog),
-    }),
-    {
-      label: `Kokoro ${backend} load`,
-      inactivityMs: KOKORO_LOAD_INACTIVITY_MS,
-      settlingMs: KOKORO_LOAD_SETTLING_MS,
-      disposeLate: disposeKokoroModel,
-    },
-  );
+  try {
+    return await withLoadWatchdog<KokoroTTSInstance>(
+      (watchdog) => kokoroModule.KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
+        dtype: BACKEND_CONFIG[backend].dtype,
+        device: backend,
+        progress_callback: createProgressListener(progress, watchdog),
+      }),
+      {
+        label: `Kokoro ${backend} load`,
+        inactivityMs: KOKORO_LOAD_INACTIVITY_MS,
+        settlingMs: KOKORO_LOAD_SETTLING_MS,
+        disposeLate: disposeKokoroModel,
+      },
+    );
+  } finally {
+    // from_pretrained cannot be cancelled: an attempt the watchdog abandoned
+    // keeps downloading, and its progress must not reach the host.
+    progress.close();
+  }
 }
 
 async function loadModel({ forceReload = false }: LoadMessage): Promise<void> {

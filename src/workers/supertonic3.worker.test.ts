@@ -68,7 +68,7 @@ function streamResponse(
 type Synthesize = (text: string, ...rest: unknown[]) => Promise<Float32Array>;
 
 interface HarnessOptions {
-  respond?: (file: string) => Response | Promise<Response>;
+  respond?: (file: string, init?: RequestInit) => Response | Promise<Response>;
   cachedAssets?: Record<string, Uint8Array<ArrayBuffer>>;
   chunks?: TextChunk[];
   synthesize?: Synthesize;
@@ -76,7 +76,7 @@ interface HarnessOptions {
   /** Makes WebGPU fail while its sessions are created or during the warm-up run. */
   webgpuFailure?: "create" | "warm-up";
   /** Stands in for ONNX session creation, after each model file was loaded. */
-  createSession?: (name: (typeof MODEL_NAMES)[number]) => Promise<void>;
+  createSession?: (name: (typeof MODEL_NAMES)[number], backend: "webgpu" | "wasm") => Promise<void>;
 }
 
 function deferred<T>() {
@@ -124,7 +124,9 @@ async function loadSupertonic3Worker({
       return true;
     }),
   });
-  const fetchMock = vi.fn(async (url: string) => (respond ?? ((file) => streamResponse(assetBytes(file))))(fileFromUrl(url)));
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => (
+    respond ?? ((file) => streamResponse(assetBytes(file)))
+  )(fileFromUrl(url), init));
   vi.stubGlobal("fetch", fetchMock);
 
   const createFakeRuntime = (run: Synthesize) => ({
@@ -149,7 +151,7 @@ async function loadSupertonic3Worker({
   ) => {
     for (const name of MODEL_NAMES) {
       await loadModel(name);
-      await createSession?.(name);
+      await createSession?.(name, backend);
     }
     if (backend === "webgpu" && webgpuFailure === "create") throw new Error("WebGPU session creation failed.");
     return runtimes[backend];
@@ -552,6 +554,64 @@ describe("Supertonic 3 asset prefetch", () => {
     for (const name of MODEL_NAMES) sessions.get(name)!.resolve();
     await waitForReady(messages);
     expect(fetched()).toHaveLength(7);
+  });
+});
+
+describe("Supertonic 3 load progress after the load ends", () => {
+  it("stops an orphaned model prefetch and reports no progress after a load error", async () => {
+    const gate = deferred<void>();
+    let prefetchSignal: AbortSignal | undefined;
+    const { dispatch, messages } = await loadSupertonic3Worker({
+      respond: (file, init) => {
+        if (file === "onnx/tts.json") return new Response("", { status: 500 });
+        if (file !== "onnx/duration_predictor.onnx") return streamResponse(assetBytes(file));
+        prefetchSignal = init?.signal ?? undefined;
+        // Half of the model arrives, then the rest waits for the gate.
+        const bytes = assetBytes(file);
+        let sent = false;
+        return new Response(new ReadableStream<Uint8Array>({
+          async pull(controller) {
+            if (!sent) {
+              sent = true;
+              controller.enqueue(bytes.slice(0, 50));
+              return;
+            }
+            await gate.promise;
+            controller.enqueue(bytes.slice(50));
+            controller.close();
+          },
+        }));
+      },
+    });
+
+    dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(messages.at(-1)).toMatchObject({ type: "ERROR", scope: "load" }));
+    const afterError = messages.length;
+    gate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(prefetchSignal?.aborted).toBe(true);
+    expect(messages.slice(afterError)).toEqual([]);
+  });
+
+  it("does not carry a model file the failed WebGPU attempt prefetched into the WASM attempt", async () => {
+    const { cache, dispatch, messages } = await loadSupertonic3Worker({
+      canUseWebGPU: true,
+      // Taking the vector estimator already prefetched the vocoder.
+      createSession: async (name, backend) => {
+        if (backend === "webgpu" && name === "vector_estimator") throw new Error("WebGPU ran out of memory.");
+      },
+    });
+
+    dispatch({ type: "LOAD" });
+    await waitForReady(messages);
+
+    expect(messages.at(-1)).toMatchObject({ type: "READY", backend: "wasm" });
+    // The WASM attempt asked for the vocoder itself (from the cache) instead
+    // of holding the abandoned prefetch through its earlier sessions.
+    expect(cache.match.mock.calls.filter(([url]) => url === assetUrl("onnx/vocoder.onnx"))).toHaveLength(2);
+    // Its downloads filled the bar again before READY's 100.
+    expect(loadProgress(messages).slice(-2)).toEqual([94, 100]);
   });
 });
 

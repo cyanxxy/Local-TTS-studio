@@ -29,6 +29,12 @@ export interface LoadProgress {
   handleTransformersEvent(info: unknown): void;
   /** Starts over, for a fallback attempt, and reports the start of the range. */
   reset(): void;
+  /**
+   * Stops reporting for good. A load that settled must post no more
+   * progress, or hosts would show it loading again; downloads it abandoned
+   * can keep reporting after it failed or fell back.
+   */
+  close(): void;
 }
 
 interface FileProgress {
@@ -54,6 +60,7 @@ export function createLoadProgress({
   const files = new Map<string, FileProgress>();
   let aggregateFraction: number | null = null;
   let lastPercent = from;
+  let closed = false;
 
   const fileSize = (file: string, progress: FileProgress | undefined): number => {
     const expected = expectedBytes[file];
@@ -77,6 +84,7 @@ export function createLoadProgress({
   };
 
   const emit = (): void => {
+    if (closed) return;
     // Hundredths of a percent are finer than any bar renders, and rounding
     // keeps float noise from posting a message per received network chunk.
     const percent = Math.round((from + clampFraction(fraction()) * (to - from)) * 100) / 100;
@@ -123,10 +131,14 @@ export function createLoadProgress({
       }
     },
     reset() {
+      if (closed) return;
       files.clear();
       aggregateFraction = null;
       lastPercent = from;
       report(from);
+    },
+    close() {
+      closed = true;
     },
   };
 }
