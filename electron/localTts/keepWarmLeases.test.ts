@@ -49,6 +49,19 @@ describe("KeepWarmLeases", () => {
     expect(leases.covers("qwen3", "target")).toBe(false);
   });
 
+  it("keeps a window's other leases when it releases one", () => {
+    const { leases } = setup();
+    const sender = new FakeSender(1);
+    leases.acquire(asSender(sender), "a", "qwen3", "target-a");
+    leases.acquire(asSender(sender), "b", "qwen3", "target-b");
+
+    expect(leases.release(1, "a")).toBe(true);
+
+    expect(leases.covers("qwen3", "target-a")).toBe(false);
+    expect(leases.covers("qwen3", "target-b")).toBe(true);
+    expect(leases.release(1, "b")).toBe(true);
+  });
+
   it("scopes lease ids to their window, so one window cannot release another's lease", () => {
     const { leases, onChange } = setup();
     leases.acquire(asSender(new FakeSender(1)), "lease", "qwen3", "target");
