@@ -771,7 +771,10 @@ export function chunkForKokoroDetailed(text: string, runtime?: ChunkingRuntimePr
  * Reader previews the same boundaries.
  */
 export function chunkForSupertonicDetailed(text: string, options: ChunkingOptions = {}): TextChunk[] {
-  return chunkWithConstraintsDetailed(text, { firstChunkMaxCharacters: SUPERTONIC_FIRST_CHUNK_MAX_CHARS, ...options });
+  return chunkWithConstraintsDetailed(text, {
+    ...options,
+    firstChunkMaxCharacters: options.firstChunkMaxCharacters ?? SUPERTONIC_FIRST_CHUNK_MAX_CHARS,
+  });
 }
 
 export function chunkTextForModelDetailed(

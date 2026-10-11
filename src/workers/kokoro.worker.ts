@@ -329,8 +329,11 @@ async function synthesizeWithinContext(
   const phonemes = await phonemize(tunedText, voice.at(0));
   if (!ticket.isCurrent()) return null;
   const { input_ids: inputIds } = (instance.tokenizer as unknown as KokoroTokenize)(phonemes, { truncation: false });
-  const splitAt = (inputIds.dims.at(-1) ?? 0) > KOKORO_MAX_INPUT_IDS ? findSplitNearMiddle(text) : null;
-  if (splitAt === null) return [await instance.generate_from_ids(inputIds, { voice, speed })];
+  if ((inputIds.dims.at(-1) ?? 0) <= KOKORO_MAX_INPUT_IDS) return [await instance.generate_from_ids(inputIds, { voice, speed })];
+  const splitAt = findSplitNearMiddle(text);
+  // Text too short to split cannot realistically overflow; truncate it as
+  // kokoro-js would rather than feed the model more ids than it holds.
+  if (splitAt === null) return [await instance.generate(tunedText, { voice, speed })];
 
   const left = await synthesizeWithinContext(instance, text.slice(0, splitAt).trimEnd(), options, ticket);
   if (!left || !ticket.isCurrent()) return null;

@@ -691,6 +691,21 @@ describe("Kokoro context budget", () => {
     expect(chunks[0].audio).toHaveLength(3 * parts.length);
   });
 
+  it("truncates like kokoro-js when an overflowing unit is too short to split", async () => {
+    const instance = createInstance([createRawAudio(3)], { af_heart: {} });
+    instance.tokenizer = vi.fn(() => ({ input_ids: { dims: [1, 600] } }));
+    instance.generate_from_ids = vi.fn(async () => createRawAudio(3));
+    const loaded = await loadWorkerModule({ instances: [instance], phonemize: vi.fn<KokoroPhonemize>(async (text) => text) });
+    loaded.dispatch({ type: "LOAD" });
+    await vi.waitFor(() => expect(loaded.postedMessages.some((message) => message.type === "READY")).toBe(true));
+
+    loaded.dispatch({ type: "GENERATE", generationId: "g", text: "7", voice: "af_heart", speed: 1, quality: 5 });
+
+    await vi.waitFor(() => expect(loaded.postedMessages.at(-1)).toEqual({ type: "GENERATION_COMPLETE", generationId: "g" }));
+    expect(instance.generate).toHaveBeenCalledExactlyOnceWith("7", { voice: "af_heart", speed: 1 });
+    expect(instance.generate_from_ids).not.toHaveBeenCalled();
+  });
+
   it("stops before synthesizing when the generation is aborted while phonemizing", async () => {
     const pending = deferred<string>();
     const instance = createBudgetedInstance(3);

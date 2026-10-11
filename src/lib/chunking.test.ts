@@ -425,6 +425,12 @@ describe("first-unit ramp", () => {
     expect(capped).toEqual(chunkForSupertonicDetailed(prose, { runtime: { backend: "webgpu", quality: 5 } }));
   });
 
+  it("keeps Supertonic's first-chunk cap when the option is passed as undefined", () => {
+    const options = { runtime: { backend: "webgpu" as const, quality: 5 } };
+    expect(chunkForSupertonicDetailed(prose, { ...options, firstChunkMaxCharacters: undefined }))
+      .toEqual(chunkForSupertonicDetailed(prose, options));
+  });
+
   it("applies the first-chunk cap under explicit limits and cuts a long first sentence at a clause", () => {
     const text = "When the storm finally broke over the harbour that night, every boat strained at its rope, "
       + "and the keeper, who had seen a hundred storms, climbed the stairs to light the lamp. The sea calmed.";
