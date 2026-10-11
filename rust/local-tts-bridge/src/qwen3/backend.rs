@@ -16,8 +16,7 @@ use super::runtime::{Qwen3Runtime, VoiceCloneReference, VoiceCloneRequest};
 use super::streaming::{AudioSink, CustomVoiceRequest, GenerationSummary, VoiceDesignRequest};
 use super::target::resolved_runtime_target;
 use crate::protocol::{
-    GenerationOutput, MAX_AUDIO_CHUNK_SAMPLES, StreamedAudioSummary, float32_to_le_bytes,
-    round_secs,
+    GenerationOutput, MAX_AUDIO_CHUNK_SAMPLES, StreamedAudioSummary, round_secs,
 };
 use crate::ws::{Backend, WebSocketConnection};
 
@@ -221,8 +220,7 @@ impl AudioSink for WebSocketQwenSink<'_> {
                 metadata["textUnitIndex"] = json!(index);
                 metadata["textUnitTotal"] = json!(total);
             }
-            self.connection.send_json(&metadata)?;
-            self.connection.send_binary(float32_to_le_bytes(chunk))?;
+            self.connection.send_audio_chunk(&metadata, chunk)?;
             self.audio_chunk_count = self.audio_chunk_count.saturating_add(1);
         }
         Ok(())

@@ -2,7 +2,7 @@
 //! between generated chunks, and the outgoing JSON and audio frames.
 
 use std::collections::{HashSet, VecDeque};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
@@ -18,7 +18,7 @@ use super::handshake::{
 };
 use crate::protocol::{
     BufferedRequest, CANCELLED_MESSAGE, MAX_WEBSOCKET_TEXT_FRAME_BYTES, classify_buffered_request,
-    round_secs,
+    float32_to_le_bytes, round_secs,
 };
 
 const WEBSOCKET_READ_TIMEOUT_SEC: u64 = 10;
@@ -228,21 +228,38 @@ impl WebSocketConnection {
     }
 
     pub fn send_json(&mut self, payload: &Value) -> Result<()> {
-        let body = serde_json::to_vec(payload)?;
-        let text = String::from_utf8(body).context("WebSocket JSON payload was not UTF-8")?;
-        self.socket.send(Message::Text(text.into()))?;
+        self.socket
+            .send(Message::Text(serde_json::to_string(payload)?.into()))?;
         Ok(())
     }
 
-    pub fn send_binary(&mut self, payload: Vec<u8>) -> Result<()> {
-        self.socket.send(Message::Binary(payload.into()))?;
-        Ok(())
+    /// Send one audio chunk: its JSON metadata frame, then its samples as a
+    /// binary frame of little-endian Float32. See [`write_audio_chunk`].
+    pub fn send_audio_chunk(&mut self, metadata: &Value, samples: &[f32]) -> Result<()> {
+        write_audio_chunk(&mut self.socket, metadata, samples)
     }
 
     pub fn close(&mut self) -> Result<()> {
         self.socket.close(None)?;
         Ok(())
     }
+}
+
+/// Queue a chunk's metadata and audio frames, then flush once. The frames are
+/// exactly the ones two separate sends would produce, but sending each would
+/// flush each: two writes, two TCP segments, and often two wakeups on the
+/// client for every chunk. A chunk past tungstenite's write buffer target is
+/// written as soon as it is queued, still behind its metadata and still in
+/// one write.
+fn write_audio_chunk<Stream: Read + Write>(
+    socket: &mut WebSocket<Stream>,
+    metadata: &Value,
+    samples: &[f32],
+) -> Result<()> {
+    socket.write(Message::Text(serde_json::to_string(metadata)?.into()))?;
+    socket.write(Message::Binary(float32_to_le_bytes(samples).into()))?;
+    socket.flush()?;
+    Ok(())
 }
 
 pub fn is_client_disconnect(err: &anyhow::Error) -> bool {
@@ -298,9 +315,9 @@ mod tests {
     use super::*;
     use crate::protocol::MAX_AUDIO_CHUNK_SAMPLES;
     use crate::ws::test_support::{
-        Client, READ_TIMEOUT, TOKEN, connect, connected_pair, read_message, send_json,
+        Client, READ_TIMEOUT, TOKEN, connect, connected_pair, decode_samples, read_binary,
+        read_json, read_message, send_json,
     };
-    use std::io::Read;
     use std::net::TcpListener;
     use std::thread;
 
@@ -734,6 +751,101 @@ mod tests {
         for error in stalls {
             assert!(!is_client_disconnect(&anyhow::Error::from(error)));
         }
+    }
+
+    /// A stream that records every write and flush the socket makes.
+    #[derive(Default)]
+    struct RecordingStream {
+        writes: Vec<Vec<u8>>,
+        flushes: usize,
+    }
+
+    impl Read for RecordingStream {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::WouldBlock.into())
+        }
+    }
+
+    impl Write for RecordingStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    fn recording_socket() -> WebSocket<RecordingStream> {
+        WebSocket::from_raw_socket(RecordingStream::default(), Role::Server, None)
+    }
+
+    /// The bytes the bridge sent for a chunk before metadata and audio shared a
+    /// flush: a text send, then a binary send of the scrubbed samples.
+    fn two_send_bytes(metadata: &Value, samples: &[f32]) -> Vec<u8> {
+        let encoded = samples
+            .iter()
+            .flat_map(|sample| {
+                let clean = if sample.is_finite() { *sample } else { 0.0 };
+                clean.to_le_bytes()
+            })
+            .collect::<Vec<u8>>();
+        let mut socket = recording_socket();
+        socket
+            .send(Message::Text(metadata.to_string().into()))
+            .unwrap();
+        socket.send(Message::Binary(encoded.into())).unwrap();
+        let stream = socket.get_ref();
+        assert_eq!((stream.writes.len(), stream.flushes), (2, 2));
+        stream.writes.concat()
+    }
+
+    #[test]
+    fn an_audio_chunk_is_one_write_and_one_flush_with_unchanged_bytes() {
+        let metadata = json!({
+            "type": "audio_chunk",
+            "requestId": "r1",
+            "index": 0,
+            "total": 0,
+            "sampleRate": 24_000,
+            "sampleCount": 4,
+            "silenceAfterSamples": 0,
+        });
+        // A small chunk stays in tungstenite's buffer until the flush, and the
+        // largest one is written as soon as it is queued, so both paths count.
+        let small = vec![0.25, f32::NAN, -0.5, f32::INFINITY];
+        let mut largest = vec![0.125; MAX_AUDIO_CHUNK_SAMPLES];
+        largest[1] = f32::NEG_INFINITY;
+        for samples in [small, largest] {
+            let mut socket = recording_socket();
+            write_audio_chunk(&mut socket, &metadata, &samples).unwrap();
+            let stream = socket.get_ref();
+            assert_eq!(
+                stream.writes.len(),
+                1,
+                "writes for {} samples",
+                samples.len()
+            );
+            assert_eq!(stream.flushes, 1, "flushes for {} samples", samples.len());
+            assert!(
+                stream.writes[0] == two_send_bytes(&metadata, &samples),
+                "wire bytes changed for {} samples",
+                samples.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_client_reads_an_audio_chunk_as_metadata_then_scrubbed_samples() {
+        let (mut connection, mut client) = connected_pair();
+        let metadata = json!({ "type": "audio_chunk", "requestId": "r1", "sampleCount": 3 });
+        connection
+            .send_audio_chunk(&metadata, &[0.5, f32::NAN, -1.0])
+            .unwrap();
+        assert_eq!(read_json(&mut client), metadata);
+        assert_eq!(decode_samples(&read_binary(&mut client)), [0.5, 0.0, -1.0]);
     }
 
     #[test]

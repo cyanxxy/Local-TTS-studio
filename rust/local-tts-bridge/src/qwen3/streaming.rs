@@ -104,6 +104,9 @@ pub trait VoiceCloneEngine {
 pub trait AudioSink {
     fn progress(&mut self, phase: &str, message: &str) -> Result<()>;
 
+    /// `samples` is the engine's output as it came, never empty but possibly
+    /// non-finite: the transport scrubs while it encodes, so cleaning here too
+    /// would cost every chunk a second pass.
     fn audio_chunk(
         &mut self,
         samples: &[f32],
@@ -175,8 +178,9 @@ impl<'a> StreamingUnitSink<'a> {
             ),
             None => self.sample_rate = Some(sample_rate),
         }
-        let cleaned = clean_audio(samples.to_vec())?;
-        if let Some(previous) = self.pending.replace(cleaned) {
+        // The engine's buffer is only lent for this call, and the chunk waits
+        // here until the next one arrives.
+        if let Some(previous) = self.pending.replace(samples.to_vec()) {
             // Not the last chunk of this unit after all, so no trailing gap.
             self.emit(previous, 0)?;
         }
@@ -197,8 +201,8 @@ impl<'a> StreamingUnitSink<'a> {
     fn end_unit(&mut self, silence_after_samples: usize) -> Result<()> {
         let Some(last) = self.pending.take() else {
             // Silently skipping would drop a sentence from the output with no
-            // signal. The buffered path failed here too (`clean_audio` rejects
-            // an empty buffer), so this keeps that contract.
+            // signal. The buffered path failed here too (it rejected an empty
+            // buffer), so this keeps that contract.
             bail!(
                 "Qwen3 produced no audio for section {} of {}.",
                 self.unit_index + 1,
@@ -382,16 +386,6 @@ fn generate_units(
     })
 }
 
-pub fn clean_audio(mut samples: Vec<f32>) -> Result<Vec<f32>> {
-    ensure!(!samples.is_empty(), "Qwen3 generated empty audio.");
-    for sample in &mut samples {
-        if !sample.is_finite() {
-            *sample = 0.0;
-        }
-    }
-    Ok(samples)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,7 +464,7 @@ mod tests {
                 controls,
             });
             // Two chunks per unit, the first carrying a non-finite sample, so
-            // the tests cover both per-chunk cleaning and the deferred flush
+            // the tests cover both raw pass-through and the deferred flush
             // that places the inter-unit gap on a unit's final chunk.
             on_audio(&[f32::NAN, 0.5], 24_000);
             on_audio(&[0.75], 24_000);
@@ -508,13 +502,6 @@ mod tests {
     }
 
     fn no_cleanup() {}
-
-    #[test]
-    fn cleans_non_finite_audio_without_peak_normalizing() {
-        let cleaned = clean_audio(vec![f32::NAN, f32::INFINITY, -2.0, 0.5]).unwrap();
-        assert_eq!(cleaned, vec![0.0, 0.0, -2.0, 0.5]);
-        assert!(clean_audio(Vec::new()).is_err());
-    }
 
     #[test]
     fn propagates_controls_and_emits_clean_unicode_safe_units() {
@@ -571,13 +558,14 @@ mod tests {
         assert_eq!(sink.chunks.len(), units * 2);
         assert_eq!(summary.audio_chunk_count, sink.chunks.len());
         assert_eq!(summary.sample_rate, 24_000);
-        // Non-finite samples are cleaned per chunk, not per unit.
+        // Chunks reach the sink unchanged and unnormalized; the transport
+        // scrubs the non-finite sample while encoding it.
         assert!(
             sink.chunks
                 .iter()
                 .enumerate()
                 .all(|(position, chunk)| if position % 2 == 0 {
-                    chunk.0 == [0.0, 0.5]
+                    chunk.0.len() == 2 && chunk.0[0].is_nan() && chunk.0[1] == 0.5
                 } else {
                     chunk.0 == [0.75]
                 })

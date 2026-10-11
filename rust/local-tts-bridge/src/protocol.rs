@@ -117,11 +117,15 @@ pub fn round_secs(value: f64) -> f64 {
     (value * 1_000.0).round() / 1_000.0
 }
 
+/// Encode samples as the little-endian Float32 the client plays, turning
+/// non-finite samples into silence in the same pass. This is the only place
+/// audio is scrubbed before it leaves the bridge, so producers can hand over
+/// raw model output and each chunk is cleaned and encoded with one copy.
 pub fn float32_to_le_bytes(samples: &[f32]) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(samples));
-    for sample in samples {
+    let mut bytes = vec![0; std::mem::size_of_val(samples)];
+    for (encoded, sample) in bytes.chunks_exact_mut(4).zip(samples) {
         let clean = if sample.is_finite() { *sample } else { 0.0 };
-        bytes.extend_from_slice(&clean.to_le_bytes());
+        encoded.copy_from_slice(&clean.to_le_bytes());
     }
     bytes
 }
@@ -183,6 +187,21 @@ mod tests {
             .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
             .collect::<Vec<_>>();
         assert_eq!(samples, vec![0.0, 0.0, -1.5]);
+    }
+
+    #[test]
+    fn float32_transport_keeps_finite_samples_bit_exact() {
+        let subnormal = f32::MIN_POSITIVE / 2.0;
+        let samples = [-0.0, subnormal, f32::MAX, f32::MIN, 0.25, f32::NEG_INFINITY];
+        let bytes = float32_to_le_bytes(&samples);
+        assert_eq!(bytes.len(), samples.len() * 4);
+        let encoded = bytes
+            .chunks_exact(4)
+            .map(|sample| u32::from_le_bytes(sample.try_into().unwrap()))
+            .collect::<Vec<_>>();
+        let expected = [-0.0, subnormal, f32::MAX, f32::MIN, 0.25, 0.0].map(f32::to_bits);
+        assert_eq!(encoded, expected);
+        assert!(float32_to_le_bytes(&[]).is_empty());
     }
 
     #[test]

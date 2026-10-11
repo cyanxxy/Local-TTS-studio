@@ -14,8 +14,8 @@ use serde_json::{Value, json};
 
 use super::connection::{WebSocketConnection, is_client_disconnect};
 use crate::protocol::{
-    GenerationOutput, MAX_AUDIO_CHUNK_SAMPLES, WebSocketRequest, float32_to_le_bytes,
-    is_elapsed_phase_timing, round_secs, validate_generation_output,
+    GenerationOutput, MAX_AUDIO_CHUNK_SAMPLES, WebSocketRequest, is_elapsed_phase_timing,
+    round_secs, validate_generation_output,
 };
 
 // Handshakes run on their own threads so one slow or silent peer cannot stall
@@ -316,7 +316,7 @@ fn send_generation_result(
     if output.streamed_audio.is_none() {
         let transport_started = Instant::now();
         for (index, chunk) in output.samples.chunks(MAX_AUDIO_CHUNK_SAMPLES).enumerate() {
-            websocket.send_json(&json!({
+            let metadata = json!({
                 "type": "audio_chunk",
                 "requestId": request_id,
                 "index": index,
@@ -324,8 +324,8 @@ fn send_generation_result(
                 "sampleRate": output.sample_rate,
                 "sampleCount": chunk.len(),
                 "silenceAfterSamples": 0,
-            }))?;
-            websocket.send_binary(float32_to_le_bytes(chunk))?;
+            });
+            websocket.send_audio_chunk(&metadata, chunk)?;
         }
         output.phase_timings.insert(
             "transportEncodingSec".to_string(),
@@ -443,8 +443,7 @@ mod tests {
                 header["textUnitIndex"] = json!(unit);
                 header["textUnitTotal"] = json!(units);
             }
-            connection.send_json(&header)?;
-            connection.send_binary(float32_to_le_bytes(&[0.25, f32::NAN]))
+            connection.send_audio_chunk(&header, &[0.25, f32::NAN])
         }
 
         fn streamed_output(chunks: usize) -> GenerationOutput {
