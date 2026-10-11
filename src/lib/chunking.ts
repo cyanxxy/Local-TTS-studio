@@ -690,6 +690,53 @@ export function chunkTextForModel(
   return chunkTextForModelDetailed(text, model, options).map((chunk) => chunk.text);
 }
 
+// Boundaries a split may follow, most natural first: a sentence end, a
+// clause break, then any space. Each pattern ends after the whitespace that
+// follows the boundary (full-width punctuation needs none), so a split never
+// separates a word from its punctuation.
+const SPLIT_BOUNDARY_TIERS = [
+  /[.!?…]["'”’)\]]*\s+|[。？！]["'”’」』)\]]*\s*/g,
+  /[,;:]["'”’)\]]*\s+|\s[—–-]\s+|[，；：、]\s*/g,
+  /\s+/g,
+];
+// A tier is used only when its best boundary leaves each part at least this
+// share of the text; otherwise a less natural but more even boundary wins.
+const SPLIT_MIN_SIDE_SHARE = 0.2;
+
+/**
+ * Where to cut `text` in two near its middle, preferring a sentence end,
+ * then a clause break, then a space, and only as a last resort the grapheme
+ * boundary closest to the middle. Returns the offset where the second part
+ * starts: text.slice(0, offset).trimEnd() and text.slice(offset) are both
+ * non-empty. Returns null when the text cannot be split that way.
+ */
+export function findSplitNearMiddle(text: string): number | null {
+  const contentEnd = text.trimEnd().length;
+  const contentStart = text.length - text.trimStart().length;
+  if (contentEnd - contentStart < 2) return null;
+  const middle = (contentStart + contentEnd) / 2;
+  const minSide = (contentEnd - contentStart) * SPLIT_MIN_SIDE_SHARE;
+  let fallback: number | null = null;
+
+  for (const tier of SPLIT_BOUNDARY_TIERS) {
+    let best: number | null = null;
+    for (const match of text.matchAll(tier)) {
+      const offset = match.index + match[0].length;
+      // Both parts must keep some content.
+      if (match.index <= contentStart || offset >= contentEnd) continue;
+      if (best === null || Math.abs(offset - middle) < Math.abs(best - middle)) best = offset;
+    }
+    if (best === null) continue;
+    if (best - contentStart >= minSide && contentEnd - best >= minSide) return best;
+    fallback ??= best;
+  }
+  if (fallback !== null) return fallback;
+
+  // One unbroken run, such as a long number or URL: cut between graphemes.
+  const hardSplit = adjustSplitToTextBoundary(text, contentStart, Math.floor(middle), contentEnd);
+  return hardSplit > contentStart && hardSplit < contentEnd ? hardSplit : null;
+}
+
 export function rechunkChunkForRetry(
   chunk: TextChunk,
   options: RetryOptions = {},

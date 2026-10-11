@@ -5,6 +5,7 @@ import {
   chunkTextForModelDetailed,
   chunkWithConstraints,
   chunkWithConstraintsDetailed,
+  findSplitNearMiddle,
   getAdaptiveChunkLimits,
   getKokoroMaxInferenceChars,
   rechunkChunkForRetry,
@@ -296,5 +297,51 @@ describe("rechunkChunkForRetry", () => {
     expect(retryChunks[0].start).toBeGreaterThanOrEqual(chunk.start);
     expect(retryChunks[retryChunks.length - 1].pauseAfterSec).toBe(chunk.pauseAfterSec);
     expect(retryChunks[retryChunks.length - 1].pauseKind).toBe(chunk.pauseKind);
+  });
+});
+
+describe("findSplitNearMiddle", () => {
+  const parts = (text: string) => {
+    const offset = findSplitNearMiddle(text);
+    return offset === null ? null : [text.slice(0, offset).trimEnd(), text.slice(offset)];
+  };
+
+  it("prefers the sentence end closest to the middle", () => {
+    expect(parts("The keeper climbed. He counted every step, slowly. The sea was grey and cold."))
+      .toEqual(["The keeper climbed. He counted every step, slowly.", "The sea was grey and cold."]);
+  });
+
+  it("falls back to a clause break, then to the space closest to the middle", () => {
+    expect(parts("One long sentence that rambles on, and then keeps going for a while longer"))
+      .toEqual(["One long sentence that rambles on,", "and then keeps going for a while longer"]);
+    expect(parts("one two three four five six seven eight"))
+      .toEqual(["one two three four", "five six seven eight"]);
+  });
+
+  it("chooses an even split over a natural boundary that leaves one part tiny", () => {
+    expect(parts("Hi. this text runs on for quite a while without any further punctuation at all"))
+      .toEqual(["Hi. this text runs on for quite a while", "without any further punctuation at all"]);
+  });
+
+  it("keeps closing quotes and brackets with the sentence they end", () => {
+    expect(parts('He said "stop." She did (eventually.) Then they all went home together.'))
+      .toEqual(['He said "stop." She did (eventually.)', "Then they all went home together."]);
+  });
+
+  it("splits full-width punctuation that has no trailing space", () => {
+    expect(parts("今日は晴れです。明日は雨が降るでしょう。")).toEqual(["今日は晴れです。", "明日は雨が降るでしょう。"]);
+  });
+
+  it("cuts an unbroken run between graphemes and refuses what cannot be split", () => {
+    expect(parts("12345678")).toEqual(["1234", "5678"]);
+    expect(parts("a😀b😀")).toEqual(["a😀", "b😀"]);
+    expect(findSplitNearMiddle("😀")).toBeNull();
+    expect(findSplitNearMiddle("  a  ")).toBeNull();
+    expect(findSplitNearMiddle("")).toBeNull();
+  });
+
+  it("ignores boundaries in leading or trailing whitespace", () => {
+    expect(parts("  First half here. Second half here.  "))
+      .toEqual(["  First half here.", "Second half here.  "]);
   });
 });
