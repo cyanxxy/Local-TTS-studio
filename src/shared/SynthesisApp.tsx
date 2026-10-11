@@ -1,5 +1,4 @@
 import {
-  lazy,
   Suspense,
   useState,
   useCallback,
@@ -16,6 +15,7 @@ import { useDocumentImport } from "../hooks/useDocumentImport";
 import { useAppPreferences } from "../hooks/useAppPreferences";
 import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useEngineOrchestrator } from "../hooks/useEngineOrchestrator";
+import { lazyWithRetry } from "./lazyWithRetry";
 import { Qwen3RuntimeProvider, useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { Qwen3InlineSettings } from "../components/Qwen3InlineSettings";
 import { Supertonic3InlineSettings } from "../components/Supertonic3InlineSettings";
@@ -27,6 +27,7 @@ import { AppFooter } from "../components/AppFooter";
 import { AppHeader } from "../components/AppHeader";
 import { BrowserSupportPanel } from "../components/BrowserSupportPanel";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { SurfaceErrorBoundary } from "../components/SurfaceErrorBoundary";
 import { TextInput } from "../components/TextInput";
 import { ModelToggle } from "../components/ModelToggle";
 import { VoiceSelector } from "../components/VoiceSelector";
@@ -76,12 +77,14 @@ interface SynthesisAppProps {
 // pages are each a large subtree that most sessions never open, and the app
 // settings dialog is only mounted once the user asks for it. Studio — the
 // landing surface — stays in the entry chunk so it never waits on a fetch.
-const AdvancedReaderPage = lazy(() => import("../components/AdvancedReaderPage")
-  .then((module) => ({ default: module.AdvancedReaderPage })));
-const LocalRuntimePage = lazy(() => import("../components/LocalRuntimePage")
-  .then((module) => ({ default: module.LocalRuntimePage })));
-const AppSettingsDialog = lazy(() => import("../components/AppSettingsDialog")
-  .then((module) => ({ default: module.AppSettingsDialog })));
+// Each one sits inside a SurfaceErrorBoundary, so a chunk that fails to load
+// or a surface that throws costs only that surface, never Studio's state.
+const AdvancedReaderPage = lazyWithRetry(() => import("../components/AdvancedReaderPage")
+  .then((module) => module.AdvancedReaderPage));
+const LocalRuntimePage = lazyWithRetry(() => import("../components/LocalRuntimePage")
+  .then((module) => module.LocalRuntimePage));
+const AppSettingsDialog = lazyWithRetry(() => import("../components/AppSettingsDialog")
+  .then((module) => module.AppSettingsDialog));
 
 /** How often the Reader samples playback position to persist reading progress. */
 const READER_PROGRESS_SAMPLE_MS = 750;
@@ -1126,6 +1129,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
           ) : browserSupportPanel
         ) : isReaderPage ? (
           localInferenceSupported ? (
+            <SurfaceErrorBoundary name="The Reader" resetKeys={[activePage]}>
             <Suspense fallback={null}>
             <AdvancedReaderPage
               fullScreen
@@ -1244,6 +1248,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onImmersiveChange={setReaderImmersive}
             />
             </Suspense>
+            </SurfaceErrorBoundary>
           ) : browserSupportPanel
         ) : null}
         </div>
@@ -1258,6 +1263,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               hidden={!isActive}
               aria-hidden={!isActive}
             >
+              <SurfaceErrorBoundary name={`The ${config.name} page`} resetKeys={[activePage]}>
               <Suspense fallback={null}>
               <LocalRuntimePage
                 active={isActive}
@@ -1270,6 +1276,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                 initialText={text}
               />
               </Suspense>
+              </SurfaceErrorBoundary>
             </section>
           );
         })}
@@ -1289,6 +1296,12 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
 
       </div>
       {appSettingsOpen && (
+        <SurfaceErrorBoundary
+          name="Settings"
+          resetKeys={[]}
+          onDismiss={closeAppSettings}
+          className="fixed inset-x-4 bottom-4 z-50 sm:left-auto sm:w-[420px]"
+        >
         <Suspense fallback={null}>
           <AppSettingsDialog
             open={appSettingsOpen}
@@ -1299,6 +1312,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
             onClose={closeAppSettings}
           />
         </Suspense>
+        </SurfaceErrorBoundary>
       )}
     </div>
   );

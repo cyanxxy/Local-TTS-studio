@@ -89,6 +89,7 @@ const mock = vi.hoisted(() => {
       exportBitrateKbps: 320,
       masteringEnabled: true,
     },
+    readerError: null as Error | null,
     modelLoader: {
       states: { kokoro: readyState, supertonic: readyState },
       getWorker: vi.fn(() => null),
@@ -470,8 +471,8 @@ vi.mock("../components/AudioPlayer", () => ({
   ),
 }));
 
-vi.mock("../components/AdvancedReaderPage", () => ({
-  AdvancedReaderPage: ({
+vi.mock("../components/AdvancedReaderPage", () => {
+  const ReaderView = ({
     text,
     onTextChange,
     onImportDocument,
@@ -591,8 +592,14 @@ vi.mock("../components/AdvancedReaderPage", () => ({
         </button>
       ))}
     </div>
-  ),
-}));
+  );
+  return {
+    AdvancedReaderPage: (props: Parameters<typeof ReaderView>[0]) => {
+      if (mock.readerError) throw mock.readerError;
+      return ReaderView(props);
+    },
+  };
+});
 
 vi.mock("../components/LocalRuntimePage", () => ({
   LocalRuntimePage: ({ model, name }: { model: string; name: string }) => (
@@ -635,6 +642,7 @@ function resetMockState() {
     neutts: ENGINES.neutts.defaultSettings,
     qwen3: ENGINES.qwen3.defaultSettings,
   };
+  mock.readerError = null;
   mock.modelLoader = {
     ...mock.modelLoader,
     states: { kokoro: mock.readyState, supertonic: mock.readyState },
@@ -1516,6 +1524,23 @@ describe("SynthesisApp", () => {
         readingFont: "georgia",
       });
     });
+  });
+
+  it("contains a Reader failure to the Reader and retries it on request", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mock.readerError = new Error("The Reader chunk could not be loaded.");
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    render(<WebApp />);
+
+    expect(await screen.findByText("The Reader could not be shown")).toBeInTheDocument();
+    expect(screen.getByText("The Reader chunk could not be loaded.")).toBeInTheDocument();
+    // The header and page tabs, and with them the rest of the app, survive.
+    expect(screen.getByRole("heading", { name: "Open TTS" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open app settings" })).toBeInTheDocument();
+
+    mock.readerError = null;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByTestId("reader-text-value")).toBeInTheDocument();
   });
 
   it("orchestrates reader controls and segment jumps", async () => {
