@@ -8,6 +8,16 @@ export const GENERATION_CANCELLED_MESSAGE = "Generation cancelled.";
 /** Refusal for new local-runtime work once the quit has started. */
 export const LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE = "The local runtime is shutting down.";
 
+/**
+ * True for text the renderer would take for a deliberate stop: it hides any
+ * failure whose message mentions "cancelled" (src/hooks/useQwen3LocalRuntime.ts,
+ * src/components/LocalRuntimePage.tsx). Native text that matches must stay out
+ * of a crash message, or the crash would vanish silently.
+ */
+export function readsAsCancellation(text: string): boolean {
+  return /cancelled/i.test(text);
+}
+
 export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

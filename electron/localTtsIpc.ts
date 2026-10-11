@@ -1,4 +1,4 @@
-import { errorMessage } from "./errors";
+import { errorMessage, readsAsCancellation } from "./errors";
 import type { GenerationContinuation } from "./generateRateLimiter";
 import { isRecord } from "./guards";
 import {
@@ -703,12 +703,18 @@ export function parseBridgeFailureLine(line: string): string | null {
   }
 }
 
-/** The failure in the last result line of `stdout`, if the bridge printed one on its way out. */
+/**
+ * The failure in the last result line of `stdout`, if the bridge printed one on
+ * its way out. It explains a crash to the renderer, so a report that would read
+ * as a cancellation there is ignored; the diagnostics log keeps the stdout.
+ */
 export function reportedBridgeFailure(stdout: string): string | null {
   const lines = stdout.split(/\r?\n/);
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index].trim();
-    if (line.startsWith(BRIDGE_RESULT_PREFIX)) return parseBridgeFailureLine(line) || null;
+    if (!line.startsWith(BRIDGE_RESULT_PREFIX)) continue;
+    const reported = parseBridgeFailureLine(line);
+    return reported && !readsAsCancellation(reported) ? reported : null;
   }
   return null;
 }

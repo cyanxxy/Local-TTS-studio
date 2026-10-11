@@ -1,4 +1,5 @@
 import { StringDecoder } from "string_decoder";
+import { readsAsCancellation } from "./errors";
 
 /** How much of each native process stream is kept for diagnostics. */
 export const NATIVE_OUTPUT_TAIL_CHARS = 16 * 1024;
@@ -122,7 +123,7 @@ export function nativeOutputExcerpt(
  */
 export function withNativeOutput(message: string, output: string): string {
   const excerpt = nativeOutputExcerpt(output);
-  if (!excerpt || /cancelled/i.test(excerpt)) return message;
+  if (!excerpt || readsAsCancellation(excerpt)) return message;
   return `${message}\nNative output:\n${excerpt}`;
 }
 

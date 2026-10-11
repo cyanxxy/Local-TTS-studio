@@ -9,6 +9,7 @@ import {
   isGenerationCancelled,
   nativeFailureDiagnostics,
   NativeRuntimeError,
+  readsAsCancellation,
 } from "./errors";
 
 describe("main-process errors", () => {
@@ -22,6 +23,12 @@ describe("main-process errors", () => {
     expect(isGenerationCancelled(new Error("Generation cancelled. Native output: crash"))).toBe(false);
     expect(isGenerationCancelled(GENERATION_CANCELLED_MESSAGE)).toBe(false);
     expect(isGenerationCancelled(null)).toBe(false);
+  });
+
+  it("flags text the renderer would treat as a deliberate stop", () => {
+    expect(readsAsCancellation("Generation cancelled.")).toBe(true);
+    expect(readsAsCancellation("step CANCELLED by the scheduler")).toBe(true);
+    expect(readsAsCancellation("Metal device lost")).toBe(false);
   });
 
   it("reads a message from errors and anything else", () => {

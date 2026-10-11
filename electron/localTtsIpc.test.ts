@@ -565,4 +565,11 @@ describe("localTtsIpc bridge result parsing", () => {
     expect(reportedBridgeFailure("__PORT__1\nplain output\n")).toBeNull();
     expect(reportedBridgeFailure("")).toBeNull();
   });
+
+  it("ignores a reported failure the renderer would take for a deliberate stop", () => {
+    const failure = (error: string) => `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error })}`;
+
+    expect(reportedBridgeFailure(`${failure("Metal device lost")}\n${failure("Generation CANCELLED by MLX")}\n`))
+      .toBeNull();
+  });
 });

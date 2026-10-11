@@ -135,6 +135,18 @@ describe("createProbeRunner", () => {
     });
   });
 
+  it("never lets a crash read as a cancellation the renderer would hide", async () => {
+    const { runner, children } = setup();
+    const probe = runner.run(REQUEST);
+
+    children[0].emitStdout(`${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "MLX stream cancelled" })}\n`);
+    children[0].finish(134);
+
+    const error = await rejectionOf(probe);
+    expect(error.message).toBe("Rust local bridge exited with code 134.");
+    expect(error.diagnostics?.stdout).toContain("MLX stream cancelled");
+  });
+
   it.each([
     { name: "exit code", code: 101, signal: null, summary: "Rust local bridge exited with code 101." },
     { name: "signal", code: null, signal: "SIGSEGV" as const, summary: "Rust local bridge exited with signal SIGSEGV." },
