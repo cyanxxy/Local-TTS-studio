@@ -14,6 +14,8 @@ import { useModelLoader } from "../hooks/useModelLoader";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { useTTS } from "../hooks/useTTS";
 import { useAppRouting } from "../hooks/useAppRouting";
+import { useAppShortcuts } from "../hooks/useAppShortcuts";
+import { useDocumentImport } from "../hooks/useDocumentImport";
 import { useAppPreferences } from "../hooks/useAppPreferences";
 import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useGenerationControl } from "../hooks/useGenerationControl";
@@ -51,10 +53,6 @@ import {
 } from "../lib/browserSupport";
 import { getWebGPUStatus, type WebGPUStatus } from "../lib/webgpu";
 import {
-  hasPrimaryShortcutModifier,
-  isEditableShortcutTarget,
-} from "../lib/appShortcuts";
-import {
   getInitialAppState,
   getInitialCreatorState,
   getInitialEngineSettings,
@@ -71,7 +69,6 @@ import {
   getCachedReaderAudioByteLength,
   normalizeReaderTextFragment,
   readerSectionAtOffset,
-  unwrapHardLineBreaks,
 } from "../lib/readerDocument";
 import { isReaderLibraryShutdownError } from "../lib/readerLibrary";
 import {
@@ -103,11 +100,6 @@ const LocalRuntimePage = lazy(() => import("../components/LocalRuntimePage")
   .then((module) => ({ default: module.LocalRuntimePage })));
 const AppSettingsDialog = lazy(() => import("../components/AppSettingsDialog")
   .then((module) => ({ default: module.AppSettingsDialog })));
-
-// Document import pulls in Readability and a zip reader — roughly a tenth of the
-// entry chunk — but is only ever reached from a user-initiated import, which is
-// already asynchronous. Load it on demand instead of at startup.
-const loadReaderImport = () => import("../lib/readerImport");
 
 /** How often the Reader samples playback position to persist reading progress. */
 const READER_PROGRESS_SAMPLE_MS = 750;
@@ -187,7 +179,6 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const [webgpuStatus, setWebgpuStatus] = useState<WebGPUStatus | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
-  const [isImportingDocument, setIsImportingDocument] = useState(false);
   // The desktop engine each surface last chose, persisted across launches. A
   // surface uses it only while that engine is available and otherwise runs the
   // browser model, without forgetting the choice for when it returns.
@@ -631,108 +622,18 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
     ? window.electron?.documents
     : undefined;
 
-  // An import can take minutes (OCR); by then the click-time handleTextChange
-  // closure is stale and would read audio/generation state from before the
-  // import started, skipping the cancel-and-reset it exists to guarantee.
-  // Always apply the result through the latest closure.
-  const handleTextChangeRef = useRef(handleTextChange);
-  useEffect(() => {
-    handleTextChangeRef.current = handleTextChange;
-  }, [handleTextChange]);
-  const importInFlightRef = useRef(false);
-
-  const handleImportDocument = useCallback(async () => {
-    if (!documentsBridge || importInFlightRef.current) return;
-    importInFlightRef.current = true;
-    setImportError(null);
-    setIsImportingDocument(true);
-    try {
-      const result = await documentsBridge.importDocument();
-      if (!result.canceled) {
-        if (result.epubBytes) {
-          const { parseEpubDocument } = await loadReaderImport();
-          const document = parseEpubDocument(new Uint8Array(result.epubBytes), result.fileName);
-          if (isReaderPage) {
-            await readerLibrary.createDocument(document);
-          } else {
-            handleTextChangeRef.current(document.text);
-          }
-        } else if (isReaderPage && /\.md$/i.test(result.fileName)) {
-          const { parseMarkdownReaderDocument } = await loadReaderImport();
-          await readerLibrary.createDocument(parseMarkdownReaderDocument(result.text, result.fileName));
-        } else {
-          // PDF and OCR text arrives hard-wrapped at the page's line width.
-          const text = /\.(pdf|png|jpe?g|tiff?|webp)$/i.test(result.fileName)
-            ? unwrapHardLineBreaks(result.text)
-            : result.text;
-          if (isReaderPage) {
-            await readerLibrary.createDocument({
-              title: result.fileName.replace(/\.[^.]+$/, ""),
-              description: result.pageCount ? `${result.pageCount} pages` : "",
-              sourceType: "file",
-              sourceName: result.fileName,
-              text,
-            });
-          } else {
-            handleTextChangeRef.current(text);
-          }
-        }
-      }
-    } catch (err) {
-      const raw = err instanceof Error ? err.message : String(err);
-      // ipcRenderer.invoke wraps main-process errors in a remote-method prefix;
-      // strip it so users see only the actionable message.
-      setImportError(raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, ""));
-    } finally {
-      importInFlightRef.current = false;
-      setIsImportingDocument(false);
-    }
-  }, [documentsBridge, isReaderPage, readerLibrary]);
-
-  const handleImportReaderFile = useCallback(async (file: File) => {
-    if (importInFlightRef.current) return;
-    importInFlightRef.current = true;
-    setImportError(null);
-    setIsImportingDocument(true);
-    try {
-      const { importReaderFile } = await loadReaderImport();
-      const document = await importReaderFile(file);
-      await readerLibrary.createDocument(document);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      setImportError(message);
-    } finally {
-      importInFlightRef.current = false;
-      setIsImportingDocument(false);
-    }
-  }, [readerLibrary]);
-
-  const handleImportReaderUrl = useCallback(async (url: string) => {
-    if (importInFlightRef.current) throw new Error("Another document import is still running.");
-    importInFlightRef.current = true;
-    setImportError(null);
-    setIsImportingDocument(true);
-    try {
-      const { fetchRemoteDocument, parseHtmlReaderDocument } = await loadReaderImport();
-      const payload = documentsBridge?.importUrl
-        ? await documentsBridge.importUrl(url)
-        : await fetchRemoteDocument(url);
-      const document = parseHtmlReaderDocument(payload);
-      await readerLibrary.createDocument(document);
-    } catch (error) {
-      let message = error instanceof Error ? error.message : String(error);
-      if (!documentsBridge && /failed to fetch|networkerror|load failed/i.test(message)) {
-        message = "This site blocks direct browser imports. Use the desktop app for cross-origin article URLs.";
-      }
-      // AdvancedReaderPage owns URL-import failures while its popover remains
-      // open. Storing the same rejection here also renders the global banner,
-      // duplicating the message and leaving it behind after the popover closes.
-      throw new Error(message);
-    } finally {
-      importInFlightRef.current = false;
-      setIsImportingDocument(false);
-    }
-  }, [documentsBridge, readerLibrary]);
+  const {
+    isImportingDocument,
+    importDocument: handleImportDocument,
+    importReaderFile: handleImportReaderFile,
+    importReaderUrl: handleImportReaderUrl,
+  } = useDocumentImport({
+    documentsBridge,
+    isReaderPage,
+    createReaderDocument: readerLibrary.createDocument,
+    onStudioText: handleTextChange,
+    setImportError,
+  });
 
   const handleNewReaderDocument = useCallback(() => {
     flushReaderAudioRef.current();
@@ -1029,82 +930,21 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
   const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
 
-  // An effect event always sees the latest page, runtime and player state, so
-  // the document listener below is attached once rather than on every render.
-  const handleAppShortcut = useEffectEvent((event: KeyboardEvent) => {
-    const primaryModifier = hasPrimaryShortcutModifier(event);
-
-    if (primaryModifier && event.key === ",") {
-      event.preventDefault();
-      setAppSettingsOpen(true);
-      return;
-    }
-
-    if (appSettingsOpen) return;
-
-    if (primaryModifier && event.key === "1") {
-      event.preventDefault();
-      handlePageNavigation("studio");
-      return;
-    }
-
-    if (primaryModifier && event.key === "2") {
-      event.preventDefault();
-      handlePageNavigation("reader");
-      return;
-    }
-
-    if (primaryModifier && event.key === "Enter") {
-      if (isStudioPage && studioRuntime.canGenerate && !studioRuntime.isGenerating) {
-        event.preventDefault();
-        handleGenerate();
-      } else if (isReaderPage && readerRuntime.canGenerate && !readerRuntime.isGenerating) {
-        event.preventDefault();
-        handleReaderGenerate();
-      }
-      return;
-    }
-
-    if (primaryModifier && event.key === ".") {
-      if (isStudioPage && studioRuntime.isGenerating) {
-        event.preventDefault();
-        handleStudioStop();
-      } else if (isReaderPage && readerRuntime.isGenerating) {
-        event.preventDefault();
-        handleReaderStop();
-      }
-      return;
-    }
-
-    if (isSetupPage(activePage) || isEditableShortcutTarget(event.target)) return;
-
-    // A focused control keeps Space for itself: Space on Download should
-    // download, not toggle playback behind the user's back.
-    const onInteractiveControl = event.target instanceof Element
-      && event.target.closest("button, a[href], [role='button'], [role='slider'], [role='menuitem']") !== null;
-    const canTogglePlayback = player.totalDuration > 0;
-    if (!primaryModifier && !event.altKey && event.code === "Space" && canTogglePlayback && !onInteractiveControl) {
-      event.preventDefault();
-      void togglePlay();
-      return;
-    }
-
-    if (!primaryModifier && event.altKey && player.totalDuration > 0) {
-      if (event.key === "ArrowLeft") {
-        event.preventDefault();
-        skipPlayback(-10);
-      } else if (event.key === "ArrowRight") {
-        event.preventDefault();
-        skipPlayback(10);
-      }
-    }
+  const handleTogglePlayback = useCallback(() => void togglePlay(), [togglePlay]);
+  useAppShortcuts({
+    activePage,
+    settingsOpen: appSettingsOpen,
+    onOpenSettings: openAppSettings,
+    onNavigate: handlePageNavigation,
+    surface: isStudioPage
+      ? { ...studioRuntime, generate: handleGenerate, stop: handleStudioStop }
+      : isReaderPage
+        ? { ...readerRuntime, generate: handleReaderGenerate, stop: handleReaderStop }
+        : null,
+    hasAudio: player.totalDuration > 0,
+    onTogglePlayback: handleTogglePlayback,
+    onSkip: skipPlayback,
   });
-
-  useEffect(() => {
-    const listener = (event: KeyboardEvent) => handleAppShortcut(event);
-    document.addEventListener("keydown", listener);
-    return () => document.removeEventListener("keydown", listener);
-  }, []);
 
   const visibleModelError = isReaderPage
     // Desktop Reader models render an inline recovery card beside the toolbar.
@@ -1491,7 +1331,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
                     <TextInput
                       text={text}
                       onTextChange={handleTextChange}
-                      onImportDocument={documentsBridge ? handleImportDocument : undefined}
+                      onImportDocument={handleImportDocument}
                       isImportingDocument={isImportingDocument}
                     />
                   </div>
@@ -1618,7 +1458,7 @@ function SynthesisAppContent({ enableDesktopRuntimes, routeBasePath = "", create
               onTextChange={handleReaderSectionTextChange}
               onEditStart={handleReaderSectionEditStart}
               onEditEnd={handleReaderSectionEditEnd}
-              onImportDocument={documentsBridge ? handleImportDocument : undefined}
+              onImportDocument={handleImportDocument}
               onImportFile={handleImportReaderFile}
               onImportUrl={handleImportReaderUrl}
               isImportingDocument={isImportingDocument}

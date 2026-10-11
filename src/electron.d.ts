@@ -120,7 +120,7 @@ export interface DocumentUrlImportResult {
   html: string;
 }
 
-interface DocumentsBridge {
+export interface DocumentsBridge {
   importDocument: () => Promise<DocumentImportResult>;
   importUrl: (url: string) => Promise<DocumentUrlImportResult>;
 }
