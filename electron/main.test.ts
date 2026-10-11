@@ -609,7 +609,20 @@ describe("Audio8 IPC", () => {
     it("forwards the accepted voice through untouched", async () => {
       await invokeAudio8("audio8:generate", { requestId: "g1", text: " hi ", voice: "sophie" });
 
-      expect(audio8Clients()[0].generate).toHaveBeenCalledWith("g1", " hi ", "sophie", expect.any(Function));
+      // No overrides: the worker samples the reference take.
+      expect(audio8Clients()[0].generate).toHaveBeenCalledWith("g1", " hi ", "sophie", expect.any(Function), undefined);
+    });
+
+    it("forwards a requested take's seed and temperature, and refuses out-of-range ones", async () => {
+      await invokeAudio8("audio8:generate", { requestId: "g1", text: "hi", voice: "clara", seed: 7, temperature: 0.6 });
+
+      expect(audio8Clients()[0].generate)
+        .toHaveBeenCalledWith("g1", "hi", "clara", expect.any(Function), { seed: 7, temperature: 0.6 });
+      expect((await audio8Rejection("audio8:generate", { requestId: "g2", text: "hi", voice: "clara", seed: 2 ** 32 })).message)
+        .toBe("Audio8 seed must be an integer from 0 to 4294967295.");
+      expect((await audio8Rejection("audio8:generate", { requestId: "g3", text: "hi", voice: "clara", temperature: 5 })).message)
+        .toBe("Audio8 temperature must be a number from 0.1 to 1.");
+      expect(audio8Clients()[0].generate).toHaveBeenCalledTimes(1);
     });
 
     it("drops progress safely when the requesting window closes during send", async () => {

@@ -17,11 +17,14 @@
  * and worker-protocol layers around it.
  */
 
-import path from "path";
 import { parentPort, workerData } from "worker_threads";
 import * as ort from "onnxruntime-node";
 import { Audio8AssetCache } from "./audio8AssetCache";
+import { parseAudio8SamplingOptions, type Audio8SamplingOptions } from "./audio8Ipc";
 import {
+  AUDIO8_DEFAULT_SEED,
+  AUDIO8_DEFAULT_TEMPERATURE,
+  AUDIO8_DESCRIPTOR,
   AUDIO8_MAX_TEXT_CHARACTERS,
   AUDIO8_MODEL_ASSETS,
   AUDIO8_VOICE_ASSETS,
@@ -29,45 +32,14 @@ import {
   type Audio8Asset,
   type Audio8VoiceId,
 } from "./audio8Model";
-import type { Audio8NativeResult, Audio8WorkerResponse } from "./audio8NativeClient";
-import { SerialTaskQueue, SharedTask, SharedTaskGroup, type SharedTaskContext } from "./audio8SharedTask";
+import type { Audio8NativeResult } from "./audio8NativeClient";
 import { selectAudio8InferenceThreads } from "./audio8Threading";
+import { createCpuSessionOptions, prepareOrtNodeWorker } from "./nativeModels/ortNode";
+import { SharedTaskGroup, type SharedTaskContext } from "./nativeModels/sharedTask";
+import { startNativeModelWorker, type NativeModelWorkerPort } from "./nativeModels/workerHost";
+import { isRecord, readWorkerModelDir } from "./nativeModels/workerProtocol";
 
-/**
- * onnxruntime-common selects its FP16 backing array lazily, the first time an
- * `ort.Tensor` is constructed. Node 24 introduced a native `Float16Array`, so
- * ORT 1.27 now selects that instead of the Uint16Array representation its Node
- * binding has historically used. The native addon accepts the new array type,
- * but node-addon-api 6 reports its byte length as zero. Every non-empty FP16
- * input consequently fails with e.g. `not enough space: expected 524288, got
- * 0`.
- *
- * Prime ORT's process-local type mapping while Float16Array is hidden. The map
- * then keeps using Uint16Array, whose bits are identical and which the native
- * binding handles correctly. Restore the global immediately so this worker
- * does not change JavaScript semantics for the tokenizer or any other code.
- */
-export function initialiseAudio8OrtFloat16Compatibility(): void {
-  const globalWithFloat16 = globalThis as typeof globalThis & { Float16Array?: unknown };
-  if (typeof globalWithFloat16.Float16Array !== "function") return;
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "Float16Array");
-  if (!descriptor?.configurable) {
-    throw new Error("Audio8 cannot initialise ONNX Runtime FP16 compatibility.");
-  }
-  try {
-    Object.defineProperty(globalThis, "Float16Array", { ...descriptor, value: undefined });
-    const probe = new ort.Tensor("float16", new Uint16Array(1), [1]);
-    probe.dispose();
-  } finally {
-    Object.defineProperty(globalThis, "Float16Array", descriptor);
-  }
-}
-
-initialiseAudio8OrtFloat16Compatibility();
-
-// ORT logs one info line per session and per optimisation pass otherwise, which
-// ends up in the packaged app's stderr for every load.
-ort.env.logLevel = "error";
+prepareOrtNodeWorker(AUDIO8_DESCRIPTOR.label);
 
 const RUNTIME_MANIFEST_FILE = "runtime_manifest.json";
 const TOKENIZER_FILE = "tokenizer/tokenizer.json";
@@ -86,9 +58,11 @@ const PROGRESS_SLOW_SESSION = 95;
 const PROGRESS_FAST_SESSION = 97;
 const PROGRESS_READY = 100;
 
-/** Sampling settings from the reference runtime. */
-const SAMPLER_SEED = 42;
-const NUCLEUS_SAMPLING: SamplingOptions = { temperature: 0.3, topP: 0.9, topK: 50 };
+/**
+ * Sampling settings from the reference runtime. A request may override the
+ * nucleus temperature; the repeat-escape draw always runs hot.
+ */
+const NUCLEUS_SAMPLING: SamplingOptions = { temperature: AUDIO8_DEFAULT_TEMPERATURE, topP: 0.9, topK: 50 };
 const REPEAT_ESCAPE_SAMPLING: SamplingOptions = { temperature: 1, topP: 0.9, topK: 50 };
 
 /** Semantic tokens seen this recently are re-rolled at a higher temperature. */
@@ -115,14 +89,8 @@ export interface SamplingOptions {
   topK: number;
 }
 
-/**
- * The parent port, narrowed to what this worker uses so the request handling
- * can be driven from a test without a real worker thread.
- */
-export interface Audio8WorkerPort {
-  on(event: "message", listener: (value: unknown) => void): unknown;
-  postMessage(value: Audio8WorkerResponse, transfer?: readonly ArrayBuffer[]): void;
-}
+/** The parent port, narrowed so request handling can be driven from a test. */
+export type Audio8WorkerPort = NativeModelWorkerPort<Audio8NativeResult>;
 
 export interface Audio8Voice {
   codes: Uint16Array;
@@ -158,9 +126,15 @@ interface SlowStep {
   hidden: ort.Tensor;
 }
 
-interface SynthesisOptions {
+interface SynthesisOptions extends Audio8SamplingOptions {
   signal?: AbortSignal;
   onProgress?: (percent: number) => void;
+}
+
+/** One take's random stream and nucleus settings, shared by every draw. */
+interface TakeSampler {
+  random: () => number;
+  nucleus: SamplingOptions;
 }
 
 function loadCancelledError(): Error {
@@ -173,10 +147,6 @@ function synthesisCancelledError(): Error {
 
 function throwIfSynthesisCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) throw synthesisCancelledError();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function modelAsset(file: string): Audio8Asset {
@@ -246,9 +216,9 @@ function trailingHiddenState(tensor: ort.Tensor, size: number): ort.Tensor {
 }
 
 /**
- * mulberry32. Seeding the sampler makes a given text, voice and model revision
- * reproduce the same audio, which is what makes regressions in this file
- * detectable at all.
+ * mulberry32. Seeding the sampler makes a given text, voice, seed and model
+ * revision reproduce the same audio, which is what makes regressions in this
+ * file detectable at all, and what lets a user keep a take they liked.
  */
 export function createSeededRandom(seed: number): () => number {
   let state = seed >>> 0;
@@ -262,44 +232,92 @@ export function createSeededRandom(seed: number): () => number {
 }
 
 /**
+ * Indices of the `k` largest logits, largest first, in exactly the order a
+ * stable descending sort leaves them: equal logits keep ascending index order.
+ *
+ * A row holds ~4,096 logits and each audio frame draws eleven times, so fully
+ * sorting the row on every draw cost about a sixth of generation time. A
+ * bounded insertion buffer only ever shifts within the top `k`, and once it is
+ * full most logits are rejected by a single comparison against its smallest
+ * entry. Candidates only displace strictly smaller entries, which is what
+ * keeps ties in index order. NaN never ranks: comparisons against it are always
+ * false, so it could otherwise freeze the buffer with a value no real logit
+ * displaces.
+ */
+export function topKLogitIndices(logits: Float64Array, k: number): Int32Array {
+  const capacity = Math.max(0, Math.min(Math.trunc(k), logits.length));
+  const indices = new Int32Array(capacity);
+  const values = new Float64Array(capacity);
+  let size = 0;
+  for (let index = 0; index < logits.length; index += 1) {
+    const value = logits[index];
+    if (size === capacity ? !(value > values[capacity - 1]) : Number.isNaN(value)) continue;
+    let slot = size < capacity ? size++ : capacity - 1;
+    while (slot > 0 && values[slot - 1] < value) {
+      values[slot] = values[slot - 1];
+      indices[slot] = indices[slot - 1];
+      slot -= 1;
+    }
+    values[slot] = value;
+    indices[slot] = index;
+  }
+  return indices.subarray(0, size);
+}
+
+/**
  * Top-k, then nucleus (top-p), then temperature, then an exponential race for
  * the winner: each surviving candidate draws `weight / -ln(u)` and the largest
  * draw wins, which is the Gumbel-max trick in multiplicative form. The race is
  * equivalent to sampling from the softmax, and keeps the whole step branch-free
  * of cumulative-sum edge cases.
+ *
+ * Every floating-point operation below runs in the same order as the original
+ * sort-based implementation and consumes one random draw per nucleus member,
+ * so a seeded stream reproduces the same tokens bit for bit. The golden tests
+ * in `audio8NativeWorker.test.ts` pin that equivalence.
  */
 export function sampleTokenId(
   logits: Float64Array,
   { temperature, topP, topK }: SamplingOptions,
   random: () => number,
 ): number {
-  const ranked = Array.from({ length: logits.length }, (_unused, index) => index)
-    .sort((left, right) => logits[right] - logits[left])
-    .slice(0, topK);
+  const ranked = topKLogitIndices(logits, topK);
+  if (ranked.length === 0) throw new Error("Audio8 sampler received no usable logits.");
   const highest = logits[ranked[0]];
-  const unscaled = ranked.map((index) => Math.exp(logits[index] - highest));
-  const unscaledTotal = unscaled.reduce((total, weight) => total + weight, 0);
-
-  // The candidate that crosses `topP` is kept, so the nucleus is never empty.
-  const nucleus: number[] = [];
-  let cumulative = 0;
+  const unscaled = new Float64Array(ranked.length);
+  let unscaledTotal = 0;
   for (let rank = 0; rank < ranked.length; rank += 1) {
-    if (rank && cumulative > topP) break;
-    nucleus.push(ranked[rank]);
-    cumulative += unscaled[rank] / unscaledTotal;
+    unscaled[rank] = Math.exp(logits[ranked[rank]] - highest);
+    unscaledTotal += unscaled[rank];
   }
 
-  const scaledHighest = Math.max(...nucleus.map((index) => logits[index] / temperature));
-  const weights = nucleus.map((index) => Math.exp(logits[index] / temperature - scaledHighest));
-  const weightTotal = weights.reduce((total, weight) => total + weight, 0);
+  // The candidate that crosses `topP` is kept, so the nucleus is never empty.
+  // It is always a prefix of `ranked`.
+  let nucleusSize = 0;
+  let cumulative = 0;
+  for (; nucleusSize < ranked.length; nucleusSize += 1) {
+    if (nucleusSize && cumulative > topP) break;
+    cumulative += unscaled[nucleusSize] / unscaledTotal;
+  }
 
-  let winner = nucleus[0];
+  let scaledHighest = -Infinity;
+  for (let rank = 0; rank < nucleusSize; rank += 1) {
+    scaledHighest = Math.max(scaledHighest, logits[ranked[rank]] / temperature);
+  }
+  const weights = new Float64Array(nucleusSize);
+  let weightTotal = 0;
+  for (let rank = 0; rank < nucleusSize; rank += 1) {
+    weights[rank] = Math.exp(logits[ranked[rank]] / temperature - scaledHighest);
+    weightTotal += weights[rank];
+  }
+
+  let winner = ranked[0];
   let bestScore = -Infinity;
-  for (let candidate = 0; candidate < nucleus.length; candidate += 1) {
-    const score = weights[candidate] / weightTotal / -Math.log(Math.max(1e-12, random()));
+  for (let rank = 0; rank < nucleusSize; rank += 1) {
+    const score = weights[rank] / weightTotal / -Math.log(Math.max(1e-12, random()));
     if (score > bestScore) {
       bestScore = score;
-      winner = nucleus[candidate];
+      winner = ranked[rank];
     }
   }
   return winner;
@@ -384,7 +402,7 @@ export class Audio8Runtime {
   async synthesize(
     text: string,
     voice: Audio8Voice,
-    { signal, onProgress }: SynthesisOptions = {},
+    { signal, onProgress, seed = AUDIO8_DEFAULT_SEED, temperature }: SynthesisOptions = {},
   ): Promise<Float32Array> {
     const manifest = this.#manifest;
     const prompt = this.#buildPrompt(text, voice);
@@ -404,7 +422,10 @@ export class Audio8Runtime {
       manifest.maxSeqLen,
       manifest.headDim,
     );
-    const random = createSeededRandom(SAMPLER_SEED);
+    const sampler: TakeSampler = {
+      random: createSeededRandom(seed),
+      nucleus: temperature === undefined ? NUCLEUS_SAMPLING : { ...NUCLEUS_SAMPLING, temperature },
+    };
     const frames: number[][] = [];
     let step: SlowStep | null = null;
     let recentSemantics: number[] = [];
@@ -420,13 +441,13 @@ export class Audio8Runtime {
       );
       for (let token = 0; token < maxTokens; token += 1) {
         throwIfSynthesisCancelled(signal);
-        const semantic = this.#chooseSemanticToken(step.logits, recentSemantics, random);
+        const semantic = this.#chooseSemanticToken(step.logits, recentSemantics, sampler);
         if (semantic === manifest.imEndId) {
           reachedEnd = true;
           break;
         }
         recentSemantics = [...recentSemantics, semantic].slice(-RECENT_SEMANTIC_WINDOW);
-        frames.push(await this.#expandFrame(semantic, step.hidden, random, signal));
+        frames.push(await this.#expandFrame(semantic, step.hidden, sampler, signal));
         if (token % PROGRESS_TOKEN_INTERVAL === 0) onProgress?.((token / maxTokens) * 100);
 
         // The final frame needs no follow-up state, and the slow step is the
@@ -457,11 +478,11 @@ export class Audio8Runtime {
    * re-rolled once at a higher temperature, which is what stops the loop
    * settling into a repeated syllable.
    */
-  #chooseSemanticToken(logits: Float64Array, recent: number[], random: () => number): number {
+  #chooseSemanticToken(logits: Float64Array, recent: number[], { random, nucleus }: TakeSampler): number {
     const manifest = this.#manifest;
     // Both draws are always taken so the seeded stream stays aligned with the
     // reference runtime whether or not the retry is used.
-    const first = sampleTokenId(logits, NUCLEUS_SAMPLING, random);
+    const first = sampleTokenId(logits, nucleus, random);
     const retry = sampleTokenId(logits, REPEAT_ESCAPE_SAMPLING, random);
     const toSemantic = (index: number) => (
       index < manifest.codebookSize ? manifest.semanticBeginId + index : manifest.imEndId
@@ -478,7 +499,7 @@ export class Audio8Runtime {
   async #expandFrame(
     semantic: number,
     hidden: ort.Tensor,
-    random: () => number,
+    { random, nucleus }: TakeSampler,
     signal?: AbortSignal,
   ): Promise<number[]> {
     const manifest = this.#manifest;
@@ -496,7 +517,7 @@ export class Audio8Runtime {
       for (let book = 1; book < manifest.numCodebooks; book += 1) {
         throwIfSynthesisCancelled(signal);
         const logits = await this.#fastStep(hidden, code, false, book, fastCaches, signal);
-        code = sampleTokenId(logits, NUCLEUS_SAMPLING, random);
+        code = sampleTokenId(logits, nucleus, random);
         frame.push(code);
       }
       return frame;
@@ -728,12 +749,7 @@ export async function createAudio8Runtime(
     (await assets.readFile(modelAsset(TOKENIZER_FILE))).toString("utf8"),
   );
   const tokenizer = await createTokenizer(tokenizerJson);
-  const options: ort.InferenceSession.SessionOptions = {
-    executionProviders: ["cpu"],
-    graphOptimizationLevel: "all",
-    intraOpNumThreads: selectAudio8InferenceThreads(),
-    interOpNumThreads: 2,
-  };
+  const options = createCpuSessionOptions(selectAudio8InferenceThreads());
 
   // Each session maps hundreds of MiB of weights. A load that fails or is
   // cancelled part way through must not strand the ones already built.
@@ -797,29 +813,8 @@ function assertVoiceId(value: unknown): Audio8VoiceId {
 
 export function startAudio8Worker(port: Audio8WorkerPort, modelDir: string): void {
   const assets = new Audio8AssetCache(modelDir);
-  // One load, however many windows and StrictMode double-effects ask for it.
-  const loading = new SharedTask<Audio8Runtime, number>(loadCancelledError);
   const voices = new Map<Audio8VoiceId, Audio8Voice>();
   const voiceLoads = new SharedTaskGroup<Audio8Voice>(synthesisCancelledError);
-  const inFlight = new Map<string, AbortController>();
-  let runtime: Audio8Runtime | null = null;
-  const generationQueue = new SerialTaskQueue();
-
-  const post = (message: Audio8WorkerResponse, transfer: ArrayBuffer[] = []): void => {
-    port.postMessage(message, transfer);
-  };
-
-  const load = (requestId: string, signal: AbortSignal): Promise<Audio8Runtime> => {
-    if (runtime) return Promise.resolve(runtime);
-    return loading.run(async (context) => {
-      const loaded = await createAudio8Runtime(assets, context);
-      runtime = loaded;
-      return loaded;
-    }, {
-      onProgress: (percent) => post({ type: "progress", requestId, percent }),
-      signal,
-    });
-  };
 
   // Voice profiles are a few kilobytes of `.npy` that never change, and the
   // renderer sends one request per 180 characters of text.
@@ -833,74 +828,36 @@ export function startAudio8Worker(port: Audio8WorkerPort, modelDir: string): voi
     }, { signal });
   };
 
-  const generate = async (
-    requestId: string,
-    request: Record<string, unknown>,
-    signal: AbortSignal,
-  ): Promise<Audio8NativeResult> => {
-    const text = assertSynthesisText(request.text);
-    const voiceId = assertVoiceId(request.voice);
-    const loaded = await load(requestId, signal);
-    const voice = await loadVoice(voiceId, signal);
-    const startedAt = performance.now();
-    const audio = await loaded.synthesize(text, voice, {
-      signal,
-      onProgress: (percent) => post({ type: "progress", requestId, percent }),
-    });
-    return {
-      sampleRate: loaded.sampleRate,
-      elapsedSec: (performance.now() - startedAt) / 1000,
-      audio: audio.buffer as ArrayBuffer,
-    };
-  };
-
-  const scheduleGenerate = (
-    requestId: string,
-    request: Record<string, unknown>,
-    signal: AbortSignal,
-  ): Promise<Audio8NativeResult> => {
-    return generationQueue.run(() => {
-      throwIfSynthesisCancelled(signal);
-      return generate(requestId, request, signal);
-    });
-  };
-
-  port.on("message", (value: unknown) => {
-    if (!isRecord(value) || typeof value.requestId !== "string") return;
-    const requestId = value.requestId;
-    if (value.type === "cancel") {
-      // Unknown ids are dropped rather than remembered: a cancel that lands
-      // after its request finished used to sit in a set that only ever grew.
-      inFlight.get(requestId)?.abort();
-      return;
-    }
-    const controller = new AbortController();
-    inFlight.set(requestId, controller);
-    void (async () => {
-      try {
-        if (value.type === "load") {
-          const loaded = await load(requestId, controller.signal);
-          post({ type: "result", requestId, result: { ready: true, sampleRate: loaded.sampleRate } });
-          return;
-        }
-        if (value.type !== "generate") throw new Error(`Unsupported Audio8 request "${String(value.type)}".`);
-        const result = await scheduleGenerate(requestId, value, controller.signal);
-        post({ type: "result", requestId, result }, result.audio ? [result.audio] : []);
-      } catch (error) {
-        post({
-          type: "error",
-          requestId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      } finally {
-        inFlight.delete(requestId);
-      }
-    })();
+  startNativeModelWorker(port, {
+    descriptor: AUDIO8_DESCRIPTOR,
+    load: (context) => createAudio8Runtime(assets, context),
+    loadCancelledError,
+    describeLoaded: (runtime) => ({ ready: true, sampleRate: runtime.sampleRate }),
+    handlers: {
+      generate: async (request, { signal, loadRuntime, report }) => {
+        throwIfSynthesisCancelled(signal);
+        const text = assertSynthesisText(request.text);
+        const voiceId = assertVoiceId(request.voice);
+        const sampling = parseAudio8SamplingOptions(request);
+        const loaded = await loadRuntime();
+        const voice = await loadVoice(voiceId, signal);
+        const startedAt = performance.now();
+        const audio = await loaded.synthesize(text, voice, { ...sampling, signal, onProgress: report });
+        const buffer = audio.buffer as ArrayBuffer;
+        return {
+          result: {
+            sampleRate: loaded.sampleRate,
+            elapsedSec: (performance.now() - startedAt) / 1000,
+            audio: buffer,
+          },
+          transfer: [buffer],
+        };
+      },
+    },
   });
 }
 
 // Absent when the module is imported directly, which is how the pure helpers
 // above are unit tested.
-if (parentPort && isRecord(workerData) && typeof workerData.modelDir === "string") {
-  startAudio8Worker(parentPort, path.resolve(workerData.modelDir));
-}
+const workerModelDir = readWorkerModelDir(workerData);
+if (parentPort && workerModelDir) startAudio8Worker(parentPort, workerModelDir);

@@ -74,6 +74,21 @@ describe("Audio8NativeClient", () => {
     await expect(generate).resolves.toEqual({ sampleRate: 44100, elapsedSec: 1.5, audio });
   });
 
+  it("sends sampling overrides only when a different take was asked for", async () => {
+    const { client, workers } = harness();
+    const reference = client.generate("gen-1", "Hello", "clara");
+    const alternative = client.generate("gen-2", "Hello", "clara", undefined, { seed: 7, temperature: 0.6 });
+
+    expect(workers[0].posted).toEqual([
+      { type: "generate", requestId: "gen-1", text: "Hello", voice: "clara" },
+      { type: "generate", requestId: "gen-2", text: "Hello", voice: "clara", seed: 7, temperature: 0.6 },
+    ]);
+    expect(Object.keys(workers[0].posted[0])).toEqual(["type", "requestId", "text", "voice"]);
+    workers[0].send({ type: "result", requestId: "gen-1", result: { sampleRate: 44100 } });
+    workers[0].send({ type: "result", requestId: "gen-2", result: { sampleRate: 44100 } });
+    await Promise.all([reference, alternative]);
+  });
+
   it("routes progress to the request that caused it", async () => {
     const { client, workers } = harness();
     const first: number[] = [];
