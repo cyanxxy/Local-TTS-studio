@@ -76,6 +76,22 @@ export function createMainWindow({ isDev, appDirectory }: AppWindowOptions): Bro
 }
 
 /**
+ * Brings the app to the front for another launch: restores and focuses the
+ * existing window, or opens one when every window has been closed (macOS keeps
+ * the app running without any).
+ */
+export function revealMainWindow(options: AppWindowOptions): void {
+  const [window] = BrowserWindow.getAllWindows();
+  if (!window) {
+    createMainWindow(options);
+    return;
+  }
+  if (window.isMinimized()) window.restore();
+  window.show();
+  window.focus();
+}
+
+/**
  * Wires the session-wide security policy: the production `app://` protocol,
  * response headers (COOP/COEP and the CSP), navigation and window-open
  * handling, and the deny-by-default permission gates.

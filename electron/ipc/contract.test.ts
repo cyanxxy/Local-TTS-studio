@@ -34,6 +34,7 @@ vi.mock("electron", () => ({
     getPath: () => "/tmp",
     getAppPath: () => "/tmp",
     getVersion: () => "0.0.0-test",
+    requestSingleInstanceLock: () => true,
     quit: vi.fn(),
   },
   BrowserWindow: class {

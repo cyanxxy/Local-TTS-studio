@@ -58,6 +58,8 @@ const mocks = vi.hoisted(() => ({
   logPending: false,
   logFlush: null as Promise<void> | null,
   windowError: null as Error | null,
+  singleInstanceLock: true,
+  exit: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
@@ -71,6 +73,8 @@ vi.mock("electron", () => ({
     getPath: () => mocks.userDataPath,
     getAppPath: () => "/tmp",
     getVersion: () => "0.0.0-test",
+    requestSingleInstanceLock: () => mocks.singleInstanceLock,
+    exit: mocks.exit,
     quit: mocks.quit,
   },
   BrowserWindow: class {
@@ -1656,5 +1660,51 @@ describe("main-process diagnostics", () => {
     await vi.advanceTimersByTimeAsync(500);
 
     expect(mocks.quit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("single-instance lock", () => {
+  async function importMain(): Promise<void> {
+    vi.resetModules();
+    mocks.invokeHandlers.clear();
+    mocks.ipcListeners.clear();
+    mocks.appListeners.clear();
+    mocks.logEntries = [];
+    (globalThis as { __dirname?: string }).__dirname = "/tmp";
+    await import("./main");
+    await drainTurns();
+  }
+
+  beforeEach(() => {
+    mocks.windows = [];
+    mocks.exit.mockClear();
+  });
+
+  afterEach(() => {
+    mocks.singleInstanceLock = true;
+  });
+
+  it("exits a second launch before it logs, registers IPC or opens a window", async () => {
+    mocks.singleInstanceLock = false;
+
+    await importMain();
+
+    expect(mocks.exit).toHaveBeenCalledWith(0);
+    expect(mocks.invokeHandlers.size).toBe(0);
+    expect(mocks.ipcListeners.size).toBe(0);
+    expect(mocks.appListeners.size).toBe(0);
+    expect(mocks.logEntries).toEqual([]);
+  });
+
+  it("brings the running window forward when the app is launched again", async () => {
+    await importMain();
+    const window = { isMinimized: () => true, restore: vi.fn(), show: vi.fn(), focus: vi.fn() };
+    mocks.windows = [window as unknown as FakeWindow];
+
+    mocks.appListeners.get("second-instance")!();
+
+    expect(mocks.exit).not.toHaveBeenCalled();
+    expect(window.restore).toHaveBeenCalledTimes(1);
+    expect(window.focus).toHaveBeenCalledTimes(1);
   });
 });

@@ -2,7 +2,7 @@
 
 import path from "path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { createMainWindow, registerAppScheme, registerSessionSecurity } from "./appWindow";
+import { createMainWindow, registerAppScheme, registerSessionSecurity, revealMainWindow } from "./appWindow";
 
 type Listener = (...args: unknown[]) => void;
 
@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   openExternal: vi.fn(),
   netFetch: vi.fn((url: string) => ({ fetched: url })),
   registerSchemes: vi.fn(),
+  openWindows: [] as unknown[],
 }));
 
 vi.mock("electron", () => ({
@@ -28,6 +29,8 @@ vi.mock("electron", () => ({
     },
   },
   BrowserWindow: class {
+    static getAllWindows = () => mocks.openWindows;
+
     constructor(options: Record<string, unknown>) {
       mocks.windowOptions.push(options);
     }
@@ -96,7 +99,17 @@ beforeEach(() => {
   mocks.openExternal.mockClear();
   mocks.netFetch.mockClear();
   mocks.registerSchemes.mockClear();
+  mocks.openWindows = [];
 });
+
+function fakeOpenWindow(minimized: boolean) {
+  return {
+    isMinimized: vi.fn(() => minimized),
+    restore: vi.fn(),
+    show: vi.fn(),
+    focus: vi.fn(),
+  };
+}
 
 describe("main window", () => {
   it("isolates the renderer and resolves the preload next to the main bundle", () => {
@@ -127,6 +140,35 @@ describe("main window", () => {
 
     expect(error).toHaveBeenCalledWith("Failed to load app://-/desktop/studio:", expect.any(Error));
     error.mockRestore();
+  });
+
+  it("restores and focuses the open window for another launch", () => {
+    const window = fakeOpenWindow(true);
+    mocks.openWindows = [window];
+
+    revealMainWindow({ isDev: false, appDirectory: APP_DIRECTORY });
+
+    expect(window.restore).toHaveBeenCalledTimes(1);
+    expect(window.show).toHaveBeenCalledTimes(1);
+    expect(window.focus).toHaveBeenCalledTimes(1);
+    expect(mocks.windowOptions).toHaveLength(0);
+  });
+
+  it("focuses a visible window without restoring it", () => {
+    const window = fakeOpenWindow(false);
+    mocks.openWindows = [window];
+
+    revealMainWindow({ isDev: false, appDirectory: APP_DIRECTORY });
+
+    expect(window.restore).not.toHaveBeenCalled();
+    expect(window.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a window for another launch when none is left", () => {
+    revealMainWindow({ isDev: false, appDirectory: APP_DIRECTORY });
+
+    expect(mocks.windowOptions).toHaveLength(1);
+    expect(mocks.loadedUrls).toEqual(["app://-/desktop/studio"]);
   });
 
   it("registers the app scheme as a privileged standard scheme", () => {
