@@ -788,11 +788,16 @@ mod tests {
             .map(|_| TcpStream::connect(address).unwrap())
             .collect::<Vec<_>>();
         // Every handshake slot is held by a peer that sent nothing, so the next
-        // connection is closed without one.
+        // connection is closed at once without one. A read that times out
+        // means the bridge started a handshake for it, so only a close counts.
         let mut refused = TcpStream::connect(address).unwrap();
         refused.set_read_timeout(Some(READ_TIMEOUT)).unwrap();
         let mut byte = [0_u8; 1];
-        assert!(matches!(refused.read(&mut byte), Ok(0) | Err(_)));
+        match refused.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            other => panic!("the connection over the cap was not closed: {other:?}"),
+        }
 
         // Once the silent peers leave, their slots free up for the owner.
         drop(silent_peers);
