@@ -1,4 +1,5 @@
 import type { LocalModel } from "../localTtsIpc";
+import { NEUTTS_DEFAULT_MODEL_REPO } from "../localTtsLimits";
 
 export interface PendingWarmup {
   requestId: string;
@@ -11,7 +12,7 @@ export function warmTargetKey(model: LocalModel, payload: Record<string, unknown
   if (model === "qwen3") {
     return [model, payload.mode, payload.modelRepo, payload.modelPath].map(String).join("\0");
   }
-  return [model, payload.modelRepo ?? "neuphonic/neutts-nano-q4-gguf"].map(String).join("\0");
+  return [model, payload.modelRepo ?? NEUTTS_DEFAULT_MODEL_REPO].map(String).join("\0");
 }
 
 /**

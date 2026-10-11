@@ -13,7 +13,10 @@ import {
 import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
   MAX_REFERENCE_AUDIO_BASE64_LENGTH,
+  MAX_REFERENCE_CACHE_KEY_LENGTH,
   MAX_REFERENCE_CODES_BASE64_LENGTH,
+  MAX_REFERENCE_TEXT_LENGTH,
+  NEUTTS_DEFAULT_MODEL_REPO,
   QWEN3_MAX_NEW_TOKENS_PER_PASSAGE,
   QWEN3_MAX_SEED,
   QWEN3_MIN_NEW_TOKENS,
@@ -24,10 +27,8 @@ export const BRIDGE_RESULT_PREFIX = "__RESULT__";
 export const LOCAL_MODELS = ["neutts", "qwen3"] as const;
 const MAX_REQUEST_ID_LENGTH = 120;
 
-const MAX_REFERENCE_TEXT_LENGTH = 2000;
-
-const ALLOWED_NEUTTS_MODELS = new Set([
-  "neuphonic/neutts-nano-q4-gguf",
+export const ALLOWED_NEUTTS_MODELS: ReadonlySet<string> = new Set([
+  NEUTTS_DEFAULT_MODEL_REPO,
   "neuphonic/neutts-air-q4-gguf",
   "neuphonic/neutts-air-q8-gguf",
   "neuphonic/neutts-nano-german-q4-gguf",
@@ -36,7 +37,7 @@ const ALLOWED_NEUTTS_MODELS = new Set([
 ]);
 
 const LEGACY_NEUTTS_MODEL_REPLACEMENTS = new Map([
-  ["neuphonic/neutts-nano-q8-gguf", "neuphonic/neutts-nano-q4-gguf"],
+  ["neuphonic/neutts-nano-q8-gguf", NEUTTS_DEFAULT_MODEL_REPO],
   ["neuphonic/neutts-nano-german-q8-gguf", "neuphonic/neutts-nano-german-q4-gguf"],
   ["neuphonic/neutts-nano-french-q8-gguf", "neuphonic/neutts-nano-french-q4-gguf"],
   ["neuphonic/neutts-nano-spanish-q8-gguf", "neuphonic/neutts-nano-spanish-q4-gguf"],
@@ -395,7 +396,7 @@ export function sanitizeQwen3Payload(
     MAX_REFERENCE_AUDIO_BASE64_LENGTH,
   );
   const referenceCacheKey = parseOptionalString(payload.referenceCacheKey, "referenceCacheKey", {
-    maxLength: 120,
+    maxLength: MAX_REFERENCE_CACHE_KEY_LENGTH,
     pattern: /^(?!.*\.\.)[A-Za-z0-9._-]+$/,
   });
 
