@@ -8,3 +8,8 @@ declare module "virtual:kokoro-onnx-wasm-assets" {
   /** kokoro.web.js, served unbundled so its espeak-ng runtime stays intact. */
   export const KOKORO_WEB_MODULE_URL: string;
 }
+
+declare module "virtual:phonemizer-assets" {
+  /** phonemizer's eSpeak NG build, served unbundled so its runtime stays intact. */
+  export const PHONEMIZER_MODULE_URL: string;
+}
