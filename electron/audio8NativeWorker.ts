@@ -17,7 +17,6 @@
  * and worker-protocol layers around it.
  */
 
-import path from "path";
 import { parentPort, workerData } from "worker_threads";
 import * as ort from "onnxruntime-node";
 import { Audio8AssetCache } from "./audio8AssetCache";
@@ -25,6 +24,7 @@ import { parseAudio8SamplingOptions, type Audio8SamplingOptions } from "./audio8
 import {
   AUDIO8_DEFAULT_SEED,
   AUDIO8_DEFAULT_TEMPERATURE,
+  AUDIO8_DESCRIPTOR,
   AUDIO8_MAX_TEXT_CHARACTERS,
   AUDIO8_MODEL_ASSETS,
   AUDIO8_VOICE_ASSETS,
@@ -32,45 +32,14 @@ import {
   type Audio8Asset,
   type Audio8VoiceId,
 } from "./audio8Model";
-import type { Audio8NativeResult, Audio8WorkerResponse } from "./audio8NativeClient";
-import { SerialTaskQueue, SharedTask, SharedTaskGroup, type SharedTaskContext } from "./nativeModels/sharedTask";
+import type { Audio8NativeResult } from "./audio8NativeClient";
 import { selectAudio8InferenceThreads } from "./audio8Threading";
+import { createCpuSessionOptions, prepareOrtNodeWorker } from "./nativeModels/ortNode";
+import { SharedTaskGroup, type SharedTaskContext } from "./nativeModels/sharedTask";
+import { startNativeModelWorker, type NativeModelWorkerPort } from "./nativeModels/workerHost";
+import { isRecord, readWorkerModelDir } from "./nativeModels/workerProtocol";
 
-/**
- * onnxruntime-common selects its FP16 backing array lazily, the first time an
- * `ort.Tensor` is constructed. Node 24 introduced a native `Float16Array`, so
- * ORT 1.27 now selects that instead of the Uint16Array representation its Node
- * binding has historically used. The native addon accepts the new array type,
- * but node-addon-api 6 reports its byte length as zero. Every non-empty FP16
- * input consequently fails with e.g. `not enough space: expected 524288, got
- * 0`.
- *
- * Prime ORT's process-local type mapping while Float16Array is hidden. The map
- * then keeps using Uint16Array, whose bits are identical and which the native
- * binding handles correctly. Restore the global immediately so this worker
- * does not change JavaScript semantics for the tokenizer or any other code.
- */
-export function initialiseAudio8OrtFloat16Compatibility(): void {
-  const globalWithFloat16 = globalThis as typeof globalThis & { Float16Array?: unknown };
-  if (typeof globalWithFloat16.Float16Array !== "function") return;
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, "Float16Array");
-  if (!descriptor?.configurable) {
-    throw new Error("Audio8 cannot initialise ONNX Runtime FP16 compatibility.");
-  }
-  try {
-    Object.defineProperty(globalThis, "Float16Array", { ...descriptor, value: undefined });
-    const probe = new ort.Tensor("float16", new Uint16Array(1), [1]);
-    probe.dispose();
-  } finally {
-    Object.defineProperty(globalThis, "Float16Array", descriptor);
-  }
-}
-
-initialiseAudio8OrtFloat16Compatibility();
-
-// ORT logs one info line per session and per optimisation pass otherwise, which
-// ends up in the packaged app's stderr for every load.
-ort.env.logLevel = "error";
+prepareOrtNodeWorker(AUDIO8_DESCRIPTOR.label);
 
 const RUNTIME_MANIFEST_FILE = "runtime_manifest.json";
 const TOKENIZER_FILE = "tokenizer/tokenizer.json";
@@ -120,14 +89,8 @@ export interface SamplingOptions {
   topK: number;
 }
 
-/**
- * The parent port, narrowed to what this worker uses so the request handling
- * can be driven from a test without a real worker thread.
- */
-export interface Audio8WorkerPort {
-  on(event: "message", listener: (value: unknown) => void): unknown;
-  postMessage(value: Audio8WorkerResponse, transfer?: readonly ArrayBuffer[]): void;
-}
+/** The parent port, narrowed so request handling can be driven from a test. */
+export type Audio8WorkerPort = NativeModelWorkerPort<Audio8NativeResult>;
 
 export interface Audio8Voice {
   codes: Uint16Array;
@@ -184,10 +147,6 @@ function synthesisCancelledError(): Error {
 
 function throwIfSynthesisCancelled(signal?: AbortSignal): void {
   if (signal?.aborted) throw synthesisCancelledError();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function modelAsset(file: string): Audio8Asset {
@@ -790,12 +749,7 @@ export async function createAudio8Runtime(
     (await assets.readFile(modelAsset(TOKENIZER_FILE))).toString("utf8"),
   );
   const tokenizer = await createTokenizer(tokenizerJson);
-  const options: ort.InferenceSession.SessionOptions = {
-    executionProviders: ["cpu"],
-    graphOptimizationLevel: "all",
-    intraOpNumThreads: selectAudio8InferenceThreads(),
-    interOpNumThreads: 2,
-  };
+  const options = createCpuSessionOptions(selectAudio8InferenceThreads());
 
   // Each session maps hundreds of MiB of weights. A load that fails or is
   // cancelled part way through must not strand the ones already built.
@@ -859,29 +813,8 @@ function assertVoiceId(value: unknown): Audio8VoiceId {
 
 export function startAudio8Worker(port: Audio8WorkerPort, modelDir: string): void {
   const assets = new Audio8AssetCache(modelDir);
-  // One load, however many windows and StrictMode double-effects ask for it.
-  const loading = new SharedTask<Audio8Runtime, number>(loadCancelledError);
   const voices = new Map<Audio8VoiceId, Audio8Voice>();
   const voiceLoads = new SharedTaskGroup<Audio8Voice>(synthesisCancelledError);
-  const inFlight = new Map<string, AbortController>();
-  let runtime: Audio8Runtime | null = null;
-  const generationQueue = new SerialTaskQueue();
-
-  const post = (message: Audio8WorkerResponse, transfer: ArrayBuffer[] = []): void => {
-    port.postMessage(message, transfer);
-  };
-
-  const load = (requestId: string, signal: AbortSignal): Promise<Audio8Runtime> => {
-    if (runtime) return Promise.resolve(runtime);
-    return loading.run(async (context) => {
-      const loaded = await createAudio8Runtime(assets, context);
-      runtime = loaded;
-      return loaded;
-    }, {
-      onProgress: (percent) => post({ type: "progress", requestId, percent }),
-      signal,
-    });
-  };
 
   // Voice profiles are a few kilobytes of `.npy` that never change, and the
   // renderer sends one request per 180 characters of text.
@@ -895,76 +828,36 @@ export function startAudio8Worker(port: Audio8WorkerPort, modelDir: string): voi
     }, { signal });
   };
 
-  const generate = async (
-    requestId: string,
-    request: Record<string, unknown>,
-    signal: AbortSignal,
-  ): Promise<Audio8NativeResult> => {
-    const text = assertSynthesisText(request.text);
-    const voiceId = assertVoiceId(request.voice);
-    const sampling = parseAudio8SamplingOptions(request);
-    const loaded = await load(requestId, signal);
-    const voice = await loadVoice(voiceId, signal);
-    const startedAt = performance.now();
-    const audio = await loaded.synthesize(text, voice, {
-      ...sampling,
-      signal,
-      onProgress: (percent) => post({ type: "progress", requestId, percent }),
-    });
-    return {
-      sampleRate: loaded.sampleRate,
-      elapsedSec: (performance.now() - startedAt) / 1000,
-      audio: audio.buffer as ArrayBuffer,
-    };
-  };
-
-  const scheduleGenerate = (
-    requestId: string,
-    request: Record<string, unknown>,
-    signal: AbortSignal,
-  ): Promise<Audio8NativeResult> => {
-    return generationQueue.run(() => {
-      throwIfSynthesisCancelled(signal);
-      return generate(requestId, request, signal);
-    });
-  };
-
-  port.on("message", (value: unknown) => {
-    if (!isRecord(value) || typeof value.requestId !== "string") return;
-    const requestId = value.requestId;
-    if (value.type === "cancel") {
-      // Unknown ids are dropped rather than remembered: a cancel that lands
-      // after its request finished used to sit in a set that only ever grew.
-      inFlight.get(requestId)?.abort();
-      return;
-    }
-    const controller = new AbortController();
-    inFlight.set(requestId, controller);
-    void (async () => {
-      try {
-        if (value.type === "load") {
-          const loaded = await load(requestId, controller.signal);
-          post({ type: "result", requestId, result: { ready: true, sampleRate: loaded.sampleRate } });
-          return;
-        }
-        if (value.type !== "generate") throw new Error(`Unsupported Audio8 request "${String(value.type)}".`);
-        const result = await scheduleGenerate(requestId, value, controller.signal);
-        post({ type: "result", requestId, result }, result.audio ? [result.audio] : []);
-      } catch (error) {
-        post({
-          type: "error",
-          requestId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      } finally {
-        inFlight.delete(requestId);
-      }
-    })();
+  startNativeModelWorker(port, {
+    descriptor: AUDIO8_DESCRIPTOR,
+    load: (context) => createAudio8Runtime(assets, context),
+    loadCancelledError,
+    describeLoaded: (runtime) => ({ ready: true, sampleRate: runtime.sampleRate }),
+    handlers: {
+      generate: async (request, { signal, loadRuntime, report }) => {
+        throwIfSynthesisCancelled(signal);
+        const text = assertSynthesisText(request.text);
+        const voiceId = assertVoiceId(request.voice);
+        const sampling = parseAudio8SamplingOptions(request);
+        const loaded = await loadRuntime();
+        const voice = await loadVoice(voiceId, signal);
+        const startedAt = performance.now();
+        const audio = await loaded.synthesize(text, voice, { ...sampling, signal, onProgress: report });
+        const buffer = audio.buffer as ArrayBuffer;
+        return {
+          result: {
+            sampleRate: loaded.sampleRate,
+            elapsedSec: (performance.now() - startedAt) / 1000,
+            audio: buffer,
+          },
+          transfer: [buffer],
+        };
+      },
+    },
   });
 }
 
 // Absent when the module is imported directly, which is how the pure helpers
 // above are unit tested.
-if (parentPort && isRecord(workerData) && typeof workerData.modelDir === "string") {
-  startAudio8Worker(parentPort, path.resolve(workerData.modelDir));
-}
+const workerModelDir = readWorkerModelDir(workerData);
+if (parentPort && workerModelDir) startAudio8Worker(parentPort, workerModelDir);

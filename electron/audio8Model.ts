@@ -14,6 +14,8 @@
  * `vite.audio8Catalogue.test.ts` asserts the two stay in agreement.
  */
 
+import type { NativeModelDescriptor } from "./nativeModels/descriptor";
+
 export const AUDIO8_MODEL_ID = "Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4";
 export const AUDIO8_MODEL_REVISION = "818569c6b832118ad68d61bbd873abe250fcd68a";
 
@@ -26,6 +28,14 @@ export const AUDIO8_VOICE_SPACE_REVISION = "6417ebaafc996620bebc3eb27cde0d5acb19
 
 /** Directory name under `userData/local-model-cache`. */
 export const AUDIO8_CACHE_NAMESPACE = "audio8";
+
+/** How the shared native model framework names, stores and starts Audio8. */
+export const AUDIO8_DESCRIPTOR: NativeModelDescriptor = {
+  label: "Audio8",
+  cacheNamespace: AUDIO8_CACHE_NAMESPACE,
+  revision: AUDIO8_MODEL_REVISION,
+  workerEntry: "audio8NativeWorker.js",
+};
 
 export const AUDIO8_VOICE_IDS = ["clara", "iris", "arthur", "mia", "ben", "sophie"] as const;
 export type Audio8VoiceId = typeof AUDIO8_VOICE_IDS[number];
