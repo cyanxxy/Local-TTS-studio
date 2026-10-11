@@ -161,4 +161,61 @@ mod tests {
         assert_eq!(decoded.samples, vec![1.0, 0.0]);
         assert!(decoded.samples.iter().all(|sample| sample.is_finite()));
     }
+
+    #[test]
+    fn decoding_stops_at_the_duration_limit_and_reports_truncation() {
+        let decode = |frames: usize| {
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 8_000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut cursor = std::io::Cursor::new(Vec::new());
+            {
+                let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+                for _ in 0..frames {
+                    writer.write_sample(16_384_i16).unwrap();
+                }
+                writer.finalize().unwrap();
+            }
+            let reader = hound::WavReader::new(std::io::Cursor::new(cursor.into_inner())).unwrap();
+            decode_bounded_mono_wav(reader, "test WAV", 1).unwrap()
+        };
+
+        let exact = decode(8_000);
+        assert_eq!(exact.sample_rate, 8_000);
+        assert_eq!(exact.samples.len(), 8_000);
+        assert!(exact.samples.iter().all(|sample| *sample == 0.5));
+        assert!(!exact.truncated);
+
+        let long = decode(8_001);
+        assert_eq!(long.samples.len(), 8_000);
+        assert!(long.truncated);
+    }
+
+    #[test]
+    fn unsupported_sample_rates_and_channel_counts_are_rejected() {
+        assert!(ensure_reference_sample_rate(MIN_REFERENCE_WAV_SAMPLE_RATE, "test").is_ok());
+        assert!(ensure_reference_sample_rate(MAX_REFERENCE_WAV_SAMPLE_RATE + 1, "test").is_err());
+        let spec = hound::WavSpec {
+            channels: 3,
+            sample_rate: 16_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = hound::WavWriter::new(&mut cursor, spec).unwrap();
+            for _ in 0..3 {
+                writer.write_sample(0_i16).unwrap();
+            }
+            writer.finalize().unwrap();
+        }
+        let reader = hound::WavReader::new(std::io::Cursor::new(cursor.into_inner())).unwrap();
+        let error = decode_bounded_mono_wav(reader, "test WAV", 1)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "test WAV must be mono or stereo.");
+    }
 }

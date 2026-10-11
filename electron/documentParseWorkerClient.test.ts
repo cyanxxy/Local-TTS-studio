@@ -54,9 +54,9 @@ describe("DocumentParseWorkerClient", () => {
       "/app/documentParseWorker.js",
       { workerData: { filePath: "/tmp/book.pdf", maxPages: 800 } },
     );
-    workers[0].send({ ok: true, text: "Book text", pageCount: 12 });
+    workers[0].send({ ok: true, pages: ["Book", "text"], pageCount: 2 });
 
-    await expect(result).resolves.toEqual({ text: "Book text", pageCount: 12 });
+    await expect(result).resolves.toEqual({ pages: ["Book", "text"], pageCount: 2 });
     expect(workers[0].terminate).toHaveBeenCalledTimes(1);
   });
 
@@ -79,19 +79,35 @@ describe("DocumentParseWorkerClient", () => {
     await expect(client.parse("/tmp/second.pdf")).rejects.toThrow(
       "Another document import is still running.",
     );
-    workers[0].send({ ok: true, text: "First", pageCount: 1 });
-    await expect(first).resolves.toEqual({ text: "First", pageCount: 1 });
+    workers[0].send({ ok: true, pages: ["First"], pageCount: 1 });
+    await expect(first).resolves.toEqual({ pages: ["First"], pageCount: 1 });
   });
 
   it("rejects malformed responses and worker failures", async () => {
     const { client, workers } = harness();
     const malformed = client.parse("/tmp/bad.pdf");
-    workers[0].send({ ok: true, text: 42, pageCount: 1 });
+    workers[0].send({ ok: true, pages: ["Page one", 42], pageCount: 2 });
     await expect(malformed).rejects.toThrow("invalid text");
 
     const failed = client.parse("/tmp/fail.pdf");
     workers[1].fail(new Error("native parser crashed"));
     await expect(failed).rejects.toThrow("native parser crashed");
+  });
+
+  it("rejects page counts that disagree with the pages or exceed the limit", async () => {
+    const { client, workers } = harness();
+    const legacy = client.parse("/tmp/legacy.pdf");
+    workers[0].send({ ok: true, text: "Joined text only", pageCount: 1 });
+    await expect(legacy).rejects.toThrow("invalid text");
+
+    const mismatched = client.parse("/tmp/mismatched.pdf");
+    workers[1].send({ ok: true, pages: ["One", "Two"], pageCount: 3 });
+    await expect(mismatched).rejects.toThrow("invalid page count");
+
+    const oversized = client.parse("/tmp/oversized.pdf");
+    const pages = Array.from({ length: 801 }, (_, index) => `Page ${index + 1}`);
+    workers[2].send({ ok: true, pages, pageCount: pages.length });
+    await expect(oversized).rejects.toThrow("invalid page count");
   });
 
   it("terminates an active parse during shutdown and rejects future work", async () => {

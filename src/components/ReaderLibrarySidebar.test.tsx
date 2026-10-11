@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { useState } from "react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState, type ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { PlaybackClock } from "../lib/playbackClock";
-import { createReaderDocument } from "../lib/readerDocument";
+import { createReaderDocument, type ReaderDocumentRecord } from "../lib/readerDocument";
 import { findDocumentMatches } from "../lib/readerSearch";
 import {
   ReaderLibrarySidebar,
@@ -201,5 +201,135 @@ describe("ReaderLibrarySidebar", () => {
       expect.objectContaining({ offset: 0, match: "İa" }),
       expect.objectContaining({ offset: 2, match: "İa" }),
     ]);
+  });
+
+  describe("annotations", () => {
+    const text = "Call me Ishmael. Some years ago I went to sea.";
+    const annotated: ReaderDocumentRecord = {
+      ...createReaderDocument({ id: "annotated", title: "Moby Dick", text }),
+      highlights: [
+        { id: "hl-1", start: 0, end: 15, color: "yellow", quote: "Call me Ishmael", createdAt: 1, updatedAt: 1 },
+        { id: "hl-2", start: 33, end: 44, color: "blue", quote: "sailed away", createdAt: 1, updatedAt: 1 },
+      ],
+    };
+
+    function renderAnnotated(overrides: Partial<ComponentProps<typeof ReaderLibrarySidebar>> = {}) {
+      const props: ComponentProps<typeof ReaderLibrarySidebar> = {
+        open: true,
+        documents: [annotated],
+        activeDocument: annotated,
+        currentTextOffset: 0,
+        clock: new PlaybackClock(),
+        onClose: vi.fn(),
+        onOpenDocument: vi.fn(),
+        onNewDocument: vi.fn(),
+        onDeleteDocument: vi.fn(),
+        onUpdateMetadata: vi.fn(),
+        onJumpToOffset: vi.fn(),
+        onAddBookmark: vi.fn(),
+        onRemoveBookmark: vi.fn(),
+        onAddNote: vi.fn(),
+        onUpdateNote: vi.fn(),
+        onRemoveNote: vi.fn(),
+        tab: "notes",
+        onTabChange: vi.fn(),
+        ...overrides,
+      };
+      render(<ReaderLibrarySidebar {...props} />);
+      return props;
+    }
+
+    it("lists highlights in the Notes tab with jump, recolour and remove", () => {
+      const onUpdateHighlight = vi.fn();
+      const onRemoveHighlight = vi.fn();
+      const props = renderAnnotated({ onUpdateHighlight, onRemoveHighlight });
+      const list = within(screen.getByRole("region", { name: "Highlights" }));
+
+      fireEvent.click(list.getByRole("button", { name: "Call me Ishmael" }));
+      expect(props.onJumpToOffset).toHaveBeenCalledWith(0);
+      // A highlight whose words were edited away stays listed without a jump.
+      expect(list.getByText("This passage was edited away.")).toBeInTheDocument();
+      expect(list.queryByRole("button", { name: /sailed away/ })).toBeNull();
+
+      const [firstPink] = list.getAllByRole("button", { name: "Pink highlight" });
+      fireEvent.click(firstPink);
+      expect(onUpdateHighlight).toHaveBeenCalledWith("hl-1", { color: "pink" });
+      fireEvent.click(list.getAllByRole("button", { name: "Yellow highlight" })[0]);
+      expect(onUpdateHighlight).toHaveBeenCalledTimes(1);
+
+      fireEvent.click(list.getAllByRole("button", { name: "Remove" })[1]);
+      expect(onRemoveHighlight).toHaveBeenCalledWith("hl-2");
+    });
+
+    it("lists highlights read-only when they cannot be changed", () => {
+      renderAnnotated();
+      const list = within(screen.getByRole("region", { name: "Highlights" }));
+
+      expect(list.queryByRole("button", { name: "Pink highlight" })).toBeNull();
+      expect(list.queryByRole("button", { name: "Remove" })).toBeNull();
+    });
+
+    it("downloads the annotations as a file from the Bookmarks tab", () => {
+      const createObjectURL = vi.fn<(blob: Blob) => string>(() => "blob:annotations");
+      const revokeObjectURL = vi.fn();
+      vi.stubGlobal("URL", Object.assign(Object.create(URL), { createObjectURL, revokeObjectURL }));
+      const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+      vi.useFakeTimers();
+      try {
+        renderAnnotated({ tab: "bookmarks" });
+        fireEvent.click(screen.getByRole("button", { name: "Export notes, highlights and bookmarks as JSON" }));
+
+        expect(click).toHaveBeenCalledTimes(1);
+        const anchor = click.mock.contexts[0] as HTMLAnchorElement;
+        expect(anchor.download).toBe("Moby-Dick-annotations.json");
+        expect(createObjectURL.mock.calls[0][0].type).toBe("application/json;charset=utf-8");
+        act(() => {
+          vi.advanceTimersByTime(1);
+        });
+        expect(revokeObjectURL).toHaveBeenCalledWith("blob:annotations");
+        expect(anchor.isConnected).toBe(false);
+      } finally {
+        vi.useRealTimers();
+        click.mockRestore();
+        vi.unstubAllGlobals();
+      }
+    });
+
+    it("offers no export for a book without annotations", () => {
+      renderAnnotated({ activeDocument: readerDocument, documents: [readerDocument] });
+
+      expect(screen.queryByRole("group", { name: "Export annotations" })).toBeNull();
+    });
+
+    it("shows a book's cover on its library card", () => {
+      const cover = { dataUrl: "data:image/png;base64,iVBORw0KGgo=" };
+      const { container } = render(
+        <ReaderLibrarySidebar
+          open
+          documents={[{ ...annotated, cover }, readerDocument]}
+          activeDocument={null}
+          currentTextOffset={0}
+          clock={new PlaybackClock()}
+          onClose={vi.fn()}
+          onOpenDocument={vi.fn()}
+          onNewDocument={vi.fn()}
+          onDeleteDocument={vi.fn()}
+          onUpdateMetadata={vi.fn()}
+          onJumpToOffset={vi.fn()}
+          onAddBookmark={vi.fn()}
+          onRemoveBookmark={vi.fn()}
+          onAddNote={vi.fn()}
+          onUpdateNote={vi.fn()}
+          onRemoveNote={vi.fn()}
+          tab="library"
+          onTabChange={vi.fn()}
+        />,
+      );
+
+      const images = container.querySelectorAll("img");
+      expect(images).toHaveLength(1);
+      expect(images[0]).toHaveAttribute("src", cover.dataUrl);
+      expect(images[0]).toHaveAttribute("alt", "");
+    });
   });
 });

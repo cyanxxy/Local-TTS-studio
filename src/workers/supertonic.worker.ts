@@ -1,28 +1,26 @@
 /**
  * Supertonic TTS Web Worker
  *
- * Runs Supertonic inference off the main thread.
- * Communicates via postMessage using typed WorkerInMessage / WorkerOutMessage.
+ * Runs Supertonic inference off the main thread. The message loop, generation
+ * run lock, and chunk emission come from the shared worker kit (./kit).
  */
 
 import { env, pipeline, TextToAudioPipeline } from "@huggingface/transformers";
 import type { RawAudio } from "@huggingface/transformers";
-import type { InferenceBackend, PronunciationRule, WorkerInMessage, WorkerOutMessage } from "../types";
+import type { InferenceBackend, WorkerInMessage } from "../types";
 import {
   SUPERTONIC_MODEL_ID,
   SUPERTONIC_MODEL_REVISION,
   SUPERTONIC_INTER_CHUNK_SILENCE_SEC,
 } from "../constants";
-import { concatFloat32Arrays, createSilence } from "../lib/audio";
 import { normalizeRawAudioOutput } from "../lib/audioOutput";
 import {
-  chunkWithConstraintsDetailed,
+  chunkForSupertonicDetailed,
   rechunkChunkForRetry,
   type TextChunk,
 } from "../lib/chunking";
-import { resolvePauseSeconds, resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
+import { resolveSentenceSpeed, tuneChunkText } from "../lib/textTuning";
 import { getTransformersModelCache, initializeTransformersCache } from "../lib/transformersCache";
-import { canInitializeWebGPU } from "../lib/webgpu";
 import {
   buildTransformersRemoteFileUrl,
   createSupertonicSpeakerEmbeddingsTensor,
@@ -35,66 +33,33 @@ import {
 } from "../lib/supertonicRuntime";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { configureTransformersOnnxRuntime } from "../lib/onnxRuntime";
+import { BackendIndependentLoadError, loadWithBackendFallback, MAX_WASM_THREADS } from "./kit/backends";
+import { clampSpeed, emitAudioChunk, resolveChunkPauseSec } from "./kit/emit";
+import type { GenerationTicket } from "./kit/generation";
+import { createLoadProgress } from "./kit/progress";
+import { errorMessage, generationMeta } from "./kit/protocol";
+import { createWorkerRuntime, type GenerateMessage, type LoadMessage } from "./kit/runtime";
 
-const BACKENDS: InferenceBackend[] = ["webgpu", "wasm"];
-const SPEED_MIN_SAFE = 0.85;
-const SPEED_MAX_SAFE = 1.15;
+const BACKENDS: readonly InferenceBackend[] = ["webgpu", "wasm"];
+// Pipeline downloads fill the bar up to here; voice preload and warm-up take the rest.
 const PIPELINE_PROGRESS_MAX = 84;
 const WARMUP_PROGRESS_PERCENT = 92;
 const EMBEDDINGS_READY_PROGRESS = 99;
-const MAX_WASM_THREADS = 4;
 const PERF_DEBUG = import.meta.env.DEV;
-
-interface ProgressInfo {
-  status: string;
-  file?: string;
-  progress?: number;
-  loaded?: number;
-  total?: number;
-}
-
-interface PipelineProgressState {
-  files: Map<string, number>;
-  usesAggregateEvents: boolean;
-}
 
 let tts: TextToAudioPipeline | null = null;
 let activeBackend: InferenceBackend | null = null;
 let supertonicStyleDim: number | null = null;
-let activeGenerationEpoch = 0;
 const voiceStore = createSupertonicVoiceStore(fetchBinaryFile, parseEmbeddingBuffer);
+const workerRuntime = createWorkerRuntime({ load: loadModel, generate });
+const { port, generations } = workerRuntime;
 
 interface PerfTrace {
   finish: (extra?: Record<string, unknown>) => void;
   mark: (name: string) => void;
 }
 
-function post(msg: WorkerOutMessage) {
-  if (msg.type === "AUDIO_CHUNK") {
-    self.postMessage(msg, { transfer: [msg.audio.buffer as ArrayBuffer] });
-  } else {
-    self.postMessage(msg);
-  }
-}
-
-function generationMeta(generationId: string | undefined): { generationId?: string } {
-  return generationId === undefined ? {} : { generationId };
-}
-
-function clampPercent(percent: number): number {
-  return Math.max(0, Math.min(100, percent));
-}
-
-function clampSpeed(speed: number): number {
-  return Math.max(SPEED_MIN_SAFE, Math.min(SPEED_MAX_SAFE, speed));
-}
-
-function normalizeFinalPauseSec(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(5, value));
-}
-
-function createPerfTrace(label: string, initial: Record<string, unknown> = {}) {
+function createPerfTrace(label: string, initial: Record<string, unknown> = {}): PerfTrace {
   const startedAt = performance.now();
   const marks: Array<[string, number]> = [];
 
@@ -116,83 +81,15 @@ function createPerfTrace(label: string, initial: Record<string, unknown> = {}) {
   };
 }
 
-function beginGeneration(): number {
-  activeGenerationEpoch += 1;
-  return activeGenerationEpoch;
-}
-
-function invalidateActiveGeneration(): void {
-  activeGenerationEpoch += 1;
-}
-
-function hardCancelGeneration(): void {
-  invalidateActiveGeneration();
-  post({ type: "CANCELLED" });
-  self.close();
-}
-
-function isGenerationCurrent(generationEpoch: number): boolean {
-  return activeGenerationEpoch === generationEpoch;
-}
-
-function finishCancelledGenerationIfStale(
-  generationEpoch: number,
-  perf: PerfTrace,
-  emitted: number,
-): boolean {
-  if (isGenerationCurrent(generationEpoch)) return false;
+/** True once `ticket` was superseded; finishes the trace so a stopped generation still logs. */
+function finishIfSuperseded(ticket: GenerationTicket, perf: PerfTrace, emitted: number): boolean {
+  if (ticket.isCurrent()) return false;
   perf.finish({ cancelled: true, emitted });
   return true;
 }
 
 function postLoadProgress(percent: number): void {
-  post({ type: "LOAD_PROGRESS", percent: clampPercent(percent) });
-}
-
-function toPercentFromMap(progressMap: Map<string, number>): number {
-  if (progressMap.size === 0) return 0;
-  const total = Array.from(progressMap.values()).reduce((sum, value) => sum + value, 0);
-  return clampPercent((total / progressMap.size) * 100);
-}
-
-function createPipelineProgressState(): PipelineProgressState {
-  return {
-    files: new Map<string, number>(),
-    usesAggregateEvents: false,
-  };
-}
-
-function resetPipelineProgress(progressState: PipelineProgressState): void {
-  progressState.files.clear();
-  progressState.usesAggregateEvents = false;
-  postLoadProgress(0);
-}
-
-function updateProgress(progressState: PipelineProgressState, info: ProgressInfo): void {
-  if (info.status === "progress_total" && typeof info.progress === "number") {
-    progressState.usesAggregateEvents = true;
-    postLoadProgress((clampPercent(info.progress) / 100) * PIPELINE_PROGRESS_MAX);
-    return;
-  }
-
-  if (progressState.usesAggregateEvents) return;
-  if (!info.file) return;
-
-  if (
-    info.status === "progress"
-    && typeof info.loaded === "number"
-    && typeof info.total === "number"
-    && info.total > 0
-  ) {
-    progressState.files.set(info.file, clampPercent((info.loaded / info.total) * 100) / 100);
-    postLoadProgress((toPercentFromMap(progressState.files) / 100) * PIPELINE_PROGRESS_MAX);
-    return;
-  }
-
-  if (info.status === "done") {
-    progressState.files.set(info.file, 1);
-    postLoadProgress((toPercentFromMap(progressState.files) / 100) * PIPELINE_PROGRESS_MAX);
-  }
+  port.post({ type: "LOAD_PROGRESS", percent });
 }
 
 function configureDebugProfiling(enabled: boolean): void {
@@ -317,45 +214,6 @@ async function disposeSupertonicPipeline(instance: TextToAudioPipeline | null): 
   }
 }
 
-async function createPipelineWithFallback(
-  progressState: PipelineProgressState,
-  debugProfiling: boolean,
-  backends: readonly InferenceBackend[] = BACKENDS,
-): Promise<{ pipeline: TextToAudioPipeline; backend: InferenceBackend }> {
-  await initializeTransformersCache();
-  let lastError: unknown = null;
-
-  for (const backend of backends) {
-    try {
-      configureDebugProfiling(debugProfiling && backend === "webgpu");
-      configureTransformersOnnxRuntime(env, TRANSFORMERS_ONNX_WASM_ASSETS, {
-        backend,
-        maxWasmThreads: MAX_WASM_THREADS,
-      });
-      if (backend === "webgpu" && !(await canInitializeWebGPU())) {
-        throw new Error("WebGPU device initialization failed.");
-      }
-      const instance = (await pipeline("text-to-speech", SUPERTONIC_MODEL_ID, {
-        device: backend,
-        // Model repo only ships fp32 weights — no fp16/q8 variants available.
-        revision: SUPERTONIC_MODEL_REVISION,
-        progress_callback: (info: ProgressInfo) => updateProgress(progressState, info),
-        session_options: debugProfiling ? { enableProfiling: true } : {},
-      })) as TextToAudioPipeline;
-      return { pipeline: instance, backend };
-    } catch (err) {
-      lastError = err;
-      if (backend === "webgpu") {
-        resetPipelineProgress(progressState);
-      }
-    }
-  }
-
-  throw (lastError instanceof Error)
-    ? lastError
-    : new Error(lastError ? String(lastError) : "Failed to load Supertonic model");
-}
-
 function getTaggedText(text: string, language = "en"): string {
   if (!["en", "ko", "es", "pt", "fr"].includes(language)) {
     throw new Error(`Unsupported Supertonic 2 language: ${language}`);
@@ -377,377 +235,289 @@ async function warmUpPipeline(
   });
 }
 
-function appendPauseToAudio(
-  chunk: TextChunk,
-  output: RawAudio,
-  hasFollowing: boolean,
-  finalPauseSec?: number,
-  pauseOverridesSec?: Partial<Record<"none" | "comma" | "sentence" | "paragraph", number>>,
-) {
-  const normalized = normalizeRawAudioOutput(output);
-  const fallbackPause = hasFollowing ? SUPERTONIC_INTER_CHUNK_SILENCE_SEC : 0;
-  const pauseSec = hasFollowing
-    ? resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec > 0 ? chunk.pauseAfterSec : fallbackPause, pauseOverridesSec)
-    : normalizeFinalPauseSec(finalPauseSec);
-
-  const audio = pauseSec > 0
-    ? concatFloat32Arrays([
-      normalized.audio,
-      createSilence(pauseSec, normalized.samplingRate),
-    ])
-    : normalized.audio;
-
-  return {
-    audio,
-    pauseSec,
-    samplingRate: normalized.samplingRate,
-  };
-}
-
 function emitChunk(
-  generationId: string | undefined,
+  message: GenerateMessage,
   chunk: TextChunk,
   output: RawAudio,
-  emitted: number,
+  index: number,
   total: number,
   hasFollowing: boolean,
-  finalPauseSec?: number,
-  pauseOverridesSec?: Partial<Record<"none" | "comma" | "sentence" | "paragraph", number>>,
-): number {
-  const normalized = appendPauseToAudio(chunk, output, hasFollowing, finalPauseSec, pauseOverridesSec);
-  const nextIndex = emitted + 1;
-
-  post({
-    type: "AUDIO_CHUNK",
-    ...generationMeta(generationId),
+): void {
+  const normalized = normalizeRawAudioOutput(output);
+  emitAudioChunk(port, {
+    generationId: message.generationId,
     audio: normalized.audio,
     samplingRate: normalized.samplingRate,
     text: chunk.text,
-    index: nextIndex,
+    index,
     total,
     textStart: chunk.start,
     textEnd: chunk.end,
-    pauseAfterSec: normalized.pauseSec,
     pauseKind: chunk.pauseKind,
+    pauseSec: resolveChunkPauseSec({
+      hasFollowing,
+      pauseKind: chunk.pauseKind,
+      // A boundary the chunker gave no pause still gets the inter-chunk gap.
+      pauseAfterSec: chunk.pauseAfterSec > 0 ? chunk.pauseAfterSec : SUPERTONIC_INTER_CHUNK_SILENCE_SEC,
+      pauseOverridesSec: message.pauseOverridesSec,
+      finalPauseSec: message.finalPauseSec,
+    }),
+  });
+}
+
+async function loadModel({ forceReload = false, preferredVoice, debugProfiling = false }: LoadMessage): Promise<void> {
+  const perf = createPerfTrace("load", {
+    debugProfiling,
+    forceReload,
+    preferredVoice: resolveSupertonicVoice(preferredVoice),
   });
 
-  return nextIndex;
-}
-
-async function loadModel(
-  forceReload: boolean = false,
-  preferredVoice?: string,
-  debugProfiling: boolean = false,
-) {
-  let nextTts: TextToAudioPipeline | null = null;
-  try {
-    const perf = createPerfTrace("load", {
-      debugProfiling,
-      forceReload,
-      preferredVoice: resolveSupertonicVoice(preferredVoice),
-    });
-
-    if (forceReload) {
-      invalidateActiveGeneration();
-      const previousTts = tts;
-      tts = null;
-      activeBackend = null;
-      supertonicStyleDim = null;
-      voiceStore.clear();
-      await disposeSupertonicPipeline(previousTts);
-    }
-
-    if (tts && activeBackend) {
-      try {
-        await preloadPreferredVoice(preferredVoice);
-        perf.mark("voicePreloadReady");
-      } catch (voicePreloadError) {
-        // The resident pipeline is still healthy — never tear it down over a
-        // transient voice fetch failure. The voice lazy-loads on generate.
-        if (PERF_DEBUG) {
-          console.warn("[supertonic] Voice preload failed on resident pipeline", voicePreloadError);
-        }
-      }
-      postLoadProgress(EMBEDDINGS_READY_PROGRESS);
-      perf.finish({ backend: activeBackend });
-      post({ type: "READY", backend: activeBackend });
-      return;
-    }
-
-    postLoadProgress(0);
-    const progressState = createPipelineProgressState();
-    let loaded = await createPipelineWithFallback(progressState, debugProfiling);
-    nextTts = loaded.pipeline;
-    let nextBackend = loaded.backend;
-    perf.mark("pipelineReady");
-    supertonicStyleDim = getSupertonicStyleDim(nextTts);
-
-    postLoadProgress(PIPELINE_PROGRESS_MAX);
-    let speakerEmbeddings = await preloadPreferredVoice(preferredVoice);
-    perf.mark("voicePreloadReady");
-    postLoadProgress(WARMUP_PROGRESS_PERCENT);
-
+  if (tts && activeBackend && !forceReload) {
     try {
-      await warmUpPipeline(nextTts, speakerEmbeddings);
-    } catch (warmupError) {
-      if (nextBackend !== "webgpu") {
-        throw warmupError;
-      }
-
-      await disposeSupertonicPipeline(nextTts);
-      nextTts = null;
-      supertonicStyleDim = null;
-      resetPipelineProgress(progressState);
-
-      loaded = await createPipelineWithFallback(progressState, debugProfiling, ["wasm"]);
-      nextTts = loaded.pipeline;
-      nextBackend = loaded.backend;
-      perf.mark("pipelineReady");
-      supertonicStyleDim = getSupertonicStyleDim(nextTts);
-
-      postLoadProgress(PIPELINE_PROGRESS_MAX);
-      speakerEmbeddings = await preloadPreferredVoice(preferredVoice);
+      await preloadPreferredVoice(preferredVoice);
       perf.mark("voicePreloadReady");
-      postLoadProgress(WARMUP_PROGRESS_PERCENT);
-      await warmUpPipeline(nextTts, speakerEmbeddings);
+    } catch (voicePreloadError) {
+      // The resident pipeline is still healthy — never tear it down over a
+      // transient voice fetch failure. The voice lazy-loads on generate.
+      if (PERF_DEBUG) {
+        console.warn("[supertonic] Voice preload failed on resident pipeline", voicePreloadError);
+      }
     }
     postLoadProgress(EMBEDDINGS_READY_PROGRESS);
-    perf.mark("warmupReady");
-
-    tts = nextTts;
-    activeBackend = nextBackend;
-
     perf.finish({ backend: activeBackend });
-    post({ type: "READY", backend: activeBackend });
-  } catch (err) {
-    await disposeSupertonicPipeline(nextTts);
-    tts = null;
-    activeBackend = null;
-    supertonicStyleDim = null;
-    post({ type: "ERROR", message: err instanceof Error ? err.message : String(err), scope: "load" });
-  }
-}
-
-async function generate(
-  generationId: string | undefined,
-  text: string,
-  voice: string,
-  speed: number,
-  quality: number,
-  finalPauseSec?: number,
-  pauseOverridesSec?: Partial<Record<"none" | "comma" | "sentence" | "paragraph", number>>,
-  sentenceSpeedVariance: number = 0,
-  pronunciationRules: PronunciationRule[] = [],
-  emphasisStrength: number = 0,
-  language: string = "en",
-) {
-  const ttsInstance = tts;
-  if (!ttsInstance) {
-    post({ type: "ERROR", message: "Model not loaded yet", scope: "generate", ...generationMeta(generationId) });
+    port.post({ type: "READY", backend: activeBackend });
     return;
   }
 
-  const generationEpoch = beginGeneration();
-
+  // Dropped before the first await, so a GENERATE that arrives during the
+  // reload is refused instead of running on the pipeline being released.
+  const previousTts = tts;
+  tts = null;
+  activeBackend = null;
+  supertonicStyleDim = null;
+  if (forceReload) voiceStore.clear();
   try {
-    getTaggedText("", language); // Validate before loading voice data or running inference.
-    const perf = createPerfTrace("generate", {
-      backend: activeBackend,
-      quality,
-      sentenceSpeedVariance,
-      voice: resolveSupertonicVoice(voice),
-    });
-    if (!isSupertonicVoice(voice)) {
-      post({ type: "ERROR", message: `Unknown voice: ${voice}`, scope: "generate", ...generationMeta(generationId) });
-      return;
-    }
-    const hadCachedVoice = voiceStore.get(voice) !== null;
-    const speakerEmbeddings = await voiceStore.ensure(voice);
-    if (finishCancelledGenerationIfStale(generationEpoch, perf, 0)) return;
-    if (!hadCachedVoice) {
-      perf.mark("voiceLazyLoadReady");
-    }
+    // The runtime superseded the running generation when a forced reload
+    // arrived; never release the pipeline under its in-flight inference.
+    await generations.idle();
+    await disposeSupertonicPipeline(previousTts);
 
-    const normalizedSpeed = clampSpeed(speed);
-    // The embedding never changes within a generation — build the tensor once
-    // instead of re-allocating it per inference call.
-    const speakerEmbeddingsTensor = createSpeakerEmbeddingsTensor(speakerEmbeddings);
-    const runtimeProfile = { backend: activeBackend, quality };
-    const initialChunks = chunkWithConstraintsDetailed(text, { runtime: runtimeProfile });
-    if (initialChunks.length === 0) {
-      initialChunks.push({
-        text,
-        start: 0,
-        end: text.length,
-        pauseAfterSec: 0,
-        pauseKind: "none",
-      });
-    }
-
-    const queue: QueuedSupertonicChunk[] = initialChunks.map((chunk) => ({ chunk, depth: 0 }));
-    let emitted = 0;
-    let hadChunkFailure = false;
-    let firstChunkFailure: unknown = null;
-    let recordedFirstChunk = false;
-    let hasDynamicTotal = false;
-
-    let batchingDisabled = false;
-
-    while (isGenerationCurrent(generationEpoch) && queue.length > 0) {
-      const selectedBatch = takeSupertonicBatch(queue, {
-        backend: activeBackend,
-        emitted,
-        sentenceSpeedVariance,
-        batchingDisabled,
-      }).filter(({ chunk }) => chunk.text.trim().length > 0);
-      if (selectedBatch.length === 0) continue;
-
-      const total = hasDynamicTotal ? 0 : emitted + selectedBatch.length + queue.length;
-
-      if (selectedBatch.length > 1) {
-        let batchEmittedCount = 0;
-        try {
-          const taggedTexts = selectedBatch.map(({ chunk }) => getTaggedText(
-            tuneChunkText(chunk.text, pronunciationRules, emphasisStrength),
-            language,
-          ));
-          const output = await ttsInstance(taggedTexts, {
-            speaker_embeddings: speakerEmbeddingsTensor,
-            num_inference_steps: quality,
-            speed: normalizedSpeed,
-          }) as RawAudio | RawAudio[];
-          if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
-          const outputs = Array.isArray(output) ? output : [output];
-
-          if (outputs.length !== selectedBatch.length) {
-            throw new Error(`Expected ${selectedBatch.length} batch outputs, received ${outputs.length}.`);
-          }
-
-          for (const [index, item] of selectedBatch.entries()) {
-            const hasFollowing = index < selectedBatch.length - 1 || queue.length > 0;
-            emitted = emitChunk(
-              generationId,
-              item.chunk,
-              outputs[index],
-              emitted,
-              total,
-              hasFollowing,
-              !hasFollowing ? finalPauseSec : undefined,
-              pauseOverridesSec,
-            );
-            batchEmittedCount = index + 1;
-            if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
-            if (!recordedFirstChunk) {
-              perf.mark("firstChunkReady");
-              recordedFirstChunk = true;
-            }
-          }
-
-          continue;
-        } catch {
-          if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
-          batchingDisabled = true;
-          hasDynamicTotal = true;
-          // Only requeue/retry items that were not already emitted; the first
-          // unemitted item falls through to the single-chunk retry below.
-          queue.unshift(...selectedBatch.slice(batchEmittedCount + 1));
-          selectedBatch.splice(0, batchEmittedCount);
-        }
-      }
-
-      const [{ chunk, depth }] = selectedBatch;
-      try {
-        const tunedText = tuneChunkText(chunk.text, pronunciationRules, emphasisStrength);
-        const chunkSpeed = clampSpeed(resolveSentenceSpeed(normalizedSpeed, sentenceSpeedVariance, tunedText));
-        const output = (await ttsInstance(getTaggedText(tunedText, language), {
-          speaker_embeddings: speakerEmbeddingsTensor,
-          num_inference_steps: quality,
-          speed: chunkSpeed,
-        })) as RawAudio;
-        if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
-        const hasFollowing = queue.length > 0;
-        emitted = emitChunk(
-          generationId,
-          chunk,
-          output,
-          emitted,
-          total,
-          hasFollowing,
-          !hasFollowing ? finalPauseSec : undefined,
-          pauseOverridesSec,
-        );
-        if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) return;
-        if (!recordedFirstChunk) {
-          perf.mark("firstChunkReady");
-          recordedFirstChunk = true;
-        }
-      } catch (error) {
-        if (depth >= 2) {
-          hadChunkFailure = true;
-          if (firstChunkFailure === null) firstChunkFailure = error;
-          continue;
-        }
-
-        const retryChunks = rechunkChunkForRetry(chunk, {
-          runtime: runtimeProfile,
-          attempt: depth + 1,
+    const progress = createLoadProgress({ report: postLoadProgress, range: [0, PIPELINE_PROGRESS_MAX] });
+    progress.reset();
+    await initializeTransformersCache();
+    const loaded = await loadWithBackendFallback<TextToAudioPipeline>({
+      backends: BACKENDS,
+      load: async (backend) => {
+        configureDebugProfiling(debugProfiling && backend === "webgpu");
+        configureTransformersOnnxRuntime(env, TRANSFORMERS_ONNX_WASM_ASSETS, {
+          backend,
+          maxWasmThreads: MAX_WASM_THREADS,
         });
-
-        if (retryChunks.length <= 1) {
-          hadChunkFailure = true;
-          if (firstChunkFailure === null) firstChunkFailure = error;
-          continue;
+        return (await pipeline("text-to-speech", SUPERTONIC_MODEL_ID, {
+          device: backend,
+          // Model repo only ships fp32 weights — no fp16/q8 variants available.
+          revision: SUPERTONIC_MODEL_REVISION,
+          progress_callback: (info: unknown) => progress.handleTransformersEvent(info),
+          session_options: debugProfiling ? { enableProfiling: true } : {},
+        })) as TextToAudioPipeline;
+      },
+      // Runs on every backend; on WebGPU the first inference also compiles
+      // the shaders before READY instead of on the first chunk.
+      warmUp: async (instance) => {
+        perf.mark("pipelineReady");
+        postLoadProgress(PIPELINE_PROGRESS_MAX);
+        let speakerEmbeddings: Float32Array;
+        try {
+          // The voice store validates embeddings against this dimension.
+          supertonicStyleDim = getSupertonicStyleDim(instance);
+          speakerEmbeddings = await preloadPreferredVoice(preferredVoice);
+        } catch (error) {
+          // A bad model config or voice download fails on every backend.
+          throw new BackendIndependentLoadError(error);
         }
+        perf.mark("voicePreloadReady");
+        postLoadProgress(WARMUP_PROGRESS_PERCENT);
+        await warmUpPipeline(instance, speakerEmbeddings);
+      },
+      dispose: disposeSupertonicPipeline,
+      onFallback: () => {
+        // The WASM attempt starts over from a fresh pipeline.
+        supertonicStyleDim = null;
+        progress.reset();
+      },
+      failureMessage: "Failed to load Supertonic model",
+    });
+    postLoadProgress(EMBEDDINGS_READY_PROGRESS);
+    perf.mark("warmupReady");
 
-        hasDynamicTotal = true;
-        queue.unshift(...retryChunks.map((retryChunk) => ({ chunk: retryChunk, depth: depth + 1 })));
-      }
-    }
-
-    if (finishCancelledGenerationIfStale(generationEpoch, perf, emitted)) {
-      return;
-    }
-
-    if (hadChunkFailure) {
-      const reason = firstChunkFailure instanceof Error ? firstChunkFailure.message : String(firstChunkFailure ?? "unknown error");
-      throw new Error(`Generation completed with skipped segments after ${emitted} chunks: ${reason}`);
-    }
-
-    if (emitted === 0) {
-      throw new Error("Model returned no audio chunks.");
-    }
-
-    perf.finish({ emitted });
-    post({ type: "GENERATION_COMPLETE", ...generationMeta(generationId) });
-  } catch (err) {
-    if (!isGenerationCurrent(generationEpoch)) return;
-    post({ type: "ERROR", message: err instanceof Error ? err.message : String(err), scope: "generate", ...generationMeta(generationId) });
+    tts = loaded.instance;
+    activeBackend = loaded.backend;
+    perf.finish({ backend: activeBackend });
+    port.post({ type: "READY", backend: activeBackend });
+  } catch (error) {
+    supertonicStyleDim = null;
+    throw error;
   }
 }
 
-self.onmessage = (e: MessageEvent<WorkerInMessage>) => {
-  const msg = e.data;
-  switch (msg.type) {
-    case "LOAD":
-      loadModel(msg.forceReload ?? false, msg.preferredVoice, msg.debugProfiling ?? false);
-      break;
-    case "GENERATE":
-      generate(
-        msg.generationId,
-        msg.text,
-        msg.voice,
-        msg.speed,
-        msg.quality,
-        msg.finalPauseSec,
-        msg.pauseOverridesSec,
-        msg.sentenceSpeedVariance ?? 0,
-        msg.pronunciationRules ?? [],
-        msg.emphasisStrength ?? 0,
-        msg.language ?? "en",
-      );
-      break;
-    case "CANCEL":
-      hardCancelGeneration();
-      break;
+async function generate(message: GenerateMessage, ticket: GenerationTicket): Promise<void> {
+  const ttsInstance = tts;
+  if (!ttsInstance) throw new Error("Model not loaded yet");
+
+  const {
+    text,
+    voice,
+    quality,
+    sentenceSpeedVariance = 0,
+    pronunciationRules = [],
+    emphasisStrength = 0,
+    language = "en",
+  } = message;
+  getTaggedText("", language); // Validate before loading voice data or running inference.
+  const perf = createPerfTrace("generate", {
+    backend: activeBackend,
+    quality,
+    sentenceSpeedVariance,
+    voice: resolveSupertonicVoice(voice),
+  });
+  if (!isSupertonicVoice(voice)) throw new Error(`Unknown voice: ${voice}`);
+  const hadCachedVoice = voiceStore.get(voice) !== null;
+  const speakerEmbeddings = await voiceStore.ensure(voice);
+  if (finishIfSuperseded(ticket, perf, 0)) return;
+  if (!hadCachedVoice) {
+    perf.mark("voiceLazyLoadReady");
   }
+
+  const normalizedSpeed = clampSpeed(message.speed);
+  // The embedding never changes within a generation — build the tensor once
+  // instead of re-allocating it per inference call.
+  const speakerEmbeddingsTensor = createSpeakerEmbeddingsTensor(speakerEmbeddings);
+  const runtimeProfile = { backend: activeBackend, quality };
+  // The chunks the Reader previews, first chunk capped for a faster start.
+  const initialChunks = chunkForSupertonicDetailed(text, { runtime: runtimeProfile });
+  if (initialChunks.length === 0) {
+    initialChunks.push({
+      text,
+      start: 0,
+      end: text.length,
+      pauseAfterSec: 0,
+      pauseKind: "none",
+    });
+  }
+
+  const queue: QueuedSupertonicChunk[] = initialChunks.map((chunk) => ({ chunk, depth: 0 }));
+  let emitted = 0;
+  let firstChunkFailure: { error: unknown } | null = null;
+  let recordedFirstChunk = false;
+  let hasDynamicTotal = false;
+
+  let batchingDisabled = false;
+
+  while (ticket.isCurrent() && queue.length > 0) {
+    const selectedBatch = takeSupertonicBatch(queue, {
+      backend: activeBackend,
+      emitted,
+      sentenceSpeedVariance,
+      batchingDisabled,
+    }).filter(({ chunk }) => chunk.text.trim().length > 0);
+    if (selectedBatch.length === 0) continue;
+
+    const total = hasDynamicTotal ? 0 : emitted + selectedBatch.length + queue.length;
+
+    if (selectedBatch.length > 1) {
+      let batchEmittedCount = 0;
+      try {
+        const taggedTexts = selectedBatch.map(({ chunk }) => getTaggedText(
+          tuneChunkText(chunk.text, pronunciationRules, emphasisStrength),
+          language,
+        ));
+        const output = await ttsInstance(taggedTexts, {
+          speaker_embeddings: speakerEmbeddingsTensor,
+          num_inference_steps: quality,
+          speed: normalizedSpeed,
+        }) as RawAudio | RawAudio[];
+        if (finishIfSuperseded(ticket, perf, emitted)) return;
+        const outputs = Array.isArray(output) ? output : [output];
+
+        if (outputs.length !== selectedBatch.length) {
+          throw new Error(`Expected ${selectedBatch.length} batch outputs, received ${outputs.length}.`);
+        }
+
+        for (const [index, item] of selectedBatch.entries()) {
+          const hasFollowing = index < selectedBatch.length - 1 || queue.length > 0;
+          emitChunk(message, item.chunk, outputs[index], emitted + 1, total, hasFollowing);
+          emitted += 1;
+          batchEmittedCount = index + 1;
+          if (!recordedFirstChunk) {
+            perf.mark("firstChunkReady");
+            recordedFirstChunk = true;
+          }
+        }
+
+        continue;
+      } catch {
+        if (finishIfSuperseded(ticket, perf, emitted)) return;
+        batchingDisabled = true;
+        hasDynamicTotal = true;
+        // Only requeue/retry items that were not already emitted; the first
+        // unemitted item falls through to the single-chunk retry below.
+        queue.unshift(...selectedBatch.slice(batchEmittedCount + 1));
+        selectedBatch.splice(0, batchEmittedCount);
+      }
+    }
+
+    const [{ chunk, depth }] = selectedBatch;
+    try {
+      const tunedText = tuneChunkText(chunk.text, pronunciationRules, emphasisStrength);
+      const chunkSpeed = clampSpeed(resolveSentenceSpeed(normalizedSpeed, sentenceSpeedVariance, tunedText));
+      const output = (await ttsInstance(getTaggedText(tunedText, language), {
+        speaker_embeddings: speakerEmbeddingsTensor,
+        num_inference_steps: quality,
+        speed: chunkSpeed,
+      })) as RawAudio;
+      if (finishIfSuperseded(ticket, perf, emitted)) return;
+      emitChunk(message, chunk, output, emitted + 1, total, queue.length > 0);
+      emitted += 1;
+      if (!recordedFirstChunk) {
+        perf.mark("firstChunkReady");
+        recordedFirstChunk = true;
+      }
+    } catch (error) {
+      if (finishIfSuperseded(ticket, perf, emitted)) return;
+      if (depth >= 2) {
+        firstChunkFailure ??= { error };
+        continue;
+      }
+
+      const retryChunks = rechunkChunkForRetry(chunk, {
+        runtime: runtimeProfile,
+        attempt: depth + 1,
+      });
+
+      if (retryChunks.length <= 1) {
+        firstChunkFailure ??= { error };
+        continue;
+      }
+
+      hasDynamicTotal = true;
+      queue.unshift(...retryChunks.map((retryChunk) => ({ chunk: retryChunk, depth: depth + 1 })));
+    }
+  }
+
+  if (finishIfSuperseded(ticket, perf, emitted)) return;
+
+  if (firstChunkFailure) {
+    throw new Error(`Generation completed with skipped segments after ${emitted} chunks: ${errorMessage(firstChunkFailure.error)}`);
+  }
+
+  if (emitted === 0) {
+    throw new Error("Model returned no audio chunks.");
+  }
+
+  perf.finish({ emitted });
+  port.post({ type: "GENERATION_COMPLETE", ...generationMeta(message.generationId) });
+}
+
+self.onmessage = (event: MessageEvent<WorkerInMessage>) => {
+  workerRuntime.handleMessage(event.data);
 };

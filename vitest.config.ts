@@ -27,6 +27,12 @@ export default defineConfig({
       // denominator for an enforceable 100% threshold.
       include: [
         "electron/generateRateLimiter.ts",
+        "electron/localTts/keepWarmLeases.ts",
+        "electron/localTts/senderLifecycle.ts",
+        "electron/nativeModels/progressThrottle.ts",
+        "electron/nativeModels/runtimeBenchmark.ts",
+        "electron/wsBridge/audioStreamValidator.ts",
+        "electron/wsBridge/protocol.ts",
         "src/constants.ts",
         "src/components/TextInput.tsx",
         "src/lib/audio.ts",

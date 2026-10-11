@@ -5,9 +5,12 @@ interface DocumentParseWorkerData {
   maxPages: number;
 }
 
-interface LiteParseResult {
+interface LiteParsePage {
   text: string;
-  pages: unknown[];
+}
+
+interface LiteParseResult {
+  pages: LiteParsePage[];
 }
 
 interface LiteParseInstance {
@@ -50,9 +53,12 @@ void (async () => {
       maxPages: workerData.maxPages,
     });
     const result = await parser.parse(workerData.filePath);
+    // Per-page text lets the main process strip running headers, footers,
+    // and page numbers before joining; LiteParse's joined `text` is the same
+    // pages separated by blank lines, so it is not sent twice.
     parentPort.postMessage({
       ok: true,
-      text: result.text,
+      pages: result.pages.map((page) => page.text),
       pageCount: result.pages.length,
     });
   } catch (cause) {

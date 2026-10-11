@@ -5,16 +5,26 @@ import {
   calculateReaderProgress,
   chapterAtOffset,
   createReaderDocument,
+  createReaderHighlight,
+  createReaderOffsetRebaser,
   estimateWordRanges,
+  isReaderDocumentCover,
+  isReaderHighlightAnchored,
+  isReaderHighlightColor,
   unwrapHardLineBreaks,
   normalizeReaderDocumentRecord,
   normalizeReaderTextFragment,
+  READER_COVER_MAX_DATA_URL_CHARS,
+  READER_HIGHLIGHT_QUOTE_LIMIT,
   rebaseReaderChapters,
+  rebaseReaderHighlights,
   rebaseReaderTextOffset,
   READER_AUDIO_SIGNATURE_VERSION,
   READER_SECTION_MAX_CHARS,
   readerSectionAtOffset,
+  resolveReaderHighlightRange,
   structureTextChapters,
+  type ReaderHighlight,
 } from "./readerDocument";
 
 describe("readerDocument", () => {
@@ -228,5 +238,312 @@ describe("readerDocument", () => {
     expect(rebaseReaderTextOffset(previous, next, 2)).toBe(2);
     expect(rebaseReaderTextOffset(previous, next, previous.indexOf("after")))
       .toBe(next.indexOf("after"));
+  });
+});
+
+describe("reader highlights", () => {
+  const text = "Call me Ishmael. Some years ago, never mind how long precisely, I went to sea.";
+
+  function highlightOf(phrase: string, overrides: Partial<ReaderHighlight> = {}): ReaderHighlight {
+    const start = text.indexOf(phrase);
+    return {
+      id: `highlight-${phrase}`,
+      start,
+      end: start + phrase.length,
+      color: "yellow",
+      quote: phrase,
+      createdAt: 1,
+      updatedAt: 1,
+      ...overrides,
+    };
+  }
+
+  it("creates a highlight trimmed to the words it covers", () => {
+    const start = text.indexOf("Some") - 1;
+    const highlight = createReaderHighlight(text, { start, end: text.indexOf(",") + 2, color: "green" }, 42);
+
+    expect(highlight).toMatchObject({
+      start: start + 1,
+      end: text.indexOf(",") + 1,
+      color: "green",
+      quote: "Some years ago,",
+      createdAt: 42,
+      updatedAt: 42,
+    });
+    expect(highlight?.id).toMatch(/^highlight-/);
+  });
+
+  it("refuses ranges with nothing to highlight or an unknown colour", () => {
+    expect(createReaderHighlight(text, { start: 4, end: 4, color: "yellow" })).toBeNull();
+    expect(createReaderHighlight("a   b", { start: 1, end: 4, color: "yellow" })).toBeNull();
+    expect(createReaderHighlight(text, { start: Number.NaN, end: 4, color: "yellow" })).toBeNull();
+    expect(createReaderHighlight(text, { start: 0, end: 4, color: "orange" as never })).toBeNull();
+    expect(isReaderHighlightColor("purple")).toBe(true);
+    expect(isReaderHighlightColor(3)).toBe(false);
+  });
+
+  it("keeps only the start of a long highlight as its quote", () => {
+    const long = "word ".repeat(1_000);
+    const highlight = createReaderHighlight(long, { start: 0, end: long.length, color: "blue" });
+
+    expect(highlight?.end).toBe(long.length - 1);
+    expect(highlight?.quote).toHaveLength(READER_HIGHLIGHT_QUOTE_LIMIT);
+    expect(isReaderHighlightAnchored(long, highlight!)).toBe(true);
+  });
+
+  it("finds a moved highlight at the nearest place its quote occurs", () => {
+    const doubled = `${text} Call me Ishmael again.`;
+    const moved = highlightOf("Call me Ishmael", { start: 3, end: 18 });
+
+    expect(resolveReaderHighlightRange(doubled, moved)).toEqual({ start: 0, end: 15 });
+    expect(resolveReaderHighlightRange(doubled, { ...moved, start: doubled.length - 10, end: doubled.length }))
+      .toEqual({ start: doubled.lastIndexOf("Call"), end: doubled.lastIndexOf("Call") + 15 });
+    expect(resolveReaderHighlightRange("Gone entirely.", moved)).toBeNull();
+    expect(resolveReaderHighlightRange(text, { ...moved, quote: "" })).toBeNull();
+  });
+
+  it("normalizes stored highlights without adding them to older records", () => {
+    const document = createReaderDocument({ id: "whale", text });
+    expect("highlights" in normalizeReaderDocumentRecord(document)).toBe(false);
+
+    const stored = {
+      ...document,
+      highlights: [
+        highlightOf("went to sea"),
+        { ...highlightOf("Some years ago"), start: 0, end: 14 },
+        { ...highlightOf("Call me"), quote: "Vanished words" },
+        { ...highlightOf("Ishmael"), color: "orange" },
+        { id: "", start: 0, end: 4 },
+        null,
+      ],
+    } as unknown as typeof document;
+
+    const normalized = normalizeReaderDocumentRecord(stored).highlights;
+
+    expect(normalized?.map((highlight) => [highlight.quote, highlight.start, highlight.end])).toEqual([
+      ["Vanished words", 0, 7],
+      ["Some years ago", text.indexOf("Some"), text.indexOf("Some") + 14],
+      ["went to sea", text.indexOf("went"), text.indexOf("went") + 11],
+    ]);
+  });
+
+  it("drops stored highlights with impossible offsets or a repeated id", () => {
+    const document = createReaderDocument({ id: "whale", text });
+    const stored = {
+      ...document,
+      highlights: [
+        highlightOf("went to sea"),
+        { ...highlightOf("went to sea"), color: "blue" },
+        { ...highlightOf("Ishmael"), id: "negative", start: -3 },
+        { ...highlightOf("Ishmael"), id: "fractional", end: 14.5 },
+        { ...highlightOf("Ishmael"), id: "empty", end: text.indexOf("Ishmael") },
+      ],
+    } as unknown as typeof document;
+
+    expect(normalizeReaderDocumentRecord(stored).highlights).toEqual([highlightOf("went to sea")]);
+  });
+
+  it("re-anchors a short quote over its own length, whatever end the record claims", () => {
+    const shifted = `Prologue. ${text}`;
+    const stored = {
+      ...createReaderDocument({ id: "whale", text: shifted }),
+      highlights: [highlightOf("Call me", { end: 1_000_000_000 })],
+    };
+
+    expect(normalizeReaderDocumentRecord(stored).highlights?.[0]).toMatchObject({
+      start: shifted.indexOf("Call me"),
+      end: shifted.indexOf("Call me") + "Call me".length,
+    });
+  });
+
+  it("survives the JSON round trip both storage backends load records through", () => {
+    const document = { ...createReaderDocument({ id: "whale", text }), highlights: [highlightOf("went to sea")] };
+
+    const loaded = normalizeReaderDocumentRecord(JSON.parse(JSON.stringify(document)));
+
+    expect(loaded.highlights).toEqual(document.highlights);
+    expect(loaded.text).toBe(text);
+  });
+
+  it("moves anchored highlights with an edit and refreshes their quote", () => {
+    const next = text.replace("never mind", "no matter");
+    const detached = { ...highlightOf("Some years"), quote: "lost words" };
+    const [before, inside, after, untouched] = rebaseReaderHighlights(text, next, [
+      highlightOf("Call me Ishmael"),
+      highlightOf("never mind how long"),
+      highlightOf("went to sea"),
+      detached,
+    ]);
+
+    expect(before).toEqual(highlightOf("Call me Ishmael"));
+    expect(inside.quote).toBe("no matter how long");
+    expect(next.slice(inside.start, inside.end)).toBe("no matter how long");
+    expect(next.slice(after.start, after.end)).toBe("went to sea");
+    expect(untouched).toBe(detached);
+    expect(rebaseReaderHighlights(text, next, [])).toEqual([]);
+  });
+
+  it("leaves text typed right after a highlight outside it", () => {
+    const next = text.replace("Call me Ishmael", "Call me Ishmael, sailor");
+    const [highlight] = rebaseReaderHighlights(text, next, [highlightOf("Call me Ishmael")]);
+
+    expect(highlight).toEqual(highlightOf("Call me Ishmael"));
+    const [before] = rebaseReaderHighlights(text, `The story. ${text}`, [highlightOf("Call me Ishmael")]);
+    expect(before.quote).toBe("Call me Ishmael");
+    expect(before.start).toBe("The story. ".length);
+  });
+
+  it("drops a highlight whose words were all deleted", () => {
+    const next = text.replace(" Some years ago,", "");
+
+    expect(rebaseReaderHighlights(text, next, [highlightOf("Some years ago")])).toEqual([]);
+  });
+});
+
+describe("reader covers", () => {
+  const cover = { dataUrl: "data:image/jpeg;base64,/9j/4AAQSkZJRg==" };
+
+  it("keeps a valid raster cover from the import", () => {
+    expect(createReaderDocument({ text: "Body.", cover }).cover).toEqual(cover);
+    expect("cover" in createReaderDocument({ text: "Body." })).toBe(false);
+  });
+
+  it("drops covers that are not small base64 raster images", () => {
+    const rejected = [
+      { dataUrl: "data:image/svg+xml;base64,PHN2Zz4=" },
+      { dataUrl: "https://example.com/cover.jpg" },
+      { dataUrl: "data:image/png;base64,not base64!" },
+      { dataUrl: `data:image/png;base64,${"A".repeat(READER_COVER_MAX_DATA_URL_CHARS)}` },
+      { dataUrl: 42 },
+      "data:image/png;base64,AAAA",
+    ];
+    for (const value of rejected) {
+      expect(isReaderDocumentCover(value)).toBe(false);
+      expect("cover" in createReaderDocument({ text: "Body.", cover: value as never })).toBe(false);
+    }
+  });
+
+  it("normalizes stored covers without adding one to older records", () => {
+    const document = createReaderDocument({ id: "covered", text: "Body.", cover });
+
+    expect(normalizeReaderDocumentRecord(JSON.parse(JSON.stringify(document))).cover).toEqual(cover);
+    expect("cover" in normalizeReaderDocumentRecord({ ...document, cover: { dataUrl: "javascript:alert(1)" } })).toBe(false);
+  });
+});
+
+/** The per-offset whole-text scan the single-pass rebaser replaces. */
+function referenceRebase(previousText: string, nextText: string, offset: number): number {
+  let prefixLength = 0;
+  const sharedLimit = Math.min(previousText.length, nextText.length);
+  while (prefixLength < sharedLimit && previousText[prefixLength] === nextText[prefixLength]) prefixLength += 1;
+  let suffixLength = 0;
+  while (
+    suffixLength < sharedLimit - prefixLength
+    && previousText[previousText.length - suffixLength - 1] === nextText[nextText.length - suffixLength - 1]
+  ) suffixLength += 1;
+  const previousChangeEnd = previousText.length - suffixLength;
+  const nextChangeEnd = nextText.length - suffixLength;
+  const safeOffset = Math.max(0, Math.min(previousText.length, offset));
+  if (safeOffset < prefixLength) return safeOffset;
+  if (safeOffset >= previousChangeEnd) return safeOffset + nextText.length - previousText.length;
+  return prefixLength + Math.min(safeOffset - prefixLength, nextChangeEnd - prefixLength);
+}
+
+/** Deterministic PRNG so a failing case can be replayed. */
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let value = Math.imul(state ^ (state >>> 15), 1 | state);
+    value ^= value + Math.imul(value ^ (value >>> 7), 61 | value);
+    return ((value ^ (value >>> 14)) >>> 0) / 4_294_967_296;
+  };
+}
+
+describe("createReaderOffsetRebaser", () => {
+  it("maps every offset exactly like a whole-text scan per offset", () => {
+    const random = seededRandom(20_261_010);
+    // A tiny alphabet makes repeated runs, where prefix and suffix overlap.
+    const alphabet = "ab \n";
+    const word = (length: number) => Array.from(
+      { length },
+      () => alphabet[Math.floor(random() * alphabet.length)],
+    ).join("");
+
+    for (let round = 0; round < 300; round += 1) {
+      const previous = word(Math.floor(random() * 40));
+      const start = Math.floor(random() * (previous.length + 1));
+      const previousEnd = start + Math.floor(random() * (previous.length - start + 1));
+      const replacement = word(Math.floor(random() * 8));
+      const next = previous.slice(0, start) + replacement + previous.slice(previousEnd);
+      const hint = { start, previousEnd, nextEnd: start + replacement.length };
+      // The hinted rebaser goes first: once the unhinted scan of this pair is
+      // remembered it would answer for the hint, and the hinted search would
+      // never run.
+      const hinted = createReaderOffsetRebaser(previous, next, hint);
+      const rebase = createReaderOffsetRebaser(previous, next);
+
+      for (let offset = -2; offset <= previous.length + 2; offset += 1) {
+        const expected = referenceRebase(previous, next, offset);
+        expect(rebase(offset)).toBe(expected);
+        expect(hinted(offset)).toBe(expected);
+        expect(rebaseReaderTextOffset(previous, next, offset)).toBe(expected);
+      }
+    }
+  });
+
+  it("only needs to scan the edited span when told where the edit is", () => {
+    const filler = "Unchanged prose that the scan never has to visit. ".repeat(2_000);
+    const previous = `${filler}The old line.${filler}`;
+    const next = `${filler}A brand new, longer line.${filler}`;
+    const rebase = createReaderOffsetRebaser(previous, next, {
+      start: filler.length,
+      previousEnd: filler.length + "The old line.".length,
+      nextEnd: filler.length + "A brand new, longer line.".length,
+    });
+
+    expect(rebase(10)).toBe(10);
+    expect(rebase(previous.length - 5)).toBe(next.length - 5);
+    expect(rebase(filler.length + 2)).toBe(referenceRebase(previous, next, filler.length + 2));
+  });
+
+  it("falls back to a full scan when a hint does not describe the two texts", () => {
+    const previous = "before EDIT after";
+    const next = "before A MUCH LONGER EDIT after";
+    const offset = previous.indexOf("after");
+
+    for (const hint of [
+      { start: -1, previousEnd: 11, nextEnd: 25 },
+      { start: 7, previousEnd: 99, nextEnd: 25 },
+      { start: 7, previousEnd: 11, nextEnd: 20 },
+      { start: 7.5, previousEnd: 11, nextEnd: 25 },
+    ]) {
+      expect(createReaderOffsetRebaser(previous, next, hint)(offset)).toBe(next.indexOf("after"));
+      // Alternate pairs so the remembered scan cannot answer for the hint.
+      expect(createReaderOffsetRebaser(next, previous)(0)).toBe(0);
+    }
+  });
+
+  it("ignores a well-formed hint that misplaces the edit, and never remembers its answer", () => {
+    const previous = "abXdef";
+    const next = "abYYdef";
+    // Lengths agree with the texts, but the edit is at 2, not 5.
+    const wrongHint = { start: 5, previousEnd: 5, nextEnd: 6 };
+    const hinted = createReaderOffsetRebaser(previous, next, wrongHint);
+    for (let offset = 0; offset <= previous.length; offset += 1) {
+      expect(hinted(offset)).toBe(referenceRebase(previous, next, offset));
+      expect(rebaseReaderTextOffset(previous, next, offset)).toBe(referenceRebase(previous, next, offset));
+    }
+    expect(rebaseReaderTextOffset(previous, next, 3)).toBe(4);
+  });
+
+  it("never answers one text pair with the scan of another", () => {
+    const first = ["one two three", "one TWO three"] as const;
+    const second = ["alpha beta", "alpha beta gamma delta"] as const;
+
+    expect(rebaseReaderTextOffset(...first, 9)).toBe(referenceRebase(...first, 9));
+    expect(rebaseReaderTextOffset(...second, 9)).toBe(referenceRebase(...second, 9));
+    expect(rebaseReaderTextOffset(...first, 9)).toBe(referenceRebase(...first, 9));
+    expect(rebaseReaderChapters(first[0], first[1], [], "Book")).toHaveLength(1);
   });
 });
