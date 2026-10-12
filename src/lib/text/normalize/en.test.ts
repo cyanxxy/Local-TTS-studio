@@ -104,6 +104,9 @@ const FIXTURES: Record<string, readonly Fixture[]> = {
     ["100 W, 2 kW, 5 V, 5000 mAh", "one hundred watts, two kilowatts, five volts, five thousand milliamp hours"],
     ["2 L, 500 mL, 5 ml, 3 mg, 5 g, 2 cm, 4 mm, 3 m tall", "two liters, five hundred milliliters, five milliliters, three milligrams, five grams, two centimeters, four millimeters, three m tall"],
     ["3-5 km", "three to five kilometers"],
+    ["She is 5'11\" and he is 6'0\", 4’11”.", "She is five foot eleven and he is six foot zero, four foot eleven."],
+    ["The 5'11 mark, 6'12\" and 3'4 stay as written", "The 5'11 mark, 6'12\" and 3'4 stay as written"],
+    ["5'07\" is five foot seven", "five foot seven is five foot seven"],
     ["-5°C and 1.0 km", "minus five degrees Celsius and one point zero kilometers"],
   ],
   times: [

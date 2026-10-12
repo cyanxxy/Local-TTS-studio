@@ -446,6 +446,29 @@ function scanCurrency(scan: Scan): void {
 }
 
 // ---------------------------------------------------------------------------
+// Heights
+
+/** Feet, a prime or apostrophe, inches and an optional closing inch mark: 4'11", 5'0", 5'11. */
+const HEIGHT = new RegExp(
+  `(?<![\\p{L}\\p{N}_.,:/\\-–−'’′])(\\d{1,2})['’′](\\d{1,2})(["”″]|''|’’)?(?![\\p{L}\\p{N}_])`,
+  "gu",
+);
+
+/**
+ * "4'11\"" -> "four foot eleven". Anything else of that shape (no closing
+ * inch mark, 12 or more inches) stays verbatim as a whole, instead of having
+ * its digits read around the marks.
+ */
+function scanHeights(scan: Scan): void {
+  for (const match of scan.text.matchAll(HEIGHT)) {
+    const end = match.index + match[0].length;
+    const isHeight = match[3] !== undefined && Number(match[2]) <= 11;
+    const spoken = `${cardinalToWords(match[1])} foot ${cardinalToWords(String(Number(match[2])))}`;
+    take(scan, match.index, end, isHeight ? [{ start: match.index, end, replacement: spoken, reason: "units" }] : []);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Numeric tokens
 
 const NUMBER_TOKEN = /\d+(?:[.,:/\-–−]\d+)*/gu;
@@ -886,6 +909,7 @@ export function normalizeEnglish(text: string, rules: ReadonlySet<Rule>, region?
   scanAddresses(scan);
   scanCurrency(scan);
   scanMonthDates(scan);
+  scanHeights(scan);
   scanNumbers(scan);
   scanAbbreviations(scan);
   scanRomanNumerals(scan);
