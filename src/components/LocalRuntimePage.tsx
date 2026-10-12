@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type {
   LocalTtsCacheInfo,
-  LocalTtsAudioChunkEvent,
   LocalTtsGenerateResult,
   LocalTtsModel,
   LocalTtsProgressEvent,
@@ -10,6 +9,7 @@ import type {
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { GenerationStats } from "../types";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
+import { createLocalAudioAssembler } from "../lib/localTtsStream";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import {
   hasPrimaryShortcutModifier,
@@ -40,6 +40,7 @@ import {
   formatBytes,
   sha256Hex,
   wavDurationSeconds,
+  type Float32AudioChunk,
   type StatusTone,
 } from "./localRuntime/utils";
 
@@ -78,23 +79,6 @@ function qwen3ReferenceGuidance(durationSec: number | null): StatusMessage {
     };
   }
   return { tone: "success", text: `Reference WAV loaded (${duration}).` };
-}
-
-interface ReceivedAudioChunk {
-  audio: ArrayBuffer;
-  sampleCount: number;
-  silenceAfterSamples: number;
-}
-
-function buildPlaybackSamples(chunk: ReceivedAudioChunk): Float32Array {
-  const samples = new Float32Array(chunk.audio, 0, chunk.sampleCount);
-  const silenceAfterSamples = Math.max(0, chunk.silenceAfterSamples);
-  const output = new Float32Array(samples.length + silenceAfterSamples);
-  for (let index = 0; index < samples.length; index += 1) {
-    const value = samples[index];
-    output[index] = Number.isFinite(value) ? value : 0;
-  }
-  return output;
 }
 
 function createLocalRequestId(model: LocalTtsModel): string {
@@ -175,9 +159,15 @@ function LocalRuntimePageBody({
   const activeRequestIdRef = useRef<string | null>(null);
   const activeProbeRequestIdRef = useRef<string | null>(null);
   const activeRequestGenerationVersionRef = useRef<number | null>(null);
-  const streamedAudioChunksRef = useRef<ReceivedAudioChunk[]>([]);
+  // The PCM of the finished request, kept to build its WAV once at completion.
+  const streamedAudioChunksRef = useRef<Float32AudioChunk[]>([]);
   const streamedAudioSampleRateRef = useRef<number | null>(null);
   const scheduledAudioChunkCountRef = useRef(0);
+  // Puts streamed audio back in order. It never changes, so the bridge
+  // subscription survives re-renders; its sink tracks the latest props.
+  const [assembler] = useState(() => createLocalAudioAssembler());
+  const pendingChunkStatusRef = useRef<StatusMessage>(null);
+  const chunkStatusFlushCancelRef = useRef<(() => void) | null>(null);
   const pendingGenerationProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const generationProgressFlushCancelRef = useRef<(() => void) | null>(null);
   const audioPlayer = useAudioPlayer();
@@ -228,10 +218,14 @@ function LocalRuntimePageBody({
     streamedAudioChunksRef.current = [];
     streamedAudioSampleRateRef.current = null;
     scheduledAudioChunkCountRef.current = 0;
+    assembler.reset();
+    chunkStatusFlushCancelRef.current?.();
+    chunkStatusFlushCancelRef.current = null;
+    pendingChunkStatusRef.current = null;
     resetAudioPlayer();
     setAudioUrl(null);
     setResult(null);
-  }, [resetAudioPlayer]);
+  }, [assembler, resetAudioPlayer]);
 
   const invalidateGeneration = useCallback((options: { runtimeChanged?: boolean } = {}) => {
     generationVersionRef.current += 1;
@@ -420,61 +414,73 @@ function LocalRuntimePageBody({
   }, [electronAvailable, model]);
 
   useEffect(() => {
+    assembler.setSink((part) => {
+      const sampleRate = part.sampleRate;
+      const chunkNumber = part.chunkIndex + 1;
+      if (part.kind === "gap") {
+        // The WAV is rebuilt from the retained chunks, so the silence joins the
+        // chunk it follows.
+        const followed = streamedAudioChunksRef.current[part.chunkIndex];
+        if (followed) followed.silenceAfterSamples += part.samples.length;
+      } else {
+        streamedAudioSampleRateRef.current = sampleRate;
+        streamedAudioChunksRef.current[part.chunkIndex] = {
+          audio: part.samples.buffer as ArrayBuffer,
+          sampleCount: part.samples.length,
+          silenceAfterSamples: 0,
+        };
+        scheduledAudioChunkCountRef.current += 1;
+      }
+      // A gap carries its chunk's label, so it extends that chunk's segment
+      // instead of adding a segment of silence.
+      void scheduleAudioChunk({
+        audio: part.samples,
+        samplingRate: sampleRate,
+        text: `${name} chunk ${chunkNumber}`,
+        index: chunkNumber,
+        total: part.declaredTotal > 0 ? part.declaredTotal : chunkNumber,
+        textStart: 0,
+        textEnd: 0,
+        pauseAfterSec: part.pauseAfterSec,
+      }).catch((err: unknown) => {
+        if (!mountedRef.current) return;
+        setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+      });
+      if (part.kind === "gap") return;
+
+      if (part.declaredTotal > 0 && scheduledAudioChunkCountRef.current === part.declaredTotal) {
+        const completeChunks = streamedAudioChunksRef.current.slice(0, part.declaredTotal);
+        setNewAudioUrl(float32ChunksToWavUrl(completeChunks, sampleRate));
+      }
+      // Chunks can arrive many times per frame: show only the latest status
+      // once per frame instead of re-rendering this whole page for each one.
+      pendingChunkStatusRef.current = {
+        tone: "info",
+        text: part.declaredTotal > 0
+          ? `Received audio chunk ${chunkNumber}/${part.declaredTotal}.`
+          : `Received streaming audio chunk ${chunkNumber}.`,
+      };
+      chunkStatusFlushCancelRef.current?.();
+      chunkStatusFlushCancelRef.current = scheduleNextUiFrame(() => {
+        chunkStatusFlushCancelRef.current = null;
+        const next = pendingChunkStatusRef.current;
+        pendingChunkStatusRef.current = null;
+        if (next && mountedRef.current) setStatus(next);
+      });
+    });
+  }, [assembler, name, scheduleAudioChunk, setNewAudioUrl]);
+
+  useEffect(() => {
     if (!electronAvailable || !window.electron?.localTts) return;
 
-    return window.electron.localTts.subscribeAudioChunk((event: LocalTtsAudioChunkEvent) => {
+    return window.electron.localTts.subscribeAudioChunk((event) => {
       if (!mountedRef.current) return;
       if (event.model !== model) return;
       if (event.requestId !== activeRequestIdRef.current) return;
       if (activeRequestGenerationVersionRef.current !== generationVersionRef.current) return;
-      if (event.sampleCount <= 0 || event.audio.byteLength !== event.sampleCount * Float32Array.BYTES_PER_ELEMENT) return;
-
-      if (event.index === 0 || streamedAudioSampleRateRef.current !== event.sampleRate) {
-        streamedAudioChunksRef.current = [];
-        streamedAudioSampleRateRef.current = event.sampleRate;
-      }
-
-      streamedAudioChunksRef.current[event.index] = {
-        audio: event.audio,
-        sampleCount: event.sampleCount,
-        silenceAfterSamples: event.silenceAfterSamples,
-      };
-
-      const sampleRate = streamedAudioSampleRateRef.current ?? event.sampleRate;
-      const displayTotal = event.total > 0 ? event.total : event.index + 1;
-      // Advance a cursor through newly contiguous chunks instead of slicing and
-      // filtering the complete stream for every transport frame. The previous
-      // implementation made long generations quadratic in chunk count.
-      while (scheduledAudioChunkCountRef.current < streamedAudioChunksRef.current.length) {
-        const chunkIndex = scheduledAudioChunkCountRef.current;
-        const chunk = streamedAudioChunksRef.current[chunkIndex];
-        if (!chunk) break;
-        scheduledAudioChunkCountRef.current += 1;
-        void scheduleAudioChunk({
-          audio: buildPlaybackSamples(chunk),
-          samplingRate: sampleRate,
-          text: `${name} chunk ${chunkIndex + 1}`,
-          index: chunkIndex + 1,
-          total: displayTotal,
-          pauseAfterSec: chunk.silenceAfterSamples / sampleRate,
-        }).catch((err: unknown) => {
-          if (!mountedRef.current) return;
-          setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
-        });
-      }
-
-      if (event.total > 0 && scheduledAudioChunkCountRef.current === event.total) {
-        const completeChunks = streamedAudioChunksRef.current.slice(0, event.total);
-        setNewAudioUrl(float32ChunksToWavUrl(completeChunks, event.sampleRate));
-      }
-      setStatus({
-        tone: "info",
-        text: event.total > 0
-          ? `Received audio chunk ${event.index + 1}/${event.total}.`
-          : `Received streaming audio chunk ${event.index + 1}.`,
-      });
+      assembler.accept(event);
     });
-  }, [electronAvailable, model, name, scheduleAudioChunk, setNewAudioUrl]);
+  }, [assembler, electronAvailable, model]);
 
   useEffect(() => () => {
     if (!window.electron?.localTts) return;
@@ -744,7 +750,7 @@ function LocalRuntimePageBody({
       const expectedChunks = generated.audioChunkCount;
       const sampleRate = streamedAudioSampleRateRef.current;
       const chunks = streamedAudioChunksRef.current.slice(0, expectedChunks);
-      const completeChunks = chunks.filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
+      const completeChunks = chunks.filter((chunk): chunk is Float32AudioChunk => !!chunk);
       if (sampleRate == null || expectedChunks <= 0 || completeChunks.length !== expectedChunks) {
         throw new Error("Generation returned incomplete streamed audio.");
       }
