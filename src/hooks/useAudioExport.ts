@@ -12,11 +12,15 @@ export interface ExportSummary {
   /** Deepest true-peak limiter reduction, in dB. */
   limiterReductionDb: number;
   mastered: boolean;
+  /** The loudness preset the export was mastered to. */
+  presetId: string;
 }
 
 interface Options {
   download: (options: ExportOptions, request: AudioExportRequest) => Promise<ExportResult | null>;
   options: ExportOptions;
+  /** The loudness preset `options` was built from, kept with the report. */
+  presetId: string;
   /** The file name (no extension) for an export started now. */
   getFileName: () => string;
   onError: (message: string) => void;
@@ -40,7 +44,7 @@ function isAbort(error: unknown): boolean {
  * Runs one audio export at a time through the export worker, with progress,
  * cancel, and the loudness report of the last finished export.
  */
-export function useAudioExport({ download, options, getFileName, onError, onStart }: Options): UseAudioExportReturn {
+export function useAudioExport({ download, options, presetId, getFileName, onError, onStart }: Options): UseAudioExportReturn {
   const [progress, setProgress] = useState<ExportProgress | null>(null);
   const [summary, setSummary] = useState<ExportSummary | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
@@ -72,6 +76,7 @@ export function useAudioExport({ download, options, getFileName, onError, onStar
         gainDb: result.gainDb,
         limiterReductionDb: result.limiterReductionDb,
         mastered: options.mastering.enabled,
+        presetId,
       });
     }, (error: unknown) => {
       if (!isAbort(error)) onError(error instanceof Error ? error.message : String(error));
@@ -79,7 +84,7 @@ export function useAudioExport({ download, options, getFileName, onError, onStar
       if (controllerRef.current === controller) controllerRef.current = null;
       setProgress(null);
     });
-  }, [download, getFileName, onError, onStart, options]);
+  }, [download, getFileName, onError, onStart, options, presetId]);
 
   const cancel = useCallback(() => controllerRef.current?.abort(), []);
 

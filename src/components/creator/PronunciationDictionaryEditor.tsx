@@ -12,6 +12,7 @@ import {
 import { downloadBlob } from "../../lib/exportAudio";
 import {
   MAX_DICTIONARIES_PER_FILE,
+  MAX_DICTIONARY_FILE_CHARS,
   PronunciationDictionaryError,
   createPronunciationDictionary,
   isLanguageTag,
@@ -469,6 +470,8 @@ export function PronunciationDictionaryEditor({
   };
   const importFile = async (file: File) => {
     try {
+      // Reject by size before reading: a legal file is at most three bytes per character.
+      if (file.size > MAX_DICTIONARY_FILE_CHARS * 3) throw new PronunciationDictionaryError("The file is too large.");
       const { dictionaries: imported, warnings } = readDictionaryFile(file.name, await file.text());
       const merged = mergeImportedDictionaries(dictionaries, imported);
       onChange(merged);

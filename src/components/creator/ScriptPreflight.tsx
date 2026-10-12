@@ -1,4 +1,4 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { ChunkPauseKind } from "../../types";
 import { buildScriptPreflight, type PreflightChunk } from "../../lib/text/preflight";
@@ -23,6 +23,8 @@ interface ScriptPreflightProps {
   speed: number;
 }
 
+/** How long the script must sit still before the preview is rebuilt. */
+export const PREFLIGHT_DEBOUNCE_MS = 300;
 const MAX_LISTED_PASSAGES = 40;
 const MAX_MAPPED_PASSAGES = 200;
 
@@ -54,7 +56,12 @@ export function ScriptPreflight({
   const [open, setOpen] = useState(false);
   const [showSpoken, setShowSpoken] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  const deferredText = useDeferredValue(text);
+  const [settledText, setSettledText] = useState(text);
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSettledText(text), PREFLIGHT_DEBOUNCE_MS);
+    return () => window.clearTimeout(timer);
+  }, [text]);
+  const deferredText = useDeferredValue(settledText);
   const normalizing = normalize && isSpeechNormalizationSupported(speechLanguage);
 
   const preflight = useMemo(() => {

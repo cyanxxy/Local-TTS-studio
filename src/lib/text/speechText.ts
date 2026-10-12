@@ -10,7 +10,12 @@
  *
  * Without normalization the text equals `tuneChunkText` for the same rules.
  */
-import { EMPHASIS_MARKUP, compilePronunciationMatcher, type PronunciationMatchRule } from "../textTuning";
+import {
+  EMPHASIS_MARKUP,
+  compilePronunciationMatcher,
+  type PronunciationMatcher,
+  type PronunciationMatchRule,
+} from "../textTuning";
 import { normalizeForSpeech, type SpeechNormalizationOptions } from "./normalize";
 import { findSpeechBreaks } from "./speechMarkup";
 import { applyTextEdits, type TextEdit, type TextRewrite } from "./textEdits";
@@ -19,6 +24,19 @@ export interface SpeechTextOptions {
   pronunciationRules?: readonly PronunciationMatchRule[];
   /** Normalization options, or omitted/false to leave numbers and symbols as written. */
   normalization?: SpeechNormalizationOptions | false;
+}
+
+// Settings keep one rules array until the dictionary changes, so a script
+// edited keystroke by keystroke compiles its dictionary once.
+const matchers = new WeakMap<readonly PronunciationMatchRule[], PronunciationMatcher>();
+
+function matcherFor(rules: readonly PronunciationMatchRule[]): PronunciationMatcher {
+  let matcher = matchers.get(rules);
+  if (!matcher) {
+    matcher = compilePronunciationMatcher(rules);
+    matchers.set(rules, matcher);
+  }
+  return matcher;
 }
 
 const INLINE_SPACE = /[ \t]/;
@@ -87,7 +105,7 @@ export function buildSpeechTextRewrite(text: string, options: SpeechTextOptions 
   accept(single(breakTagEdits(text)));
   accept(emphasisEdits(text));
   if (options.pronunciationRules && options.pronunciationRules.length > 0) {
-    accept(single(compilePronunciationMatcher(options.pronunciationRules).rewrite(text).edits));
+    accept(single(matcherFor(options.pronunciationRules).rewrite(text).edits));
   }
   if (options.normalization) {
     accept(single(normalizeForSpeech(text, options.normalization).edits));

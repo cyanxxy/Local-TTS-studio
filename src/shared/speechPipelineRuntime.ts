@@ -5,7 +5,7 @@
  */
 import { flattenPronunciationDictionaries, type PronunciationDictionary } from "../lib/pronunciation/dictionary";
 import {
-  buildSpeechPlan,
+  buildSpeechPlanSafe,
   createChunkRemapper,
   type SpeechBreakBoundary,
   type SpeechPipelineSettings,
@@ -119,7 +119,7 @@ export function withSpeechPipeline<Id extends SurfaceEngineId>(
   return {
     ...runtime,
     synthesize: (request: SynthesisRequest<Id>) => {
-      const plan = buildSpeechPlan(request.text, resolveSettings(id), boundary);
+      const plan = buildSpeechPlanSafe(request.text, resolveSettings(id), boundary);
       const inner = runtime.synthesize({
         ...request,
         text: plan.spoken,

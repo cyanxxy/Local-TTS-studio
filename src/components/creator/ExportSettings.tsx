@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, useState } from "react";
 import { Download, FileCode2, FileJson, Loader2, Subtitles, X } from "lucide-react";
 import {
   EXPORT_BITRATE_OPTIONS,
@@ -86,6 +86,8 @@ function NumberField({
   suffix: string;
   onChange: (value: number) => void;
 }) {
+  // What is typed stays as typed (even empty) until the field loses focus.
+  const [typed, setTyped] = useState<string | null>(null);
   return (
     <div>
       <label htmlFor={id} className="text-xs font-medium text-text-secondary">{label}</label>
@@ -97,12 +99,14 @@ function NumberField({
           min={0}
           max={max}
           step={step}
-          value={value}
+          value={typed ?? value}
           className={fieldClass}
           onChange={(event) => {
+            setTyped(event.target.value);
             const parsed = event.target.valueAsNumber;
-            onChange(Number.isFinite(parsed) ? Math.min(max, Math.max(0, parsed)) : 0);
+            if (Number.isFinite(parsed)) onChange(Math.min(max, Math.max(0, parsed)));
           }}
+          onBlur={() => setTyped(null)}
         />
         <span className="text-xs text-text-muted">{suffix}</span>
       </div>
@@ -133,7 +137,7 @@ export function ExportSettings({
   const { isExporting, progress, summary } = audioExport;
   const downloadStatusId = `${ids}-download-status`;
   const percent = Math.round((progress?.fraction ?? 0) * 100);
-  const compliance = summary?.mastered && loudnessPresetId === "acx" ? acxCompliance(summary.report) : null;
+  const compliance = summary?.mastered && summary.presetId === "acx" ? acxCompliance(summary.report) : null;
 
   return (
     <div className="space-y-4">
@@ -275,7 +279,7 @@ export function ExportSettings({
           />
         </div>
         <p className="text-xs text-text-muted">
-          Pauses between passages stay exactly as set. Captions follow the audio as generated, not these edits.
+          Pauses between passages stay exactly as set, and captions follow these edits.
         </p>
       </fieldset>
 

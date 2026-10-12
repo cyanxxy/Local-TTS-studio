@@ -35,6 +35,8 @@ export interface UseCreatorSettingsReturn {
   exportPost: ExportPostState;
   loudnessPresetId: string;
   captionStyle: CaptionStyle;
+  /** Rules the upgrade from the old lexicon had to leave out, or undefined. */
+  migrationNotice: string | undefined;
   generationSettings: GenerationTuningSettings;
   exportOptions: ExportOptions;
   persistedState: PersistedCreatorState;
@@ -233,6 +235,7 @@ export function useCreatorSettings({
     exportPost,
     loudnessPresetId,
     captionStyle,
+    migrationNotice: initialState.migrationNotice,
     generationSettings,
     exportOptions,
     persistedState,
@@ -259,6 +262,7 @@ export function useCreatorSettings({
     exportOptions,
     exportPost,
     generationSettings,
+    initialState.migrationNotice,
     loudnessPresetId,
     normalizeSpeech,
     onExportBitrateChange,

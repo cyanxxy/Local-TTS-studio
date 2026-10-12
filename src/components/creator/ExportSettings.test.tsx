@@ -46,6 +46,7 @@ const SUMMARY: ExportSummary = {
   gainDb: 2.3,
   limiterReductionDb: 0.8,
   mastered: true,
+  presetId: "streaming",
 };
 
 function renderSettings(props: Partial<React.ComponentProps<typeof ExportSettings>> = {}) {
@@ -181,6 +182,10 @@ describe("ExportSettings", () => {
     fireEvent.change(screen.getByLabelText("Fade in"), { target: { value: "30" } });
     fireEvent.change(screen.getByLabelText("Fade out"), { target: { value: "-5" } });
     fireEvent.change(screen.getByLabelText("Fade out"), { target: { value: "" } });
+    // An emptied field stays empty while it is edited, and the setting keeps its last value.
+    expect(screen.getByLabelText("Fade out")).toHaveValue(null);
+    fireEvent.blur(screen.getByLabelText("Fade out"));
+    expect(screen.getByLabelText("Fade out")).toHaveValue(0);
 
     const calls = (creator.onExportPostChange as ReturnType<typeof vi.fn>).mock.calls.map(([patch]) => patch);
     expect(calls).toEqual([
@@ -188,7 +193,6 @@ describe("ExportSettings", () => {
       { headSec: 0.5 },
       { tailSec: 10 },
       { fadeInMs: 30 },
-      { fadeOutMs: 0 },
       { fadeOutMs: 0 },
     ]);
   });
@@ -261,12 +265,36 @@ describe("ExportSettings", () => {
     expect(screen.queryByText(/ACX loudness|ACX limits/)).not.toBeInTheDocument();
   });
 
-  it("judges an ACX export against the ACX limits", () => {
+  it("judges an ACX export against the ACX limits and says what it does not check", () => {
     renderSettings({
       creator: makeCreator({ loudnessPresetId: "acx" }),
-      audioExport: makeExport({ summary: SUMMARY }),
+      audioExport: makeExport({ summary: { ...SUMMARY, presetId: "acx" } }),
     });
-    expect(screen.getByText("Meets the ACX loudness and peak limits.")).toBeInTheDocument();
+    expect(screen.getByText("Meets the ACX loudness and peak limits. The noise floor (-60 dB RMS) is not checked.")).toBeInTheDocument();
+  });
+
+  it("ties the ACX verdict to the preset the export used, not the one selected now", () => {
+    const { unmount } = render(
+      <ExportSettings
+        creator={makeCreator({ loudnessPresetId: "acx" })}
+        sourceSampleRate={null}
+        hasAudio
+        audioExport={makeExport({ summary: SUMMARY })}
+        onDownloadCaptions={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/ACX loudness and peak/)).not.toBeInTheDocument();
+    unmount();
+    render(
+      <ExportSettings
+        creator={makeCreator({ loudnessPresetId: "streaming" })}
+        sourceSampleRate={null}
+        hasAudio
+        audioExport={makeExport({ summary: { ...SUMMARY, presetId: "acx" } })}
+        onDownloadCaptions={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/ACX loudness and peak/)).toBeInTheDocument();
   });
 
   it("flags an ACX export outside the limits and handles silent and unmastered reports", () => {
@@ -275,7 +303,7 @@ describe("ExportSettings", () => {
         creator={makeCreator({ loudnessPresetId: "acx" })}
         sourceSampleRate={null}
         hasAudio
-        audioExport={makeExport({ summary: { ...SUMMARY, report: { ...SUMMARY.report, rmsDbfs: -30 } } })}
+        audioExport={makeExport({ summary: { ...SUMMARY, presetId: "acx", report: { ...SUMMARY.report, rmsDbfs: -30 } } })}
         onDownloadCaptions={vi.fn()}
       />,
     );

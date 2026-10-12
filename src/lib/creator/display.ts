@@ -65,11 +65,11 @@ export function acxCompliance(report: Pick<LoudnessReport, "rmsDbfs" | "samplePe
   const { rmsDbfs, samplePeakDbfs } = report;
   const rmsOk = rmsDbfs >= -23 && rmsDbfs <= -18;
   const peakOk = samplePeakDbfs <= -3;
-  if (rmsOk && peakOk) return { ok: true, text: "Meets the ACX loudness and peak limits." };
+  if (rmsOk && peakOk) return { ok: true, text: "Meets the ACX loudness and peak limits. The noise floor (-60 dB RMS) is not checked." };
   const problems = [
     ...(rmsOk ? [] : [`RMS ${formatDb(rmsDbfs, "dBFS")} is outside −23 to −18 dBFS`]),
     ...(peakOk ? [] : [`peak ${formatDb(samplePeakDbfs, "dBFS")} is above −3 dBFS`]),
   ];
-  return { ok: false, text: `Outside the ACX limits: ${problems.join("; ")}.` };
+  return { ok: false, text: `Outside the ACX limits: ${problems.join("; ")}. The noise floor (-60 dB RMS) is not checked.` };
 }
 

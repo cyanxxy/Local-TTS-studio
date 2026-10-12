@@ -62,16 +62,16 @@ describe("formatDb", () => {
 
 describe("acxCompliance", () => {
   it("passes audio inside the RMS window with peaks below -3 dBFS", () => {
-    expect(acxCompliance({ rmsDbfs: -20, samplePeakDbfs: -3.5 })).toEqual({ ok: true, text: "Meets the ACX loudness and peak limits." });
+    expect(acxCompliance({ rmsDbfs: -20, samplePeakDbfs: -3.5 })).toEqual({ ok: true, text: "Meets the ACX loudness and peak limits. The noise floor (-60 dB RMS) is not checked." });
   });
 
   it("names every limit that is missed", () => {
     expect(acxCompliance({ rmsDbfs: -16, samplePeakDbfs: -3.5 })).toEqual({
       ok: false,
-      text: "Outside the ACX limits: RMS −16.0 dBFS is outside −23 to −18 dBFS.",
+      text: "Outside the ACX limits: RMS −16.0 dBFS is outside −23 to −18 dBFS. The noise floor (-60 dB RMS) is not checked.",
     });
     expect(acxCompliance({ rmsDbfs: -25, samplePeakDbfs: -1 }).text)
-      .toBe("Outside the ACX limits: RMS −25.0 dBFS is outside −23 to −18 dBFS; peak −1.0 dBFS is above −3 dBFS.");
-    expect(acxCompliance({ rmsDbfs: -20, samplePeakDbfs: -2 }).text).toBe("Outside the ACX limits: peak −2.0 dBFS is above −3 dBFS.");
+      .toBe("Outside the ACX limits: RMS −25.0 dBFS is outside −23 to −18 dBFS; peak −1.0 dBFS is above −3 dBFS. The noise floor (-60 dB RMS) is not checked.");
+    expect(acxCompliance({ rmsDbfs: -20, samplePeakDbfs: -2 }).text).toBe("Outside the ACX limits: peak −2.0 dBFS is above −3 dBFS. The noise floor (-60 dB RMS) is not checked.");
   });
 });

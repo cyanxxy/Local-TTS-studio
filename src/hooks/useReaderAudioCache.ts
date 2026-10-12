@@ -121,9 +121,11 @@ export function useReaderAudioCache({
       : null
   ), [engineId, section, sectionText, signatureParts]);
 
-  // What the same inputs hashed to before signature version 2.
+  // What the same inputs hashed to before signature version 2. Version 1 never
+  // saw what the speech pipeline does to the script (normalization, cleanup,
+  // rule options), so audio cached then cannot stand in for audio made with it.
   const legacySignature = useMemo(() => (
-    section && signatureParts
+    section && signatureParts && signatureParts.tuning.speechFingerprint === undefined
       ? buildLegacyAudioSignature({ text: sectionText, model: engineId, ...signatureParts.legacy })
       : null
   ), [engineId, section, sectionText, signatureParts]);

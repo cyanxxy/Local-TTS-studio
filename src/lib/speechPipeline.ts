@@ -269,6 +269,22 @@ export interface RemappableWordTiming {
   endSec: number;
 }
 
+/**
+ * `buildSpeechPlan` that never throws: if the rewrite fails, the script is
+ * spoken as written rather than taking the page down.
+ */
+export function buildSpeechPlanSafe(
+  source: string,
+  settings: SpeechPipelineSettings,
+  boundary: SpeechBreakBoundary = "paragraph",
+): SpeechPlan {
+  try {
+    return buildSpeechPlan(source, settings, boundary);
+  } catch {
+    return identityPlan(source, boundary);
+  }
+}
+
 /** The fields of an audio chunk the remapper reads and rewrites. */
 export interface RemappableChunk {
   audio: Float32Array;

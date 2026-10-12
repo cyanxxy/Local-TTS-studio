@@ -25,7 +25,7 @@ function setup(download: Download) {
   const onError = vi.fn();
   const onStart = vi.fn();
   const getFileName = vi.fn(() => "Story-af_heart-20261012-120000");
-  const view = renderHook(() => useAudioExport({ download, options: OPTIONS, getFileName, onError, onStart }));
+  const view = renderHook(() => useAudioExport({ download, options: OPTIONS, presetId: "streaming", getFileName, onError, onStart }));
   return { ...view, onError, onStart, getFileName };
 }
 
@@ -73,6 +73,7 @@ describe("useAudioExport", () => {
       gainDb: 1.5,
       limiterReductionDb: 0.4,
       mastered: true,
+      presetId: "streaming",
     });
   });
 
@@ -132,6 +133,7 @@ describe("useAudioExport", () => {
     const view = renderHook(() => useAudioExport({
       download: deferred.download,
       options: OPTIONS,
+      presetId: "streaming",
       getFileName: () => "name",
       onError: vi.fn(),
     }));

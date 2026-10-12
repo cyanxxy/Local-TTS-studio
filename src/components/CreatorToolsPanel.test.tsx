@@ -34,6 +34,7 @@ function makeCreator(overrides: Partial<UseCreatorSettingsReturn> = {}): UseCrea
     exportPost: defaults.exportPost,
     loudnessPresetId: "streaming",
     captionStyle: "readable",
+    migrationNotice: undefined,
     generationSettings: { speed: defaults.speed, quality: 5, pauseOverridesSec: { comma: 0.11, sentence: 0.2, paragraph: 0.32, none: 0 } },
     exportOptions: {
       format: "mp3",
@@ -220,6 +221,13 @@ describe("CreatorToolsPanel", () => {
 
       expect(creator.onDictionariesChange).toHaveBeenCalledWith([expect.objectContaining({ name: "Dictionary 1" })]);
     });
+  });
+
+  it("tells the user once which saved pronunciation rules the upgrade left out", () => {
+    renderPanel({ creator: makeCreator({ migrationNotice: "2 of your 3 saved pronunciation rules were left out." }) });
+    expect(screen.getByText("2 of your 3 saved pronunciation rules were left out.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByText(/left out/)).not.toBeInTheDocument();
   });
 
   describe("export", () => {

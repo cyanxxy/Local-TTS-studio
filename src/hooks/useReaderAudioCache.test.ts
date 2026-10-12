@@ -166,6 +166,15 @@ describe("useReaderAudioCache", () => {
     expect(library.saveAudio.mock.calls[0][0].updatedAt).toBeGreaterThan(5);
   });
 
+  it("does not reuse version 1 audio once the speech pipeline rewrites the script", async () => {
+    const piped = { ...parts, tuning: { speechFingerprint: "normalize" } } as unknown as typeof parts;
+    const { library, player } = setup({ signatureParts: piped, loaded: cachedAudio({ signature: legacySignatureFor(0) }) });
+
+    await waitFor(() => expect(library.clearAudio).toHaveBeenCalledTimes(1));
+    expect(player.restoreAudioCache).not.toHaveBeenCalled();
+    expect(library.saveAudio).not.toHaveBeenCalled();
+  });
+
   it("still discards version 1 audio whose settings differ", async () => {
     const other = buildLegacyAudioSignature({
       text: document.text.slice(sections[0].start, sections[0].end),

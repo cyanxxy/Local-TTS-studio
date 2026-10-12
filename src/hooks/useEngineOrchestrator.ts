@@ -79,6 +79,8 @@ export interface UseEngineOrchestratorReturn {
   /** The engine whose audio the visible surface plays and saves, or null off the surfaces. */
   visibleEngineId: SurfaceEngineId | null;
   runtimes: EngineRuntimeMap;
+  /** What the visible surface's engines are asked to speak: the script after the speech pipeline. */
+  spokenText: string;
   audio8: Audio8Runtime;
   browser: Omit<UseBrowserEngineRuntimesReturn, "runtimes">;
   desktopEngineAvailability: Readonly<Record<DesktopInlineEngineId, boolean>>;
@@ -349,6 +351,7 @@ export function useEngineOrchestrator({
     engineIds,
     visibleEngineId,
     runtimes,
+    spokenText: pipeline.spokenText,
     audio8,
     browser: browserExtras,
     desktopEngineAvailability,

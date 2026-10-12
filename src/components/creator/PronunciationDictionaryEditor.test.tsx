@@ -220,6 +220,20 @@ describe("PronunciationDictionaryEditor", () => {
     expect(state.current).toEqual([brand]);
   });
 
+  it("refuses an oversized file without reading it", async () => {
+    renderEditor([brand]);
+    const huge = file("huge.json", "{}");
+    Object.defineProperty(huge, "size", { value: 13 * 1024 * 1024 });
+    const text = vi.spyOn(huge, "text");
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText("Import pronunciation dictionary file"), { target: { files: [huge] } });
+    });
+
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Could not import huge.json. The file is too large."));
+    expect(text).not.toHaveBeenCalled();
+  });
+
   it("warns about PLS entries it skipped", async () => {
     renderEditor([]);
     const pls = '<?xml version="1.0"?><lexicon version="1.0" xmlns="http://www.w3.org/2005/01/pronunciation-lexicon" alphabet="ipa" xml:lang="en"><lexeme><grapheme>ok</grapheme><alias>okay</alias></lexeme><lexeme><grapheme>none</grapheme></lexeme></lexicon>';

@@ -906,7 +906,7 @@ describe("SynthesisApp", () => {
     expect(mock.cache.clearCache).toHaveBeenCalled();
     expect(mock.cache.redownloadActiveModel).toHaveBeenCalled();
     expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions, exportRequest);
-    expect(mock.player.downloadCaptions).toHaveBeenCalledWith("vtt", "readable");
+    expect(mock.player.downloadCaptions).toHaveBeenCalledWith("vtt", "readable", undefined);
     expect(screen.getByTestId("audio-player")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "toggle-play" }));

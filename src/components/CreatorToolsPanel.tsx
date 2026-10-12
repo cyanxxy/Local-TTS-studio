@@ -73,6 +73,7 @@ export function CreatorToolsPanel({
 }: CreatorToolsPanelProps) {
   const [open, setOpen] = useState(false);
   const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
   const [pronunciationPreviewText, setPronunciationPreviewText] = useState("");
   const controlId = useId();
   const panelId = `${controlId}-panel`;
@@ -307,6 +308,18 @@ export function CreatorToolsPanel({
           {/* Pronunciation */}
           <div className="border-t border-black/5 pt-4 space-y-3">
             <SectionLabel>Pronunciation</SectionLabel>
+            {creator.migrationNotice && !noticeDismissed && (
+              <div role="status" className="flex items-start gap-2 rounded-lg border border-border bg-text-primary/[0.04] p-2 text-xs text-text-secondary">
+                <p className="flex-1">{creator.migrationNotice}</p>
+                <button
+                  type="button"
+                  className="rounded-md px-1.5 py-0.5 font-medium text-text-muted hover:bg-text-primary/[0.07] hover:text-text-primary"
+                  onClick={() => setNoticeDismissed(true)}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
             <PronunciationDictionaryEditor
               dictionaries={dictionaries}
               onChange={creator.onDictionariesChange}

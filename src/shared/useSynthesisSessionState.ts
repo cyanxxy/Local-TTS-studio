@@ -147,6 +147,7 @@ export function useSynthesisSessionState({
     engineIds: { studio: studioEngineId, reader: readerEngineId },
     visibleEngineId,
     runtimes,
+    spokenText,
     audio8,
     browser,
     surfaceEngineSettings,
@@ -381,15 +382,17 @@ export function useSynthesisSessionState({
   const audioExport = useAudioExport({
     download: downloadPlayerAudio,
     options: creator.exportOptions,
+    presetId: creator.loudnessPresetId,
     getFileName: exportFileName,
     onError: reportExportError,
     onStart: clearExportError,
   });
 
   const captionStyle = creator.captionStyle;
+  const exportPost = creator.exportOptions.post;
   const handleDownloadCaptions = useCallback((format: "srt" | "vtt" | "json") => {
-    downloadPlayerCaptions(format, captionStyle);
-  }, [captionStyle, downloadPlayerCaptions]);
+    downloadPlayerCaptions(format, captionStyle, exportPost);
+  }, [captionStyle, downloadPlayerCaptions, exportPost]);
 
   const handleSkipBackward = useCallback(() => skipPlayback(-10), [skipPlayback]);
   const handleSkipForward = useCallback(() => skipPlayback(10), [skipPlayback]);
@@ -520,6 +523,7 @@ export function useSynthesisSessionState({
     },
     studio: {
       text,
+      spokenText,
       changeText: handleTextChange,
       engineId: studioEngineId,
       desktopModel: studioDesktopModel,

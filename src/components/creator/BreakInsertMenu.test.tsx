@@ -16,7 +16,7 @@ describe("BreakInsertMenu", () => {
     open();
     expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(screen.getByRole("group", { name: "Insert a pause" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "2 s" }));
+    fireEvent.click(screen.getByRole("button", { name: "Insert a 2 seconds pause" }));
 
     expect(onInsert).toHaveBeenCalledWith(2);
     expect(screen.queryByRole("group", { name: "Insert a pause" })).not.toBeInTheDocument();
@@ -62,5 +62,50 @@ describe("BreakInsertMenu", () => {
     expect(screen.getByRole("group", { name: "Insert a pause" })).toBeInTheDocument();
     fireEvent.pointerDown(screen.getByRole("button", { name: "Elsewhere" }));
     expect(screen.queryByRole("group", { name: "Insert a pause" })).not.toBeInTheDocument();
+  });
+
+  it("moves focus into the menu, steps through the presets with the arrow keys and returns focus on Escape", () => {
+    render(<BreakInsertMenu onInsert={() => {}} />);
+    const trigger = screen.getByRole("button", { name: "Pause" });
+    open();
+    const presets = screen.getAllByRole("button", { name: /^Insert a .* pause$/ });
+    expect(presets.map((button) => button.getAttribute("aria-label"))).toEqual([
+      "Insert a 300 milliseconds pause",
+      "Insert a 500 milliseconds pause",
+      "Insert a 1 second pause",
+      "Insert a 2 seconds pause",
+    ]);
+    expect(trigger).toHaveAttribute("aria-controls", screen.getByRole("group", { name: "Insert a pause" }).id);
+    expect(presets[0]).toHaveFocus();
+
+    const toolbar = screen.getByRole("toolbar", { name: "Preset pauses" });
+    fireEvent.keyDown(toolbar, { key: "ArrowRight" });
+    expect(presets[1]).toHaveFocus();
+    fireEvent.keyDown(toolbar, { key: "ArrowDown" });
+    expect(presets[2]).toHaveFocus();
+    fireEvent.keyDown(toolbar, { key: "End" });
+    expect(presets[3]).toHaveFocus();
+    fireEvent.keyDown(toolbar, { key: "ArrowRight" });
+    expect(presets[0]).toHaveFocus();
+    fireEvent.keyDown(toolbar, { key: "ArrowLeft" });
+    expect(presets[3]).toHaveFocus();
+    fireEvent.keyDown(toolbar, { key: "ArrowUp" });
+    expect(presets[2]).toHaveFocus();
+    fireEvent.keyDown(toolbar, { key: "Home" });
+    expect(presets[0]).toHaveFocus();
+    fireEvent.keyDown(toolbar, { key: "a" });
+    expect(presets[0]).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(trigger).toHaveFocus();
+  });
+
+  it("ties the custom field to its error message", () => {
+    render(<BreakInsertMenu onInsert={() => {}} />);
+    open();
+    const input = screen.getByLabelText("Custom (seconds)");
+    expect(input).not.toHaveAttribute("aria-describedby");
+    fireEvent.change(input, { target: { value: "0" } });
+    expect(input).toHaveAccessibleDescription("Use 0.1 to 10 seconds.");
   });
 });

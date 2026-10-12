@@ -8,6 +8,7 @@ import { encodeSpeechBreakMark } from "./speechBreakMarks";
 import {
   INACTIVE_SPEECH_PIPELINE,
   buildSpeechPlan,
+  buildSpeechPlanSafe,
   createChunkRemapper,
   describeSpeechPipeline,
   isSpeechPipelineActive,
@@ -331,5 +332,28 @@ describe("break boundaries against the engine chunkers", () => {
     expect(mapped.map((entry) => entry.text)).toEqual(["Hi.", "Ok.", "Yes no maybe so", "Done"]);
     expect(mapped.map((entry) => entry.pauseAfterSec)).toEqual([1, 2, 0.5, 0]);
     for (const entry of mapped) expect(source.slice(entry.textStart, entry.textEnd)).toBe(entry.text);
+  });
+});
+
+describe("buildSpeechPlanSafe", () => {
+  it("builds the same plan as buildSpeechPlan", () => {
+    expect(buildSpeechPlanSafe("GIF.", rules(["GIF", "jif"])).spoken).toBe("jif.");
+  });
+
+  it("speaks the script as written instead of throwing", () => {
+    const broken = { ...INACTIVE_SPEECH_PIPELINE, get rules(): never { throw new Error("rule compile failed"); } };
+    expect(() => buildSpeechPlan("GIF.", broken)).toThrow("rule compile failed");
+    const plan = buildSpeechPlanSafe("GIF.", broken);
+    expect(plan.identity).toBe(true);
+    expect(plan.spoken).toBe("GIF.");
+  });
+
+  it("scales to a dictionary with thousands of rules", () => {
+    const many = rules(...Array.from({ length: 5000 }, (_, index): [string, string] => [`term${index}`, `t${index}`]));
+    const text = Array.from({ length: 1000 }, (_, index) => `plain term${index} words`).join(" ");
+    const started = performance.now();
+    const plan = buildSpeechPlan(text, many);
+    expect(plan.spoken.startsWith("plain t0 words plain t1 words")).toBe(true);
+    expect(performance.now() - started).toBeLessThan(2000);
   });
 });

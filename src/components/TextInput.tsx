@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef } from "react";
 import { FileUp, Loader2 } from "lucide-react";
 import { MIN_TEXT_LENGTH } from "../constants";
+import { stripSpeechBreakMarks } from "../lib/speechBreakMarks";
 import { insertBreakTag } from "../lib/creator/breakInsert";
 import { getMeaningfulTextLength, hasMinimumSynthesisText } from "../lib/textValidation";
 import { BreakInsertMenu } from "./creator/BreakInsertMenu";
@@ -11,12 +12,19 @@ interface TextInputProps {
   /** Desktop-only document import (PDF/DOCX/images via LiteParse); absent on web builds. */
   onImportDocument?: () => void;
   isImportingDocument?: boolean;
+  /**
+   * What the engine is asked to say once pauses, cleanup and the dictionary have
+   * had their way. The counter measures this, since it is what Generate needs.
+   */
+  spokenText?: string;
 }
 
-export function TextInput({ text, onTextChange, onImportDocument, isImportingDocument = false }: TextInputProps) {
+export function TextInput({ text, onTextChange, onImportDocument, isImportingDocument = false, spokenText }: TextInputProps) {
   // Count meaningful (trimmed) characters so the counter matches the generate gate.
-  const charCount = getMeaningfulTextLength(text);
-  const isValid = hasMinimumSynthesisText(text, MIN_TEXT_LENGTH);
+  const spoken = spokenText === undefined ? text : stripSpeechBreakMarks(spokenText);
+  const charCount = getMeaningfulTextLength(spoken);
+  const isValid = hasMinimumSynthesisText(spoken, MIN_TEXT_LENGTH);
+  const writtenCount = getMeaningfulTextLength(text);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   // Where the caret goes once the controlled textarea shows the inserted pause.
   const pendingCaretRef = useRef<number | null>(null);
@@ -74,11 +82,16 @@ export function TextInput({ text, onTextChange, onImportDocument, isImportingDoc
             !isValid && charCount > 0 ? "text-danger" : "text-text-muted"
           }`}
         >
-          {charCount} chars
+          {charCount} chars{writtenCount > 0 && charCount !== writtenCount ? " spoken" : ""}
           {!isValid && charCount > 0 && (
             <span className="text-text-muted"> / {MIN_TEXT_LENGTH}</span>
           )}
         </span>
+        {!isValid && writtenCount >= MIN_TEXT_LENGTH && (
+          <span className="text-xs text-text-muted" role="status">
+            Pauses, cleanup and pronunciation rules leave fewer than {MIN_TEXT_LENGTH} characters to speak.
+          </span>
+        )}
       </div>
     </div>
   );

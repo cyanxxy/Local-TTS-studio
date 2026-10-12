@@ -346,6 +346,8 @@ describe("useEngineOrchestrator", () => {
 
       expect(retakeText({ text: "GIF files are small.", textStart: 0, textEnd: 20 })).toBe("jif files are small.");
       expect(retakeText({ text: "kept", textStart: undefined, textEnd: undefined })).toBe("kept");
+      // Audio made from an earlier version of the script keeps its own words.
+      expect(retakeText({ text: "An older sentence.", textStart: 0, textEnd: 18 })).toBe("An older sentence.");
     });
 
     it("runs every synthesize request through the pipeline, for each engine", async () => {

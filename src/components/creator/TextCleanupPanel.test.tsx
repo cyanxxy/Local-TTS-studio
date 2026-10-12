@@ -18,7 +18,7 @@ describe("TextCleanupPanel", () => {
 
   it("applies the cleanup once and offers to undo it", () => {
     const onTextChange = vi.fn();
-    render(<TextCleanupPanel text={MESSY} onTextChange={onTextChange} />);
+    const { rerender } = render(<TextCleanupPanel text={MESSY} onTextChange={onTextChange} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Clean up script" }));
     expect(onTextChange).toHaveBeenCalledTimes(1);
@@ -26,10 +26,29 @@ describe("TextCleanupPanel", () => {
     expect(cleaned).toContain("The launch went well.");
     expect(cleaned).not.toContain("**");
     expect(cleaned).not.toContain("[1]");
+    rerender(<TextCleanupPanel text={cleaned} onTextChange={onTextChange} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Undo cleanup" }));
     expect(onTextChange).toHaveBeenLastCalledWith(MESSY);
+    rerender(<TextCleanupPanel text={MESSY} onTextChange={onTextChange} />);
     expect(screen.queryByRole("button", { name: "Undo cleanup" })).not.toBeInTheDocument();
+  });
+
+  it("stops offering undo once the script has been edited since the cleanup", () => {
+    const onTextChange = vi.fn();
+    const { rerender } = render(<TextCleanupPanel text={MESSY} onTextChange={onTextChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Clean up script" }));
+    const cleaned = onTextChange.mock.calls[0][0] as string;
+
+    rerender(<TextCleanupPanel text={cleaned} onTextChange={onTextChange} />);
+    expect(screen.getByRole("button", { name: "Undo cleanup" })).toBeInTheDocument();
+
+    rerender(<TextCleanupPanel text={`${cleaned} And a new sentence.`} onTextChange={onTextChange} />);
+    expect(screen.queryByRole("button", { name: "Undo cleanup" })).not.toBeInTheDocument();
+    // Editing back to the cleaned text makes the undo safe again.
+    rerender(<TextCleanupPanel text={cleaned} onTextChange={onTextChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Undo cleanup" }));
+    expect(onTextChange).toHaveBeenLastCalledWith(MESSY);
   });
 
   it("only runs the actions that are ticked", () => {

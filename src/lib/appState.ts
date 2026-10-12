@@ -29,6 +29,7 @@ import type {
 import { LOUDNESS_PRESETS, type ExportFormat } from "./exportAudio";
 import {
   MAX_DICTIONARIES_PER_FILE,
+  MAX_DICTIONARY_RULES,
   dictionaryFromLegacyRules,
   validatePronunciationDictionary,
   type PronunciationDictionary,
@@ -101,6 +102,11 @@ export interface CreatorState {
   loudnessPresetId: string;
   exportPost: ExportPostState;
   captionStyle: CaptionStyle;
+  /**
+   * Set when this session moved a version 1 lexicon into a dictionary and had
+   * to leave some rules behind. Not stored.
+   */
+  migrationNotice?: string;
 }
 
 /** What is stored: every field optional, so a missing or invalid one falls back to the preset. */
@@ -120,6 +126,9 @@ export interface PronunciationLexiconDiagnostics {
 
 /** MP3 bitrates the encoder accepts (64 kbps floor); below 32 kHz it stops at 160. */
 export const EXPORT_BITRATE_OPTIONS = [64, 96, 128, 160, 192, 256, 320] as const;
+/** The longest written and spoken forms a dictionary rule accepts. */
+const MAX_LEGACY_FROM_LENGTH = 200;
+const MAX_LEGACY_TO_LENGTH = 500;
 export const DEFAULT_LOUDNESS_PRESET_ID = "streaming";
 export const MAX_EXPORT_PADDING_SEC = 10;
 export const MAX_EXPORT_FADE_MS = 5000;
@@ -307,11 +316,16 @@ function parseCreatorState(stored: Record<string, unknown>, legacy: boolean): Cr
   const preset = isCreatorPresetId(stored.preset) ? stored.preset : getCreatorPresetDefaults(DEFAULT_CREATOR_PRESET).preset;
   const defaults = getCreatorPresetDefaults(preset);
   let dictionaries = defaults.dictionaries;
+  let migrationNotice: string | undefined;
   if (legacy) {
     const rules = typeof stored.pronunciationLexicon === "string"
       ? parsePronunciationRules(stored.pronunciationLexicon)
       : [];
-    if (rules.length > 0) dictionaries = [dictionaryFromLegacyRules(rules, { id: QUICK_RULES_DICTIONARY_ID })];
+    const migrated = migrateLegacyRules(rules);
+    if (migrated.dictionary) dictionaries = [migrated.dictionary];
+    if (migrated.skipped > 0) {
+      migrationNotice = `${migrated.skipped} of your ${rules.length} saved pronunciation ${rules.length === 1 ? "rule was" : "rules were"} too long or too many for a dictionary and ${migrated.skipped === 1 ? "was" : "were"} left out. They are still stored unchanged.`;
+    }
   } else {
     dictionaries = parseDictionaries(stored.dictionaries, dictionaries);
   }
@@ -332,7 +346,41 @@ function parseCreatorState(stored: Record<string, unknown>, legacy: boolean): Cr
     loudnessPresetId: isLoudnessPresetId(stored.loudnessPresetId) ? stored.loudnessPresetId : defaults.loudnessPresetId,
     exportPost: parseExportPost(stored.exportPost),
     captionStyle: isCaptionStyle(stored.captionStyle) ? stored.captionStyle : defaults.captionStyle,
+    ...(migrationNotice === undefined ? {} : { migrationNotice }),
   };
+}
+
+/**
+ * Moves version 1 rules into a dictionary without ever throwing: rules longer
+ * than a dictionary allows, rules past its size limit and rules it rejects
+ * stay behind (version 1 storage is never modified).
+ */
+function migrateLegacyRules(rules: readonly PronunciationRule[]): { dictionary: PronunciationDictionary | null; skipped: number } {
+  const fitting = rules
+    .filter((rule) => rule.from.length <= MAX_LEGACY_FROM_LENGTH && rule.to.length <= MAX_LEGACY_TO_LENGTH)
+    .slice(0, MAX_DICTIONARY_RULES);
+  const build = (candidates: readonly PronunciationRule[]) => (
+    candidates.length === 0 ? null : dictionaryFromLegacyRules(candidates, { id: QUICK_RULES_DICTIONARY_ID })
+  );
+  try {
+    const dictionary = build(fitting);
+    return { dictionary, skipped: rules.length - fitting.length };
+  } catch {
+    // Something in the lexicon is not valid in a dictionary; keep the rules that are.
+    const accepted = fitting.filter((rule) => {
+      try {
+        dictionaryFromLegacyRules([rule]);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    try {
+      return { dictionary: build(accepted), skipped: rules.length - accepted.length };
+    } catch {
+      return { dictionary: null, skipped: rules.length };
+    }
+  }
 }
 
 /**

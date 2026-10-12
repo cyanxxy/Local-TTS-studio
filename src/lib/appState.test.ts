@@ -354,6 +354,29 @@ describe("appState", () => {
     expect(getInitialCreatorState().exportBitrateKbps).toBe(256);
   });
 
+  it("never fails to start over a version 1 lexicon that a dictionary cannot hold", () => {
+    const raw = JSON.stringify({
+      pronunciationLexicon: [`${"a".repeat(300)}=x`, `b=${"y".repeat(600)}`, "keep=this", "also=this"].join("\n"),
+    });
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, raw);
+
+    const state = getInitialCreatorState();
+    expect(state.dictionaries[0].rules.map((rule) => rule.type === "alias" && rule.from)).toEqual(["keep", "also"]);
+    expect(state.migrationNotice).toBe("2 of your 4 saved pronunciation rules were too long or too many for a dictionary and were left out. They are still stored unchanged.");
+    expect(localStorage.getItem(LEGACY_CREATOR_STATE_STORAGE_KEY)).toBe(raw);
+
+    const tooMany = Array.from({ length: 6000 }, (_, index) => `w${index}=v${index}`).join("\n");
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: tooMany }));
+    const big = getInitialCreatorState();
+    expect(big.dictionaries[0].rules).toHaveLength(5000);
+    expect(big.migrationNotice).toContain("1000 of your 6000 saved pronunciation rules were");
+
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: "one=\u0001bad" }));
+    const rejected = getInitialCreatorState();
+    expect(rejected.dictionaries).toEqual([]);
+    expect(rejected.migrationNotice).toContain("1 of your 1 saved pronunciation rule was");
+  });
+
   it("persists app and creator state while tolerating storage failures", () => {
     persistAppState({ model: "supertonic", text: "Saved" });
     persistCreatorState({ preset: "custom", exportFormat: "mp3" });

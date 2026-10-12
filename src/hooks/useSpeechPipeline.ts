@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
-import { buildSpeechPlan, createChunkRemapper, type SpeechPlan } from "../lib/speechPipeline";
+import { buildSpeechPlanSafe, createChunkRemapper, type SpeechPlan } from "../lib/speechPipeline";
 import type { SurfaceEngineId, SurfaceEngineSettings } from "../models/registry";
 import type { EngineRuntimeMap } from "../shared/engineRuntime";
 import {
@@ -64,7 +64,7 @@ export function useSpeechPipeline({
     () => resolveSpeechPipelineSettings({ dictionaries, normalize, cleanup }, language),
     [cleanup, dictionaries, language, normalize],
   );
-  const plan = useMemo(() => buildSpeechPlan(text, settings, boundary), [boundary, settings, text]);
+  const plan = useMemo(() => buildSpeechPlanSafe(text, settings, boundary), [boundary, settings, text]);
   const remapper = useMemo(() => createChunkRemapper(plan), [plan]);
 
   const { beginStream, scheduleChunk } = player;
@@ -87,6 +87,9 @@ export function useSpeechPipeline({
 
   const retakeText = useCallback<UseSpeechPipelineReturn["retakeText"]>((segment) => {
     if (plan.identity || segment.textStart === undefined || segment.textEnd === undefined) return segment.text;
+    // The stored offsets belong to the script the audio was made from. Once it
+    // is edited they point elsewhere, so the passage is retaken as it was written.
+    if (plan.source.slice(segment.textStart, segment.textEnd) !== segment.text) return segment.text;
     const range = plan.toSpokenRange({ start: segment.textStart, end: segment.textEnd });
     return plan.spoken.slice(range.start, range.end);
   }, [plan]);

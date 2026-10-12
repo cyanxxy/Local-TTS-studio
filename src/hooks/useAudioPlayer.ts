@@ -1,6 +1,8 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import type { CaptionExportFormat } from "../types";
 import type { CaptionStyle } from "../lib/appState";
+import type { PostProcessingOptions } from "../lib/audio/postProcess";
+import { retimeChunksForExport } from "../lib/creator/captionTiming";
 import type { CachedReaderAudioChunk } from "../lib/readerDocument";
 import {
   AUDIO_PLAYER_RETAIN_BEHIND_SECONDS,
@@ -69,7 +71,8 @@ export interface UseAudioPlayerReturn {
    * Rejects with an AbortError when `request.signal` aborts.
    */
   download: (options?: ExportOptions, request?: AudioExportRequest) => Promise<ExportResult | null>;
-  downloadCaptions: (format: CaptionExportFormat, style?: CaptionStyle) => void;
+  /** Saves captions; `post` moves the cues to where an export with those finishing options puts them. */
+  downloadCaptions: (format: CaptionExportFormat, style?: CaptionStyle, post?: PostProcessingOptions) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
   getAudioChunkCount: () => number;
   /** The sample rate the engine produced the buffered audio at, or null while there is none. */
@@ -758,10 +761,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     return result;
   }, []);
 
-  const downloadCaptions = useCallback((format: CaptionExportFormat, style: CaptionStyle = "readable") => {
+  const downloadCaptions = useCallback((format: CaptionExportFormat, style: CaptionStyle = "readable", post?: PostProcessingOptions) => {
     if (allChunksRef.current.length === 0) return;
 
-    const segments = buildCaptionSegments(allChunksRef.current);
+    const segments = buildCaptionSegments(retimeChunksForExport(allChunksRef.current, post));
 
     if (segments.length === 0) return;
 

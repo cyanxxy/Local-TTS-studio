@@ -31,7 +31,8 @@ const ACTION_LABELS: Record<TextCleanupAction, { label: string; hint: string }> 
 export function TextCleanupPanel({ text, onTextChange }: TextCleanupPanelProps) {
   const [actions, setActions] = useState<ReadonlySet<TextCleanupAction>>(() => new Set(DEFAULT_TEXT_CLEANUP_ACTIONS));
   const [urlMode, setUrlMode] = useState<"domain" | "remove">("domain");
-  const [undoText, setUndoText] = useState<string | null>(null);
+  // Undo is only offered while the script is still exactly what the cleanup produced.
+  const [undo, setUndo] = useState<{ before: string; after: string } | null>(null);
   const idPrefix = useId();
 
   const result = useMemo(
@@ -135,20 +136,20 @@ export function TextCleanupPanel({ text, onTextChange }: TextCleanupPanelProps) 
           className={accentButtonClass}
           disabled={changeCount === 0}
           onClick={() => {
-            setUndoText(text);
+            setUndo({ before: text, after: result.text });
             onTextChange(result.text);
           }}
         >
           <Eraser size={12} aria-hidden="true" />
           Clean up script
         </button>
-        {undoText !== null && (
+        {undo !== null && undo.after === text && (
           <button
             type="button"
             className={subtleButtonClass}
             onClick={() => {
-              onTextChange(undoText);
-              setUndoText(null);
+              onTextChange(undo.before);
+              setUndo(null);
             }}
           >
             <Undo2 size={12} aria-hidden="true" />

@@ -665,6 +665,25 @@ describe("useAudioPlayer", () => {
     expect(downloadBlobSpy.mock.calls[3]?.[1]).toBe("tts-audio.flac");
   });
 
+  it("writes captions at the times a trimmed and padded export puts them", async () => {
+    const downloadBlobSpy = vi.spyOn(exportAudioModule, "downloadBlob").mockImplementation(() => {});
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk({
+        audio: new Float32Array(4), samplingRate: 1, text: "Hello there", index: 1, total: 1, pauseAfterSec: 0,
+      });
+    });
+
+    const firstCue = async (post?: { headSec: number }) => {
+      downloadBlobSpy.mockClear();
+      act(() => result.current.downloadCaptions("srt", "passage", post));
+      const [blob] = downloadBlobSpy.mock.calls[0] as unknown as [Blob];
+      return (await blob.text()).split("\n")[1];
+    };
+    expect(await firstCue()).toBe("00:00:00,000 --> 00:00:04,000");
+    expect(await firstCue({ headSec: 2 })).toBe("00:00:02,000 --> 00:00:06,000");
+  });
+
   it("reports the sample rate of the audio it holds", async () => {
     const { result } = renderHook(() => useAudioPlayer());
     expect(result.current.getSourceSampleRate()).toBeNull();

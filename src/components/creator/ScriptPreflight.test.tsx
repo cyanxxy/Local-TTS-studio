@@ -1,7 +1,7 @@
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
 import { chunkForKokoroDetailed } from "../../lib/chunking";
-import { ScriptPreflight } from "./ScriptPreflight";
+import { PREFLIGHT_DEBOUNCE_MS, ScriptPreflight } from "./ScriptPreflight";
 
 const chunkScript = (text: string) => chunkForKokoroDetailed(text, { backend: "wasm" });
 
@@ -108,8 +108,39 @@ describe("ScriptPreflight", () => {
     expect(screen.getByRole("img")).toBeInTheDocument();
     expect(document.querySelector('[title="Opening pause 500 ms"]')).not.toBeNull();
 
-    rerender(<ScriptPreflight {...props} text="   " />);
+    vi.useFakeTimers();
+    try {
+      rerender(<ScriptPreflight {...props} text="   " />);
+      act(() => vi.advanceTimersByTime(PREFLIGHT_DEBOUNCE_MS));
+    } finally {
+      vi.useRealTimers();
+    }
     expect(screen.getByText("Write or paste a script to preview it.")).toBeInTheDocument();
+  });
+
+  it("rebuilds the preview only once the script has stopped changing", () => {
+    vi.useFakeTimers();
+    try {
+      const calls: string[] = [];
+      const chunk = (text: string) => {
+        calls.push(text);
+        return chunkScript(text);
+      };
+      const noRules: never[] = [];
+      const { rerender, props } = renderPreflight({ text: "First draft here.", chunkScript: chunk, rules: noRules, normalize: false });
+      open();
+      const initial = calls.length;
+      for (const text of ["Second draft here.", "Third draft here.", "Fourth draft here."]) {
+        rerender(<ScriptPreflight {...props} chunkScript={chunk} rules={noRules} normalize={false} text={text} />);
+        act(() => vi.advanceTimersByTime(PREFLIGHT_DEBOUNCE_MS / 4));
+      }
+      expect(calls).toHaveLength(initial);
+      act(() => vi.advanceTimersByTime(PREFLIGHT_DEBOUNCE_MS));
+      expect(calls.slice(initial).every((text) => text === "Fourth draft here.")).toBe(true);
+      expect(calls.length).toBeGreaterThan(initial);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("lists the first passages and the rest on request", () => {
