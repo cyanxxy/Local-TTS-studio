@@ -28,4 +28,8 @@ describe("qwen3SupportsInstruct", () => {
       expect(qwen3SupportsInstruct(profile.repo), profile.repo).toBe(expected);
     }
   });
+
+  it("never offers instructions for a repository outside the profile table", () => {
+    expect(qwen3SupportsInstruct("someone/Qwen3-TTS-12Hz-1.7B-CustomVoice-6bit")).toBe(false);
+  });
 });

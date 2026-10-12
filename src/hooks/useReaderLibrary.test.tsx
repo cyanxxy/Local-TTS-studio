@@ -100,6 +100,21 @@ describe("useReaderLibrary", () => {
     await waitFor(async () => expect(await listReaderDocuments()).toHaveLength(1));
   });
 
+  it("keeps its identity across renders until its state changes", async () => {
+    const { result, rerender } = renderHook(() => useReaderLibrary("A library that settles."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const settled = result.current;
+
+    rerender();
+    expect(result.current).toBe(settled);
+
+    act(() => result.current.updateActiveMetadata({ title: "Renamed" }));
+    expect(result.current).not.toBe(settled);
+    expect(result.current.activeDocument?.title).toBe("Renamed");
+    expect(result.current.updateProgress).toBe(settled.updateProgress);
+    expect(result.current.saveAudio).toBe(settled.saveAudio);
+  });
+
   it("does not let a delayed progress write overwrite a newer text save", async () => {
     const { result } = renderHook(() => useReaderLibrary("Original reader text."));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -189,6 +204,85 @@ describe("useReaderLibrary", () => {
 
     act(() => result.current.updateNote(noteId, "great ".trim()));
     expect(result.current.activeDocument?.notes[0].text).toBe("great");
+  });
+
+  it("adds, recolours and removes highlights and stores each change", async () => {
+    const { result } = renderHook(() => useReaderLibrary("First words. Second words. Third words."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const id = result.current.activeDocument!.id;
+    const stored = async () => (await listReaderDocuments()).find((document) => document.id === id);
+
+    act(() => result.current.addHighlight({ start: 26, end: 40, color: "yellow" }));
+    // A drag that catches the space before the words is trimmed to them.
+    act(() => result.current.addHighlight({ start: 12, end: 26, color: "green" }));
+    // A range of whitespace highlights nothing.
+    act(() => result.current.addHighlight({ start: 12, end: 13, color: "blue" }));
+    const highlights = result.current.activeDocument!.highlights!;
+    expect(highlights.map(({ quote, color }) => ({ quote, color }))).toEqual([
+      { quote: "Second words.", color: "green" },
+      { quote: "Third words.", color: "yellow" },
+    ]);
+    await waitFor(async () => expect((await stored())?.highlights).toHaveLength(2));
+
+    const [second, third] = highlights;
+    act(() => result.current.updateHighlight(second.id, { color: "pink" }));
+    expect(result.current.activeDocument!.highlights![0]).toMatchObject({ id: second.id, color: "pink" });
+    expect(result.current.activeDocument!.highlights![0].updatedAt).toBeGreaterThan(second.updatedAt);
+    await waitFor(async () => expect((await stored())?.highlights?.[0].color).toBe("pink"));
+
+    const beforeInvalid = result.current.activeDocument;
+    act(() => result.current.updateHighlight(third.id, { color: "magenta" as never }));
+    act(() => result.current.removeHighlight("missing"));
+    expect(result.current.activeDocument).toBe(beforeInvalid);
+
+    act(() => result.current.removeHighlight(second.id));
+    expect(result.current.activeDocument!.highlights!.map((highlight) => highlight.id)).toEqual([third.id]);
+    await waitFor(async () => expect((await stored())?.highlights?.map((highlight) => highlight.id))
+      .toEqual([third.id]));
+  });
+
+  it("moves highlights with their words when the text is edited", async () => {
+    const seed = "Keep this phrase. Drop these words. Keep that phrase.";
+    const { result } = renderHook(() => useReaderLibrary(seed));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.addHighlight({ start: 0, end: 17, color: "yellow" }));
+    act(() => result.current.addHighlight({ start: 18, end: 35, color: "blue" }));
+    act(() => result.current.addHighlight({ start: 36, end: seed.length, color: "green" }));
+
+    // The section editor knows the span it replaced; the hint narrows the scan to it.
+    const edited = "Keep this phrase. Keep that phrase.";
+    act(() => result.current.updateActiveText(edited, {
+      preserveText: true,
+      deferStructure: true,
+      hint: { start: 18, previousEnd: 36, nextEnd: 18 },
+    }));
+
+    const highlights = result.current.activeDocument!.highlights!;
+    expect(highlights.map(({ quote, color }) => ({ quote, color }))).toEqual([
+      { quote: "Keep this phrase.", color: "yellow" },
+      { quote: "Keep that phrase.", color: "green" },
+    ]);
+    for (const highlight of highlights) {
+      expect(edited.slice(highlight.start, highlight.end)).toBe(highlight.quote);
+    }
+  });
+
+  it("ignores an edit hint that does not describe the edit", async () => {
+    const seed = "Alpha passage here. Beta passage here.";
+    const { result } = renderHook(() => useReaderLibrary(seed));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.addHighlight({ start: 20, end: seed.length, color: "yellow" }));
+    act(() => result.current.addBookmark({ label: "Beta", textOffset: 20, positionSec: 0 }));
+
+    const edited = `Intro. ${seed}`;
+    act(() => result.current.updateActiveText(edited, {
+      preserveText: true,
+      hint: { start: 30, previousEnd: 31, nextEnd: 31 },
+    }));
+
+    const document = result.current.activeDocument!;
+    expect(edited.slice(document.highlights![0].start, document.highlights![0].end)).toBe("Beta passage here.");
+    expect(document.bookmarks[0].textOffset).toBe(27);
   });
 
   it("flushes pending text and progress when the hook unmounts", async () => {

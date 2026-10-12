@@ -1,12 +1,5 @@
 import { SUPERTONIC3_LANGUAGES, SUPERTONIC3_VOICES } from "../constants";
-
-const LANGUAGE_NAMES: Record<string, string> = {
-  en: "English", ko: "Korean", ja: "Japanese", ar: "Arabic", bg: "Bulgarian", cs: "Czech",
-  da: "Danish", de: "German", el: "Greek", es: "Spanish", et: "Estonian", fi: "Finnish",
-  fr: "French", hi: "Hindi", hr: "Croatian", hu: "Hungarian", id: "Indonesian", it: "Italian",
-  lt: "Lithuanian", lv: "Latvian", nl: "Dutch", pl: "Polish", pt: "Portuguese", ro: "Romanian",
-  ru: "Russian", sk: "Slovak", sl: "Slovenian", sv: "Swedish", tr: "Turkish", uk: "Ukrainian", vi: "Vietnamese",
-};
+import { SUPERTONIC3_LANGUAGE_NAMES } from "../models/supertonic3";
 
 interface Props {
   voice: string;
@@ -32,7 +25,7 @@ export function Supertonic3InlineSettings({ voice, language, onVoiceChange, onLa
       <label className="block text-xs font-medium text-text-secondary">
         Language
         <select aria-label="Supertonic 3 language" value={language} onChange={(event) => onLanguageChange(event.target.value)} className={`mt-1 ${inputClass}`}>
-          {SUPERTONIC3_LANGUAGES.map((option) => <option key={option} value={option}>{LANGUAGE_NAMES[option]} · {option}</option>)}
+          {SUPERTONIC3_LANGUAGES.map((option) => <option key={option} value={option}>{SUPERTONIC3_LANGUAGE_NAMES[option]} · {option}</option>)}
         </select>
       </label>
     </section>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type {
   LocalTtsAudioChunkEvent,
   LocalTtsGenerateResult,
@@ -9,10 +9,22 @@ import { MIN_TEXT_LENGTH } from "../constants";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { TextChunk } from "../lib/chunking";
 import { buildQwen3RequestPlan } from "../lib/qwenChunking";
-import { qwen3SupportsInstruct } from "../components/localRuntime/modelOptions";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
+import type { EngineRuntime, SynthesisRequest } from "../shared/engineRuntime";
 import type { GenerationStats, ModelState } from "../types";
+import {
+  QWEN3_SECTION_JOIN_PAUSE_SEC,
+  isPlayableQwen3Chunk,
+  isQwen3ReferenceCacheMiss,
+  qwen3BasePayload,
+  qwen3ErrorMessage as message,
+  qwen3PlaybackSamples as playbackSamples,
+  qwen3ReferencePayload,
+  qwen3RequestId as requestId,
+  streamQwen3Synthesis,
+} from "./qwen3Synthesis";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import { useSynthesisQueue } from "./useSynthesisQueue";
 import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
   exceedsUnicodeScalarLimit,
@@ -20,6 +32,12 @@ import {
 
 interface UseQwen3LocalRuntimeOptions {
   enabled: boolean;
+  /**
+   * A surface selects Qwen3, on screen or not. The main process then keeps its
+   * model resident instead of evicting it after a minute of idling. Defaults
+   * to `enabled`.
+   */
+  retain?: boolean;
   text: string;
   allowLongText?: boolean;
   player: UseAudioPlayerReturn;
@@ -34,55 +52,11 @@ interface ReceivedAudioChunk {
   textUnitTotal?: number;
 }
 
-interface PendingAudioDelivery {
-  requestId: string;
-  generationVersion: number;
-  expectedChunkCount: number;
-  timeoutId: number;
-  resolve: () => void;
-  reject: (error: Error) => void;
-}
-
-interface UseQwen3LocalRuntimeReturn {
-  modelState: ModelState;
-  canGenerate: boolean;
-  isGenerating: boolean;
-  generationProgress: number;
-  stats: GenerationStats;
-  error: string | null;
-  handleGenerate: () => void;
-  handleStop: () => void;
-  retryLoad: () => void;
-  resetGeneratedAudio: () => void;
-  cancelActiveGeneration: () => void;
-}
-
 const LOCAL_MODEL = "qwen3";
-const QWEN_SECTION_JOIN_PAUSE_SEC = 0.2;
-// The native result and streamed audio use separate Electron IPC messages.
-// An invoke result can become observable before the final event has crossed
-// into the renderer, especially when that event carries a large PCM buffer.
-const AUDIO_DELIVERY_GRACE_MS = 5_000;
+const BRIDGE_MISSING = "Qwen3 local inference requires the Electron app.";
 
-function requestId(kind: "probe" | "generate" | "job"): string {
-  return `${LOCAL_MODEL}-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function playbackSamples(chunk: ReceivedAudioChunk): Float32Array {
-  const samples = new Float32Array(chunk.audio, 0, chunk.sampleCount);
-  for (let index = 0; index < samples.length; index += 1) {
-    if (!Number.isFinite(samples[index])) samples[index] = 0;
-  }
-  const trailingSilence = Math.max(0, chunk.silenceAfterSamples);
-  if (trailingSilence === 0) return samples;
-  const output = new Float32Array(samples.length + trailingSilence);
-  output.set(samples);
-  return output;
-}
-
-function message(error: unknown): string {
-  const raw = error instanceof Error ? error.message : String(error);
-  return raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
+function sameItems(left: readonly unknown[], right: readonly unknown[]): boolean {
+  return left.length === right.length && left.every((item, index) => Object.is(item, right[index]));
 }
 
 function mergeGenerateResults(
@@ -113,15 +87,21 @@ function mergeGenerateResults(
 
 export function useQwen3LocalRuntime({
   enabled,
+  retain = enabled,
   text,
   allowLongText = false,
   player,
   setShowPlayer,
-}: UseQwen3LocalRuntimeOptions): UseQwen3LocalRuntimeReturn {
+}: UseQwen3LocalRuntimeOptions): EngineRuntime<"qwen3"> {
   const settings = useQwen3Runtime();
   const refreshSetup = settings.refreshSetup;
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
-  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  // A probe the user asked for again. The first probe after enabling is not
+  // stored here: it is pending until `probeSettled`, so the effect that starts
+  // it writes no state.
+  const [probeRefreshing, setProbeRefreshing] = useState(false);
+  const [probeSettled, setProbeSettled] = useState(false);
+  const [wasEnabled, setWasEnabled] = useState(enabled);
   const [generateBusy, setGenerateBusy] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
   const [, setProgress] = useState<LocalTtsProgressEvent | null>(null);
@@ -143,7 +123,9 @@ export function useQwen3LocalRuntime({
   const activeRequestUnitCountRef = useRef(1);
   const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const cancelProgressFlushRef = useRef<(() => void) | null>(null);
-  const pendingAudioDeliveryRef = useRef<PendingAudioDelivery | null>(null);
+  // The player's content epoch when this runtime's generated audio entered it,
+  // or null while the player holds nothing this runtime made.
+  const ownedPlayerEpochRef = useRef<number | null>(null);
   const warmedKeyRef = useRef<string | null>(null);
   const warmingKeyRef = useRef<string | null>(null);
   const activeTextUnitsRef = useRef<TextChunk[]>([]);
@@ -152,68 +134,23 @@ export function useQwen3LocalRuntime({
   const beginStream = player.beginStream;
   const endStream = player.endStream;
   const getAudioChunkCount = player.getAudioChunkCount;
+  const getContentEpoch = player.getContentEpoch;
+  const getPlaybackTime = player.getCurrentTime;
+  const playerTotalDuration = player.totalDuration;
   const resetPlayer = player.reset;
   const scheduleChunk = player.scheduleChunk;
   const stopAll = player.stopAll;
   const truncateAudioChunks = player.truncateAudioChunks;
-
-  const settlePendingAudioDelivery = useCallback((error?: Error) => {
-    const pending = pendingAudioDeliveryRef.current;
-    if (!pending) return;
-    pendingAudioDeliveryRef.current = null;
-    window.clearTimeout(pending.timeoutId);
-    if (error) pending.reject(error);
-    else pending.resolve();
-  }, []);
-
-  const cancelPendingAudioDelivery = useCallback(() => {
-    // Cancellation/version checks after the await decide whether the job should
-    // continue. Resolving here simply prevents an obsolete request from waiting
-    // for an event that the native bridge will no longer send.
-    settlePendingAudioDelivery();
-  }, [settlePendingAudioDelivery]);
-
-  const waitForAudioDelivery = useCallback((
-    activeRequestId: string,
-    generationVersion: number,
-    expectedChunkCount: number,
-  ): Promise<void> => {
-    if (receivedChunkIndexesRef.current.size === expectedChunkCount) {
-      return Promise.resolve();
-    }
-
-    cancelPendingAudioDelivery();
-    return new Promise<void>((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        const pending = pendingAudioDeliveryRef.current;
-        if (
-          pending?.requestId !== activeRequestId
-          || pending.generationVersion !== generationVersion
-        ) return;
-        settlePendingAudioDelivery(
-          new Error("Generation returned incomplete streamed audio."),
-        );
-      }, AUDIO_DELIVERY_GRACE_MS);
-      pendingAudioDeliveryRef.current = {
-        requestId: activeRequestId,
-        generationVersion,
-        expectedChunkCount,
-        timeoutId,
-        resolve,
-        reject,
-      };
-    });
-  }, [cancelPendingAudioDelivery, settlePendingAudioDelivery]);
+  const { queue, busy: synthesisBusy, holdForeground } = useSynthesisQueue(generateBusy);
 
   useEffect(() => {
     mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      cancelPendingAudioDelivery();
-    };
-  }, [cancelPendingAudioDelivery]);
+    return () => { mountedRef.current = false; };
+  }, []);
 
-  const clearGeneratedResult = useCallback(() => {
+  // Empties the shared player and forgets the streamed audio bookkeeping. It
+  // touches no React state, so the settings effect below can call it.
+  const releasePlayerAudio = useCallback(() => {
     pendingChunksRef.current.clear();
     receivedChunkIndexesRef.current.clear();
     sampleRateRef.current = null;
@@ -222,10 +159,15 @@ export function useQwen3LocalRuntime({
     activeRequestUnitCountRef.current = 1;
     activeTextUnitsRef.current = [];
     resetPlayer();
+    ownedPlayerEpochRef.current = null;
+  }, [resetPlayer]);
+
+  const clearGeneratedResult = useCallback(() => {
+    releasePlayerAudio();
     setResult(null);
     setProgress(null);
     setGenerationProgress(0);
-  }, [resetPlayer]);
+  }, [releasePlayerAudio]);
 
   const cancelActiveGeneration = useCallback(() => {
     const active = activeRequestRef.current;
@@ -236,7 +178,6 @@ export function useQwen3LocalRuntime({
 
   const resetGeneratedAudio = useCallback(() => {
     generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
@@ -245,91 +186,126 @@ export function useQwen3LocalRuntime({
     setError(null);
     setGenerateBusy(false);
     setGenerationProgress(0);
-  }, [cancelActiveGeneration, cancelPendingAudioDelivery, clearGeneratedResult, setShowPlayer]);
+  }, [cancelActiveGeneration, clearGeneratedResult, setShowPlayer]);
 
-  // Generated audio and errors belong to the exact synthesis configuration
-  // that produced them. Clear the shared player when any audible Qwen setting
-  // changes so old speech is never presented as the newly selected voice.
-  useEffect(() => {
-    generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
-    cancelActiveGeneration();
-    activeRequestRef.current = null;
-    activeRequestVersionRef.current = null;
-    pendingProgressRef.current = null;
-    cancelProgressFlushRef.current?.();
-    cancelProgressFlushRef.current = null;
-    setGenerateBusy(false);
-    setError(null);
-    clearGeneratedResult();
-    setShowPlayer(false);
-  }, [
-    cancelActiveGeneration,
-    clearGeneratedResult,
-    setShowPlayer,
+  // Generated audio, errors and progress belong to the exact synthesis
+  // configuration that produced them, so any audible Qwen setting change
+  // retires them and old speech is never presented as the new voice. This
+  // hook's own state is adjusted while rendering; the bridge request and the
+  // shared player live outside React and are released by the effect below.
+  const audibleSettings: readonly unknown[] = [
     settings.instruct,
     settings.language,
     settings.maxNewTokens,
     settings.modelPath,
     settings.profile.mode,
     settings.profile.repo,
+    // Compared by identity: never copy or scan a reference of up to 60 MB.
     settings.referenceAudioBase64,
     settings.referenceText,
     settings.seed,
     settings.speaker,
     settings.temperature,
     settings.topK,
-    cancelPendingAudioDelivery,
-  ]);
+  ];
+  const [appliedAudibleSettings, setAppliedAudibleSettings] = useState(audibleSettings);
+  if (!sameItems(appliedAudibleSettings, audibleSettings)) {
+    setAppliedAudibleSettings(audibleSettings);
+    setGenerateBusy(false);
+    setError(null);
+    setResult(null);
+    setProgress(null);
+    setGenerationProgress(0);
+  }
 
-  const runProbe = useCallback(async () => {
-    if (!enabled || !bridge) return;
+  // The shared player belongs to whichever engine drives the visible surface,
+  // and Qwen3 settings are also edited from the Qwen3 setup page. The audio is
+  // Qwen3's to clear only while Qwen3 drives the surface (restored Reader audio
+  // included) or while the audio this runtime generated is still the player's.
+  const releaseStalePlayerAudio = useEffectEvent(() => {
+    const ownsPlayerAudio = ownedPlayerEpochRef.current !== null
+      && ownedPlayerEpochRef.current === getContentEpoch();
+    if (!enabled && !ownsPlayerAudio) return;
+    releasePlayerAudio();
+    setShowPlayer(false);
+  });
+
+  // Keyed on the applied settings, which change identity exactly when an
+  // audible setting does.
+  useEffect(() => {
+    generationVersionRef.current += 1;
+    cancelActiveGeneration();
+    activeRequestRef.current = null;
+    activeRequestVersionRef.current = null;
+    pendingProgressRef.current = null;
+    cancelProgressFlushRef.current?.();
+    cancelProgressFlushRef.current = null;
+    releaseStalePlayerAudio();
+  }, [appliedAudibleSettings, cancelActiveGeneration]);
+
+  const fetchProbe = useCallback((): Promise<void> => {
+    if (!enabled || !bridge) return Promise.resolve();
     const version = ++runtimeVersionRef.current;
     const id = requestId("probe");
     activeProbeRef.current = id;
-    setRuntimeBusy(true);
-    setError(null);
-    try {
-      const next = await bridge.probe({ model: LOCAL_MODEL, requestId: id });
-      if (!mountedRef.current || runtimeVersionRef.current !== version || activeProbeRef.current !== id) return;
-      setRuntime(next);
-      if (!next.ready) setError(next.message);
-    } catch (nextError) {
-      if (!mountedRef.current || runtimeVersionRef.current !== version || activeProbeRef.current !== id) return;
-      setRuntime(null);
-      setError(message(nextError));
-    } finally {
-      if (mountedRef.current && runtimeVersionRef.current === version && activeProbeRef.current === id) {
+    const isCurrent = () => (
+      mountedRef.current && runtimeVersionRef.current === version && activeProbeRef.current === id
+    );
+    return bridge.probe({ model: LOCAL_MODEL, requestId: id })
+      .then((next) => {
+        if (!isCurrent()) return;
+        setRuntime(next);
+        setError(next.ready ? null : next.message);
+      })
+      .catch((nextError: unknown) => {
+        if (!isCurrent()) return;
+        setRuntime(null);
+        setError(message(nextError));
+      })
+      .finally(() => {
+        if (!isCurrent()) return;
         activeProbeRef.current = null;
-        setRuntimeBusy(false);
-      }
-    }
+        setProbeRefreshing(false);
+        setProbeSettled(true);
+      });
   }, [bridge, enabled]);
 
   const retryLoad = useCallback(() => {
     if (!enabled) return;
-    void Promise.allSettled([runProbe(), refreshSetup()]);
-  }, [enabled, refreshSetup, runProbe]);
+    if (bridge) setProbeRefreshing(true);
+    setError(null);
+    void Promise.allSettled([fetchProbe(), refreshSetup()]);
+  }, [bridge, enabled, fetchProbe, refreshSetup]);
 
+  // Turning the runtime off drops what an unfinished run left in state.
+  if (wasEnabled !== enabled) {
+    setWasEnabled(enabled);
+    if (!enabled) {
+      setProbeRefreshing(false);
+      setProbeSettled(false);
+      setGenerateBusy(false);
+      setGenerationProgress(0);
+      setProgress(null);
+    }
+  }
+  const runtimeBusy = probeRefreshing || (enabled && !!bridge && !probeSettled);
+
+  // The provider reads the model inventory itself, so enabling only probes the
+  // runtime; `retryLoad` is the explicit way to read both again.
   useEffect(() => {
     if (enabled) {
-      retryLoad();
+      void fetchProbe();
       return;
     }
     runtimeVersionRef.current += 1;
     generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
     cancelProgressFlushRef.current?.();
     pendingProgressRef.current = null;
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
     activeProbeRef.current = null;
-    setRuntimeBusy(false);
-    setGenerateBusy(false);
-    setGenerationProgress(0);
-    setProgress(null);
-  }, [cancelActiveGeneration, cancelPendingAudioDelivery, enabled, retryLoad]);
+  }, [cancelActiveGeneration, enabled, fetchProbe]);
 
   useEffect(() => {
     if (!electronAvailable || generateBusy || !bridge?.warm) return;
@@ -352,6 +328,20 @@ export function useQwen3LocalRuntime({
     return () => { active = false; };
   }, [bridge, electronAvailable, generateBusy, settings.modelPath, settings.profile, settings.readiness]);
 
+  // A lease keeps the model resident in the main process for as long as a
+  // surface selects it, across the idle pauses between generations. It loads
+  // nothing: the pre-warm above does. Releasing the lease (the model is
+  // deselected, or its folder changes) only returns it to the idle timer.
+  const keepWarm = bridge?.keepWarm;
+  const leaseModelPath = settings.modelPath.trim();
+  const leaseRepo = settings.profile.repo;
+  const leaseMode = settings.profile.mode;
+  const leaseReady = settings.readiness !== "missing";
+  useEffect(() => {
+    if (!retain || !keepWarm || !leaseModelPath || !leaseReady) return;
+    return keepWarm({ model: LOCAL_MODEL, modelRepo: leaseRepo, modelPath: leaseModelPath, mode: leaseMode });
+  }, [keepWarm, leaseMode, leaseModelPath, leaseReady, leaseRepo, retain]);
+
   useEffect(() => {
     if (!electronAvailable || !bridge) return;
     return bridge.subscribeProgress((event) => {
@@ -371,7 +361,7 @@ export function useQwen3LocalRuntime({
     return bridge.subscribeAudioChunk((event: LocalTtsAudioChunkEvent) => {
       if (!mountedRef.current || event.model !== LOCAL_MODEL || event.requestId !== activeRequestRef.current) return;
       if (activeRequestVersionRef.current !== generationVersionRef.current) return;
-      if (event.sampleCount <= 0 || event.audio.byteLength !== event.sampleCount * Float32Array.BYTES_PER_ELEMENT) return;
+      if (!isPlayableQwen3Chunk(event)) return;
       if (sampleRateRef.current !== event.sampleRate) {
         pendingChunksRef.current.clear();
         receivedChunkIndexesRef.current.clear();
@@ -416,18 +406,8 @@ export function useQwen3LocalRuntime({
           if (mountedRef.current) setError(message(nextError));
         });
       }
-
-      const pending = pendingAudioDeliveryRef.current;
-      if (
-        pending
-        && pending.requestId === event.requestId
-        && pending.generationVersion === generationVersionRef.current
-        && receivedChunkIndexesRef.current.size === pending.expectedChunkCount
-      ) {
-        settlePendingAudioDelivery();
-      }
     });
-  }, [bridge, electronAvailable, scheduleChunk, settlePendingAudioDelivery, text]);
+  }, [bridge, electronAvailable, scheduleChunk, text]);
 
   useEffect(() => () => {
     cancelProgressFlushRef.current?.();
@@ -464,6 +444,7 @@ export function useQwen3LocalRuntime({
   }), [combinedError, enabled, ready, runtimeBusy, settings.setupBusy]);
   const canGenerate = ready
     && !generateBusy
+    && !synthesisBusy
     && !textTooLong
     && text.trim().length >= MIN_TEXT_LENGTH;
 
@@ -474,13 +455,13 @@ export function useQwen3LocalRuntime({
       processingTime,
       charsPerSec: processingTime > 0 ? text.trim().length / processingTime : 0,
       rtf: result && result.durationSec > 0 ? result.elapsedSec / result.durationSec : 0,
-      totalDuration: player.totalDuration || result?.durationSec || 0,
+      totalDuration: playerTotalDuration || result?.durationSec || 0,
       // Sampled rather than tracked: the live position ticks every frame and no
       // consumer renders this field, so depending on it would rebuild the stats
       // object (and re-render every consumer) 60 times a second for nothing.
-      currentDuration: player.getCurrentTime(),
+      currentDuration: getPlaybackTime(),
     };
-  }, [player, result, text]);
+  }, [getPlaybackTime, playerTotalDuration, result, text]);
 
   const handleGenerate = useCallback(() => {
     if (!canGenerate || !bridge) return;
@@ -488,7 +469,9 @@ export function useQwen3LocalRuntime({
     const requestPlan = buildQwen3RequestPlan(text);
     const requestSections = requestPlan.sections;
     if (requestSections.length === 0) return;
+    holdForeground();
     clearGeneratedResult();
+    ownedPlayerEpochRef.current = getContentEpoch();
     // Every mode uses the units re-split from the exact IPC request text.
     activeTextUnitsRef.current = requestPlan.units;
     setShowPlayer(true);
@@ -497,22 +480,7 @@ export function useQwen3LocalRuntime({
     setGenerationProgress(0);
     setError(null);
     const jobId = requestId("job");
-    const basePayload: Record<string, unknown> = {
-      mode: settings.profile.mode,
-      modelRepo: settings.profile.repo,
-      modelPath: settings.modelPath.trim(),
-      language: settings.language,
-      temperature: settings.temperature,
-      topK: settings.topK,
-      maxNewTokens: settings.maxNewTokens,
-      ...(settings.seed !== null ? { seed: settings.seed } : {}),
-    };
-    if (settings.profile.mode === "customVoice") {
-      basePayload.speaker = settings.speaker;
-      basePayload.instruct = qwen3SupportsInstruct(settings.profile.repo) ? settings.instruct : "";
-    } else if (settings.profile.mode === "voiceDesign") {
-      basePayload.instruct = settings.instruct;
-    }
+    const basePayload = qwen3BasePayload(settings, settings.seed);
 
     const runSections = async () => {
       let combinedResult: LocalTtsGenerateResult | null = null;
@@ -556,15 +524,7 @@ export function useQwen3LocalRuntime({
             payload: {
               ...basePayload,
               text: section.text,
-              ...(settings.profile.mode === "voiceClone"
-                ? uploadReference
-                  ? {
-                      referenceAudioBase64: settings.referenceAudioBase64,
-                      referenceText: settings.referenceText.trim(),
-                      referenceCacheKey: jobId,
-                    }
-                  : { referenceCacheKey: jobId }
-                : {}),
+              ...qwen3ReferencePayload(settings, jobId, uploadReference),
             },
           });
 
@@ -579,7 +539,7 @@ export function useQwen3LocalRuntime({
           } catch (sectionError: unknown) {
             const canRestoreReference = settings.profile.mode === "voiceClone"
               && !initiallyUploadsReference
-              && /reference cache entry was not found/i.test(message(sectionError))
+              && isQwen3ReferenceCacheMiss(sectionError)
               && mountedRef.current
               && generationVersionRef.current === version
               && activeRequestRef.current === id;
@@ -600,12 +560,11 @@ export function useQwen3LocalRuntime({
             || generationVersionRef.current !== version
             || activeRequestRef.current !== id
           ) return;
-          await waitForAudioDelivery(id, version, generated.audioChunkCount);
-          if (
-            !mountedRef.current
-            || generationVersionRef.current !== version
-            || activeRequestRef.current !== id
-          ) return;
+          // generate() settles only after the preload has delivered every
+          // chunk of the request, so a shortfall is a failure, not a wait.
+          if (receivedChunkIndexesRef.current.size !== generated.audioChunkCount) {
+            throw new Error("Generation returned incomplete streamed audio.");
+          }
           combinedResult = mergeGenerateResults(combinedResult, generated);
           activeSectionCompleted = true;
 
@@ -617,7 +576,7 @@ export function useQwen3LocalRuntime({
             const textUnit = activeTextUnitsRef.current[textUnitIndex];
             const pauseSamples = Math.max(
               1,
-              Math.round(generated.sampleRate * QWEN_SECTION_JOIN_PAUSE_SEC),
+              Math.round(generated.sampleRate * QWEN3_SECTION_JOIN_PAUSE_SEC),
             );
             await scheduleChunk({
               audio: new Float32Array(pauseSamples),
@@ -627,12 +586,12 @@ export function useQwen3LocalRuntime({
               total: activeTextUnitsRef.current.length || 1,
               textStart: textUnit?.start ?? section.start,
               textEnd: textUnit?.end ?? section.end,
-              pauseAfterSec: QWEN_SECTION_JOIN_PAUSE_SEC,
+              pauseAfterSec: QWEN3_SECTION_JOIN_PAUSE_SEC,
               pauseKind: "sentence",
             });
             combinedResult = {
               ...combinedResult,
-              durationSec: combinedResult.durationSec + QWEN_SECTION_JOIN_PAUSE_SEC,
+              durationSec: combinedResult.durationSec + QWEN3_SECTION_JOIN_PAUSE_SEC,
             };
           }
           setGenerationProgress(((sectionIndex + 1) / requestSections.length) * 100);
@@ -679,13 +638,19 @@ export function useQwen3LocalRuntime({
     clearGeneratedResult,
     endStream,
     getAudioChunkCount,
+    getContentEpoch,
+    holdForeground,
     scheduleChunk,
     setShowPlayer,
     settings,
     text,
     truncateAudioChunks,
-    waitForAudioDelivery,
   ]);
+
+  const synthesize = useCallback((request: SynthesisRequest<"qwen3">) => queue.enqueue((signal) => {
+    if (!bridge) throw new Error(BRIDGE_MISSING);
+    return streamQwen3Synthesis(bridge, request, signal);
+  }, request.signal), [bridge, queue]);
 
   const handleStop = useCallback(() => {
     const hasActiveGeneration = generateBusy || activeRequestRef.current !== null;
@@ -697,7 +662,6 @@ export function useQwen3LocalRuntime({
     }
 
     generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
     if (activeRequestRef.current) cancelActiveGeneration();
     else stopAll();
     activeRequestRef.current = null;
@@ -715,13 +679,13 @@ export function useQwen3LocalRuntime({
     setError(null);
   }, [
     cancelActiveGeneration,
-    cancelPendingAudioDelivery,
     endStream,
     generateBusy,
     stopAll,
   ]);
 
-  return {
+  return useMemo(() => ({
+    id: "qwen3",
     modelState,
     canGenerate,
     isGenerating: generateBusy,
@@ -733,5 +697,19 @@ export function useQwen3LocalRuntime({
     retryLoad,
     resetGeneratedAudio,
     cancelActiveGeneration,
-  };
+    synthesize,
+  }), [
+    canGenerate,
+    cancelActiveGeneration,
+    combinedError,
+    generateBusy,
+    generationProgress,
+    handleGenerate,
+    handleStop,
+    modelState,
+    resetGeneratedAudio,
+    retryLoad,
+    stats,
+    synthesize,
+  ]);
 }

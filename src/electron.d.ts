@@ -1,4 +1,7 @@
-export type LocalTtsModel = "neutts" | "qwen3";
+import type { RustBridgeEngineId } from "./models/registry";
+
+/** Engines the main process drives through the Rust bridge IPC. */
+export type LocalTtsModel = RustBridgeEngineId;
 
 export interface LocalTtsProbeResult {
   ready: boolean;
@@ -125,7 +128,7 @@ export interface DocumentUrlImportResult {
   html: string;
 }
 
-interface DocumentsBridge {
+export interface DocumentsBridge {
   importDocument: () => Promise<DocumentImportResult>;
   importUrl: (url: string) => Promise<DocumentUrlImportResult>;
 }

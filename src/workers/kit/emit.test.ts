@@ -96,4 +96,16 @@ describe("emitAudioChunk", () => {
     expect(posted[1]).not.toHaveProperty("generationId");
     expect(Array.from((posted[1] as Extract<WorkerOutMessage, { type: "AUDIO_CHUNK" }>).audio)).toEqual([0.5]);
   });
+
+  it("attaches word timings only when the model provides them", () => {
+    const posted: WorkerOutMessage[] = [];
+    const port: WorkerPort = { post: (message) => posted.push(message), postError: vi.fn() };
+    const base = { generationId: "g1", audio: new Float32Array([0.5]), samplingRate: 10, text: "Hi", index: 1, total: 1, pauseKind: "none" as const, pauseSec: 0 };
+
+    emitAudioChunk(port, { ...base, wordTimings: [{ start: 0, end: 2, startSec: 0, endSec: 0.1 }] });
+    emitAudioChunk(port, base);
+
+    expect(posted[0]).toHaveProperty("wordTimings", [{ start: 0, end: 2, startSec: 0, endSec: 0.1 }]);
+    expect(posted[1]).not.toHaveProperty("wordTimings");
+  });
 });

@@ -9,6 +9,12 @@ const KOKORO_ONNX_RUNTIME_DIST_CANDIDATES = [
   "node_modules/onnxruntime-web/dist",
 ];
 const KOKORO_BROWSER_BUILD_SUFFIX = "/node_modules/kokoro-js/dist/kokoro.web.js";
+// The same eSpeak NG build (phonemizer 1.2.1, English voices only) that
+// kokoro.web.js inlines, as a standalone module for the workers that phonemize
+// without kokoro-js (Kitten, Paradee, Piper). kokoro.web.js keeps its copy
+// private and bundles ONNX Runtime and Transformers.js beside it, so those
+// workers cannot share it.
+const PHONEMIZER_BUILD = "node_modules/phonemizer/dist/phonemizer.js";
 const KOKORO_BUNDLED_JSEP_WASM_URL_RE =
   /new URL\(\s*(["'])ort-wasm-simd-threaded\.jsep\.wasm\1\s*,\s*import\.meta\.url\s*\)/g;
 const KOKORO_ENV_WASM_PATHS_ONLY_RE =
@@ -90,6 +96,14 @@ function resolveKokoroBrowserBuild(rootDir: string): string {
   return resolve(rootDir, `.${KOKORO_BROWSER_BUILD_SUFFIX}`);
 }
 
+function resolvePhonemizerBuild(rootDir: string): string {
+  const buildPath = resolve(rootDir, PHONEMIZER_BUILD);
+  if (!existsSync(buildPath)) {
+    throw new Error(`Missing phonemizer build: ${PHONEMIZER_BUILD}. Check the phonemizer dependency before building.`);
+  }
+  return normalizePath(buildPath);
+}
+
 function resolveKokoroOnnxRuntimeAsset(rootDir: string, filename: string): string {
   for (const runtimeDist of KOKORO_ONNX_RUNTIME_DIST_CANDIDATES) {
     const assetPath = resolve(rootDir, runtimeDist, filename);
@@ -127,6 +141,7 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
 
       const mjsPath = resolveKokoroOnnxRuntimeAsset(rootDir, "ort-wasm-simd-threaded.jsep.mjs");
       const wasmPath = resolveKokoroOnnxRuntimeAsset(rootDir, "ort-wasm-simd-threaded.jsep.wasm");
+      const phonemizerPath = resolvePhonemizerBuild(rootDir);
 
       if (isBuild) {
         const mjsReferenceId = this.emitFile({
@@ -146,23 +161,34 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
           name: "kokoro.web.js",
           source: kokoroBuild.code,
         });
+        // Byte-for-byte as well, for the same reason: bundling it leaves
+        // eSpeak NG without voices.
+        const phonemizerReferenceId = this.emitFile({
+          type: "asset",
+          name: "phonemizer.js",
+          source: readFileSync(phonemizerPath),
+        });
 
         return [
           `import wasmUrl from ${JSON.stringify(`${wasmPath}?url`)};`,
           `const mjsUrl = import.meta.ROLLUP_FILE_URL_${mjsReferenceId};`,
           "export const KOKORO_ONNX_JSEP_ASSETS = { mjs: mjsUrl, wasm: wasmUrl };",
           `export const KOKORO_WEB_MODULE_URL = import.meta.ROLLUP_FILE_URL_${kokoroReferenceId};`,
+          `export const PHONEMIZER_MODULE_URL = import.meta.ROLLUP_FILE_URL_${phonemizerReferenceId};`,
         ].join("\n");
       }
 
-      // Dev serves the file as its own module through `transform` above, which
-      // keeps it out of dependency pre-bundling for the same reason.
+      // Dev serves both eSpeak NG builds as modules of their own (kokoro.web.js
+      // through `transform` above), which keeps them out of dependency
+      // pre-bundling for the same reason.
       return [
         `import mjsUrl from ${JSON.stringify(`${mjsPath}?url`)};`,
         `import wasmUrl from ${JSON.stringify(`${wasmPath}?url`)};`,
         `import kokoroUrl from ${JSON.stringify(`${resolveKokoroBrowserBuild(rootDir)}?url`)};`,
+        `import phonemizerUrl from ${JSON.stringify(`${phonemizerPath}?url`)};`,
         "export const KOKORO_ONNX_JSEP_ASSETS = { mjs: mjsUrl, wasm: wasmUrl };",
         "export const KOKORO_WEB_MODULE_URL = kokoroUrl;",
+        "export const PHONEMIZER_MODULE_URL = phonemizerUrl;",
       ].join("\n");
     },
   };

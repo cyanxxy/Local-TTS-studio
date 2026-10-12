@@ -1,10 +1,9 @@
 import type { ModelState } from "../types";
-import { MODELS } from "../constants";
+import { ENGINE_REGISTRY, type EngineId } from "../models/registry";
 
 interface DownloadProgressProps {
-  kokoroState: ModelState;
-  supertonicState: ModelState;
-  supertonic3State?: ModelState;
+  /** Load state of each engine that may be preparing, keyed by engine. */
+  states: Partial<Record<EngineId, ModelState>>;
 }
 
 function ProgressBar({ state, name }: { state: ModelState; name: string }) {
@@ -33,12 +32,16 @@ function ProgressBar({ state, name }: { state: ModelState; name: string }) {
   );
 }
 
-export function DownloadProgress({ kokoroState, supertonicState, supertonic3State }: DownloadProgressProps) {
-  const showKokoro = kokoroState.loading || (!!kokoroState.error && !kokoroState.ready);
-  const showSupertonic = supertonicState.loading || (!!supertonicState.error && !supertonicState.ready);
-  const showSupertonic3 = !!supertonic3State
-    && (supertonic3State.loading || (!!supertonic3State.error && !supertonic3State.ready));
-  if (!showKokoro && !showSupertonic && !showSupertonic3) return null;
+function isPreparing(state: ModelState | undefined): state is ModelState {
+  return !!state && (state.loading || (!!state.error && !state.ready));
+}
+
+export function DownloadProgress({ states }: DownloadProgressProps) {
+  const preparing = ENGINE_REGISTRY.flatMap((engine) => {
+    const state = states[engine.id];
+    return isPreparing(state) ? [{ id: engine.id, label: engine.label, state }] : [];
+  });
+  if (preparing.length === 0) return null;
 
   return (
     <div className="px-5 py-4 rounded-[22px] surface flex flex-col gap-4 animate-fade-up">
@@ -48,15 +51,9 @@ export function DownloadProgress({ kokoroState, supertonicState, supertonic3Stat
         </span>
         <span className="text-xs text-text-muted">Downloads once</span>
       </div>
-      {showKokoro && (
-        <ProgressBar name={MODELS.kokoro.label} state={kokoroState} />
-      )}
-      {showSupertonic && (
-        <ProgressBar name={MODELS.supertonic.label} state={supertonicState} />
-      )}
-      {showSupertonic3 && supertonic3State && (
-        <ProgressBar name="Supertonic 3" state={supertonic3State} />
-      )}
+      {preparing.map(({ id, label, state }) => (
+        <ProgressBar key={id} name={label} state={state} />
+      ))}
     </div>
   );
 }

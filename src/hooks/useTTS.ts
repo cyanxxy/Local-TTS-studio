@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import type {
   ChunkPauseKind,
   GenerationStats,
@@ -8,10 +8,11 @@ import type {
   WorkerOutMessage,
 } from "../types";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
+import { abortWorkerGeneration, postWorkerGenerate, workerEventMessage, workerGenerateRequest } from "./workerGeneration";
 
-interface UseTTSOptions {
-  kokoroWorker: React.RefObject<Worker | null>;
-  supertonicWorker: React.RefObject<Worker | null>;
+interface UseTTSOptions<Model extends string> {
+  /** The worker that synthesizes `model`, or null while it is not running. */
+  getWorker: (model: Model) => Worker | null;
   onAudioChunk: (chunk: {
     audio: Float32Array;
     samplingRate: number;
@@ -26,13 +27,20 @@ interface UseTTSOptions {
   onComplete: () => void;
 }
 
-export interface UseTTSReturn {
+export interface UseTTSReturn<Model extends string = ModelType> {
   isGenerating: boolean;
   error: string | null;
   stats: GenerationStats;
   generationProgress: number;
-  generate: (text: string, model: ModelType, voice: string, settings: GenerationTuningSettings) => void;
+  generate: (text: string, model: Model, voice: string, settings: GenerationTuningSettings) => void;
+  /** Hard stop: closes the worker, which must then be replaced and its model loaded again. */
   cancel: () => void;
+  /**
+   * Soft stop: ends the generation and keeps the worker and its model. When
+   * the worker does not answer in time, `onUnresponsive` runs with that
+   * worker, for the caller to replace if it still uses it.
+   */
+  abort: (onUnresponsive: (worker: Worker) => void) => void;
 }
 
 const INITIAL_STATS: GenerationStats = {
@@ -44,22 +52,15 @@ const INITIAL_STATS: GenerationStats = {
   currentDuration: 0,
 };
 
-function workerEventMessage(event: Event, fallback: string): string {
-  if (event instanceof ErrorEvent && event.message) return event.message;
-  if (event.type === "messageerror") return `${fallback} The worker sent an unreadable message.`;
-  return fallback;
-}
-
 /**
  * Unified TTS hook. Model-agnostic — delegates to the right worker
  * based on the active model. Tracks generation stats.
  */
-export function useTTS({
-  kokoroWorker,
-  supertonicWorker,
+export function useTTS<Model extends string>({
+  getWorker,
   onAudioChunk,
   onComplete,
-}: UseTTSOptions): UseTTSReturn {
+}: UseTTSOptions<Model>): UseTTSReturn<Model> {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState<GenerationStats>(INITIAL_STATS);
@@ -70,6 +71,7 @@ export function useTTS({
   const inputCharsRef = useRef(1);
   const generatedAudioSecsRef = useRef(0);
   const activeWorkerRef = useRef<Worker | null>(null);
+  const activeGenerationIdRef = useRef<string | null>(null);
   const listenerWorkerRef = useRef<Worker | null>(null);
   const listenerRef = useRef<((e: MessageEvent<WorkerOutMessage>) => void) | null>(null);
   const errorListenerRef = useRef<((event: Event) => void) | null>(null);
@@ -132,13 +134,14 @@ export function useTTS({
     messageErrorListenerRef.current = null;
     listenerWorkerRef.current = null;
     activeWorkerRef.current = null;
+    activeGenerationIdRef.current = null;
   }, [discardGenerationUiFlush]);
 
   useEffect(() => cleanup, [cleanup]);
 
   const generate = useCallback(
-    (text: string, model: ModelType, voice: string, settings: GenerationTuningSettings) => {
-      const worker = model === "kokoro" ? kokoroWorker.current : supertonicWorker.current;
+    (text: string, model: Model, voice: string, settings: GenerationTuningSettings) => {
+      const worker = getWorker(model);
       if (!worker) return;
 
       // Cleanup previous listener
@@ -156,6 +159,7 @@ export function useTTS({
       activeWorkerRef.current = worker;
       generationSeqRef.current += 1;
       const generationId = `browser-${generationSeqRef.current}`;
+      activeGenerationIdRef.current = generationId;
 
       const handleMessage = (e: MessageEvent<WorkerOutMessage>) => {
         const msg = e.data;
@@ -231,26 +235,18 @@ export function useTTS({
       worker.addEventListener("messageerror", handleWorkerMessageError as EventListener);
       listenerWorkerRef.current = worker;
 
-      const message: WorkerInMessage = {
+      const message = {
         type: "GENERATE",
         generationId,
-        text,
-        voice,
-        language: settings.language,
-        speed: settings.speed,
-        quality: settings.quality,
-        pauseOverridesSec: settings.pauseOverridesSec,
-        sentenceSpeedVariance: settings.sentenceSpeedVariance,
-        pronunciationRules: settings.pronunciationRules,
-        emphasisStrength: settings.emphasisStrength,
-      };
+        ...workerGenerateRequest(text, voice, settings),
+      } satisfies WorkerInMessage;
       try {
-        worker.postMessage(message);
+        postWorkerGenerate(worker, message);
       } catch (error) {
         failGeneration(error instanceof Error ? error.message : String(error));
       }
     },
-    [kokoroWorker, supertonicWorker, onAudioChunk, onComplete, cleanup, flushGenerationUiNow, queueGenerationUiFlush],
+    [getWorker, onAudioChunk, onComplete, cleanup, flushGenerationUiNow, queueGenerationUiFlush],
   );
 
   const cancel = useCallback(() => {
@@ -261,12 +257,23 @@ export function useTTS({
     cleanup();
   }, [cleanup]);
 
-  return {
+  const abort = useCallback((onUnresponsive: (worker: Worker) => void) => {
+    const worker = activeWorkerRef.current;
+    const generationId = activeGenerationIdRef.current;
+    if (worker && generationId) {
+      abortWorkerGeneration(worker, generationId, () => onUnresponsive(worker));
+    }
+    setIsGenerating(false);
+    cleanup();
+  }, [cleanup]);
+
+  return useMemo(() => ({
     isGenerating,
     error,
     stats,
     generationProgress,
     generate,
     cancel,
-  };
+    abort,
+  }), [abort, cancel, error, generate, generationProgress, isGenerating, stats]);
 }

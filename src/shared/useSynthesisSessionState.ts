@@ -1,0 +1,519 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
+import { useAppEnvironment } from "../hooks/useAppEnvironment";
+import { useAppPreferences } from "../hooks/useAppPreferences";
+import { useAppRouting } from "../hooks/useAppRouting";
+import { useAppShortcuts } from "../hooks/useAppShortcuts";
+import { useAudioPlayer } from "../hooks/useAudioPlayer";
+import { useCreatorSettings } from "../hooks/useCreatorSettings";
+import { useDocumentImport } from "../hooks/useDocumentImport";
+import { useEngineOrchestrator } from "../hooks/useEngineOrchestrator";
+import { useReaderLibrary } from "../hooks/useReaderLibrary";
+import { useReaderSections } from "../hooks/useReaderSections";
+import { useReaderSession } from "../hooks/useReaderSession";
+import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
+import {
+  getInitialAppState,
+  getInitialCreatorState,
+  getInitialEngineSettings,
+  persistAppState,
+  persistCreatorState,
+  persistEngineSettings,
+  type PersistedAppState,
+} from "../lib/appState";
+import type { AppPage } from "../lib/appRouting";
+import { getUnsupportedModelMessage } from "../lib/browserSupport";
+import {
+  getEngine,
+  surfaceEngineSignatureParts,
+  type EngineSettings,
+  type SurfaceEngineId,
+} from "../models/registry";
+import type { ModelType } from "../types";
+import type { CreatorEngineSupport } from "../components/CreatorToolsPanel";
+
+export interface SynthesisSessionOptions {
+  enableDesktopRuntimes: boolean;
+  routeBasePath?: string;
+  createSupertonic3Worker?: () => Worker;
+}
+
+/**
+ * The engines whose settings Studio owns and persists. Qwen3's settings live
+ * in `Qwen3RuntimeProvider`, which persists them itself.
+ */
+type AppEngineId = Exclude<SurfaceEngineId, "qwen3">;
+type AppEngineSettings = { [Id in AppEngineId]: EngineSettings<Id> };
+
+/**
+ * Everything the app's surfaces share: the routed page, the engines and their
+ * settings, the one audio player, the Studio script, and the Reader's library
+ * and session. The surfaces read it through `SynthesisSessionContext`; this
+ * hook is the only place the pieces are wired together.
+ */
+export function useSynthesisSessionState({
+  enableDesktopRuntimes,
+  routeBasePath = "",
+  createSupertonic3Worker,
+}: SynthesisSessionOptions) {
+  const environment = useAppEnvironment(enableDesktopRuntimes);
+  const { desktopRuntimesAvailable, browserSupport, debugProfiling, webgpuStatus } = environment;
+  const localInferenceSupported = browserSupport.isSupported;
+  const { preferences, updatePreferences, resetPreferences } = useAppPreferences();
+  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  const qwen3Settings = useQwen3Runtime();
+  const initialState = useMemo(() => getInitialAppState(), []);
+  const initialCreatorState = useMemo(() => getInitialCreatorState(), []);
+  const { activePage, availableTabs: routeTabs, isReaderPage, isStudioPage, navigateToPage } = useAppRouting(
+    enableDesktopRuntimes,
+    routeBasePath,
+  );
+  const availableTabs = useMemo(() => routeTabs.filter((tab) => {
+    if (tab.key === "neutts") return preferences.showNeuTTS;
+    if (tab.key === "qwen3") return preferences.showQwen3TTS && qwen3Settings.available;
+    return true;
+  }), [preferences.showNeuTTS, preferences.showQwen3TTS, qwen3Settings.available, routeTabs]);
+
+  const [text, setText] = useState(initialState.text);
+  const [engineSettings, setEngineSettings] = useState<AppEngineSettings>(() => {
+    const { kokoro, supertonic, audio8, supertonic3 } = getInitialEngineSettings();
+    return { kokoro, supertonic, audio8, supertonic3 };
+  });
+  const [quality, setQuality] = useState(initialState.quality);
+  const [showPlayer, setShowPlayer] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const { voice: audio8Voice } = engineSettings.audio8;
+  const { voice: supertonic3Voice, language: supertonic3Language } = engineSettings.supertonic3;
+  const { language: supertonicLanguage } = engineSettings.supertonic;
+
+  const readerLibrary = useReaderLibrary(initialState.text);
+  const {
+    preferences: readerViewPreferences,
+    updatePreferences: updateReaderViewPreferences,
+  } = useReaderViewPreferences();
+  const readerSections = useReaderSections(readerLibrary.activeDocument);
+  const synthesisText = isReaderPage && readerSections.activeSection
+    ? readerSections.activeSectionText
+    : text;
+  // Anything that replaces the Reader's audio saves it first. The Reader
+  // session that knows how is created after the engines it saves for, so the
+  // engines reach it through this ref.
+  const flushReaderAudioRef = useRef<() => void>(() => undefined);
+  const beforeReaderAudioChange = useCallback(() => flushReaderAudioRef.current(), []);
+
+  const openAppSettings = useCallback(() => setAppSettingsOpen(true), []);
+  const closeAppSettings = useCallback(() => setAppSettingsOpen(false), []);
+
+  useEffect(() => {
+    if (activePage === "neutts" && !preferences.showNeuTTS) {
+      navigateToPage("studio");
+    }
+  }, [activePage, navigateToPage, preferences.showNeuTTS]);
+
+  useEffect(() => {
+    if (activePage === "qwen3" && !qwen3Settings.available) navigateToPage("studio");
+  }, [activePage, navigateToPage, qwen3Settings.available]);
+
+  const player = useAudioPlayer();
+  // The player object changes identity with its state; its functions never do.
+  // Callbacks below depend on the functions so they stay stable while streaming.
+  const {
+    download: downloadPlayerAudio,
+    downloadCaptions: downloadPlayerCaptions,
+    jumpToSegment,
+    skip: skipPlayback,
+    togglePlay,
+  } = player;
+
+  const creator = useCreatorSettings({
+    initialState: initialCreatorState,
+    quality,
+    language: supertonicLanguage,
+  });
+
+  const clearExportError = useCallback(() => setExportError(null), []);
+  const {
+    activeModel,
+    desktopModels: { studio: studioDesktopModel, reader: readerDesktopModel },
+    chosenDesktopModels,
+    engineIds: { studio: studioEngineId, reader: readerEngineId },
+    visibleEngineId,
+    runtimes,
+    audio8,
+    browser,
+    surfaceEngineSettings,
+    desktopModelOptions,
+    retireAllAudio,
+    selectBrowserModel,
+    changeEngineInput,
+  } = useEngineOrchestrator({
+    surface: isReaderPage ? "reader" : isStudioPage ? "studio" : null,
+    desktopRuntimesAvailable,
+    createSupertonic3Worker,
+    enableDesktopRuntimes,
+    browserSupport,
+    debugProfiling,
+    initialState,
+    text: synthesisText,
+    engineSettings,
+    generationSettings: creator.generationSettings,
+    player,
+    setShowPlayer,
+    beforeReaderAudioChange,
+    onEngineChange: clearExportError,
+  });
+  const browserRuntime = runtimes[activeModel];
+  const currentModelState = browserRuntime.modelState;
+  const voice = browser.voicesInUse[activeModel];
+  const studioRuntime = runtimes[studioEngineId];
+  const readerRuntime = runtimes[readerEngineId];
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      const persisted: PersistedAppState = {
+        model: activeModel,
+        text,
+        quality,
+        desktopModels: chosenDesktopModels,
+      };
+      persistAppState(persisted);
+      persistEngineSettings(engineSettings);
+    }, 200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [activeModel, chosenDesktopModels, engineSettings, quality, text]);
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      persistCreatorState(creator.persistedState);
+    }, 200);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [creator.persistedState]);
+
+  const handleStudioModelChange = useCallback((model: ModelType) => {
+    selectBrowserModel("studio", model);
+  }, [selectBrowserModel]);
+
+  const handleReaderModelChange = useCallback((model: ModelType) => {
+    selectBrowserModel("reader", model);
+  }, [selectBrowserModel]);
+
+  const resetAudioForTextEdit = useCallback(() => {
+    const hasActiveAudioState = Object.values(runtimes).some((runtime) => runtime.isGenerating)
+      || player.segments.length > 0
+      || player.totalDuration > 0;
+    if (hasActiveAudioState) {
+      // Unforced: finished audio only needs clearing, and a forced cancel
+      // would reload the model on the first keystroke after listening.
+      retireAllAudio();
+    }
+  }, [player.segments.length, player.totalDuration, retireAllAudio, runtimes]);
+
+  const handleTextChange = useCallback((nextText: string) => {
+    if (nextText === text) return;
+
+    resetAudioForTextEdit();
+    setText(nextText);
+    setExportError(null);
+    setImportError(null);
+  }, [
+    resetAudioForTextEdit,
+    text,
+  ]);
+
+  const handleReaderGenerate = useCallback(() => {
+    setExportError(null);
+    readerRuntime.handleGenerate();
+  }, [readerRuntime]);
+
+  // The inputs that shape the Reader engine's audio — only those it reads, so
+  // a control the engine ignores never discards its cached sections. Null
+  // while one of them is still unknown (Qwen3 before its model is located).
+  const readerSignatureParts = useMemo(() => surfaceEngineSignatureParts(
+    readerEngineId,
+    surfaceEngineSettings,
+    { tuning: creator.generationSettings, quality },
+  ), [creator.generationSettings, quality, readerEngineId, surfaceEngineSettings]);
+  const clearReaderErrors = useCallback(() => {
+    setExportError(null);
+    setImportError(null);
+  }, []);
+  const reportReaderError = useCallback((message: string) => setImportError(message), []);
+  const readerSession = useReaderSession({
+    active: isReaderPage,
+    library: readerLibrary,
+    sections: readerSections,
+    player,
+    engineId: readerEngineId,
+    signatureParts: readerSignatureParts,
+    isGenerating: readerRuntime.isGenerating,
+    generate: handleReaderGenerate,
+    autoAdvance: readerViewPreferences.autoAdvance,
+    retireAllAudio,
+    resetAudioForTextEdit,
+    setShowPlayer,
+    clearErrors: clearReaderErrors,
+    onError: reportReaderError,
+  });
+  const { flushAudio: flushReaderAudio } = readerSession;
+  useEffect(() => {
+    flushReaderAudioRef.current = flushReaderAudio;
+  }, [flushReaderAudio]);
+
+  const documentsBridge = desktopRuntimesAvailable
+    ? window.electron?.documents
+    : undefined;
+
+  const {
+    isImportingDocument,
+    importDocument: handleImportDocument,
+    importReaderFile: handleImportReaderFile,
+    importReaderUrl: handleImportReaderUrl,
+  } = useDocumentImport({
+    documentsBridge,
+    isReaderPage,
+    createReaderDocument: readerLibrary.createDocument,
+    onStudioText: handleTextChange,
+    setImportError,
+  });
+
+  const patchEngineSettings = useCallback(<Id extends AppEngineId>(
+    engine: Id,
+    patch: Partial<AppEngineSettings[Id]>,
+  ) => {
+    setEngineSettings((current) => ({ ...current, [engine]: { ...current[engine], ...patch } }));
+  }, []);
+
+  const handleVoiceChange = useCallback((nextVoice: string) => {
+    if (nextVoice === voice) return;
+    changeEngineInput(activeModel, () => patchEngineSettings(activeModel, { voice: nextVoice }));
+  }, [activeModel, changeEngineInput, patchEngineSettings, voice]);
+
+  const handleAudio8VoiceChange = useCallback((nextVoice: string) => {
+    if (nextVoice === audio8Voice) return;
+    changeEngineInput("audio8", () => patchEngineSettings("audio8", { voice: nextVoice }));
+  }, [audio8Voice, changeEngineInput, patchEngineSettings]);
+
+  const handleSupertonic3VoiceChange = useCallback((nextVoice: string) => {
+    if (nextVoice === supertonic3Voice) return;
+    changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { voice: nextVoice }));
+  }, [changeEngineInput, patchEngineSettings, supertonic3Voice]);
+
+  // The language shapes Supertonic 2 audio like its voice does, so it goes
+  // through the same save-then-clear path rather than being set directly.
+  const handleSupertonicLanguageChange = useCallback((nextLanguage: string) => {
+    if (nextLanguage === supertonicLanguage) return;
+    changeEngineInput("supertonic", () => patchEngineSettings("supertonic", { language: nextLanguage }));
+  }, [changeEngineInput, patchEngineSettings, supertonicLanguage]);
+
+  const handleSupertonic3LanguageChange = useCallback((nextLanguage: string) => {
+    if (nextLanguage === supertonic3Language) return;
+    changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { language: nextLanguage }));
+  }, [changeEngineInput, patchEngineSettings, supertonic3Language]);
+
+  const handleQualityChange = useCallback((nextQuality: number) => {
+    if (nextQuality === quality) return;
+    // Both Supertonic engines read the shared quality. Audio from an engine
+    // that ignores it stays valid, so it is neither saved nor cleared.
+    if (!visibleEngineId || !getEngine(visibleEngineId).capabilities.quality) {
+      setQuality(nextQuality);
+      return;
+    }
+    changeEngineInput(visibleEngineId, () => setQuality(nextQuality));
+  }, [changeEngineInput, quality, visibleEngineId]);
+
+  const handlePageNavigation = useCallback((page: AppPage) => {
+    if (isReaderPage && page !== "reader") flushReaderAudio();
+    navigateToPage(page);
+  }, [flushReaderAudio, isReaderPage, navigateToPage]);
+
+  const handleJumpToSegment = useCallback((segmentId: string) => {
+    if (!segmentId) return;
+    jumpToSegment(segmentId);
+    setShowPlayer(true);
+  }, [jumpToSegment]);
+
+  const handleGenerate = useCallback(() => {
+    setExportError(null);
+    studioRuntime.handleGenerate();
+  }, [studioRuntime]);
+
+  const handleStudioStop = useCallback(() => {
+    studioRuntime.handleStop();
+  }, [studioRuntime]);
+
+  const handleStudioRetryLoad = useCallback(() => {
+    studioRuntime.retryLoad();
+  }, [studioRuntime]);
+
+  const handleReaderStop = useCallback(() => {
+    readerRuntime.handleStop();
+  }, [readerRuntime]);
+
+  const handleReaderRetryLoad = useCallback(() => {
+    readerRuntime.retryLoad();
+  }, [readerRuntime]);
+
+  const handleDownloadAudio = useCallback(() => {
+    setExportError(null);
+    void downloadPlayerAudio(creator.exportOptions).catch((error: unknown) => {
+      setExportError(error instanceof Error ? error.message : String(error));
+    });
+  }, [creator.exportOptions, downloadPlayerAudio]);
+
+  const handleDownloadCaptions = useCallback((format: "srt" | "vtt" | "json") => {
+    downloadPlayerCaptions(format);
+  }, [downloadPlayerCaptions]);
+
+  const handleSkipBackward = useCallback(() => skipPlayback(-10), [skipPlayback]);
+  const handleSkipForward = useCallback(() => skipPlayback(10), [skipPlayback]);
+
+  const creatorEngineSupport = useMemo<CreatorEngineSupport>(() => {
+    const { label, capabilities } = getEngine(studioEngineId);
+    return {
+      engineLabel: label,
+      speed: capabilities.speed,
+      pauses: capabilities.pauses,
+      pronunciationLexicon: capabilities.pronunciationLexicon,
+    };
+  }, [studioEngineId]);
+
+  const isUsingWasmFallback = currentModelState.ready && currentModelState.backend === "wasm";
+  const showWasmBadge = localInferenceSupported
+    && visibleEngineId !== null
+    && visibleEngineId !== "qwen3"
+    && visibleEngineId !== "audio8"
+    && ((webgpuStatus !== null && !webgpuStatus.available)
+      || (visibleEngineId === "supertonic3" ? runtimes.supertonic3.modelState.backend === "wasm" : isUsingWasmFallback));
+  const webgpuModeNote = showWasmBadge
+    ? webgpuStatus?.message ?? null
+    : null;
+  const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
+  const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
+
+  const handleTogglePlayback = useCallback(() => void togglePlay(), [togglePlay]);
+  useAppShortcuts({
+    activePage,
+    settingsOpen: appSettingsOpen,
+    onOpenSettings: openAppSettings,
+    onNavigate: handlePageNavigation,
+    surface: isStudioPage
+      ? { ...studioRuntime, generate: handleGenerate, stop: handleStudioStop }
+      : isReaderPage
+        ? { ...readerRuntime, generate: handleReaderGenerate, stop: handleReaderStop }
+        : null,
+    hasAudio: player.totalDuration > 0,
+    onTogglePlayback: handleTogglePlayback,
+    onSkip: skipPlayback,
+  });
+
+  const visibleModelError = isReaderPage
+    // Desktop Reader models render an inline recovery card beside the toolbar.
+    // Keep the global banner for browser-model failures, whose Reader controls
+    // otherwise expose only the generic "Model failed to load" status.
+    ? readerDesktopModel === null ? readerRuntime.modelState.error : null
+    : isStudioPage
+    ? studioRuntime.modelState.error
+    : currentModelState.error;
+  const visibleGenerationError = isReaderPage
+    ? readerRuntime.error
+    : isStudioPage
+    ? studioRuntime.error
+    : browserRuntime.error;
+  const visibleError = visibleGenerationError ?? visibleModelError ?? importError ?? exportError ?? player.error;
+
+  const activeSegmentIndex = player.activeSegmentId
+    ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
+    : -1;
+
+  return {
+    environment,
+    preferences: { value: preferences, update: updatePreferences, reset: resetPreferences },
+    appSettings: { open: appSettingsOpen, onOpen: openAppSettings, onClose: closeAppSettings },
+    routing: {
+      activePage,
+      isReaderPage,
+      isStudioPage,
+      routeBasePath,
+      tabs: availableTabs,
+      navigate: handlePageNavigation,
+    },
+    /** What the header and footer say about the visible surface. */
+    chrome: {
+      visibleError,
+      showWasmBadge,
+      webgpuModeNote,
+      showSingleThreadedNote,
+      activeModelSupportMessage,
+    },
+    player: {
+      state: player,
+      show: showPlayer,
+      activeSegmentNumber: activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null,
+      togglePlay,
+      skipBackward: handleSkipBackward,
+      skipForward: handleSkipForward,
+      downloadAudio: handleDownloadAudio,
+      downloadCaptions: handleDownloadCaptions,
+    },
+    creator,
+    creatorEngineSupport,
+    engines: {
+      activeModel,
+      runtimes,
+      audio8,
+      browser,
+      desktopModelOptions,
+      surfaceEngineSettings,
+      voice,
+      kokoroVoices: browser.voices.kokoro,
+      currentModelState,
+      quality,
+      changeQuality: handleQualityChange,
+      changeVoice: handleVoiceChange,
+      audio8Voice,
+      changeAudio8Voice: handleAudio8VoiceChange,
+      supertonicLanguage,
+      changeSupertonicLanguage: handleSupertonicLanguageChange,
+      supertonic3Voice,
+      supertonic3Language,
+      changeSupertonic3Voice: handleSupertonic3VoiceChange,
+      changeSupertonic3Language: handleSupertonic3LanguageChange,
+    },
+    studio: {
+      text,
+      changeText: handleTextChange,
+      engineId: studioEngineId,
+      desktopModel: studioDesktopModel,
+      runtime: studioRuntime,
+      changeModel: handleStudioModelChange,
+      generate: handleGenerate,
+      stop: handleStudioStop,
+      retryLoad: handleStudioRetryLoad,
+    },
+    reader: {
+      library: readerLibrary,
+      session: readerSession,
+      viewPreferences: readerViewPreferences,
+      updateViewPreferences: updateReaderViewPreferences,
+      engineId: readerEngineId,
+      desktopModel: readerDesktopModel,
+      runtime: readerRuntime,
+      changeModel: handleReaderModelChange,
+      generate: handleReaderGenerate,
+      stop: handleReaderStop,
+      retryLoad: handleReaderRetryLoad,
+      jumpToSegment: handleJumpToSegment,
+    },
+    documents: {
+      isImporting: isImportingDocument,
+      importDocument: handleImportDocument,
+      importReaderFile: handleImportReaderFile,
+      importReaderUrl: handleImportReaderUrl,
+    },
+  };
+}
+
+export type SynthesisSession = ReturnType<typeof useSynthesisSessionState>;

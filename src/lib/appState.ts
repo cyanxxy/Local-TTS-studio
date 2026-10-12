@@ -1,9 +1,6 @@
 import {
-  AUDIO8_DEFAULT_VOICE,
-  AUDIO8_VOICES,
   CREATOR_PRESETS,
   DEFAULT_CREATOR_PRESET,
-  MODELS,
   PAUSE_MAX,
   PAUSE_MIN,
   QUALITY_DEFAULT,
@@ -12,6 +9,17 @@ import {
   SPEED_MAX,
   SPEED_MIN,
 } from "../constants";
+import { asRecord } from "../models/settings";
+import {
+  ENGINE_IDS,
+  isBrowserEngineId,
+  isDesktopInlineEngineId,
+  parseEngineSettings,
+  type DesktopInlineEngineId,
+  type EngineId,
+  type EngineSettings,
+} from "../models/registry";
+import type { EngineSurface } from "../models/types";
 import type {
   CreatorPresetId,
   ExportAudioFormat,
@@ -21,19 +29,35 @@ import type {
 } from "../types";
 
 const LEGACY_MODEL_STORAGE_KEY = "tts-app-model";
-const APP_STATE_STORAGE_KEY = "tts-app-state-v1";
+/** The v1 app state, which also held the Kokoro, Supertonic 2 and Audio8 voices. Read only to migrate. */
+const LEGACY_APP_STATE_STORAGE_KEY = "tts-app-state-v1";
+const APP_STATE_STORAGE_KEY = "tts-app-state-v2";
+const APP_STATE_VERSION = 2;
+const ENGINE_SETTINGS_STORAGE_KEY = "tts-engine-settings-v1";
 const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
 
 export const DEFAULT_TEXT =
   "This text-to-speech system runs entirely in your browser, providing fast and private operation without sending any data to external servers.";
 
+/** The desktop engine each surface selected in place of the browser model, or null for the browser model. */
+export type SurfaceDesktopModels = Record<EngineSurface, DesktopInlineEngineId | null>;
+
 export interface PersistedAppState {
   model?: ModelType;
   text?: string;
-  voicesByModel?: Partial<Record<ModelType, string>>;
   quality?: number;
-  audio8Voice?: string;
+  desktopModels?: Partial<SurfaceDesktopModels>;
 }
+
+export interface InitialAppState {
+  model: ModelType;
+  text: string;
+  quality: number;
+  desktopModels: SurfaceDesktopModels;
+}
+
+/** Every registered engine's persisted settings, keyed by engine. */
+export type PersistedEngineSettings = { [Id in EngineId]: EngineSettings<Id> };
 
 export interface PersistedCreatorState {
   preset?: CreatorPresetId;
@@ -46,14 +70,6 @@ export interface PersistedCreatorState {
   exportSampleRate?: ExportSampleRate;
   exportBitrateKbps?: number;
   masteringEnabled?: boolean;
-}
-
-export interface InitialAppState {
-  model: ModelType;
-  text: string;
-  voicesByModel: Record<ModelType, string>;
-  quality: number;
-  audio8Voice: string;
 }
 
 export interface CreatorState {
@@ -80,18 +96,6 @@ export interface PronunciationLexiconDiagnostics {
 }
 
 const EXPORT_BITRATE_OPTIONS = [128, 192, 256, 320] as const;
-
-function isModelType(value: unknown): value is ModelType {
-  return value === "kokoro" || value === "supertonic";
-}
-
-function isSupertonicVoice(value: unknown): value is (typeof MODELS.supertonic.voices)[number] {
-  return typeof value === "string" && MODELS.supertonic.voices.some((voice) => voice === value);
-}
-
-function isAudio8Voice(value: unknown): value is (typeof AUDIO8_VOICES)[number]["id"] {
-  return typeof value === "string" && AUDIO8_VOICES.some((voice) => voice.id === value);
-}
 
 function clampQuality(quality: number): number {
   return Math.max(QUALITY_MIN, Math.min(QUALITY_MAX, Math.round(quality)));
@@ -130,55 +134,70 @@ function normalizeExportBitrate(value: unknown, fallback: number): number {
 function getLegacyModelSelection(): ModelType | null {
   try {
     const stored = localStorage.getItem(LEGACY_MODEL_STORAGE_KEY);
-    if (isModelType(stored)) return stored;
+    if (isBrowserEngineId(stored)) return stored;
   } catch { /* localStorage unavailable */ }
   return null;
 }
 
-export function getInitialAppState(): InitialAppState {
-  const defaults: InitialAppState = {
-    model: "kokoro",
-    text: DEFAULT_TEXT,
-    voicesByModel: {
-      kokoro: MODELS.kokoro.defaultVoice,
-      supertonic: MODELS.supertonic.defaultVoice,
-    },
-    quality: QUALITY_DEFAULT,
-    audio8Voice: AUDIO8_DEFAULT_VOICE,
-  };
-
-  const legacyModel = getLegacyModelSelection();
-
+/** The stored JSON object under `key`, or an empty object when it is missing, malformed or unreadable. */
+function readStoredRecord(key: string): Record<string, unknown> {
   try {
-    const stored = localStorage.getItem(APP_STATE_STORAGE_KEY);
-    if (!stored) {
-      return legacyModel ? { ...defaults, model: legacyModel } : defaults;
-    }
-
-    const parsed = JSON.parse(stored) as PersistedAppState;
-    const persistedKokoroVoice = parsed.voicesByModel?.kokoro;
-    const persistedSupertonicVoice = parsed.voicesByModel?.supertonic;
-    const hasValidSupertonicVoice = isSupertonicVoice(persistedSupertonicVoice);
-
-    return {
-      model: isModelType(parsed.model) ? parsed.model : (legacyModel ?? defaults.model),
-      text: typeof parsed.text === "string" ? parsed.text : defaults.text,
-      voicesByModel: {
-        kokoro: typeof persistedKokoroVoice === "string" && persistedKokoroVoice.trim().length > 0
-          ? persistedKokoroVoice
-          : defaults.voicesByModel.kokoro,
-        supertonic: hasValidSupertonicVoice
-          ? persistedSupertonicVoice
-          : defaults.voicesByModel.supertonic,
-      },
-      quality: typeof parsed.quality === "number" && Number.isFinite(parsed.quality)
-        ? clampQuality(parsed.quality)
-        : defaults.quality,
-      audio8Voice: isAudio8Voice(parsed.audio8Voice) ? parsed.audio8Voice : defaults.audio8Voice,
-    };
+    const stored = localStorage.getItem(key);
+    return stored ? asRecord(JSON.parse(stored)) : {};
   } catch {
-    return legacyModel ? { ...defaults, model: legacyModel } : defaults;
+    return {};
   }
+}
+
+function parseDesktopModel(value: unknown): DesktopInlineEngineId | null {
+  return isDesktopInlineEngineId(value) ? value : null;
+}
+
+export function getInitialAppState(): InitialAppState {
+  const current = readStoredRecord(APP_STATE_STORAGE_KEY);
+  // Before v2 is first written, the v1 shape supplies the fields both share.
+  const stored = Object.keys(current).length > 0 ? current : readStoredRecord(LEGACY_APP_STATE_STORAGE_KEY);
+  const desktopModels = asRecord(stored.desktopModels);
+
+  return {
+    model: isBrowserEngineId(stored.model) ? stored.model : (getLegacyModelSelection() ?? "kokoro"),
+    text: typeof stored.text === "string" ? stored.text : DEFAULT_TEXT,
+    quality: typeof stored.quality === "number" && Number.isFinite(stored.quality)
+      ? clampQuality(stored.quality)
+      : QUALITY_DEFAULT,
+    desktopModels: {
+      studio: parseDesktopModel(desktopModels.studio),
+      reader: parseDesktopModel(desktopModels.reader),
+    },
+  };
+}
+
+/**
+ * The settings v1 kept for an engine, in that engine's settings shape, or
+ * undefined when v1 had none. v1 stored only the Kokoro, Supertonic 2 and
+ * Audio8 voices.
+ */
+function legacyEngineSettings(id: EngineId, legacy: Record<string, unknown>): unknown {
+  const voicesByModel = asRecord(legacy.voicesByModel);
+  if (id === "kokoro" || id === "supertonic") {
+    return id in voicesByModel ? { voice: voicesByModel[id] } : undefined;
+  }
+  if (id === "audio8") return "audio8Voice" in legacy ? { voice: legacy.audio8Voice } : undefined;
+  return undefined;
+}
+
+/**
+ * Every engine's settings, validated by its descriptor. An engine with no
+ * stored entry yet falls back to what v1 kept for it, then to its defaults.
+ */
+export function getInitialEngineSettings(): PersistedEngineSettings {
+  const stored = readStoredRecord(ENGINE_SETTINGS_STORAGE_KEY);
+  const legacy = readStoredRecord(LEGACY_APP_STATE_STORAGE_KEY);
+  const entries = ENGINE_IDS.map((id) => [
+    id,
+    parseEngineSettings(id, id in stored ? stored[id] : legacyEngineSettings(id, legacy)),
+  ] as const);
+  return Object.fromEntries(entries) as PersistedEngineSettings;
 }
 
 export function getCreatorPresetDefaults(preset: CreatorPresetId): CreatorState {
@@ -278,8 +297,20 @@ export function analyzePronunciationLexicon(lexicon: string): PronunciationLexic
 
 export function persistAppState(state: PersistedAppState): void {
   try {
-    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({ version: APP_STATE_VERSION, ...state }));
     localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, state.model ?? "kokoro");
+  } catch { /* localStorage unavailable */ }
+}
+
+/**
+ * Stores the given engines' settings and keeps every other engine's entry.
+ * Studio and the Qwen3 runtime each own different engines and write
+ * independently, so neither may overwrite the other's.
+ */
+export function persistEngineSettings(settings: Partial<PersistedEngineSettings>): void {
+  try {
+    const stored = readStoredRecord(ENGINE_SETTINGS_STORAGE_KEY);
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({ ...stored, ...settings }));
   } catch { /* localStorage unavailable */ }
 }
 
