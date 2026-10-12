@@ -100,6 +100,12 @@ describe("parsePls", () => {
     expect(() => parsePls(lexicon(lexemes))).toThrow(/more than 5000 entries/);
   });
 
+  it("rejects a single lexeme with more graphemes than the rule limit", () => {
+    const graphemes = "<grapheme>a</grapheme>".repeat(MAX_DICTIONARY_RULES + 1000);
+    expect(() => parsePls(lexicon(`<lexeme>${graphemes}<alias>x</alias></lexeme>`)))
+      .toThrow(new PronunciationDictionaryError(`The lexicon has more than ${MAX_DICTIONARY_RULES} entries.`));
+  });
+
   it("validates imported strings like any dictionary", () => {
     expect(() => parsePls(lexicon(`<lexeme><grapheme>${"x".repeat(201)}</grapheme><alias>y</alias></lexeme>`)))
       .toThrow(/at most 200 characters/);

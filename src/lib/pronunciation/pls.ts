@@ -113,12 +113,14 @@ export function parsePls(xml: string, options: PlsImportOptions = {}): PlsImport
         : `${label} (${graphemes[0]}) has no alias or phoneme and was skipped.`);
       return;
     }
-    rules.push(...graphemes.map(toRule));
+    // A loop, not push(...spread): a lexeme can list more graphemes than an argument list can hold.
+    for (const from of graphemes) {
+      if (rules.length >= MAX_DICTIONARY_RULES) {
+        throw new PronunciationDictionaryError(`The lexicon has more than ${MAX_DICTIONARY_RULES} entries.`);
+      }
+      rules.push(toRule(from));
+    }
   });
-
-  if (rules.length > MAX_DICTIONARY_RULES) {
-    throw new PronunciationDictionaryError(`The lexicon has more than ${MAX_DICTIONARY_RULES} entries.`);
-  }
   let dictionaryLanguage = language;
   if (language !== undefined && !isLanguageTag(language)) {
     warnings.push(`Ignored the invalid language tag "${language}".`);
