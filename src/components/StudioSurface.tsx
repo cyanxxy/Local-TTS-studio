@@ -79,6 +79,7 @@ export function StudioSurface() {
             <div className="flex-1 min-h-0">
               <TextInput
                 text={studio.text}
+                spokenText={studio.spokenText}
                 onTextChange={studio.changeText}
                 onImportDocument={documents.importDocument}
                 isImportingDocument={documents.isImporting}
@@ -200,26 +201,13 @@ export function StudioSurface() {
 
       <div className="mt-4">
         <CreatorToolsPanel
-          preset={creator.creatorPreset}
-          onPresetChange={creator.onCreatorPresetChange}
-          speed={creator.speed}
-          onSpeedChange={creator.onSpeedChange}
+          creator={creator}
           engineSupport={creatorEngineSupport}
-          pauseCommaSec={creator.pauseCommaSec}
-          onPauseCommaSecChange={creator.onPauseCommaChange}
-          pauseSentenceSec={creator.pauseSentenceSec}
-          onPauseSentenceSecChange={creator.onPauseSentenceChange}
-          pauseParagraphSec={creator.pauseParagraphSec}
-          onPauseParagraphSecChange={creator.onPauseParagraphChange}
-          pronunciationLexicon={creator.pronunciationLexicon}
-          onPronunciationLexiconChange={creator.onPronunciationLexiconChange}
-          exportOptions={creator.exportOptions}
-          onExportFormatChange={creator.onExportFormatChange}
-          onExportSampleRateChange={creator.onExportSampleRateChange}
-          onExportBitrateKbpsChange={creator.onExportBitrateChange}
-          onMasteringEnabledChange={creator.onMasteringEnabledChange}
+          script={studio.text}
+          onScriptChange={studio.changeText}
+          sourceSampleRate={hasAudio ? player.state.getSourceSampleRate() : null}
           hasAudio={hasAudio}
-          onDownloadAudio={player.downloadAudio}
+          audioExport={player.audioExport}
           onDownloadCaptions={player.downloadCaptions}
         />
       </div>

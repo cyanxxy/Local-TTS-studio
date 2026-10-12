@@ -1,7 +1,9 @@
 import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalBrowserSupport } from "../lib/browserSupport";
+import { createPronunciationDictionary } from "../lib/pronunciation/dictionary";
 import type { SurfaceEngineId } from "../models/registry";
+import type { SpeechPipelineChoices } from "../shared/speechPipelineRuntime";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useAudio8Runtime } from "./useAudio8Runtime";
 import { useBrowserEngineRuntimes } from "./useBrowserEngineRuntimes";
@@ -75,9 +77,18 @@ const ENGINE_SETTINGS = {
   supertonic3: { voice: "M1", language: "en", seed: null },
 };
 
-function renderOrchestrator(
-  initial: { surface?: Surface | null; studio?: "audio8" | "supertonic3" | "qwen3" | null; reader?: "audio8" | "supertonic3" | "qwen3" | null } = {},
-) {
+interface RenderOptions {
+  surface?: Surface | null;
+  studio?: "audio8" | "supertonic3" | "qwen3" | null;
+  reader?: "audio8" | "supertonic3" | "qwen3" | null;
+  text?: string;
+  speech?: SpeechPipelineChoices;
+  player?: UseAudioPlayerReturn;
+}
+
+const PLAIN_SPEECH: SpeechPipelineChoices = { dictionaries: [], normalize: false, cleanup: false };
+
+function renderOrchestrator(initial: RenderOptions = {}) {
   const beforeReaderAudioChange = vi.fn();
   const onEngineChange = vi.fn();
   const view = renderHook(({ surface }: { surface: Surface | null }) => useEngineOrchestrator({
@@ -88,10 +99,11 @@ function renderOrchestrator(
     browserSupport: BROWSER_SUPPORT,
     debugProfiling: false,
     initialState: { model: "kokoro", desktopModels: { studio: initial.studio ?? null, reader: initial.reader ?? null } },
-    text: "Enough text to speak aloud.",
+    text: initial.text ?? "Enough text to speak aloud.",
     engineSettings: ENGINE_SETTINGS,
-    generationSettings: { speed: 1, quality: 5 },
-    player: {} as UseAudioPlayerReturn,
+    generationSettings: { speed: 1, quality: 5, pronunciationRules: [{ from: "GIF", to: "jif" }] },
+    speech: initial.speech ?? PLAIN_SPEECH,
+    player: initial.player ?? ({} as UseAudioPlayerReturn),
     setShowPlayer: vi.fn(),
     beforeReaderAudioChange,
     onEngineChange,
@@ -112,7 +124,11 @@ describe("useEngineOrchestrator", () => {
     const { result } = renderOrchestrator({ studio: "audio8" });
 
     expect(Object.keys(result.current.runtimes).sort()).toEqual([...ALL_ENGINES].sort());
-    for (const id of ALL_ENGINES) expect(result.current.runtimes[id]).toBe(mock.runtimes[id]);
+    // The runtimes are wrapped (to run the speech pipeline), but every surface field is theirs.
+    for (const id of ALL_ENGINES) {
+      expect(result.current.runtimes[id]).toEqual({ ...mock.runtimes[id], synthesize: expect.any(Function) });
+      expect(result.current.runtimes[id].handleGenerate).toBe(mock.runtimes[id].handleGenerate);
+    }
     expect(result.current.engineIds).toEqual({ studio: "audio8", reader: "kokoro" });
     expect(result.current.visibleEngineId).toBe("audio8");
   });
@@ -232,5 +248,133 @@ describe("useEngineOrchestrator", () => {
     act(() => result.current.changeEngineInput("kokoro", apply));
     expect(beforeReaderAudioChange).toHaveBeenCalledOnce();
     expect(mock.runtimes.kokoro.resetGeneratedAudio).toHaveBeenCalledOnce();
+  });
+
+  describe("spoken-text pipeline", () => {
+    const BREAKS = 'GIF files are small.<break time="1s"/>The end.';
+    const speech: SpeechPipelineChoices = {
+      dictionaries: [createPronunciationDictionary({ name: "Quick", rules: [{ type: "alias", from: "GIF", to: "jif" }] })],
+      normalize: false,
+      cleanup: false,
+    };
+    const lastCall = <T,>(hook: unknown) => (hook as { mock: { calls: T[][] } }).mock.calls.at(-1)![0];
+
+    function fakePlayer() {
+      const scheduleChunk = vi.fn(async () => {});
+      const beginStream = vi.fn();
+      return { player: { scheduleChunk, beginStream, marker: "real" } as unknown as UseAudioPlayerReturn, scheduleChunk, beginStream };
+    }
+
+    it("leaves the script, the tuning's player and the engines' text alone when it has nothing to do", () => {
+      const { player } = fakePlayer();
+      renderOrchestrator({ player });
+
+      const options = lastCall<{ text: string; player: UseAudioPlayerReturn }>(useBrowserEngineRuntimes);
+      expect(options.text).toBe("Enough text to speak aloud.");
+      expect(options.player).toBe(player);
+    });
+
+    it("hands the engines the spoken text and clears their own copy of the pronunciation rules", () => {
+      renderOrchestrator({ text: BREAKS, speech });
+
+      const browser = lastCall<{ text: string; generationSettings: { pronunciationRules: unknown[] } }>(useBrowserEngineRuntimes);
+      expect(browser.text).toBe("jif files are small.\n\nThe end.");
+      expect(browser.generationSettings.pronunciationRules).toEqual([]);
+      expect(lastCall<{ text: string }>(useSupertonic3Runtime).text).toBe(browser.text);
+      expect(lastCall<{ text: string }>(useAudio8Runtime).text).toBe(browser.text);
+      expect(lastCall<{ text: string }>(useQwen3LocalRuntime).text).toBe(browser.text);
+    });
+
+    it("splits Qwen3 requests at a pause mark instead of a blank line", () => {
+      renderOrchestrator({ text: BREAKS, speech, studio: "qwen3" });
+
+      const text = lastCall<{ text: string }>(useQwen3LocalRuntime).text;
+      expect(text).toMatch(/^jif files are small\.[\ue000-\ue3e8]The end\.$/u);
+      expect(text.charCodeAt("jif files are small.".length)).toBe(0xe000 + 100);
+    });
+
+    it("gives the engines a player that reports chunks against the written script", async () => {
+      const { player, scheduleChunk, beginStream } = fakePlayer();
+      renderOrchestrator({ text: BREAKS, speech, player });
+      const { player: engineFacing } = lastCall<{ player: UseAudioPlayerReturn }>(useBrowserEngineRuntimes);
+
+      engineFacing.beginStream();
+      expect(beginStream).toHaveBeenCalledOnce();
+      await engineFacing.scheduleChunk({
+        audio: new Float32Array(100),
+        samplingRate: 100,
+        text: "jif files are small.",
+        index: 1,
+        total: 2,
+        textStart: 0,
+        textEnd: 20,
+        pauseAfterSec: 0.44,
+      });
+
+      expect(scheduleChunk).toHaveBeenCalledOnce();
+      const [forwarded] = scheduleChunk.mock.calls[0] as unknown as [{ audio: Float32Array; text: string; textEnd: number; pauseAfterSec: number }];
+      expect(forwarded.text).toBe("GIF files are small.");
+      expect(forwarded.textEnd).toBe(20);
+      expect(forwarded.pauseAfterSec).toBe(1);
+      expect(forwarded.audio).toHaveLength(100 - 44 + 100);
+    });
+
+    it("maps a running generation's chunks with the script it started from", async () => {
+      const { player, scheduleChunk } = fakePlayer();
+      const options: RenderOptions = { text: BREAKS, speech, player };
+      const { rerender } = renderOrchestrator(options);
+      const engineFacing = () => lastCall<{ player: UseAudioPlayerReturn }>(useBrowserEngineRuntimes).player;
+
+      engineFacing().beginStream();
+      const started = engineFacing();
+      // The dictionary changes while the first generation is still streaming.
+      options.speech = PLAIN_SPEECH;
+      rerender({ surface: "studio" });
+      expect(lastCall<{ text: string }>(useBrowserEngineRuntimes).text).toBe("GIF files are small.\n\nThe end.");
+
+      await started.scheduleChunk({
+        audio: new Float32Array(10), samplingRate: 100, text: "jif files are small.", index: 1, total: 2, textStart: 0, textEnd: 20,
+      });
+      await engineFacing().scheduleChunk({
+        audio: new Float32Array(10), samplingRate: 100, text: "GIF files are small.", index: 1, total: 2, textStart: 0, textEnd: 20,
+      });
+
+      const forwarded = scheduleChunk.mock.calls.map((call) => (call as unknown as [{ text: string }])[0].text);
+      // The running generation still maps through its own plan; the next one maps through the new text.
+      expect(forwarded).toEqual(["GIF files are small.", "GIF files are small."]);
+    });
+
+    it("regenerates a retaken passage from what the engine spoke for it", () => {
+      renderOrchestrator({ text: BREAKS, speech });
+      const { retakeText } = lastCall<{ retakeText: (segment: { text: string; textStart?: number; textEnd?: number }) => string }>(useBrowserEngineRuntimes);
+
+      expect(retakeText({ text: "GIF files are small.", textStart: 0, textEnd: 20 })).toBe("jif files are small.");
+      expect(retakeText({ text: "kept", textStart: undefined, textEnd: undefined })).toBe("kept");
+      // Audio made from an earlier version of the script keeps its own words.
+      expect(retakeText({ text: "An older sentence.", textStart: 0, textEnd: 18 })).toBe("An older sentence.");
+    });
+
+    it("runs every synthesize request through the pipeline, for each engine", async () => {
+      const seen: Array<{ text: string; rules: unknown }> = [];
+      mock.runtimes.kokoro.synthesize.mockImplementation(((request: { text: string; tuning: { pronunciationRules: unknown } }) => {
+        seen.push({ text: request.text, rules: request.tuning.pronunciationRules });
+        return (async function* () {
+          yield { audio: new Float32Array(10), samplingRate: 100, text: "x", index: 1, total: 1, textStart: 0, textEnd: 20, pauseAfterSec: 0 };
+        })();
+      }) as never);
+      const { result } = renderOrchestrator({ speech });
+
+      const chunks = [];
+      for await (const chunk of result.current.runtimes.kokoro.synthesize({
+        text: BREAKS,
+        settings: { voice: "af_heart" },
+        tuning: { speed: 1, quality: 5, pronunciationRules: [{ from: "GIF", to: "jif" }] },
+      })) chunks.push(chunk);
+
+      expect(seen).toEqual([{ text: "jif files are small.\n\nThe end.", rules: [] }]);
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]).toMatchObject({ text: "GIF files are small.", pauseAfterSec: 1 });
+      expect(result.current.runtimes.audio8.id).toBe("audio8");
+    });
   });
 });

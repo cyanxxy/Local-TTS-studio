@@ -13,6 +13,8 @@ interface UseGenerationControlOptions {
   getWorker: UseModelLoaderReturn["getWorker"];
   hardRestartModel: (model: ModelType) => void;
   player: UseAudioPlayerReturn;
+  /** The text a retake regenerates a stored segment with; defaults to the segment's own text. */
+  retakeText?: (segment: { text: string; textStart?: number; textEnd?: number }) => string;
   setShowPlayer: (showPlayer: boolean) => void;
   text: string;
   tts: Pick<UseTTSReturn, "abort" | "cancel" | "generate" | "isGenerating">;
@@ -48,6 +50,7 @@ export function useGenerationControl({
   getWorker,
   hardRestartModel,
   player,
+  retakeText,
   setShowPlayer,
   text,
   tts,
@@ -169,7 +172,7 @@ export function useGenerationControl({
     retakeRef.current = retake;
     setIsRetakingSegment(true);
     retake.detach = observeWorkerGeneration(worker, generationId, {
-      ...workerGenerateRequest(segment.text, voice, generationSettings, engineFields),
+      ...workerGenerateRequest(retakeText ? retakeText(segment) : segment.text, voice, generationSettings, engineFields),
       finalPauseSec: segment.pauseAfterSec,
     }, {
       onChunk: (chunk) => {
@@ -206,6 +209,7 @@ export function useGenerationControl({
     engineFields,
     isGenerationBusy,
     replaceSegment,
+    retakeText,
     segments,
     setShowPlayer,
     getWorker,

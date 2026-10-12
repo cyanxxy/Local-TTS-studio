@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LocalTtsAudioChunkEvent, LocalTtsGenerateResult } from "../electron";
 import { buildQwen3RequestPlan } from "../lib/qwenChunking";
+import { encodeSpeechBreakMark } from "../lib/speechBreakMarks";
 import type { Qwen3SynthesisSettings, SynthesisChunk } from "../shared/engineRuntime";
 import {
   QWEN3_SECTION_JOIN_PAUSE_SEC,
@@ -173,6 +174,25 @@ describe("streamQwen3Synthesis", () => {
     expect(output).toHaveLength(3);
     expect(output[1]).toMatchObject({ pauseAfterSec: QWEN3_SECTION_JOIN_PAUSE_SEC, pauseKind: "sentence" });
     expect(output[1].audio).toHaveLength(Math.round(SAMPLE_RATE * QWEN3_SECTION_JOIN_PAUSE_SEC));
+  });
+
+  it("sends a request per inline pause and joins them with the requested silence", async () => {
+    const { bridge, requests, emit } = createBridge();
+    const text = `Hi.\n\nOk.${encodeSpeechBreakMark(1.5)}Yes.${encodeSpeechBreakMark(0.5)}`;
+    const chunks = collect(streamQwen3Synthesis(bridge, { text, settings: SETTINGS }, new AbortController().signal));
+
+    for (let section = 0; section < 2; section += 1) {
+      await settle();
+      const { request, resolve } = requests[section];
+      expect(request.payload?.text).toBe(section === 0 ? "Hi.\n\nOk." : "Yes.");
+      emit(request.requestId, 0, 1);
+      resolve(result(1));
+    }
+
+    const output = await chunks;
+    expect(output.map((chunk) => chunk.pauseAfterSec)).toEqual([0, 1.5, 0, 0.5]);
+    expect(output[1].audio).toHaveLength(Math.round(SAMPLE_RATE * 1.5));
+    expect(output[3].audio).toHaveLength(Math.round(SAMPLE_RATE * 0.5));
   });
 
   it("uploads the reference again once when the bridge lost it before a section streamed", async () => {

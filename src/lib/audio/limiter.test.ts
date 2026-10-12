@@ -109,8 +109,9 @@ describe("TruePeakLimiter", () => {
   });
 
   it("limits a long input to its length and ceiling", () => {
-    const input = sine(300, 24000, 30, 1.2);
+    const input = sine(300, 24000, 4, 1.2);
     const output = limitTruePeak(input, 24000, { ceilingDb: -1 });
     expect(output).toHaveLength(input.length);
+    expect(Math.max(...output.map(Math.abs))).toBeLessThanOrEqual(10 ** (-1 / 20));
   });
 });

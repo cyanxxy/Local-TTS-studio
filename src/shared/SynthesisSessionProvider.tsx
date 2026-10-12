@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { AudioExportContext } from "../components/AudioExportContext";
 import { SynthesisSessionContext } from "./synthesisSessionContext";
 import { useSynthesisSessionState, type SynthesisSessionOptions } from "./useSynthesisSessionState";
 
@@ -12,5 +13,9 @@ export function SynthesisSessionProvider({
   ...options
 }: SynthesisSessionOptions & { children: ReactNode }) {
   const session = useSynthesisSessionState(options);
-  return <SynthesisSessionContext.Provider value={session}>{children}</SynthesisSessionContext.Provider>;
+  return (
+    <SynthesisSessionContext.Provider value={session}>
+      <AudioExportContext.Provider value={session.player.audioExport}>{children}</AudioExportContext.Provider>
+    </SynthesisSessionContext.Provider>
+  );
 }

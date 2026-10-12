@@ -1,4 +1,5 @@
 import type { TextChunk } from "./chunking";
+import { findSpeechBreakMarks } from "./speechBreakMarks";
 import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
   countUnicodeScalars,
@@ -11,6 +12,8 @@ export const QWEN3_UNIT_MAX_CHARS = 200;
 // rust/local-tts-bridge/src/qwen3/text.rs. CJK text speaks about twice as long
 // per character, so CJK-heavy units are cut at about half the characters.
 export const QWEN3_CJK_CHARACTER_WEIGHT = 2;
+/** A run of pause marks is capped like a single break tag. */
+const MAX_MARKED_PAUSE_SEC = 10;
 
 export interface Qwen3RequestSection extends TextChunk {
   /** Inclusive index of the first Qwen text unit in this request. */
@@ -154,6 +157,49 @@ export function buildQwen3TextUnits(text: string): TextChunk[] {
  * will, so a streamed `textUnitIndex` indexes `units` from `unitStart`.
  */
 export function buildQwen3RequestPlan(text: string): Qwen3RequestPlan {
+  const marks = findSpeechBreakMarks(text);
+  if (marks.length === 0) return buildUnmarkedRequestPlan(text);
+
+  // Each pause mark ends its own requests, and the pause it carries replaces
+  // the usual join pause after them. Marks with nothing between them add up.
+  const sections: Qwen3RequestSection[] = [];
+  const units: TextChunk[] = [];
+  let markedPauseSec: number | null = null;
+  const applyMarkedPause = () => {
+    const section = sections.at(-1);
+    const unit = units.at(-1);
+    if (!section || !unit || markedPauseSec === null) return;
+    section.pauseAfterSec = markedPauseSec;
+    section.pauseKind = "sentence";
+    unit.pauseAfterSec = markedPauseSec;
+  };
+  let from = 0;
+  for (let index = 0; index <= marks.length; index += 1) {
+    const to = index < marks.length ? marks[index].index : text.length;
+    const plan = buildUnmarkedRequestPlan(text.slice(from, to));
+    const unitOffset = units.length;
+    for (const unit of plan.units) units.push({ ...unit, start: unit.start + from, end: unit.end + from });
+    for (const section of plan.sections) {
+      sections.push({
+        ...section,
+        start: section.start + from,
+        end: section.end + from,
+        unitStart: section.unitStart + unitOffset,
+        unitEnd: section.unitEnd + unitOffset,
+      });
+    }
+    if (plan.sections.length > 0) markedPauseSec = null;
+    if (index < marks.length) {
+      const seconds = marks[index].seconds;
+      markedPauseSec = Math.min(MAX_MARKED_PAUSE_SEC, Math.round(((markedPauseSec ?? 0) + seconds) * 100) / 100);
+      applyMarkedPause();
+    }
+    from = to + 1;
+  }
+  return { sections, units };
+}
+
+function buildUnmarkedRequestPlan(text: string): Qwen3RequestPlan {
   const groupingUnits = buildQwen3TextUnits(text);
   if (groupingUnits.length === 0) return { sections: [], units: [] };
 

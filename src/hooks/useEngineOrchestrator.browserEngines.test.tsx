@@ -148,6 +148,7 @@ function renderOrchestrator(
     debugProfiling: false,
     initialState: { model, desktopModels: { studio: null, reader: null } },
     text: TEXT,
+    speech: { dictionaries: [], normalize: false, cleanup: false },
     engineSettings,
     generationSettings: TUNING,
     player,

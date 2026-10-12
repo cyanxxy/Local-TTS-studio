@@ -7,10 +7,6 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** Where a pronunciation rule may match. */
 export type PronunciationRuleScope = "word" | "anywhere";
 
@@ -41,13 +37,17 @@ export interface PronunciationMatcher {
 }
 
 interface CompiledRule {
-  pattern: RegExp;
   to: string;
+  /** The rule's written form, trimmed. */
+  from: string;
+  caseSensitive: boolean;
+  /** No letter or digit may touch the match on this side. */
+  boundaryBefore: boolean;
+  boundaryAfter: boolean;
 }
 
 // Word characters for boundary checks: letters, combining marks, digits and
 // underscore in any script, unlike `\b`, which only knows ASCII.
-const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
 // Scripts written without spaces between words. A boundary requirement would
 // stop "東京" from ever matching inside "東京都", so rule edges in these scripts
 // match anywhere.
@@ -78,12 +78,34 @@ function compileRule(rule: PronunciationMatchRule): CompiledRule | null {
   const caseSensitive = rule.caseSensitive ?? isAcronymRule(from);
   const chars = Array.from(from);
   const wordScope = (rule.scope ?? "word") === "word";
-  const before = wordScope && needsBoundary(chars[0]) ? `(?<!${WORD_CHAR})` : "";
-  const after = wordScope && needsBoundary(chars[chars.length - 1]) ? `(?!${WORD_CHAR})` : "";
   return {
-    pattern: new RegExp(`${before}${escapeRegExp(from)}${after}`, caseSensitive ? "uy" : "iuy"),
     to,
+    from,
+    caseSensitive,
+    boundaryBefore: wordScope && needsBoundary(chars[0]),
+    boundaryAfter: wordScope && needsBoundary(chars[chars.length - 1]),
   };
+}
+
+/** Whether the code point just before `index` is a word character. */
+function wordCharBefore(text: string, index: number): boolean {
+  if (index === 0) return false;
+  const low = text.charCodeAt(index - 1);
+  const start = low >= 0xdc00 && low <= 0xdfff && index >= 2 ? index - 2 : index - 1;
+  return WORD_EDGE_CHAR.test(String.fromCodePoint(text.codePointAt(start)!));
+}
+
+/** Whether the code point at `index` is a word character. */
+function wordCharAt(text: string, index: number): boolean {
+  return index < text.length && WORD_EDGE_CHAR.test(String.fromCodePoint(text.codePointAt(index)!));
+}
+
+/** Whether `rule` matches `text` at `position`; the candidate already matches its form ignoring case. */
+function ruleMatchesAt(rule: CompiledRule, text: string, position: number): boolean {
+  const end = position + rule.from.length;
+  if (rule.caseSensitive && text.slice(position, end) !== rule.from) return false;
+  if (rule.boundaryBefore && wordCharBefore(text, position)) return false;
+  return !(rule.boundaryAfter && wordCharAt(text, end));
 }
 
 /**
@@ -102,32 +124,40 @@ export function compilePronunciationMatcher(
     .sort((a, b) => b.rule.from.trim().length - a.rule.from.trim().length)
     .map((entry) => entry.compiled);
 
-  // Case-insensitive alternation of every rule finds candidate positions; the
-  // per-rule sticky patterns then decide case and word boundaries.
-  const candidates = compiled.length > 0
-    ? new RegExp(compiled.map((rule) => `(?:${rule.pattern.source})`).join("|"), "giu")
-    : null;
+  // Rules are looked up by their whole written form, lowercased: at a position
+  // only the lengths some rule has are tried, longest first, so the cost does
+  // not grow with the number of rules. The rule's own case and
+  // word-boundary checks then decide. `compiled` is sorted longest first, so
+  // each list keeps earlier rules ahead of later ones of the same length.
+  const byForm = new Map<string, CompiledRule[]>();
+  for (const rule of compiled) {
+    const key = rule.from.toLowerCase();
+    const list = byForm.get(key);
+    if (list) list.push(rule);
+    else byForm.set(key, [rule]);
+  }
+  const lengths = [...new Set(compiled.map((rule) => rule.from.length))].sort((a, b) => b - a);
+  const candidatesAt = function* (text: string, position: number): Generator<CompiledRule> {
+    for (const length of lengths) {
+      if (position + length > text.length) continue;
+      const list = byForm.get(text.slice(position, position + length).toLowerCase());
+      if (list) yield* list;
+    }
+  };
 
   const findEdits = (text: string): TextEdit[] => {
-    if (!candidates) return [];
+    if (compiled.length === 0) return [];
     const edits: TextEdit[] = [];
-    candidates.lastIndex = 0;
-    let candidate: RegExpExecArray | null;
-    while ((candidate = candidates.exec(text)) !== null) {
-      const position = candidate.index;
-      let matched = false;
-      for (const rule of compiled) {
-        rule.pattern.lastIndex = position;
-        const match = rule.pattern.exec(text);
-        if (!match) continue;
-        edits.push({ start: position, end: position + match[0].length, replacement: rule.to, reason: "pronunciation" });
-        candidates.lastIndex = position + match[0].length;
-        matched = true;
+    let position = 0;
+    while (position < text.length) {
+      let matchedLength = 0;
+      for (const rule of candidatesAt(text, position)) {
+        if (!ruleMatchesAt(rule, text, position)) continue;
+        matchedLength = rule.from.length;
+        edits.push({ start: position, end: position + matchedLength, replacement: rule.to, reason: "pronunciation" });
         break;
       }
-      // The candidate only matched with the wrong case; resume one code unit
-      // later so overlapping candidates are still found.
-      if (!matched) candidates.lastIndex = position + 1;
+      position += matchedLength || 1;
     }
     return edits;
   };

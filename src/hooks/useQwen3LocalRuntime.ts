@@ -13,7 +13,6 @@ import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import type { EngineRuntime, SynthesisRequest } from "../shared/engineRuntime";
 import type { GenerationStats, ModelState } from "../types";
 import {
-  QWEN3_SECTION_JOIN_PAUSE_SEC,
   isPlayableQwen3Chunk,
   isQwen3ReferenceCacheMiss,
   qwen3BasePayload,
@@ -591,13 +590,14 @@ export function useQwen3LocalRuntime({
 
           // Rust only knows whether a unit is final within one IPC request.
           // The renderer owns the multi-request job, so it restores the natural
-          // inter-unit pause between non-final request sections.
-          if (sectionIndex < requestSections.length - 1) {
+          // inter-unit pause between non-final request sections, or the
+          // longer one an inline pause asked for.
+          if (section.pauseAfterSec > 0) {
             const textUnitIndex = Math.max(section.unitStart, section.unitEnd - 1);
             const textUnit = activeTextUnitsRef.current[textUnitIndex];
             const pauseSamples = Math.max(
               1,
-              Math.round(generated.sampleRate * QWEN3_SECTION_JOIN_PAUSE_SEC),
+              Math.round(generated.sampleRate * section.pauseAfterSec),
             );
             await scheduleChunk({
               audio: new Float32Array(pauseSamples),
@@ -607,12 +607,12 @@ export function useQwen3LocalRuntime({
               total: activeTextUnitsRef.current.length || 1,
               textStart: textUnit?.start ?? section.start,
               textEnd: textUnit?.end ?? section.end,
-              pauseAfterSec: QWEN3_SECTION_JOIN_PAUSE_SEC,
+              pauseAfterSec: section.pauseAfterSec,
               pauseKind: "sentence",
             });
             combinedResult = {
               ...combinedResult,
-              durationSec: combinedResult.durationSec + QWEN3_SECTION_JOIN_PAUSE_SEC,
+              durationSec: combinedResult.durationSec + section.pauseAfterSec,
             };
           }
           setGenerationProgress(((sectionIndex + 1) / requestSections.length) * 100);

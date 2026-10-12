@@ -144,7 +144,9 @@ function parseQwen3Settings(raw: unknown): Qwen3Settings {
 }
 
 const capabilities: EngineCapabilities = {
-  // The bridge receives the script as written and paces its own units.
+  // The bridge receives the script as written and paces its own units. The
+  // speech pipeline (dictionary, normalization, pauses) rewrites the script
+  // before it gets there, which is why these stay false: the engine reads none.
   speed: false,
   pauses: false,
   pronunciationLexicon: false,
@@ -233,8 +235,9 @@ export const qwen3Engine = {
         referenceAudio: cloning ? settings.referenceAudioSignature : null,
         referenceText: cloning ? settings.referenceText.trim() : null,
       }),
-      // Creator tuning never reaches the bridge.
-      tuning: {},
+      // The bridge reads no Creator tuning; only the speech pipeline's rewrite
+      // of the script (dictionary, normalization, cleanup) changes its audio.
+      tuning: tuning.speechFingerprint === undefined ? {} : { speechFingerprint: tuning.speechFingerprint },
       legacy: {
         voice: JSON.stringify({
           repo: settings.profile.repo,

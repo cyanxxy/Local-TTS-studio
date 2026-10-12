@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createAuditionPlayer, type AuditionPlayer } from "../lib/auditionPlayer";
 import { downloadAudioChunks } from "../lib/audioExportClient";
-import { downloadBlob } from "../lib/exportAudio";
+import { downloadBlob, type ExportOptions } from "../lib/exportAudio";
 import {
   autoCastSpeakers,
   findUncastSpeakers,
@@ -27,13 +27,12 @@ import {
 } from "../lib/dialogue/script";
 import type { PresetSynthesize } from "../lib/presetSynthesis";
 import type { VoicePreset } from "../lib/voiceLibrary/types";
-import type { AudioExportOptions } from "../types";
 
 export type DialogueRenderStatus = "idle" | "rendering" | "done" | "cancelled" | "error";
 
 export interface DialogueSessionOptions {
   synthesize: PresetSynthesize;
-  exportOptions: AudioExportOptions;
+  exportOptions: ExportOptions;
   /**
    * Voices to cast new speakers from, in order. Stage 2's Voice Library adds
    * its saved presets here; the casting UI needs nothing else to change.

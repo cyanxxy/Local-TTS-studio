@@ -35,6 +35,8 @@ interface Options {
   /** GENERATE fields only the active engine's worker reads, from its settings (see `workerFields`). */
   engineFields?: Readonly<Record<string, unknown>>;
   player: UseAudioPlayerReturn;
+  /** See `UseGenerationControlOptions.retakeText`. */
+  retakeText?: (segment: { text: string; textStart?: number; textEnd?: number }) => string;
   setShowPlayer: (show: boolean) => void;
 }
 
@@ -86,6 +88,7 @@ export function useBrowserEngineRuntimes({
   generationSettings,
   engineFields,
   player,
+  retakeText,
   setShowPlayer,
 }: Options): UseBrowserEngineRuntimesReturn {
   const loader = useModelLoader(activeModel, {
@@ -154,6 +157,7 @@ export function useBrowserEngineRuntimes({
     hardRestartModel,
     getWorker,
     player,
+    retakeText,
     setShowPlayer,
     text,
     tts,

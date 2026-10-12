@@ -4,6 +4,8 @@ import { AudioPlayer } from "./AudioPlayer";
 import { MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE, PLAYBACK_RATES } from "../constants";
 import type { GenerationStats } from "../types";
 import { PlaybackClock } from "../lib/playbackClock";
+import type { UseAudioExportReturn } from "../hooks/useAudioExport";
+import { AudioExportContext } from "./AudioExportContext";
 
 function clockAt(seconds: number): PlaybackClock {
   const clock = new PlaybackClock();
@@ -369,5 +371,67 @@ describe("AudioPlayer", () => {
     fireEvent.pointerDown(slider, { pointerId: 1, clientX: 20 });
 
     expect(onSeek).toHaveBeenCalledWith(0);
+  });
+
+  describe("while an export runs", () => {
+    function renderExporting(variant: "panel" | "dock", exportState: Partial<UseAudioExportReturn> = {}) {
+      const audioExport: UseAudioExportReturn = {
+        isExporting: true,
+        progress: { phase: "encoding", fraction: 0.37 },
+        summary: null,
+        start: vi.fn(),
+        cancel: vi.fn(),
+        ...exportState,
+      };
+      const onDownload = vi.fn();
+      render(
+        <AudioExportContext.Provider value={audioExport}>
+          <AudioPlayer
+            variant={variant}
+            isPlaying={false}
+            clock={clockAt(0)}
+            totalDuration={12}
+            segmentCount={1}
+            activeSegmentNumber={1}
+            stats={defaultStats}
+            isGenerating={false}
+            onTogglePlay={vi.fn()}
+            onSeek={vi.fn()}
+            onSkipBackward={vi.fn()}
+            onSkipForward={vi.fn()}
+            onDownload={onDownload}
+          />
+        </AudioExportContext.Provider>,
+      );
+      return { audioExport, onDownload };
+    }
+
+    it.each(["panel", "dock"] as const)("turns the %s download button into a cancel button with progress", (variant) => {
+      const { audioExport, onDownload } = renderExporting(variant);
+
+      expect(screen.queryByRole("button", { name: "Download audio" })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Cancel export (37%)" }));
+
+      expect(audioExport.cancel).toHaveBeenCalledOnce();
+      expect(onDownload).not.toHaveBeenCalled();
+    });
+
+    it("keeps the cancel action in the overflow menu", () => {
+      const { audioExport } = renderExporting("dock");
+      fireEvent.click(screen.getByRole("button", { name: "More playback options" }));
+      fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Cancel export (37%)" }));
+      expect(audioExport.cancel).toHaveBeenCalledOnce();
+    });
+
+    it("downloads as before once the export is over, and when no export is provided", () => {
+      const { onDownload } = renderExporting("panel", { isExporting: false, progress: null });
+      fireEvent.click(screen.getByRole("button", { name: "Download audio" }));
+      expect(onDownload).toHaveBeenCalledOnce();
+    });
+
+    it("reads zero progress before the first report", () => {
+      renderExporting("panel", { progress: null });
+      expect(screen.getByRole("button", { name: "Cancel export (0%)" })).toBeInTheDocument();
+    });
   });
 });

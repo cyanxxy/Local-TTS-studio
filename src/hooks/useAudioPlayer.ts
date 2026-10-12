@@ -1,5 +1,8 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import type { AudioExportOptions, CaptionExportFormat } from "../types";
+import type { CaptionExportFormat } from "../types";
+import type { CaptionStyle } from "../lib/appState";
+import type { PostProcessingOptions } from "../lib/audio/postProcess";
+import { retimeChunksForExport } from "../lib/creator/captionTiming";
 import type { CachedReaderAudioChunk } from "../lib/readerDocument";
 import {
   AUDIO_PLAYER_RETAIN_BEHIND_SECONDS,
@@ -8,9 +11,9 @@ import {
   MIN_PLAYBACK_RATE,
 } from "../constants";
 import { PlaybackClock } from "../lib/playbackClock";
-import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
-import { downloadAudioChunks } from "../lib/audioExportClient";
-import { downloadBlob } from "../lib/exportAudio";
+import { buildCaptionJson, buildSrt, buildVtt, type CaptionBuildOptions } from "../lib/captions";
+import { exportAudioChunks, type AudioExportRequest } from "../lib/audioExportClient";
+import { downloadBlob, type ExportOptions, type ExportResult } from "../lib/exportAudio";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
 import {
   appendAudioSegment,
@@ -62,10 +65,18 @@ export interface UseAudioPlayerReturn {
   skip: (deltaSeconds: number) => void;
   jumpToSegment: (segmentId: string) => void;
   setPlaybackRate: (rate: number) => void;
-  download: (options?: AudioExportOptions) => Promise<void>;
-  downloadCaptions: (format: CaptionExportFormat) => void;
+  /**
+   * Renders the audio in the export worker and saves it. Resolves with the
+   * export's loudness report and timeline, or null when there was no audio.
+   * Rejects with an AbortError when `request.signal` aborts.
+   */
+  download: (options?: ExportOptions, request?: AudioExportRequest) => Promise<ExportResult | null>;
+  /** Saves captions; `post` moves the cues to where an export with those finishing options puts them. */
+  downloadCaptions: (format: CaptionExportFormat, style?: CaptionStyle, post?: PostProcessingOptions) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
   getAudioChunkCount: () => number;
+  /** The sample rate the engine produced the buffered audio at, or null while there is none. */
+  getSourceSampleRate: () => number | null;
   /**
    * Increments whenever the buffered audio is replaced wholesale (a reset or a
    * restored cache). A runtime that generated the current audio can compare
@@ -88,6 +99,13 @@ export interface UseAudioPlayerReturn {
   reset: () => void;
   stopAll: () => void;
 }
+
+/** Cue layouts for the caption styles. */
+const CAPTION_LAYOUTS: Record<CaptionStyle, CaptionBuildOptions["layout"]> = {
+  readable: {},
+  short: { maxWordsPerCue: 3 },
+  passage: false,
+};
 
 /** Background-safe cadence for extending the playback schedule. */
 const SCHEDULE_TOPUP_INTERVAL_MS = 1000;
@@ -731,29 +749,33 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     syncCurrentTime(live);
   }, [getLiveTimelineTime, replayFromOffset, syncCurrentTime]);
 
-  const download = useCallback(async (options?: AudioExportOptions) => {
-    if (allChunksRef.current.length === 0) return;
+  const download = useCallback(async (options?: ExportOptions, request: AudioExportRequest = {}) => {
+    if (allChunksRef.current.length === 0) return null;
 
-    await downloadAudioChunks(allChunksRef.current.map((chunk) => ({
+    const result = await exportAudioChunks(allChunksRef.current.map((chunk) => ({
       audio: chunk.audio,
       samplingRate: chunk.samplingRate,
-    })), options);
+      pauseAfterSec: chunk.pauseAfterSec,
+    })), options, request);
+    downloadBlob(result.blob, `${request.fileName || "tts-audio"}.${result.extension}`);
+    return result;
   }, []);
 
-  const downloadCaptions = useCallback((format: CaptionExportFormat) => {
+  const downloadCaptions = useCallback((format: CaptionExportFormat, style: CaptionStyle = "readable", post?: PostProcessingOptions) => {
     if (allChunksRef.current.length === 0) return;
 
-    const segments = buildCaptionSegments(allChunksRef.current);
+    const segments = buildCaptionSegments(retimeChunksForExport(allChunksRef.current, post));
 
     if (segments.length === 0) return;
 
+    const build: CaptionBuildOptions = { layout: CAPTION_LAYOUTS[style] };
     if (format === "srt") {
-      downloadBlob(new Blob([buildSrt(segments)], { type: "application/x-subrip" }), "tts-captions.srt");
+      downloadBlob(new Blob([buildSrt(segments, build)], { type: "application/x-subrip" }), "tts-captions.srt");
       return;
     }
 
     if (format === "vtt") {
-      downloadBlob(new Blob([buildVtt(segments)], { type: "text/vtt" }), "tts-captions.vtt");
+      downloadBlob(new Blob([buildVtt(segments, build)], { type: "text/vtt" }), "tts-captions.vtt");
       return;
     }
 
@@ -844,6 +866,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   }), []);
 
   const getAudioChunkCount = useCallback(() => allChunksRef.current.length, []);
+  const getSourceSampleRate = useCallback(() => allChunksRef.current[0]?.samplingRate ?? null, []);
   const getContentEpoch = useCallback(() => contentEpochRef.current, []);
 
   const truncateAudioChunks = useCallback((count: number) => {
@@ -1062,6 +1085,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     downloadCaptions,
     replaceSegment,
     getAudioChunkCount,
+    getSourceSampleRate,
     getContentEpoch,
     truncateAudioChunks,
     getAudioCacheSnapshot,
@@ -1081,6 +1105,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     error,
     getAudioCacheSnapshot,
     getAudioChunkCount,
+    getSourceSampleRate,
     getContentEpoch,
     getCurrentTime,
     getPlaybackSnapshot,

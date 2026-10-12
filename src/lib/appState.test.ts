@@ -18,7 +18,8 @@ const LEGACY_MODEL_STORAGE_KEY = "tts-app-model";
 const LEGACY_APP_STATE_STORAGE_KEY = "tts-app-state-v1";
 const APP_STATE_STORAGE_KEY = "tts-app-state-v2";
 const ENGINE_SETTINGS_STORAGE_KEY = "tts-engine-settings-v1";
-const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
+const LEGACY_CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
+const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v2";
 
 const DEFAULT_ENGINE_SETTINGS = Object.fromEntries(
   Object.values(ENGINES).map((engine) => [engine.id, engine.defaultSettings]),
@@ -202,7 +203,11 @@ describe("appState", () => {
       preset: "custom",
       speed: defaultPreset.speed,
       exportFormat: defaultPreset.exportFormat,
-      pronunciationLexicon: "",
+      dictionaries: [],
+      normalizeSpeech: false,
+      cleanupOnSpeak: false,
+      captionStyle: "readable",
+      loudnessPresetId: "streaming",
     });
 
     expect(getCreatorPresetDefaults("youtube-long")).toMatchObject({
@@ -213,16 +218,21 @@ describe("appState", () => {
 
   it("normalizes persisted creator state and clamps numeric ranges", () => {
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      version: 2,
       preset: "custom",
       speed: 99,
       pauseCommaSec: -1,
       pauseSentenceSec: 99,
       pauseParagraphSec: 0.5,
-      pronunciationLexicon: "GIF => jif",
-      exportFormat: "mp3",
+      normalizeSpeech: true,
+      cleanupOnSpeak: true,
+      exportFormat: "flac-24",
       exportSampleRate: 44100,
       exportBitrateKbps: 999,
       masteringEnabled: false,
+      loudnessPresetId: "acx",
+      exportPost: { trimSilence: true, headSec: 99, tailSec: 0.5, fadeInMs: -5, fadeOutMs: 9999 },
+      captionStyle: "passage",
     }));
 
     expect(getInitialCreatorState()).toEqual({
@@ -231,12 +241,35 @@ describe("appState", () => {
       pauseCommaSec: 0,
       pauseSentenceSec: 1.2,
       pauseParagraphSec: 0.5,
-      pronunciationLexicon: "GIF => jif",
-      exportFormat: "mp3",
+      dictionaries: [],
+      normalizeSpeech: true,
+      cleanupOnSpeak: true,
+      exportFormat: "flac-24",
       exportSampleRate: 44100,
       exportBitrateKbps: 320,
       masteringEnabled: false,
+      loudnessPresetId: "acx",
+      exportPost: { trimSilence: true, headSec: 10, tailSec: 0.5, fadeInMs: 0, fadeOutMs: 5000 },
+      captionStyle: "passage",
     });
+  });
+
+  it("keeps the dictionaries that validate and skips the rest", () => {
+    const valid = {
+      version: 2,
+      id: "brand",
+      name: "Brand",
+      enabled: false,
+      rules: [{ type: "alias", from: "GIF", to: "jif" }],
+    };
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      version: 2,
+      dictionaries: [valid, { id: 7 }, "nope"],
+    }));
+    expect(getInitialCreatorState().dictionaries).toEqual([valid]);
+
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({ version: 2, dictionaries: "bad" }));
+    expect(getInitialCreatorState().dictionaries).toEqual([]);
   });
 
   it("falls back from invalid creator state fields and malformed JSON", () => {
@@ -246,17 +279,57 @@ describe("appState", () => {
       pauseCommaSec: "none",
       pauseSentenceSec: null,
       pauseParagraphSec: undefined,
-      pronunciationLexicon: 123,
       exportFormat: "aac",
       exportSampleRate: 22050,
       exportBitrateKbps: "320",
       masteringEnabled: "yes",
+      normalizeSpeech: "yes",
+      cleanupOnSpeak: 1,
+      loudnessPresetId: "loud",
+      exportPost: "none",
+      captionStyle: "loud",
     }));
 
     expect(getInitialCreatorState()).toEqual(getCreatorPresetDefaults("youtube-shorts"));
 
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, "{not json");
     expect(getInitialCreatorState()).toEqual(getCreatorPresetDefaults("youtube-shorts"));
+  });
+
+  it("migrates the v1 creator state, turning its text lexicon into a dictionary", () => {
+    const v1 = JSON.stringify({
+      preset: "youtube-long",
+      speed: 1.1,
+      pronunciationLexicon: "route => root\nUS = you ess\nbad line",
+      exportFormat: "mp3",
+      exportBitrateKbps: 256,
+      masteringEnabled: false,
+    });
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, v1);
+
+    const migrated = getInitialCreatorState();
+    expect(migrated).toMatchObject({ preset: "youtube-long", speed: 1.1, exportFormat: "mp3", exportBitrateKbps: 256, masteringEnabled: false });
+    expect(migrated.dictionaries).toHaveLength(1);
+    expect(migrated.dictionaries[0]).toMatchObject({
+      id: "quick-rules",
+      name: "Quick rules",
+      enabled: true,
+      rules: [
+        { type: "alias", from: "route", to: "root", caseSensitive: false },
+        { type: "alias", from: "US", to: "you ess", caseSensitive: true },
+      ],
+    });
+    // Everything v1 could not store starts at its default, and v1 stays for a downgrade.
+    expect(migrated).toMatchObject({ normalizeSpeech: false, cleanupOnSpeak: false, captionStyle: "readable", loudnessPresetId: "streaming" });
+    expect(localStorage.getItem(LEGACY_CREATOR_STATE_STORAGE_KEY)).toBe(v1);
+
+    // Once v2 exists, it wins.
+    persistCreatorState({ preset: "custom", dictionaries: [] });
+    expect(getInitialCreatorState().preset).toBe("custom");
+
+    localStorage.clear();
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: 123 }));
+    expect(getInitialCreatorState().dictionaries).toEqual([]);
   });
 
   it("parses pronunciation rules from common separators and ignores comments", () => {
@@ -294,18 +367,47 @@ describe("appState", () => {
     });
   });
 
-  it("snaps persisted MP3 bitrates to values supported by the export control", () => {
+  it("snaps persisted MP3 bitrates to values the encoder supports", () => {
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
       preset: "custom",
-      exportBitrateKbps: 96,
+      exportBitrateKbps: 40,
     }));
-    expect(getInitialCreatorState().exportBitrateKbps).toBe(128);
+    expect(getInitialCreatorState().exportBitrateKbps).toBe(64);
+
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      preset: "custom",
+      exportBitrateKbps: 100,
+    }));
+    expect(getInitialCreatorState().exportBitrateKbps).toBe(96);
 
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
       preset: "custom",
       exportBitrateKbps: 275,
     }));
     expect(getInitialCreatorState().exportBitrateKbps).toBe(256);
+  });
+
+  it("never fails to start over a version 1 lexicon that a dictionary cannot hold", () => {
+    const raw = JSON.stringify({
+      pronunciationLexicon: [`${"a".repeat(300)}=x`, `b=${"y".repeat(600)}`, "keep=this", "also=this"].join("\n"),
+    });
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, raw);
+
+    const state = getInitialCreatorState();
+    expect(state.dictionaries[0].rules.map((rule) => rule.type === "alias" && rule.from)).toEqual(["keep", "also"]);
+    expect(state.migrationNotice).toBe("2 of your 4 saved pronunciation rules were too long or too many for a dictionary and were left out. They are still stored unchanged.");
+    expect(localStorage.getItem(LEGACY_CREATOR_STATE_STORAGE_KEY)).toBe(raw);
+
+    const tooMany = Array.from({ length: 6000 }, (_, index) => `w${index}=v${index}`).join("\n");
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: tooMany }));
+    const big = getInitialCreatorState();
+    expect(big.dictionaries[0].rules).toHaveLength(5000);
+    expect(big.migrationNotice).toContain("1000 of your 6000 saved pronunciation rules were");
+
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: "one=\u0001bad" }));
+    const rejected = getInitialCreatorState();
+    expect(rejected.dictionaries).toEqual([]);
+    expect(rejected.migrationNotice).toContain("1 of your 1 saved pronunciation rule was");
   });
 
   it("persists app and creator state while tolerating storage failures", () => {
@@ -318,6 +420,7 @@ describe("appState", () => {
     });
     expect(localStorage.getItem(LEGACY_MODEL_STORAGE_KEY)).toBe("supertonic");
     expect(JSON.parse(localStorage.getItem(CREATOR_STATE_STORAGE_KEY) ?? "{}")).toMatchObject({
+      version: 2,
       preset: "custom",
       exportFormat: "mp3",
     });

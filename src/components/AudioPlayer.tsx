@@ -1,4 +1,4 @@
-import { useRef, useCallback, useEffect, useState, type ReactNode } from "react";
+import { useContext, useRef, useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -17,6 +17,7 @@ import {
 import type { GenerationStats } from "../types";
 import { PLAYBACK_RATES } from "../constants";
 import { usePlaybackSelector, usePlaybackTime, type PlaybackClock } from "../lib/playbackClock";
+import { AudioExportContext } from "./AudioExportContext";
 
 type AudioPlayerVariant = "panel" | "dock";
 type PrimaryActionIcon = "generate" | "retry" | "loading";
@@ -416,6 +417,17 @@ export function AudioPlayer({
   const statsVisible = hasGenerationStats(stats) && !isDock;
   const sectionText = sectionLabel(segmentCount, activeSegmentNumber, sectionPreviewCount);
   const effectivePrimaryAction = hasAudio ? undefined : primaryAction;
+  // A running export turns every download button into its progress and Cancel.
+  const audioExport = useContext(AudioExportContext);
+  const exporting = audioExport?.isExporting ?? false;
+  const downloadLabel = exporting
+    ? `Cancel export (${Math.round((audioExport?.progress?.fraction ?? 0) * 100)}%)`
+    : "Download audio";
+  const handleDownload = exporting && audioExport ? audioExport.cancel : onDownload;
+  const downloadEnabled = hasAudio || exporting;
+  const downloadIcon = (size: number) => (exporting
+    ? <Loader2 size={size} className="animate-spin" />
+    : <Download size={size} />);
 
   // The player is itself glass (or sits on a surface), so its buttons are
   // fills — never a second material — and they give on press, not lift.
@@ -569,10 +581,10 @@ export function AudioPlayer({
       : []),
     {
       key: "download",
-      label: "Download audio",
-      icon: <Download size={14} />,
-      onSelect: onDownload,
-      disabled: !hasAudio,
+      label: downloadLabel,
+      icon: downloadIcon(14),
+      onSelect: handleDownload,
+      disabled: !downloadEnabled,
     },
     ...(canStop && onStop
       ? [{
@@ -688,13 +700,13 @@ export function AudioPlayer({
             )}
             <button
               type="button"
-              onClick={onDownload}
-              disabled={!hasAudio}
-              aria-label="Download audio"
-              title="Download audio"
-              className={utilityButton(hasAudio)}
+              onClick={handleDownload}
+              disabled={!downloadEnabled}
+              aria-label={downloadLabel}
+              title={downloadLabel}
+              className={utilityButton(downloadEnabled)}
             >
-              <Download size={14} />
+              {downloadIcon(14)}
             </button>
             {stopButton}
           </div>
@@ -748,17 +760,17 @@ export function AudioPlayer({
           )}
           <button
             type="button"
-            onClick={onDownload}
-            disabled={!hasAudio}
-            aria-label="Download audio"
-            title="Download audio"
+            onClick={handleDownload}
+            disabled={!downloadEnabled}
+            aria-label={downloadLabel}
+            title={downloadLabel}
             className={`flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-xl transition-all ${
-              hasAudio
+              downloadEnabled
                 ? "text-text-muted hover:bg-accent-light hover:text-accent"
                 : "cursor-not-allowed text-text-muted"
             }`}
           >
-            <Download size={16} />
+            {downloadIcon(16)}
           </button>
         </div>
 

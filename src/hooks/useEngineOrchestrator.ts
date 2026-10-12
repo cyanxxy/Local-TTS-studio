@@ -18,12 +18,14 @@ import {
   type SurfaceEngineSettings,
 } from "../models/registry";
 import type { EngineRuntimeMap } from "../shared/engineRuntime";
+import type { SpeechPipelineChoices } from "../shared/speechPipelineRuntime";
 import { describeDesktopModelOptions, type DesktopModelOption } from "../shared/desktopModelOptions";
 import type { GenerationTuningSettings } from "../types";
 import { useAudio8Runtime, type Audio8Runtime } from "./useAudio8Runtime";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useBrowserEngineRuntimes, type UseBrowserEngineRuntimesReturn } from "./useBrowserEngineRuntimes";
 import { useQwen3LocalRuntime } from "./useQwen3LocalRuntime";
+import { useSpeechPipeline } from "./useSpeechPipeline";
 import { useSupertonic3Runtime } from "./useSupertonic3Runtime";
 
 /** The pages that synthesize into the shared player. */
@@ -53,10 +55,16 @@ interface Options {
   browserSupport: LocalBrowserSupport;
   debugProfiling: boolean;
   initialState: Pick<InitialAppState, "model" | "desktopModels">;
-  /** What the visible surface generation speaks. */
+  /** What the visible surface generation speaks, as written. */
   text: string;
   engineSettings: OrchestratedEngineSettings;
   generationSettings: GenerationTuningSettings;
+  /**
+   * The spoken-text pipeline's Creator choices. Every engine speaks the
+   * pipeline's form of the script and the player receives chunks against the
+   * written one; see `lib/speechPipeline.ts`.
+   */
+  speech: SpeechPipelineChoices;
   player: UseAudioPlayerReturn;
   setShowPlayer: (show: boolean) => void;
   /**
@@ -81,6 +89,8 @@ export interface UseEngineOrchestratorReturn {
   /** The engine whose audio the visible surface plays and saves, or null off the surfaces. */
   visibleEngineId: SurfaceEngineId | null;
   runtimes: EngineRuntimeMap;
+  /** What the visible surface's engines are asked to speak: the script after the speech pipeline. */
+  spokenText: string;
   audio8: Audio8Runtime;
   browser: Omit<UseBrowserEngineRuntimesReturn, "runtimes">;
   desktopEngineAvailability: Readonly<Record<DesktopInlineEngineId, boolean>>;
@@ -122,6 +132,7 @@ export function useEngineOrchestrator({
   text,
   engineSettings,
   generationSettings,
+  speech,
   player,
   setShowPlayer,
   beforeReaderAudioChange,
@@ -168,6 +179,27 @@ export function useEngineOrchestrator({
   );
   const visibleEngineId: SurfaceEngineId | null = surface === null ? null : engineIds[surface];
   const selects = (engine: SurfaceEngineId) => studioEngineId === engine || readerEngineId === engine;
+
+  const languageSettings = useMemo(() => ({
+    kokoro: engineSettings.kokoro,
+    supertonic: engineSettings.supertonic,
+    supertonic3: engineSettings.supertonic3,
+    qwen3: qwen3Settings,
+  }), [engineSettings.kokoro, engineSettings.supertonic, engineSettings.supertonic3, qwen3Settings]);
+  const pipeline = useSpeechPipeline({
+    text,
+    choices: speech,
+    visibleEngineId,
+    fallbackEngineId: activeModel,
+    languageSettings,
+    player,
+  });
+  // The pipeline applies the pronunciation dictionary to every engine, so the
+  // engines' own copy of the rules is cleared; a rule must not apply twice.
+  const engineTuning = useMemo<GenerationTuningSettings>(
+    () => ({ ...generationSettings, pronunciationRules: [] }),
+    [generationSettings],
+  );
 
   const {
     kokoro: kokoroSettings,
@@ -217,19 +249,20 @@ export function useEngineOrchestrator({
     browserSupport,
     preferredVoices: preferredBrowserVoices,
     debugProfiling,
-    text,
+    text: pipeline.spokenText,
     savedVoices: savedBrowserVoices,
-    generationSettings,
+    generationSettings: engineTuning,
     engineFields: browserEngineFields,
-    player,
+    player: pipeline.player,
+    retakeText: pipeline.retakeText,
     setShowPlayer,
   });
   const qwen3 = useQwen3LocalRuntime({
     enabled: desktopRuntimesAvailable && qwen3Settings.available && visibleEngineId === "qwen3",
     retain: desktopRuntimesAvailable && qwen3Settings.available && selects("qwen3"),
-    text,
+    text: pipeline.spokenText,
     allowLongText: visibleEngineId === "qwen3",
-    player,
+    player: pipeline.player,
     setShowPlayer,
   });
   const supertonic3 = useSupertonic3Runtime({
@@ -237,12 +270,12 @@ export function useEngineOrchestrator({
     active: visibleEngineId === "supertonic3",
     retain: selects("supertonic3"),
     createWorker: createSupertonic3Worker,
-    text,
+    text: pipeline.spokenText,
     voice: engineSettings.supertonic3.voice,
     language: engineSettings.supertonic3.language,
     seed: engineSettings.supertonic3.seed,
-    generationSettings,
-    player,
+    generationSettings: engineTuning,
+    player: pipeline.player,
     setShowPlayer,
   });
   const { seed: audio8Seed, temperature: audio8Temperature } = engineSettings.audio8;
@@ -252,20 +285,21 @@ export function useEngineOrchestrator({
   );
   const audio8 = useAudio8Runtime({
     active: visibleEngineId === "audio8",
-    text,
+    text: pipeline.spokenText,
     voice: engineSettings.audio8.voice,
     sampling: audio8Sampling,
-    generationSettings,
-    player,
+    generationSettings: engineTuning,
+    player: pipeline.player,
     setShowPlayer,
   });
 
-  const runtimes = useMemo<EngineRuntimeMap>(() => ({
+  const { wrapRuntimes } = pipeline;
+  const runtimes = useMemo<EngineRuntimeMap>(() => wrapRuntimes({
     ...browser.runtimes,
     audio8,
     supertonic3,
     qwen3,
-  }), [audio8, browser.runtimes, qwen3, supertonic3]);
+  }), [audio8, browser.runtimes, qwen3, supertonic3, wrapRuntimes]);
 
   const retireAllAudio = useCallback(() => {
     const all = Object.values(runtimes);
@@ -372,6 +406,7 @@ export function useEngineOrchestrator({
     engineIds,
     visibleEngineId,
     runtimes,
+    spokenText: pipeline.spokenText,
     audio8,
     browser: browserExtras,
     desktopEngineAvailability,
