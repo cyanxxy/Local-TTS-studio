@@ -1,8 +1,9 @@
 /**
- * English eSpeak NG phonemization for the StyleTTS-family browser models
- * (Kitten, Paradee). It reuses the phonemizer 1.2.1 build that kokoro-js also
- * embeds (its voice list is limited to English). Workers pass in the URL that
- * vite.phonemizerAssets.ts exports from "virtual:phonemizer-assets", so the
+ * English eSpeak NG phonemization for the browser models that phonemize
+ * without kokoro-js (Kitten, Paradee, Piper). It reuses the phonemizer 1.2.1
+ * build that kokoro-js also embeds (its voice list is limited to English).
+ * Workers pass in PHONEMIZER_MODULE_URL from src/lib/onnxWasmAssets.ts, which
+ * vite.kokoroAssets.ts serves unbundled beside kokoro.web.js, so the
  * Emscripten runtime never passes through Rolldown or dependency pre-bundling
  * and this module stays importable anywhere (tests, chunk planners). Every
  * worker that loads it gets its own eSpeak instance.

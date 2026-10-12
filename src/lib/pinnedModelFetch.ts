@@ -136,6 +136,8 @@ export type PinnedAssetIntegrity = {
 export interface PinnedAssetManifest {
   readonly repo: string;
   readonly revision: string;
+  /** The repository card's license at `revision`, when the manifest was pinned with --license. */
+  readonly license?: string;
   readonly files: Readonly<Record<string, PinnedAssetIntegrity>>;
 }
 

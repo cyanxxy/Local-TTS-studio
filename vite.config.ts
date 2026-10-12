@@ -3,7 +3,6 @@ import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets.ts";
-import { phonemizerAssetPlugin } from "./vite.phonemizerAssets.ts";
 
 const rootDir = import.meta.dirname;
 
@@ -37,7 +36,6 @@ function desktopShellFallbackPlugin(): Plugin {
 export default defineConfig({
   plugins: [
     kokoroOnnxWasmAssetPlugin(rootDir),
-    phonemizerAssetPlugin(rootDir),
     desktopShellFallbackPlugin(),
     react(),
     tailwindcss(),
@@ -60,7 +58,7 @@ export default defineConfig({
   },
   worker: {
     format: "es",
-    plugins: () => [kokoroOnnxWasmAssetPlugin(rootDir), phonemizerAssetPlugin(rootDir)],
+    plugins: () => [kokoroOnnxWasmAssetPlugin(rootDir)],
   },
   resolve: {
     conditions: ["onnxruntime-web-use-extern-wasm"],
