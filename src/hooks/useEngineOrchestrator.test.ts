@@ -113,6 +113,19 @@ describe("useEngineOrchestrator", () => {
     expect(result.current.visibleEngineId).toBe("audio8");
   });
 
+  it("retains the Qwen3 model for as long as either surface selects it and the engine is available", () => {
+    const { rerender } = renderOrchestrator({ studio: "qwen3", reader: null });
+    expect(vi.mocked(useQwen3LocalRuntime).mock.calls.at(-1)?.[0]).toMatchObject({ enabled: true, retain: true });
+
+    // Qwen3 stays selected by Studio while the Reader is on screen.
+    rerender({ surface: "reader" });
+    expect(vi.mocked(useQwen3LocalRuntime).mock.calls.at(-1)?.[0]).toMatchObject({ enabled: false, retain: true });
+
+    mock.qwen3Available = false;
+    rerender({ surface: "reader" });
+    expect(vi.mocked(useQwen3LocalRuntime).mock.calls.at(-1)?.[0]).toMatchObject({ retain: false });
+  });
+
   it("activates engines for the visible surface and keeps loaded ones the other surface selects", () => {
     const { rerender } = renderOrchestrator({ studio: "supertonic3", reader: null });
 

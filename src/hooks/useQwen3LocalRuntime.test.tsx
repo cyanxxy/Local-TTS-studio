@@ -281,14 +281,15 @@ describe("useQwen3LocalRuntime long-text batching", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it("waits for the final streamed-audio event when the IPC result arrives first", async () => {
+  it("puts out-of-order streamed audio back in order before the request settles", async () => {
     vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
     let emitAudioChunk: ((event: Record<string, unknown>) => void) | undefined;
     const firstAudio = new Float32Array([0.1, -0.1]);
     const secondAudio = new Float32Array([0.2, -0.2]);
-    const generate = vi.fn(async (request: GenerateRequest) => {
-      void request;
-      return {
+    // Like the preload, the result follows every chunk of the request.
+    let finishRequest!: () => void;
+    const generate = vi.fn((request: GenerateRequest) => new Promise((resolve) => {
+      finishRequest = () => resolve({
         sampleRate: 24_000,
         modelRepo: String(request.payload?.modelRepo),
         durationSec: (firstAudio.length + secondAudio.length) / 24_000,
@@ -296,8 +297,8 @@ describe("useQwen3LocalRuntime long-text batching", () => {
         audioTransport: "websocket-binary" as const,
         audioChunkCount: 2,
         phaseTimingsSec: { inferenceSec: 0.1 },
-      };
-    });
+      });
+    }));
     window.electron = {
       isElectron: true,
       platform: "darwin",
@@ -355,6 +356,7 @@ describe("useQwen3LocalRuntime long-text batching", () => {
       });
     });
     await waitFor(() => expect(methods.scheduleChunk).toHaveBeenCalledTimes(2));
+    act(() => finishRequest());
     await waitFor(() => expect(result.current.isGenerating).toBe(false));
 
     const scheduledAudio = methods.scheduleChunk.mock.calls
@@ -362,6 +364,45 @@ describe("useQwen3LocalRuntime long-text batching", () => {
     expect(scheduledAudio).toEqual([firstAudio.buffer, secondAudio.buffer]);
     expect(methods.endStream).toHaveBeenCalledTimes(1);
     expect(result.current.error).toBeNull();
+  });
+
+  it("fails at once when a settled request is missing streamed audio", async () => {
+    vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
+    const generate = vi.fn(async (request: GenerateRequest) => ({
+      sampleRate: 24_000,
+      modelRepo: String(request.payload?.modelRepo),
+      durationSec: 0.1,
+      elapsedSec: 0.1,
+      audioTransport: "websocket-binary" as const,
+      audioChunkCount: 2,
+      phaseTimingsSec: { inferenceSec: 0.1 },
+    }));
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate,
+        cancel: vi.fn().mockResolvedValue({ cancelled: true }),
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn(() => () => undefined),
+      },
+    } as never;
+    const { player } = audioPlayer();
+    const { result } = renderHook(() => useQwen3LocalRuntime({
+      enabled: true,
+      text: "A Reader sentence that is long enough to synthesize.",
+      player,
+      setShowPlayer: vi.fn(),
+    }));
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+
+    act(() => result.current.handleGenerate());
+
+    await waitFor(() => expect(result.current.error).toBe("Generation returned incomplete streamed audio."));
+    expect(result.current.isGenerating).toBe(false);
   });
 
   it("keeps completed sections playable when a later request fails", async () => {
@@ -1105,5 +1146,98 @@ describe("useQwen3LocalRuntime runtime probe", () => {
     expect(result.current.modelState.loading).toBe(true);
     await waitFor(() => expect(result.current.modelState.loading).toBe(false));
     expect(probe).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useQwen3LocalRuntime keep-warm lease", () => {
+  function install(settingsOverrides: Record<string, unknown> = {}) {
+    const release = vi.fn();
+    const keepWarm = vi.fn(() => release);
+    vi.mocked(useQwen3Runtime).mockReturnValue({ ...runtimeSettings(), ...settingsOverrides } as never);
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        keepWarm,
+        generate: vi.fn(),
+        cancel: vi.fn().mockResolvedValue({ cancelled: true }),
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn(() => () => undefined),
+      },
+    } as never;
+    return { keepWarm, release };
+  }
+
+  function render(options: { enabled: boolean; retain?: boolean }) {
+    const { player } = audioPlayer();
+    return renderHook((props: { enabled: boolean; retain?: boolean }) => useQwen3LocalRuntime({
+      ...props,
+      text: "Keep me warm.",
+      player,
+      setShowPlayer: vi.fn(),
+    }), { initialProps: options });
+  }
+
+  it("holds a lease on the selected model and releases it when the model is deselected", () => {
+    const { keepWarm, release } = install();
+    const { rerender, unmount } = render({ enabled: true });
+
+    expect(keepWarm).toHaveBeenCalledExactlyOnceWith({
+      model: "qwen3",
+      modelRepo: "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit",
+      modelPath: "/models/qwen3",
+      mode: "customVoice",
+    });
+    // Re-rendering with the same selection keeps the one lease.
+    rerender({ enabled: true });
+    expect(keepWarm).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+
+    rerender({ enabled: false });
+    expect(release).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the lease while another surface still selects the model", () => {
+    const { keepWarm, release } = install();
+    const { rerender } = render({ enabled: true, retain: true });
+
+    rerender({ enabled: false, retain: true });
+    expect(keepWarm).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+
+    rerender({ enabled: false, retain: false });
+    expect(release).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds no lease on a model that is not on disk", () => {
+    const { keepWarm } = install({ readiness: "missing" });
+    render({ enabled: true });
+    expect(keepWarm).not.toHaveBeenCalled();
+
+    const blank = install({ modelPath: "  " });
+    render({ enabled: true });
+    expect(blank.keepWarm).not.toHaveBeenCalled();
+  });
+
+  it("moves the lease when the model folder changes", () => {
+    const { keepWarm, release } = install();
+    const { rerender } = render({ enabled: true });
+    vi.mocked(useQwen3Runtime).mockReturnValue({ ...runtimeSettings(), modelPath: "/models/other" } as never);
+
+    rerender({ enabled: true });
+
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(keepWarm).toHaveBeenLastCalledWith(expect.objectContaining({ modelPath: "/models/other" }));
+  });
+
+  it("runs without leases where the bridge has none", () => {
+    install();
+    delete (window.electron!.localTts as { keepWarm?: unknown }).keepWarm;
+    expect(() => render({ enabled: true })).not.toThrow();
   });
 });

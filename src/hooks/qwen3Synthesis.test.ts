@@ -3,7 +3,6 @@ import type { LocalTtsAudioChunkEvent, LocalTtsGenerateResult } from "../electro
 import { buildQwen3RequestPlan } from "../lib/qwenChunking";
 import type { Qwen3SynthesisSettings, SynthesisChunk } from "../shared/engineRuntime";
 import {
-  QWEN3_AUDIO_DELIVERY_GRACE_MS,
   QWEN3_SECTION_JOIN_PAUSE_SEC,
   qwen3BasePayload,
   qwen3ChunkTextUnitIndex,
@@ -130,10 +129,11 @@ describe("streamQwen3Synthesis", () => {
     });
     emit("someone-else", 0, 2);
     emit(request.requestId, 1, 2, { textUnitIndex: 1 });
-    requests[0].resolve(result(2));
-    await settle();
+    // A repeat of a delivered chunk changes nothing.
     emit(request.requestId, 1, 2, { textUnitIndex: 1 });
     emit(request.requestId, 0, 2, { textUnitIndex: 0 });
+    // The result follows every chunk on the preload's ordered stream.
+    requests[0].resolve(result(2));
 
     const output = await chunks;
     const { units } = buildQwen3RequestPlan(text);
@@ -224,14 +224,15 @@ describe("streamQwen3Synthesis", () => {
     expect(bridge.cancel).toHaveBeenCalledExactlyOnceWith({ model: "qwen3", requestId: requests[0].request.requestId });
   });
 
-  it("fails when declared audio never arrives, and passes bridge errors through without the IPC wrapper", async () => {
+  it("fails at once when declared audio is missing from a finished request, and passes bridge errors through without the IPC wrapper", async () => {
     vi.useFakeTimers();
     const { bridge, requests } = createBridge();
     const missing = collect(streamQwen3Synthesis(bridge, { text: "Long enough to speak aloud.", settings: SETTINGS }, new AbortController().signal));
     const missingOutcome = missing.catch((error: unknown) => error);
     await vi.advanceTimersByTimeAsync(0);
+    // The result follows every chunk on the preload's ordered stream, so no
+    // grace period is waited out.
     requests[0].resolve(result(2));
-    await vi.advanceTimersByTimeAsync(QWEN3_AUDIO_DELIVERY_GRACE_MS);
     expect(await missingOutcome).toEqual(new Error("Generation returned incomplete streamed audio."));
 
     const failing = collect(streamQwen3Synthesis(bridge, { text: "Long enough to speak aloud.", settings: SETTINGS }, new AbortController().signal));

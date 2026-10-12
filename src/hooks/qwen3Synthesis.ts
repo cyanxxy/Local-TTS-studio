@@ -10,10 +10,6 @@ export type LocalTtsBridge = NonNullable<NonNullable<Window["electron"]>["localT
 const LOCAL_MODEL = "qwen3";
 /** The pause the renderer restores between request sections; Rust only pauses within one request. */
 export const QWEN3_SECTION_JOIN_PAUSE_SEC = 0.2;
-// The native result and streamed audio use separate Electron IPC messages.
-// An invoke result can become observable before the final event has crossed
-// into the renderer, especially when that event carries a large PCM buffer.
-export const QWEN3_AUDIO_DELIVERY_GRACE_MS = 5_000;
 const REFERENCE_CACHE_MISS = /reference cache entry was not found/i;
 
 export function qwen3RequestId(kind: "probe" | "generate" | "job"): string {
@@ -154,7 +150,6 @@ async function* streamSection(
   let expectedChunks: number | null = null;
   let result: LocalTtsGenerateResult | null = null;
   let settled = false;
-  let graceTimer: number | undefined;
 
   const finishIfComplete = () => {
     if (expectedChunks !== null && received.size >= expectedChunks) channel.close();
@@ -215,11 +210,9 @@ async function* streamSection(
     result = generated;
     expectedChunks = generated.audioChunkCount;
     finishIfComplete();
-    if (!channel.settled) {
-      graceTimer = window.setTimeout(() => {
-        channel.fail(new Error("Generation returned incomplete streamed audio."));
-      }, QWEN3_AUDIO_DELIVERY_GRACE_MS);
-    }
+    // The result arrives only after the preload has delivered every chunk of
+    // the request, so audio still missing here will never come.
+    if (!channel.settled) channel.fail(new Error("Generation returned incomplete streamed audio."));
   }, (error: unknown) => {
     settled = true;
     channel.fail(error);
@@ -233,7 +226,6 @@ async function* streamSection(
     signal.throwIfAborted();
     return result!;
   } finally {
-    window.clearTimeout(graceTimer);
     unsubscribe();
     signal.removeEventListener("abort", onAbort);
     // Stopping early (the reader broke off, or a chunk failed) leaves the

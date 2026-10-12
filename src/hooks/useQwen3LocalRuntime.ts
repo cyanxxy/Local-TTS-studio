@@ -13,7 +13,6 @@ import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import type { EngineRuntime, SynthesisRequest } from "../shared/engineRuntime";
 import type { GenerationStats, ModelState } from "../types";
 import {
-  QWEN3_AUDIO_DELIVERY_GRACE_MS,
   QWEN3_SECTION_JOIN_PAUSE_SEC,
   isPlayableQwen3Chunk,
   isQwen3ReferenceCacheMiss,
@@ -33,6 +32,12 @@ import {
 
 interface UseQwen3LocalRuntimeOptions {
   enabled: boolean;
+  /**
+   * A surface selects Qwen3, on screen or not. The main process then keeps its
+   * model resident instead of evicting it after a minute of idling. Defaults
+   * to `enabled`.
+   */
+  retain?: boolean;
   text: string;
   allowLongText?: boolean;
   player: UseAudioPlayerReturn;
@@ -45,15 +50,6 @@ interface ReceivedAudioChunk {
   silenceAfterSamples: number;
   textUnitIndex?: number;
   textUnitTotal?: number;
-}
-
-interface PendingAudioDelivery {
-  requestId: string;
-  generationVersion: number;
-  expectedChunkCount: number;
-  timeoutId: number;
-  resolve: () => void;
-  reject: (error: Error) => void;
 }
 
 const LOCAL_MODEL = "qwen3";
@@ -91,6 +87,7 @@ function mergeGenerateResults(
 
 export function useQwen3LocalRuntime({
   enabled,
+  retain = enabled,
   text,
   allowLongText = false,
   player,
@@ -126,7 +123,6 @@ export function useQwen3LocalRuntime({
   const activeRequestUnitCountRef = useRef(1);
   const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const cancelProgressFlushRef = useRef<(() => void) | null>(null);
-  const pendingAudioDeliveryRef = useRef<PendingAudioDelivery | null>(null);
   // The player's content epoch when this runtime's generated audio entered it,
   // or null while the player holds nothing this runtime made.
   const ownedPlayerEpochRef = useRef<number | null>(null);
@@ -147,61 +143,10 @@ export function useQwen3LocalRuntime({
   const truncateAudioChunks = player.truncateAudioChunks;
   const { queue, busy: synthesisBusy, holdForeground } = useSynthesisQueue(generateBusy);
 
-  const settlePendingAudioDelivery = useCallback((error?: Error) => {
-    const pending = pendingAudioDeliveryRef.current;
-    if (!pending) return;
-    pendingAudioDeliveryRef.current = null;
-    window.clearTimeout(pending.timeoutId);
-    if (error) pending.reject(error);
-    else pending.resolve();
-  }, []);
-
-  const cancelPendingAudioDelivery = useCallback(() => {
-    // Cancellation/version checks after the await decide whether the job should
-    // continue. Resolving here simply prevents an obsolete request from waiting
-    // for an event that the native bridge will no longer send.
-    settlePendingAudioDelivery();
-  }, [settlePendingAudioDelivery]);
-
-  const waitForAudioDelivery = useCallback((
-    activeRequestId: string,
-    generationVersion: number,
-    expectedChunkCount: number,
-  ): Promise<void> => {
-    if (receivedChunkIndexesRef.current.size === expectedChunkCount) {
-      return Promise.resolve();
-    }
-
-    cancelPendingAudioDelivery();
-    return new Promise<void>((resolve, reject) => {
-      const timeoutId = window.setTimeout(() => {
-        const pending = pendingAudioDeliveryRef.current;
-        if (
-          pending?.requestId !== activeRequestId
-          || pending.generationVersion !== generationVersion
-        ) return;
-        settlePendingAudioDelivery(
-          new Error("Generation returned incomplete streamed audio."),
-        );
-      }, QWEN3_AUDIO_DELIVERY_GRACE_MS);
-      pendingAudioDeliveryRef.current = {
-        requestId: activeRequestId,
-        generationVersion,
-        expectedChunkCount,
-        timeoutId,
-        resolve,
-        reject,
-      };
-    });
-  }, [cancelPendingAudioDelivery, settlePendingAudioDelivery]);
-
   useEffect(() => {
     mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      cancelPendingAudioDelivery();
-    };
-  }, [cancelPendingAudioDelivery]);
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Empties the shared player and forgets the streamed audio bookkeeping. It
   // touches no React state, so the settings effect below can call it.
@@ -233,7 +178,6 @@ export function useQwen3LocalRuntime({
 
   const resetGeneratedAudio = useCallback(() => {
     generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
@@ -242,7 +186,7 @@ export function useQwen3LocalRuntime({
     setError(null);
     setGenerateBusy(false);
     setGenerationProgress(0);
-  }, [cancelActiveGeneration, cancelPendingAudioDelivery, clearGeneratedResult, setShowPlayer]);
+  }, [cancelActiveGeneration, clearGeneratedResult, setShowPlayer]);
 
   // Generated audio, errors and progress belong to the exact synthesis
   // configuration that produced them, so any audible Qwen setting change
@@ -290,7 +234,6 @@ export function useQwen3LocalRuntime({
   // audible setting does.
   useEffect(() => {
     generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
@@ -298,7 +241,7 @@ export function useQwen3LocalRuntime({
     cancelProgressFlushRef.current?.();
     cancelProgressFlushRef.current = null;
     releaseStalePlayerAudio();
-  }, [appliedAudibleSettings, cancelActiveGeneration, cancelPendingAudioDelivery]);
+  }, [appliedAudibleSettings, cancelActiveGeneration]);
 
   const fetchProbe = useCallback((): Promise<void> => {
     if (!enabled || !bridge) return Promise.resolve();
@@ -356,14 +299,13 @@ export function useQwen3LocalRuntime({
     }
     runtimeVersionRef.current += 1;
     generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
     cancelProgressFlushRef.current?.();
     pendingProgressRef.current = null;
     cancelActiveGeneration();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
     activeProbeRef.current = null;
-  }, [cancelActiveGeneration, cancelPendingAudioDelivery, enabled, fetchProbe]);
+  }, [cancelActiveGeneration, enabled, fetchProbe]);
 
   useEffect(() => {
     if (!electronAvailable || generateBusy || !bridge?.warm) return;
@@ -385,6 +327,20 @@ export function useQwen3LocalRuntime({
     });
     return () => { active = false; };
   }, [bridge, electronAvailable, generateBusy, settings.modelPath, settings.profile, settings.readiness]);
+
+  // A lease keeps the model resident in the main process for as long as a
+  // surface selects it, across the idle pauses between generations. It loads
+  // nothing: the pre-warm above does. Releasing the lease (the model is
+  // deselected, or its folder changes) only returns it to the idle timer.
+  const keepWarm = bridge?.keepWarm;
+  const leaseModelPath = settings.modelPath.trim();
+  const leaseRepo = settings.profile.repo;
+  const leaseMode = settings.profile.mode;
+  const leaseReady = settings.readiness !== "missing";
+  useEffect(() => {
+    if (!retain || !keepWarm || !leaseModelPath || !leaseReady) return;
+    return keepWarm({ model: LOCAL_MODEL, modelRepo: leaseRepo, modelPath: leaseModelPath, mode: leaseMode });
+  }, [keepWarm, leaseMode, leaseModelPath, leaseReady, leaseRepo, retain]);
 
   useEffect(() => {
     if (!electronAvailable || !bridge) return;
@@ -450,18 +406,8 @@ export function useQwen3LocalRuntime({
           if (mountedRef.current) setError(message(nextError));
         });
       }
-
-      const pending = pendingAudioDeliveryRef.current;
-      if (
-        pending
-        && pending.requestId === event.requestId
-        && pending.generationVersion === generationVersionRef.current
-        && receivedChunkIndexesRef.current.size === pending.expectedChunkCount
-      ) {
-        settlePendingAudioDelivery();
-      }
     });
-  }, [bridge, electronAvailable, scheduleChunk, settlePendingAudioDelivery, text]);
+  }, [bridge, electronAvailable, scheduleChunk, text]);
 
   useEffect(() => () => {
     cancelProgressFlushRef.current?.();
@@ -614,12 +560,11 @@ export function useQwen3LocalRuntime({
             || generationVersionRef.current !== version
             || activeRequestRef.current !== id
           ) return;
-          await waitForAudioDelivery(id, version, generated.audioChunkCount);
-          if (
-            !mountedRef.current
-            || generationVersionRef.current !== version
-            || activeRequestRef.current !== id
-          ) return;
+          // generate() settles only after the preload has delivered every
+          // chunk of the request, so a shortfall is a failure, not a wait.
+          if (receivedChunkIndexesRef.current.size !== generated.audioChunkCount) {
+            throw new Error("Generation returned incomplete streamed audio.");
+          }
           combinedResult = mergeGenerateResults(combinedResult, generated);
           activeSectionCompleted = true;
 
@@ -700,7 +645,6 @@ export function useQwen3LocalRuntime({
     settings,
     text,
     truncateAudioChunks,
-    waitForAudioDelivery,
   ]);
 
   const synthesize = useCallback((request: SynthesisRequest<"qwen3">) => queue.enqueue((signal) => {
@@ -718,7 +662,6 @@ export function useQwen3LocalRuntime({
     }
 
     generationVersionRef.current += 1;
-    cancelPendingAudioDelivery();
     if (activeRequestRef.current) cancelActiveGeneration();
     else stopAll();
     activeRequestRef.current = null;
@@ -736,7 +679,6 @@ export function useQwen3LocalRuntime({
     setError(null);
   }, [
     cancelActiveGeneration,
-    cancelPendingAudioDelivery,
     endStream,
     generateBusy,
     stopAll,

@@ -183,6 +183,7 @@ export function useEngineOrchestrator({
   });
   const qwen3 = useQwen3LocalRuntime({
     enabled: desktopRuntimesAvailable && qwen3Settings.available && visibleEngineId === "qwen3",
+    retain: desktopRuntimesAvailable && qwen3Settings.available && selects("qwen3"),
     text,
     allowLongText: visibleEngineId === "qwen3",
     player,
