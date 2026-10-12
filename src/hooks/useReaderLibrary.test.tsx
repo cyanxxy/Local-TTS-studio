@@ -341,9 +341,9 @@ describe("useReaderLibrary", () => {
             vi.advanceTimersByTime(750);
           });
         }
-        // 7.5 s in: one throttled write has fired, carrying the latest position.
+        // 7.5 s in: one write fired at the 5 s mark with the position it had then.
         expect(saveProgress).toHaveBeenCalledTimes(1);
-        expect(saveProgress.mock.calls[0][1]).toMatchObject({ positionSec: 6 });
+        expect(saveProgress.mock.calls[0][1]).toMatchObject({ positionSec: 7 });
         act(() => { vi.advanceTimersByTime(5_000); });
         expect(saveProgress).toHaveBeenCalledTimes(2);
         expect(saveProgress.mock.calls[1][1]).toMatchObject({ positionSec: 10 });
