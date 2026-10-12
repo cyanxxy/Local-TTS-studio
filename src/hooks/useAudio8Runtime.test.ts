@@ -1,6 +1,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Audio8LoadResult, Audio8ProgressEvent } from "../electron";
+import { enginePreviewChunks } from "../models/registry";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useAudio8Runtime } from "./useAudio8Runtime";
 
@@ -18,7 +19,7 @@ function createBridge() {
     load: vi.fn<(request: { requestId: string }) => Promise<Audio8LoadResult>>(
       async () => ({ sampleRate: SAMPLE_RATE }),
     ),
-    generate: vi.fn<(request: { requestId: string; text: string; voice: string }) => Promise<{
+    generate: vi.fn<(request: { requestId: string; text: string; voice: string; seed?: number; temperature?: number }) => Promise<{
       sampleRate: number;
       elapsedSec: number;
       audio: ArrayBuffer;
@@ -61,7 +62,12 @@ function installBridge(bridge: Bridge | undefined) {
   });
 }
 
-function renderRuntime(bridge: Bridge | undefined, player = createPlayer(), text = LONG_TEXT) {
+function renderRuntime(
+  bridge: Bridge | undefined,
+  player = createPlayer(),
+  text = LONG_TEXT,
+  sampling?: { seed: number | null; temperature: number | null },
+) {
   installBridge(bridge);
   const setShowPlayer = vi.fn();
   const view = renderHook(
@@ -69,6 +75,7 @@ function renderRuntime(bridge: Bridge | undefined, player = createPlayer(), text
       active: props.active,
       text,
       voice: "clara",
+      sampling,
       generationSettings: { speed: 1, quality: 5 },
       player,
       setShowPlayer,
@@ -233,11 +240,47 @@ describe("useAudio8Runtime generation", () => {
       expect(request.voice).toBe("clara");
       expect(request.text.length).toBeLessThanOrEqual(180);
     }
+    // The Reader previews Audio8 passages with the same chunker, so its
+    // passage count matches what generation actually produces.
+    const preview = enginePreviewChunks("audio8", LONG_TEXT, { settings: { voice: "clara", seed: null, temperature: null }, backend: null, quality: 5 });
+    expect(bridge.generate.mock.calls.map(([request]) => request.text)).toEqual(preview.map((chunk) => chunk.text));
     expect(result.current.generationProgress).toBe(100);
     expect(result.current.stats.totalDuration).toBeGreaterThan(0);
     expect(result.current.stats.totalDuration).toBeGreaterThan(chunkCount);
     expect(result.current.stats.rtf).toBeCloseTo(result.current.stats.processingTime / chunkCount, 5);
     expect(result.current.error).toBeNull();
+  });
+
+  it("seeds the surface generation from the engine settings", async () => {
+    const { result } = renderRuntime(bridge, createPlayer(), LONG_TEXT, { seed: 11, temperature: 0.6 });
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+
+    await act(async () => {
+      result.current.handleGenerate();
+      await Promise.resolve();
+    });
+    await waitFor(() => expect(result.current.isGenerating).toBe(false));
+
+    expect(bridge.generate.mock.calls.map(([request]) => [request.seed, request.temperature]))
+      .toEqual(bridge.generate.mock.calls.map((_, index) => [11 + index, 0.6]));
+  });
+
+  it("synthesizes a request with its own seed over the settings', and with the settings' when it has none", async () => {
+    const { result } = renderRuntime(bridge);
+    const drain = async (request: Parameters<typeof result.current.synthesize>[0]) => {
+      for await (const chunk of result.current.synthesize(request)) void chunk;
+    };
+    const base = { text: "A short preview line to speak.", tuning: { speed: 1, quality: 5 } };
+
+    await drain({ ...base, settings: { voice: "clara", seed: 5, temperature: 0.3 }, seed: 99 });
+    await drain({ ...base, settings: { voice: "clara", seed: 5, temperature: null } });
+    await drain({ ...base, settings: { voice: "clara", seed: null, temperature: null } });
+
+    const [overridden, fromSettings, unseeded] = bridge.generate.mock.calls.map(([request]) => request);
+    expect(overridden).toMatchObject({ seed: 99, temperature: 0.3 });
+    expect(fromSettings).toMatchObject({ seed: 5 });
+    expect(fromSettings).not.toHaveProperty("temperature");
+    expect(unseeded).not.toHaveProperty("seed");
   });
 
   it("reports inference progress for the active generation request", async () => {

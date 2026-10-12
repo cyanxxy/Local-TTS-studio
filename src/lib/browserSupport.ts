@@ -1,4 +1,6 @@
 import type { ModelType } from "../types";
+import { BROWSER_ENGINE_IDS, engineRequiresWebGPU, getEngine } from "../models/registry";
+import type { EngineTarget } from "../models/types";
 
 interface NavigatorLike {
   userAgent?: string;
@@ -6,8 +8,13 @@ interface NavigatorLike {
   maxTouchPoints?: number;
 }
 
-const ALL_LOCAL_MODELS: readonly ModelType[] = ["kokoro", "supertonic"];
-const ELECTRON_BROWSER_MODELS: readonly ModelType[] = ["kokoro"];
+function browserModelsFor(target: EngineTarget): readonly ModelType[] {
+  return BROWSER_ENGINE_IDS.filter((id) => (getEngine(id).targets as readonly EngineTarget[]).includes(target));
+}
+
+const ALL_LOCAL_MODELS = browserModelsFor("web");
+// Electron replaces the legacy Supertonic 2 browser runtime with Supertonic 3.
+const ELECTRON_BROWSER_MODELS = browserModelsFor("desktop");
 
 export interface LocalBrowserSupport {
   isSupported: boolean;
@@ -90,4 +97,30 @@ export function getUnsupportedModelMessage(
   browserSupport: LocalBrowserSupport,
 ): string | null {
   return browserSupport.unsupportedModelMessages[model] ?? null;
+}
+
+/**
+ * Why a browser model cannot be used on this device, for models that need
+ * WebGPU when it is known to be missing. `webgpuAvailable` is null while the
+ * check is still running, in which case nothing is ruled out yet.
+ */
+export function getWebGPUUnavailableModelMessages(
+  webgpuAvailable: boolean | null,
+): Partial<Record<ModelType, string>> {
+  if (webgpuAvailable !== false) return {};
+  return Object.fromEntries(
+    BROWSER_ENGINE_IDS.filter(engineRequiresWebGPU).map((id) => [
+      id,
+      `${getEngine(id).label} needs WebGPU, which this device does not provide.`,
+    ]),
+  );
+}
+
+/** `support` without the models in `unavailable`, which this device cannot run. */
+export function withoutUnavailableModels(
+  support: LocalBrowserSupport,
+  unavailable: Partial<Record<ModelType, string>>,
+): LocalBrowserSupport {
+  const supportedModels = support.supportedModels.filter((model) => !(model in unavailable));
+  return supportedModels.length === support.supportedModels.length ? support : { ...support, supportedModels };
 }

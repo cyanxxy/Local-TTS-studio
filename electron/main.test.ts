@@ -1,12 +1,23 @@
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
+import { fileURLToPath } from "url";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { dialog } from "electron";
 import { AUDIO8_MAX_TEXT_CHARACTERS, AUDIO8_MODEL_REVISION } from "./audio8Model";
+import type { DiagnosticsLevel, DiagnosticsLogger } from "./diagnostics";
 import { getDefaultQwen3Profile } from "./qwen3Profiles";
+import type { CreateWebSocketBridgeWorkerPoolOptions } from "./webSocketBridgeWorker";
 
 interface FakeWindow {
   webContents: { isDestroyed: () => boolean; send: ReturnType<typeof vi.fn> };
+}
+
+interface LoggedEntry {
+  scope: string;
+  level: DiagnosticsLevel;
+  msg: string;
+  data?: Record<string, unknown>;
 }
 
 interface FakeAudio8Client {
@@ -36,12 +47,21 @@ const mocks = vi.hoisted(() => ({
   audio8AfterLoad: null as (() => void) | null,
   audio8Hold: null as Promise<void> | null,
   localWsRun: vi.fn(),
-  localWsCancel: vi.fn(() => false),
+  localWsCancel: vi.fn<(requestId: string) => boolean>(() => false),
   localWsShutdown: vi.fn(async () => undefined),
   localWsShutdownAll: vi.fn(async () => undefined),
+  localWsRefreshIdleEviction: vi.fn(),
   qwenDownload: vi.fn(),
   qwenResolve: vi.fn(),
   qwenInspect: vi.fn(),
+  poolOptions: null as CreateWebSocketBridgeWorkerPoolOptions<"neutts" | "qwen3"> | null,
+  logEntries: [] as LoggedEntry[],
+  logPending: false,
+  logFlush: null as Promise<void> | null,
+  windowError: null as Error | null,
+  singleInstanceLock: true,
+  exit: vi.fn(),
+  windowOpened: null as (() => void) | null,
 }));
 
 vi.mock("electron", () => ({
@@ -54,11 +74,19 @@ vi.mock("electron", () => ({
     },
     getPath: () => mocks.userDataPath,
     getAppPath: () => "/tmp",
+    getVersion: () => "0.0.0-test",
+    requestSingleInstanceLock: () => mocks.singleInstanceLock,
+    exit: mocks.exit,
     quit: mocks.quit,
   },
   BrowserWindow: class {
     static fromWebContents = () => null;
     static getAllWindows = () => mocks.windows;
+    constructor() {
+      if (mocks.windowError) throw mocks.windowError;
+      mocks.windowOpened?.();
+    }
+
     loadURL = () => Promise.resolve();
   },
   dialog: { showOpenDialog: vi.fn() },
@@ -92,13 +120,42 @@ vi.mock("./readerLibraryWorkerClient", () => ({
 }));
 
 vi.mock("./webSocketBridgeWorker", () => ({
-  createWebSocketBridgeWorkerPool: () => ({
-    run: mocks.localWsRun,
-    cancel: mocks.localWsCancel,
-    shutdown: mocks.localWsShutdown,
-    shutdownAll: mocks.localWsShutdownAll,
-  }),
+  createWebSocketBridgeWorkerPool: (options: CreateWebSocketBridgeWorkerPoolOptions<"neutts" | "qwen3">) => {
+    mocks.poolOptions = options;
+    return {
+      run: mocks.localWsRun,
+      cancel: mocks.localWsCancel,
+      shutdown: mocks.localWsShutdown,
+      shutdownAll: mocks.localWsShutdownAll,
+      refreshIdleEviction: mocks.localWsRefreshIdleEviction,
+    };
+  },
 }));
+
+// The real log writes under userData/logs. These tests check what main asks
+// it to record; electron/diagnostics.test.ts covers the file itself.
+vi.mock("./diagnostics", async (importOriginal) => {
+  const record = (scope: string, level: DiagnosticsLevel) => (msg: string, data?: Record<string, unknown>) => {
+    mocks.logEntries.push({ scope, level, msg, ...(data ? { data } : {}) });
+  };
+  const logger = (scope: string): DiagnosticsLogger => ({
+    debug: record(scope, "debug"),
+    info: record(scope, "info"),
+    warn: record(scope, "warn"),
+    error: record(scope, "error"),
+    child: (child) => logger(`${scope}:${child}`),
+  });
+  return {
+    ...await importOriginal<typeof import("./diagnostics")>(),
+    createDiagnosticsLog: () => ({
+      logger,
+      flush: () => mocks.logFlush ?? Promise.resolve(),
+      get pending() {
+        return mocks.logPending;
+      },
+    }),
+  };
+});
 
 vi.mock("./qwen3ModelDownload", async (importOriginal) => ({
   ...await importOriginal<typeof import("./qwen3ModelDownload")>(),
@@ -348,6 +405,18 @@ describe("Reader library quit-time flush", () => {
     return quitEvent;
   }
 
+  it("starts the SQLite worker beside the main bundle with the library in userData", async () => {
+    startReaderLibraryWorker();
+    const { ReaderLibraryWorkerClient } = await import("./readerLibraryWorkerClient");
+
+    // The test runner gives main.ts its own source directory as __dirname.
+    expect(vi.mocked(ReaderLibraryWorkerClient)).toHaveBeenLastCalledWith(
+      path.join(path.dirname(fileURLToPath(import.meta.url)), "readerLibraryWorker.js"),
+      path.join(mocks.userDataPath, "reader-library.sqlite3"),
+      expect.any(Function),
+    );
+  });
+
   it("keeps the worker open until every renderer acknowledges the flush", async () => {
     const window = createWindow();
     mocks.windows = [window];
@@ -406,6 +475,131 @@ describe("Reader library quit-time flush", () => {
       ok: false,
       error: "Reader library is shutting down.",
     });
+  });
+});
+
+describe("document IPC", () => {
+  let tempDir: string;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    mocks.ipcListeners.clear();
+    mocks.invokeHandlers.clear();
+    mocks.appListeners.clear();
+    mocks.windows = [];
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "open-tts-main-documents-"));
+    (globalThis as { __dirname?: string }).__dirname = "/tmp";
+    await import("./main");
+  });
+
+  afterEach(async () => {
+    vi.mocked(dialog.showOpenDialog).mockReset();
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  /** Imports an EPUB through the dialog and returns the staged transfer. */
+  async function stageEpub(bytes: Uint8Array): Promise<{ epubTransferId: string; epubByteLength: number }> {
+    const filePath = path.join(tempDir, "book.epub");
+    await fs.writeFile(filePath, bytes);
+    vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: false, filePaths: [filePath] });
+    const result = await mocks.invokeHandlers.get("document:import")!(createEvent(undefined)) as {
+      fileName: string;
+      epubTransferId: string;
+      epubByteLength: number;
+    };
+    expect(result).toMatchObject({ canceled: false, fileName: "book.epub", epubByteLength: bytes.byteLength });
+    expect(result).not.toHaveProperty("epubBytes");
+    return result;
+  }
+
+  async function waitForPortClose(port: ReturnType<typeof createPort>): Promise<void> {
+    for (let turn = 0; turn < 100 && port.close.mock.calls.length === 0; turn += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+  }
+
+  it("streams a staged EPUB to the importing renderer once, then forgets it", async () => {
+    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const { epubTransferId } = await stageEpub(bytes);
+
+    const port = createPort();
+    emitStream("document:read-epub", createEvent(port), { transferId: epubTransferId });
+    await waitForPortClose(port);
+
+    expect(port.postMessage.mock.calls).toEqual([
+      [{ offset: 0, chunk: bytes }],
+      [{ done: true }],
+    ]);
+
+    // A second read of the same transfer finds nothing to send.
+    const replay = createPort();
+    emitStream("document:read-epub", createEvent(replay), { transferId: epubTransferId });
+    expect(replay.postMessage).toHaveBeenCalledWith({ error: "The EPUB transfer expired. Import the file again." });
+    expect(replay.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a transfer staged for a different renderer", async () => {
+    const { epubTransferId } = await stageEpub(new Uint8Array([9]));
+    const port = createPort();
+    const otherRenderer = createEvent(port);
+    otherRenderer.sender.id = 2;
+
+    emitStream("document:read-epub", otherRenderer, { transferId: epubTransferId });
+
+    expect(port.postMessage).toHaveBeenCalledWith({ error: "The EPUB transfer expired. Import the file again." });
+    expect(port.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes an untrusted sender's port silently instead of throwing in the main process", async () => {
+    const { epubTransferId } = await stageEpub(new Uint8Array([7]));
+    const port = createPort();
+
+    expect(() => emitStream(
+      "document:read-epub",
+      createEvent(port, "https://example.com"),
+      { transferId: epubTransferId },
+    )).not.toThrow();
+
+    expect(port.close).toHaveBeenCalledTimes(1);
+    expect(port.postMessage).not.toHaveBeenCalled();
+    // The untrusted read did not consume the transfer.
+    const trusted = createPort();
+    emitStream("document:read-epub", createEvent(trusted), { transferId: epubTransferId });
+    await waitForPortClose(trusted);
+    expect(trusted.postMessage).toHaveBeenLastCalledWith({ done: true });
+  });
+
+  it("answers a malformed read request on the port instead of leaving it open", () => {
+    const port = createPort();
+
+    emitStream("document:read-epub", createEvent(port), { transferId: 42 });
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      error: "The EPUB transfer request was invalid. Import the file again.",
+    });
+    expect(port.close).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns plain-text imports inline without staging a transfer", async () => {
+    const filePath = path.join(tempDir, "notes.txt");
+    await fs.writeFile(filePath, "Hello from a text file.");
+    vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: false, filePaths: [filePath] });
+
+    await expect(mocks.invokeHandlers.get("document:import")!(createEvent(undefined))).resolves.toEqual({
+      canceled: false,
+      fileName: "notes.txt",
+      text: "Hello from a text file.",
+      pageCount: undefined,
+    });
+  });
+
+  it.each([
+    { name: "a non-string URL", request: { url: 42 } },
+    { name: "an over-long URL", request: { url: `https://example.com/${"a".repeat(2048)}` } },
+    { name: "a missing request", request: undefined },
+  ])("rejects a URL import with $name", ({ request }) => {
+    expect(() => mocks.invokeHandlers.get("document:import-url")!(createEvent(undefined), request))
+      .toThrow("Invalid document URL.");
   });
 });
 
@@ -609,7 +803,20 @@ describe("Audio8 IPC", () => {
     it("forwards the accepted voice through untouched", async () => {
       await invokeAudio8("audio8:generate", { requestId: "g1", text: " hi ", voice: "sophie" });
 
-      expect(audio8Clients()[0].generate).toHaveBeenCalledWith("g1", " hi ", "sophie", expect.any(Function));
+      // No overrides: the worker samples the reference take.
+      expect(audio8Clients()[0].generate).toHaveBeenCalledWith("g1", " hi ", "sophie", expect.any(Function), undefined);
+    });
+
+    it("forwards a requested take's seed and temperature, and refuses out-of-range ones", async () => {
+      await invokeAudio8("audio8:generate", { requestId: "g1", text: "hi", voice: "clara", seed: 7, temperature: 0.6 });
+
+      expect(audio8Clients()[0].generate)
+        .toHaveBeenCalledWith("g1", "hi", "clara", expect.any(Function), { seed: 7, temperature: 0.6 });
+      expect((await audio8Rejection("audio8:generate", { requestId: "g2", text: "hi", voice: "clara", seed: 2 ** 32 })).message)
+        .toBe("Audio8 seed must be an integer from 0 to 4294967295.");
+      expect((await audio8Rejection("audio8:generate", { requestId: "g3", text: "hi", voice: "clara", temperature: 5 })).message)
+        .toBe("Audio8 temperature must be a number from 0.1 to 1.");
+      expect(audio8Clients()[0].generate).toHaveBeenCalledTimes(1);
     });
 
     it("drops progress safely when the requesting window closes during send", async () => {
@@ -934,6 +1141,7 @@ describe("local model cache lifecycle IPC", () => {
     mocks.localWsCancel.mockReset().mockReturnValue(false);
     mocks.localWsShutdown.mockReset().mockResolvedValue(undefined);
     mocks.localWsShutdownAll.mockReset().mockResolvedValue(undefined);
+    mocks.localWsRefreshIdleEviction.mockReset();
     mocks.localWsRun.mockReset().mockImplementation(async (_model, request: { command?: string }) => ({
       response: { ok: true, result: request.command === "warm" ? { warmed: true } : {
         sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
@@ -1062,6 +1270,145 @@ describe("local model cache lifecycle IPC", () => {
     await clear;
   });
 
+  /** Holds the next pool run open until the returned controls settle it. */
+  function holdNextRun() {
+    let resolveRun!: (value: unknown) => void;
+    let rejectRun!: (error: Error) => void;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    mocks.localWsRun.mockImplementationOnce(() => new Promise((resolve, reject) => {
+      resolveRun = resolve;
+      rejectRun = reject;
+      markStarted();
+    }));
+    return {
+      started,
+      resolve: (value: unknown) => resolveRun(value),
+      reject: (error: Error) => rejectRun(error),
+    };
+  }
+
+  const GENERATE_RESPONSE = {
+    response: { ok: true, result: {
+      sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+      audioTransport: "websocket-binary", audioChunkCount: 1, phaseTimingsSec: {},
+    } },
+  };
+
+  it("routes a cancel from the owning renderer to the worker pool", async () => {
+    const run = holdNextRun();
+    mocks.localWsCancel.mockReturnValue(true);
+    const generated = invoke("local-tts:generate", generateRequest).catch((error: Error) => error.message);
+    await run.started;
+
+    await expect(invoke("local-tts:cancel", { model: "neutts", requestId: "local-generate" }))
+      .resolves.toEqual({ cancelled: true });
+    expect(mocks.localWsCancel).toHaveBeenCalledWith("local-generate");
+
+    run.reject(new Error("Generation cancelled."));
+    await expect(generated).resolves.toBe("Generation cancelled.");
+    // Settled requests are forgotten, so a late cancel is undelivered.
+    await expect(invoke("local-tts:cancel", { model: "neutts", requestId: "local-generate" }))
+      .resolves.toEqual({ cancelled: false });
+  });
+
+  it("refuses a cancel from a renderer or model that does not own the request", async () => {
+    const run = holdNextRun();
+    const generated = invoke("local-tts:generate", generateRequest);
+    await run.started;
+    const otherRenderer = createEvent(undefined);
+    otherRenderer.sender.id = 2;
+
+    await expect(Promise.resolve(mocks.invokeHandlers.get("local-tts:cancel")!(
+      otherRenderer,
+      { model: "neutts", requestId: "local-generate" },
+    ))).rejects.toThrow("Cancellation request does not own the active local-runtime request.");
+    await expect(invoke("local-tts:cancel", { model: "qwen3", requestId: "local-generate" }))
+      .rejects.toThrow("does not own");
+    expect(mocks.localWsCancel).not.toHaveBeenCalled();
+
+    run.resolve(GENERATE_RESPONSE);
+    await expect(generated).resolves.toMatchObject({ audioChunkCount: 1 });
+  });
+
+  it("refuses a second request that reuses a running request id", async () => {
+    const run = holdNextRun();
+    const generated = invoke("local-tts:generate", generateRequest);
+    await run.started;
+
+    await expect(invoke("local-tts:generate", generateRequest))
+      .rejects.toThrow("A request with id local-generate is already running.");
+
+    run.resolve(GENERATE_RESPONSE);
+    await generated;
+  });
+
+  it("cancels a renderer's running generation when its web contents are destroyed", async () => {
+    const run = holdNextRun();
+    mocks.localWsCancel.mockReturnValue(true);
+    const event = createEvent(undefined);
+    const generated = Promise.resolve(mocks.invokeHandlers.get("local-tts:generate")!(event, generateRequest))
+      .catch((error: Error) => error.message);
+    await run.started;
+
+    const destroyed = event.sender.once.mock.calls.find(([name]) => name === "destroyed")?.[1] as () => void;
+    destroyed();
+
+    expect(mocks.localWsCancel).toHaveBeenCalledWith("local-generate");
+    run.reject(new Error("Generation cancelled."));
+    await expect(generated).resolves.toBe("Generation cancelled.");
+  });
+
+  it("makes a generate wait for an in-flight warm-up of the same model instead of failing", async () => {
+    const warmRun = holdNextRun();
+    const warmed = invoke("local-tts:warm", { model: "neutts" });
+    await warmRun.started;
+
+    const generated = invoke("local-tts:generate", generateRequest);
+    await drainTurns();
+    // The warm-up is doing the model load the generation needs.
+    expect(mocks.localWsRun).toHaveBeenCalledTimes(1);
+    expect(mocks.localWsCancel).not.toHaveBeenCalled();
+
+    warmRun.resolve({ response: { ok: true, result: { warmed: true } } });
+    await expect(warmed).resolves.toEqual({ warmed: true });
+    await expect(generated).resolves.toMatchObject({ audioChunkCount: 1 });
+    expect(mocks.localWsRun).toHaveBeenCalledTimes(2);
+    expect(mocks.localWsRun.mock.calls[1][1]).toMatchObject({ requestId: "local-generate" });
+  });
+
+  it("cancels an in-flight warm-up for a different model target before generating", async () => {
+    const warmRun = holdNextRun();
+    const warmed = invoke("local-tts:warm", { model: "neutts" });
+    await warmRun.started;
+    const warmRequestId = (mocks.localWsRun.mock.calls[0][1] as { requestId: string }).requestId;
+    mocks.localWsCancel.mockImplementation((requestId: string) => {
+      if (requestId === warmRequestId) warmRun.reject(new Error("Generation cancelled."));
+      return requestId === warmRequestId;
+    });
+
+    const generated = invoke("local-tts:generate", {
+      ...generateRequest,
+      payload: { ...generateRequest.payload, modelRepo: "neuphonic/neutts-air-q4-gguf" },
+    });
+
+    await expect(warmed).resolves.toEqual({ warmed: false, message: "Generation cancelled." });
+    await expect(generated).resolves.toMatchObject({ audioChunkCount: 1 });
+    expect(mocks.localWsCancel).toHaveBeenCalledWith(warmRequestId);
+  });
+
+  it("reports a second warm-up of the same target as already warming", async () => {
+    const warmRun = holdNextRun();
+    const first = invoke("local-tts:warm", { model: "neutts" });
+    await warmRun.started;
+
+    await expect(invoke("local-tts:warm", { model: "neutts" }))
+      .resolves.toEqual({ warmed: false, message: "This model is already warming." });
+
+    warmRun.resolve({ response: { ok: true, result: { warmed: true } } });
+    await first;
+  });
+
   it("holds quit for deletion and never starts the generation queued behind it", async () => {
     const deletion = holdDeletion();
     const clear = invoke("local-tts:clear-cache", { model: "neutts" });
@@ -1078,5 +1425,635 @@ describe("local model cache lifecycle IPC", () => {
     await expect(queued).resolves.toContain("shutting down");
     await waitForQuit();
     expect(mocks.localWsRun).not.toHaveBeenCalled();
+  });
+
+  async function writeModelDir(directory: string): Promise<void> {
+    for (const file of qwenProfile.requiredFiles) {
+      const target = path.join(directory, ...file.split("/"));
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.writeFile(target, file === "config.json" ? JSON.stringify({ tts_model_type: "custom_voice" }) : "x");
+    }
+  }
+
+  describe("audio stream", () => {
+    const audioChunk = {
+      requestId: "local-generate",
+      index: 0,
+      total: 1,
+      sampleRate: 24_000,
+      sampleCount: 2,
+      silenceAfterSamples: 0,
+      audio: new ArrayBuffer(8),
+    };
+
+    function generateWithEvent(event: ReturnType<typeof createEvent>): Promise<unknown> {
+      return Promise.resolve(mocks.invokeHandlers.get("local-tts:generate")!(event, generateRequest));
+    }
+
+    it("sends every chunk and then the end marker on one channel before replying", async () => {
+      const event = createEvent(undefined);
+      const order: string[] = [];
+      event.sender.send.mockImplementation((channel: string, payload: { type: string }) => {
+        order.push(`${channel} ${payload.type}`);
+      });
+      mocks.localWsRun.mockImplementationOnce(async (_model, options: { onAudioChunk: (chunk: unknown) => void }) => {
+        options.onAudioChunk(audioChunk);
+        options.onAudioChunk({ ...audioChunk, index: 1, total: 2 });
+        return { response: { ok: true, result: {
+          sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+          audioTransport: "websocket-binary", audioChunkCount: 2, phaseTimingsSec: {},
+        } } };
+      });
+
+      await generateWithEvent(event).then(() => order.push("reply"));
+
+      expect(order).toEqual([
+        "local-tts:audio-stream chunk",
+        "local-tts:audio-stream chunk",
+        "local-tts:audio-stream end",
+        "reply",
+      ]);
+      expect(event.sender.send).toHaveBeenNthCalledWith(1, "local-tts:audio-stream", {
+        type: "chunk", model: "neutts", ...audioChunk,
+      });
+      expect(event.sender.send).toHaveBeenLastCalledWith("local-tts:audio-stream", {
+        type: "end", model: "neutts", requestId: "local-generate",
+      });
+    });
+
+    it("forwards a unit gap on the same ordered channel between the chunks", async () => {
+      const event = createEvent(undefined);
+      const gap = {
+        requestId: "local-generate",
+        afterChunkIndex: 0,
+        sampleRate: 24_000,
+        silenceSamples: 4_800,
+        textUnitIndex: 0,
+        textUnitTotal: 2,
+      };
+      mocks.localWsRun.mockImplementationOnce(async (_model, options: {
+        onAudioChunk: (chunk: unknown) => void;
+        onAudioGap: (gap: unknown) => void;
+      }) => {
+        options.onAudioChunk(audioChunk);
+        options.onAudioGap(gap);
+        options.onAudioChunk({ ...audioChunk, index: 1, total: 2 });
+        return { response: { ok: true, result: {
+          sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+          audioTransport: "websocket-binary", audioChunkCount: 2, phaseTimingsSec: {},
+        } } };
+      });
+
+      await generateWithEvent(event);
+
+      expect(event.sender.send.mock.calls.map(([, payload]) => (payload as { type: string }).type))
+        .toEqual(["chunk", "gap", "chunk", "end"]);
+      expect(event.sender.send).toHaveBeenNthCalledWith(2, "local-tts:audio-stream", {
+        type: "gap", model: "neutts", ...gap,
+      });
+    });
+
+    it("ends the stream of a generation that fails", async () => {
+      const event = createEvent(undefined);
+      mocks.localWsRun.mockRejectedValueOnce(new Error("Rust local bridge exited before returning a result."));
+
+      await expect(generateWithEvent(event)).rejects.toThrow("exited before returning a result");
+      expect(event.sender.send).toHaveBeenCalledWith("local-tts:audio-stream", {
+        type: "end", model: "neutts", requestId: "local-generate",
+      });
+    });
+
+    it("sends nothing to a window that has closed", async () => {
+      const event = createEvent(undefined);
+      event.sender.isDestroyed = () => true;
+      mocks.localWsRun.mockImplementationOnce(async (_model, options: { onAudioChunk: (chunk: unknown) => void }) => {
+        options.onAudioChunk(audioChunk);
+        return { response: { ok: true, result: {
+          sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+          audioTransport: "websocket-binary", audioChunkCount: 1, phaseTimingsSec: {},
+        } } };
+      });
+
+      await generateWithEvent(event);
+      expect(event.sender.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("keep-warm leases", () => {
+    const MINUTE = 60 * 1000;
+
+    function lease(modelPath: string, leaseId = "lease-1") {
+      return { leaseId, model: "qwen3", modelRepo: qwenProfile.repo, modelPath };
+    }
+
+    /** Warms `modelPath` and returns what the pool was told the worker now holds. */
+    async function warmQwen(modelPath: string): Promise<string> {
+      await writeModelDir(modelPath);
+      await expect(invoke("local-tts:warm", { model: "qwen3", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath }))
+        .resolves.toEqual({ warmed: true });
+      const options = mocks.localWsRun.mock.lastCall![1] as { residencyKey?: string };
+      expect(options.residencyKey).toEqual(expect.any(String));
+      return options.residencyKey!;
+    }
+
+    function idleEvictMs(model: "neutts" | "qwen3", residencyKey: string | null): number {
+      const option = mocks.poolOptions!.idleEvictMs;
+      return typeof option === "function" ? option(model, residencyKey) : option;
+    }
+
+    it("tells the pool a generation leaves the same model loaded as a warm-up of it", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const warmed = await warmQwen(modelPath);
+
+      await invoke("local-tts:generate", {
+        model: "qwen3",
+        requestId: "qwen-generate",
+        payload: { text: "hello", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath },
+      });
+
+      expect((mocks.localWsRun.mock.lastCall![1] as { residencyKey?: string }).residencyKey).toBe(warmed);
+    });
+
+    it("keeps a leased Qwen3 model resident for the keep-warm window, and only that model", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const otherPath = path.join(mocks.userDataPath, "other-qwen3");
+      const residency = await warmQwen(modelPath);
+      const other = await warmQwen(otherPath);
+      expect(idleEvictMs("qwen3", residency)).toBe(MINUTE);
+
+      await expect(invoke("local-tts:keep-warm", lease(modelPath))).resolves.toBeUndefined();
+
+      // The idle worker is re-timed at once.
+      expect(mocks.localWsRefreshIdleEviction).toHaveBeenCalledWith("qwen3");
+      expect(idleEvictMs("qwen3", residency)).toBe(30 * MINUTE);
+      expect(idleEvictMs("qwen3", other)).toBe(MINUTE);
+      expect(idleEvictMs("qwen3", null)).toBe(MINUTE);
+      expect(idleEvictMs("neutts", null)).toBe(5 * MINUTE);
+    });
+
+    it("returns to the usual idle window once the lease is released", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const residency = await warmQwen(modelPath);
+      await invoke("local-tts:keep-warm", lease(modelPath));
+      mocks.localWsRefreshIdleEviction.mockClear();
+
+      await expect(invoke("local-tts:release-keep-warm", { leaseId: "lease-1" })).resolves.toEqual({ released: true });
+
+      expect(mocks.localWsRefreshIdleEviction).toHaveBeenCalledWith("qwen3");
+      expect(idleEvictMs("qwen3", residency)).toBe(MINUTE);
+      await expect(invoke("local-tts:release-keep-warm", { leaseId: "lease-1" })).resolves.toEqual({ released: false });
+    });
+
+    it("does not let another window release a lease", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const residency = await warmQwen(modelPath);
+      await invoke("local-tts:keep-warm", lease(modelPath));
+      const otherWindow = createEvent(undefined);
+      otherWindow.sender.id = 2;
+
+      await expect(Promise.resolve(mocks.invokeHandlers.get("local-tts:release-keep-warm")!(otherWindow, { leaseId: "lease-1" })))
+        .resolves.toEqual({ released: false });
+      expect(idleEvictMs("qwen3", residency)).toBe(30 * MINUTE);
+    });
+
+    it("drops the leases of a window that goes away", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const residency = await warmQwen(modelPath);
+      const event = createEvent(undefined);
+      await mocks.invokeHandlers.get("local-tts:keep-warm")!(event, lease(modelPath));
+
+      const crashed = event.sender.on.mock.calls.find(([name]) => name === "render-process-gone")?.[1] as () => void;
+      crashed();
+
+      expect(idleEvictMs("qwen3", residency)).toBe(MINUTE);
+    });
+
+    it("refuses a lease it cannot validate", async () => {
+      await expect(invoke("local-tts:keep-warm", { ...lease("/models/qwen3"), model: "neutts" }))
+        .rejects.toThrow("Only Qwen3-TTS models can be kept warm.");
+      await expect(invoke("local-tts:keep-warm", { ...lease("/models/qwen3"), leaseId: "" }))
+        .rejects.toThrow("`leaseId` is required.");
+    });
+
+    it("tells every open window when a resident model goes away", async () => {
+      await invoke("local-tts:generate", generateRequest);
+      const open = createWindow();
+      const closed = createWindow();
+      closed.webContents.isDestroyed = () => true;
+      mocks.windows = [open, closed];
+
+      mocks.poolOptions!.onWorkerExit!("qwen3", { reason: "idle" });
+
+      expect(open.webContents.send).toHaveBeenCalledWith("local-tts:model-evicted", { model: "qwen3", reason: "idle" });
+      expect(closed.webContents.send).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Qwen3 model folder checks", () => {
+    // Consecutive sections of one read, as the Reader sends them, so the
+    // generation cooldown does not refuse the second request.
+    function qwenGenerate(modelPath: string, sectionIndex: number) {
+      return {
+        model: "qwen3",
+        requestId: `qwen-${sectionIndex}`,
+        payload: { text: "hello", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath },
+        continuation: { jobId: "qwen-read", sectionIndex, sectionCount: 8 },
+      };
+    }
+
+    /** Counts reads of the folder's config.json, which every structural check parses. */
+    function countConfigReads(modelPath: string) {
+      const originalReadFile = fs.readFile.bind(fs);
+      const reads = vi.fn();
+      vi.spyOn(fs, "readFile").mockImplementation(((target: Parameters<typeof fs.readFile>[0], options) => {
+        if (target === path.join(modelPath, "config.json")) reads();
+        return originalReadFile(target, options);
+      }) as typeof fs.readFile);
+      return reads;
+    }
+
+    it("checks a model folder once for back-to-back generations", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      await writeModelDir(modelPath);
+      const reads = countConfigReads(modelPath);
+
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 0));
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 1));
+      await expect(invoke("local-tts:warm", { model: "qwen3", mode: qwenProfile.mode, modelRepo: qwenProfile.repo, modelPath }))
+        .resolves.toEqual({ warmed: true });
+
+      expect(reads).toHaveBeenCalledTimes(1);
+      expect(mocks.localWsRun).toHaveBeenCalledTimes(3);
+    });
+
+    it("checks an incomplete folder again on every request, so fixing it works at once", async () => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      const missing = "The selected Qwen3 model directory is missing required files";
+
+      await expect(invoke("local-tts:generate", qwenGenerate(modelPath, 0))).rejects.toThrow(missing);
+      await writeModelDir(modelPath);
+      await expect(invoke("local-tts:generate", qwenGenerate(modelPath, 1)))
+        .resolves.toMatchObject({ audioChunkCount: 1 });
+      expect(mocks.localWsRun).toHaveBeenCalledTimes(1);
+    });
+
+    it.each([
+      { action: "clearing the Qwen3 cache", run: () => invoke("local-tts:clear-cache", { model: "qwen3" }) },
+      { action: "a model download", run: () => invoke("local-tts:download-qwen3-model", { modelRepo: qwenProfile.repo }) },
+      {
+        action: "a failed model download",
+        run: () => {
+          mocks.qwenDownload.mockRejectedValueOnce(new Error("Download failed."));
+          return invoke("local-tts:download-qwen3-model", { modelRepo: qwenProfile.repo }).catch(() => undefined);
+        },
+      },
+      { action: "a setup refresh", run: () => invoke("local-tts:qwen3-setup", { modelRepo: qwenProfile.repo }) },
+    ])("checks the folder again after $action", async ({ run }) => {
+      const modelPath = path.join(mocks.userDataPath, "manual-qwen3");
+      await writeModelDir(modelPath);
+      const reads = countConfigReads(modelPath);
+
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 0));
+      await run();
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 1));
+
+      expect(reads).toHaveBeenCalledTimes(2);
+    });
+
+    it("refuses a folder deleted by clearing the cache instead of trusting the earlier pass", async () => {
+      const modelPath = path.join(mocks.userDataPath, "local-model-cache", "qwen3", "managed");
+      await writeModelDir(modelPath);
+      await invoke("local-tts:generate", qwenGenerate(modelPath, 0));
+
+      await invoke("local-tts:clear-cache", { model: "qwen3" });
+
+      await expect(invoke("local-tts:generate", qwenGenerate(modelPath, 1)))
+        .rejects.toThrow("The selected Qwen3 model directory is missing required files");
+      expect(mocks.localWsRun).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe("main-process diagnostics", () => {
+  const generateRequest = {
+    model: "neutts", requestId: "local-generate", payload: {
+      text: "hello", referenceText: "hello", referenceCodesBase64: "AAAA",
+    },
+  };
+  const generateResponse = {
+    response: { ok: true, result: {
+      sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+      audioTransport: "websocket-binary", audioChunkCount: 1, phaseTimingsSec: {},
+    } },
+  };
+
+  function invoke(channel: string, request: unknown, url?: string): Promise<unknown> {
+    return Promise.resolve().then(() => mocks.invokeHandlers.get(channel)!(createEvent(undefined, url), request));
+  }
+
+  function logged(scope: string): LoggedEntry[] {
+    return mocks.logEntries.filter((entry) => entry.scope === scope);
+  }
+
+  async function importMain(): Promise<void> {
+    vi.resetModules();
+    mocks.invokeHandlers.clear();
+    mocks.ipcListeners.clear();
+    mocks.appListeners.clear();
+    mocks.logEntries = [];
+    (globalThis as { __dirname?: string }).__dirname = "/tmp";
+    await import("./main");
+  }
+
+  beforeEach(async () => {
+    mocks.windows = [];
+    mocks.quit.mockClear();
+    mocks.closeWorker.mockClear();
+    mocks.workerError = null;
+    mocks.logPending = false;
+    mocks.logFlush = null;
+    mocks.localWsRun.mockReset().mockResolvedValue(generateResponse);
+    mocks.localWsCancel.mockReset().mockReturnValue(false);
+    mocks.localWsShutdownAll.mockReset().mockResolvedValue(undefined);
+    mocks.userDataPath = await fs.mkdtemp(path.join(os.tmpdir(), "open-tts-main-diagnostics-"));
+    await importMain();
+    vi.spyOn(fs, "access").mockResolvedValue(undefined);
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    mocks.windowError = null;
+    await fs.rm(mocks.userDataPath, { recursive: true, force: true });
+    mocks.userDataPath = "/tmp";
+  });
+
+  it("records the start of the session with the runtime it runs on", () => {
+    expect(mocks.logEntries[0]).toEqual({
+      scope: "app",
+      level: "info",
+      msg: "Started",
+      data: {
+        version: "0.0.0-test",
+        electron: process.versions.electron,
+        chrome: process.versions.chrome,
+        platform: process.platform,
+        arch: process.arch,
+        osRelease: os.release(),
+        packaged: false,
+      },
+    });
+  });
+
+  it("logs a failed generation with the bridge's native diagnostics", async () => {
+    // The module instance main loaded after resetModules, so `instanceof` holds.
+    const { NativeRuntimeError } = await import("./errors");
+    const failure = new NativeRuntimeError(
+      "Rust local bridge exited before returning a result (code 101).",
+      { stderr: "thread 'main' panicked", exitCode: 101, signal: null },
+    );
+    mocks.localWsRun.mockRejectedValueOnce(failure);
+
+    await expect(invoke("local-tts:generate", generateRequest)).rejects.toBe(failure);
+
+    expect(logged("ipc")).toEqual([{
+      scope: "ipc",
+      level: "error",
+      msg: "IPC request failed",
+      data: {
+        channel: "local-tts:generate",
+        error: { message: failure.message, native: { stderr: "thread 'main' panicked", exitCode: 101, signal: null } },
+      },
+    }]);
+  });
+
+  it("records a deliberate stop at debug level only", async () => {
+    mocks.localWsRun.mockRejectedValueOnce(new Error("Generation cancelled."));
+
+    await expect(invoke("local-tts:generate", generateRequest)).rejects.toThrow("Generation cancelled.");
+
+    expect(logged("ipc")).toEqual([
+      { scope: "ipc", level: "debug", msg: "IPC request cancelled", data: { channel: "local-tts:generate" } },
+    ]);
+  });
+
+  it("logs an untrusted sender once per channel", async () => {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await expect(invoke("audio8:cache-info", undefined, "https://evil.test/page"))
+        .rejects.toThrow("Rejected IPC from untrusted sender.");
+    }
+
+    expect(logged("ipc")).toEqual([{
+      scope: "ipc",
+      level: "warn",
+      msg: "Rejected IPC from an untrusted sender",
+      data: { channel: "audio8:cache-info", senderOrigin: "https://evil.test" },
+    }]);
+  });
+
+  it("logs a failed warm-up, which the renderer only sees as warmed: false, but not a cancelled one", async () => {
+    mocks.localWsRun.mockRejectedValueOnce(new Error("Model load failed."));
+    await expect(invoke("local-tts:warm", { model: "neutts" }))
+      .resolves.toEqual({ warmed: false, message: "Model load failed." });
+    mocks.localWsRun.mockRejectedValueOnce(new Error("Generation cancelled."));
+    await expect(invoke("local-tts:warm", { model: "neutts" }))
+      .resolves.toEqual({ warmed: false, message: "Generation cancelled." });
+
+    expect(logged("local-tts")).toEqual([{
+      scope: "local-tts",
+      level: "warn",
+      msg: "Warm-up failed",
+      data: { model: "neutts", error: { message: "Model load failed.", stack: expect.stringContaining("Model load failed.") } },
+    }]);
+  });
+
+  it("logs the first malformed progress frame of a request and keeps generating", async () => {
+    mocks.localWsRun.mockImplementationOnce(async (_model, options: { onProgress: (payload: unknown) => void }) => {
+      options.onProgress({ type: "progress" });
+      options.onProgress({ type: "progress", phase: 7 });
+      return generateResponse;
+    });
+
+    await expect(invoke("local-tts:generate", generateRequest)).resolves.toMatchObject({ audioChunkCount: 1 });
+
+    expect(logged("local-tts")).toEqual([{
+      scope: "local-tts",
+      level: "warn",
+      msg: "Ignored a malformed bridge progress frame",
+      data: { model: "neutts", requestId: "local-generate", error: expect.any(String) },
+    }]);
+  });
+
+  it("logs a throwing bridge stream consumer", async () => {
+    // The pool is built on the first request.
+    await invoke("local-tts:generate", generateRequest);
+    const failure = new Error("renderer send failed");
+
+    mocks.poolOptions!.onListenerError!(failure, { requestId: "local-generate", listener: "audioChunk" });
+
+    expect(logged("local-tts")).toEqual([{
+      scope: "local-tts",
+      level: "error",
+      msg: "A bridge stream consumer failed",
+      data: { requestId: "local-generate", listener: "audioChunk", error: { message: failure.message, stack: failure.stack } },
+    }]);
+  });
+
+  it("logs renderer and child process crashes, and a clean child exit as routine", () => {
+    mocks.appListeners.get("render-process-gone")!({}, {}, { reason: "oom", exitCode: 9 });
+    mocks.appListeners.get("child-process-gone")!({}, { type: "GPU", reason: "crashed", exitCode: 5, name: "GPU" });
+    mocks.appListeners.get("child-process-gone")!({}, {
+      type: "Utility", reason: "clean-exit", exitCode: 0, serviceName: "network.mojom.NetworkService",
+    });
+
+    expect(logged("app").slice(1)).toEqual([
+      { scope: "app", level: "error", msg: "A renderer process is gone", data: { reason: "oom", exitCode: 9 } },
+      {
+        scope: "app",
+        level: "error",
+        msg: "A child process is gone",
+        data: { type: "GPU", reason: "crashed", exitCode: 5, name: "GPU" },
+      },
+      {
+        scope: "app",
+        level: "info",
+        msg: "A child process exited",
+        data: { type: "Utility", reason: "clean-exit", exitCode: 0, serviceName: "network.mojom.NetworkService" },
+      },
+    ]);
+  });
+
+  it("logs a startup that failed before the IPC handlers were registered", async () => {
+    mocks.windowError = new Error("Window creation failed.");
+    await importMain();
+    await drainTurns();
+
+    expect(logged("app")).toContainEqual({
+      scope: "app",
+      level: "error",
+      msg: "Startup failed",
+      data: { error: { message: "Window creation failed.", stack: expect.any(String) } },
+    });
+    expect(mocks.invokeHandlers.size).toBe(0);
+  });
+
+  it("logs a shutdown step that fails and still quits", async () => {
+    emitStream("reader-library:save-audio-stream", createEvent(createPort()), { metadata: {}, chunkCount: 1 });
+    mocks.closeWorker.mockImplementationOnce(() => Promise.reject(new Error("Reader library worker is shutting down.")));
+
+    mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
+    await waitForQuit();
+
+    expect(logged("shutdown")).toEqual([{
+      scope: "shutdown",
+      level: "error",
+      msg: "A shutdown step failed",
+      data: {
+        participant: "reader-library",
+        error: { message: "Reader library worker is shutting down.", stack: expect.any(String) },
+      },
+    }]);
+  });
+
+  it("holds the quit for pending log writes and quits once they land", async () => {
+    let finishFlush!: () => void;
+    mocks.logPending = true;
+    mocks.logFlush = new Promise<void>((resolve) => { finishFlush = resolve; });
+    const quitEvent = { preventDefault: vi.fn() };
+
+    mocks.appListeners.get("before-quit")!(quitEvent);
+
+    // Nothing else is outstanding; the unwritten entries alone hold the quit.
+    expect(quitEvent.preventDefault).toHaveBeenCalledTimes(1);
+    await drainTurns();
+    expect(mocks.quit).not.toHaveBeenCalled();
+    finishFlush();
+    await waitForQuit();
+    expect(mocks.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not let a stuck log write keep the app from quitting", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    mocks.logPending = true;
+    mocks.logFlush = new Promise<void>(() => {});
+
+    mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
+    // The barrier gives up first, then the final flush gets its own short wait.
+    await vi.advanceTimersByTimeAsync(2_500);
+    expect(mocks.quit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(mocks.quit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("single-instance lock", () => {
+  async function importMain(): Promise<void> {
+    vi.resetModules();
+    mocks.invokeHandlers.clear();
+    mocks.ipcListeners.clear();
+    mocks.appListeners.clear();
+    mocks.logEntries = [];
+    (globalThis as { __dirname?: string }).__dirname = "/tmp";
+    await import("./main");
+    await drainTurns();
+  }
+
+  beforeEach(() => {
+    mocks.windows = [];
+    mocks.exit.mockClear();
+    mocks.quit.mockClear();
+  });
+
+  afterEach(() => {
+    mocks.singleInstanceLock = true;
+    mocks.windowOpened = null;
+  });
+
+  it("exits a second launch before it logs, registers IPC or opens a window", async () => {
+    mocks.singleInstanceLock = false;
+
+    await importMain();
+
+    expect(mocks.exit).toHaveBeenCalledWith(0);
+    expect(mocks.invokeHandlers.size).toBe(0);
+    expect(mocks.ipcListeners.size).toBe(0);
+    expect(mocks.appListeners.size).toBe(0);
+    expect(mocks.logEntries).toEqual([]);
+  });
+
+  it("brings the running window forward when the app is launched again", async () => {
+    await importMain();
+    const window = { isMinimized: () => true, restore: vi.fn(), show: vi.fn(), focus: vi.fn() };
+    mocks.windows = [window as unknown as FakeWindow];
+
+    mocks.appListeners.get("second-instance")!();
+
+    expect(mocks.exit).not.toHaveBeenCalled();
+    expect(window.restore).toHaveBeenCalledTimes(1);
+    expect(window.focus).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens no window for a relaunch or a dock click once the quit has started", async () => {
+    await importMain();
+    const opened = vi.fn();
+    mocks.windowOpened = opened;
+    mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
+
+    mocks.appListeners.get("second-instance")!();
+    mocks.appListeners.get("activate")!();
+
+    expect(opened).not.toHaveBeenCalled();
+    await waitForQuit();
+  });
+
+  it("reopens a window on a dock click when none is left", async () => {
+    await importMain();
+    const opened = vi.fn();
+    mocks.windowOpened = opened;
+
+    mocks.appListeners.get("activate")!();
+
+    expect(opened).toHaveBeenCalledTimes(1);
   });
 });

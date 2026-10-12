@@ -1,4 +1,7 @@
-export type LocalTtsModel = "neutts" | "qwen3";
+import type { RustBridgeEngineId } from "./models/registry";
+
+/** Engines the main process drives through the Rust bridge IPC. */
+export type LocalTtsModel = RustBridgeEngineId;
 
 export interface LocalTtsProbeResult {
   ready: boolean;
@@ -94,6 +97,8 @@ export interface LocalTtsProgressEvent {
 }
 
 export interface LocalTtsAudioChunkEvent {
+  /** Absent on chunks; a stream event carrying `kind: "gap"` is a LocalTtsAudioGapEvent. */
+  kind?: undefined;
   requestId: string;
   model: LocalTtsModel;
   index: number;
@@ -104,6 +109,33 @@ export interface LocalTtsAudioChunkEvent {
   textUnitIndex?: number;
   textUnitTotal?: number;
   audio: ArrayBuffer;
+}
+
+/**
+ * Silence the bridge puts after a finished text unit. It arrives on the audio
+ * stream in order with the chunks: after the chunk numbered `afterChunkIndex`
+ * and before the next one. It is not a chunk and never counts toward
+ * `audioChunkCount`.
+ */
+export interface LocalTtsAudioGapEvent {
+  kind: "gap";
+  requestId: string;
+  model: LocalTtsModel;
+  afterChunkIndex: number;
+  sampleRate: number;
+  silenceSamples: number;
+  textUnitIndex: number;
+  textUnitTotal: number;
+}
+
+export type LocalTtsAudioStreamEvent = LocalTtsAudioChunkEvent | LocalTtsAudioGapEvent;
+
+// A resident Rust worker went away, and the model it had loaded with it:
+// evicted after idling, stopped on purpose (a cache clear, a respawn with new
+// settings, shutdown) or failed. The next request loads the model again.
+export interface LocalTtsModelEvictedEvent {
+  model: LocalTtsModel;
+  reason: "idle" | "stopped" | "failed";
 }
 
 export type DocumentImportResult =
@@ -117,7 +149,7 @@ export interface DocumentUrlImportResult {
   html: string;
 }
 
-interface DocumentsBridge {
+export interface DocumentsBridge {
   importDocument: () => Promise<DocumentImportResult>;
   importUrl: (url: string) => Promise<DocumentUrlImportResult>;
 }
@@ -126,11 +158,16 @@ interface ReaderLibraryBridge {
   listDocuments: () => Promise<unknown[]>;
   getDocument: (id: string) => Promise<unknown | null>;
   saveDocument: (document: unknown) => Promise<void>;
+  // Stores only the reading position. Optional so older preloads can omit it.
+  saveProgress?: (documentId: string, progress: unknown) => Promise<void>;
   deleteDocument: (id: string) => Promise<void>;
   getActiveDocumentId: () => Promise<string | null>;
   setActiveDocumentId: (id: string) => Promise<void>;
   saveAudio: (audio: unknown) => Promise<void>;
   getAudio: (documentId: string, sectionId: string) => Promise<unknown | null>;
+  // The signature of a section's complete cached audio, without its PCM.
+  // Optional so older preloads can omit it.
+  getAudioSignature?: (documentId: string, sectionId: string) => Promise<string | null>;
   deleteAudio: (documentId: string, sectionId?: string) => Promise<void>;
   // Quitting asks every window to write out its debounced Reader edits and
   // holds the shutdown until the listener's promise settles. Optional so test
@@ -144,6 +181,10 @@ interface LocalTtsBridge {
     requestId: string;
     payload?: Record<string, unknown>;
   }) => Promise<LocalTtsProbeResult>;
+  // Resolves once every audio chunk of the request has been delivered. With
+  // `onAudioChunk`, the request's chunks go to that listener alone instead of
+  // every `subscribeAudioChunk` listener. Cancelling the request stops its
+  // delivery at once.
   generate: (request: {
     model: LocalTtsModel;
     requestId: string;
@@ -153,6 +194,8 @@ interface LocalTtsBridge {
       sectionIndex: number;
       sectionCount: number;
     };
+  }, options?: {
+    onAudioChunk?: (event: LocalTtsAudioStreamEvent) => void;
   }) => Promise<LocalTtsGenerateResult>;
   warm?: (request: {
     model: LocalTtsModel;
@@ -160,6 +203,17 @@ interface LocalTtsBridge {
     modelPath?: string;
     modelRepo?: string;
   }) => Promise<LocalTtsWarmResult>;
+  // Keeps the named Qwen3 model resident while the lease is held, instead of
+  // evicting it after a minute of idling (main still frees it after 30 idle
+  // minutes). Loads nothing itself: pair it with `warm`. Call the returned
+  // function, once or more, to release the lease; a closing, crashing or
+  // reloading window releases its leases on its own.
+  keepWarm?: (request: {
+    model: "qwen3";
+    modelRepo: string;
+    modelPath: string;
+    mode?: "customVoice" | "voiceClone" | "voiceDesign";
+  }) => () => void;
   cancel: (request: {
     model: LocalTtsModel;
     requestId: string;
@@ -177,7 +231,9 @@ interface LocalTtsBridge {
     listener: (event: LocalTtsQwen3DownloadProgress) => void,
   ) => () => void;
   subscribeProgress: (listener: (event: LocalTtsProgressEvent) => void) => () => void;
-  subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;
+  // Chunks of the requests started without their own `onAudioChunk`.
+  subscribeAudioChunk: (listener: (event: LocalTtsAudioStreamEvent) => void) => () => void;
+  subscribeModelEvicted?: (listener: (event: LocalTtsModelEvictedEvent) => void) => () => void;
 }
 
 export interface Audio8LoadResult {
@@ -201,6 +257,10 @@ interface Audio8Bridge {
     requestId: string;
     text: string;
     voice: string;
+    /** Unsigned 32-bit sampling seed; omitted for a fresh one. */
+    seed?: number;
+    /** Sampling temperature, 0.1 to 1; omitted for the model's own. */
+    temperature?: number;
   }) => Promise<Audio8GenerateResult>;
   cancel: (request: { requestId: string }) => Promise<{ cancelled: boolean }>;
   getCacheInfo: () => Promise<LocalTtsCacheInfo>;

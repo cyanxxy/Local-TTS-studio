@@ -1,8 +1,5 @@
 import { memo } from "react";
 import { Loader2, RefreshCw, Sparkles, Square } from "lucide-react";
-import {
-  QUALITY_MIN, QUALITY_MAX, QUALITY_STEP,
-} from "../constants";
 import { useControlsContext } from "./ControlsContext";
 
 const WAVEFORM_BARS = [
@@ -34,7 +31,7 @@ const WaveformBars = memo(function WaveformBars() {
 
 export function Controls() {
   const {
-    activeModel,
+    qualityRange,
     quality,
     onQualityChange,
     onGenerate,
@@ -55,8 +52,8 @@ export function Controls() {
   return (
     <div className="flex flex-col gap-5">
 
-      {/* Quality slider — Supertonic only */}
-      {activeModel === "supertonic" && (
+      {/* Quality slider — only for engines with a step range */}
+      {qualityRange && (
         <div>
           <div className="flex items-baseline justify-between mb-2.5">
             <label className="text-sm font-semibold text-text-secondary">
@@ -68,9 +65,9 @@ export function Controls() {
           </div>
           <input
             type="range"
-            min={QUALITY_MIN}
-            max={QUALITY_MAX}
-            step={QUALITY_STEP}
+            min={qualityRange.min}
+            max={qualityRange.max}
+            step={qualityRange.step}
             value={quality}
             onChange={(e) => onQualityChange(parseInt(e.target.value))}
           />

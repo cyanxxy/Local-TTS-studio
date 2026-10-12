@@ -45,6 +45,28 @@ function installFailingDesktopBridge(cause: Error) {
 
 // A desktop bridge whose writes are held open, so a flush can be observed
 // separately from the write it is waiting on.
+function installProgressDesktopBridge() {
+  const seed = createReaderDocument({ id: "desktop-book", text: "A stored desktop book.", now: 100 });
+  const saveDocument = vi.fn<(document: unknown) => Promise<void>>(async () => undefined);
+  const saveProgress = vi.fn<(documentId: string, progress: unknown) => Promise<void>>(async () => undefined);
+  window.electron = {
+    isElectron: true,
+    readerLibrary: {
+      listDocuments: vi.fn(async () => [seed]),
+      getDocument: vi.fn(async () => seed),
+      saveDocument,
+      saveProgress,
+      deleteDocument: vi.fn(async () => undefined),
+      getActiveDocumentId: vi.fn(async () => seed.id),
+      setActiveDocumentId: vi.fn(async () => undefined),
+      saveAudio: vi.fn(async () => undefined),
+      getAudio: vi.fn(async () => null),
+      deleteAudio: vi.fn(async () => undefined),
+    },
+  };
+  return { saveDocument, saveProgress };
+}
+
 function installDeferredDesktopBridge() {
   const seed = createReaderDocument({ id: "desktop-book", text: "A stored desktop book.", now: 100 });
   const pendingSaves: Array<() => void> = [];
@@ -98,6 +120,21 @@ describe("useReaderLibrary", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.documents).toHaveLength(1);
     await waitFor(async () => expect(await listReaderDocuments()).toHaveLength(1));
+  });
+
+  it("keeps its identity across renders until its state changes", async () => {
+    const { result, rerender } = renderHook(() => useReaderLibrary("A library that settles."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const settled = result.current;
+
+    rerender();
+    expect(result.current).toBe(settled);
+
+    act(() => result.current.updateActiveMetadata({ title: "Renamed" }));
+    expect(result.current).not.toBe(settled);
+    expect(result.current.activeDocument?.title).toBe("Renamed");
+    expect(result.current.updateProgress).toBe(settled.updateProgress);
+    expect(result.current.saveAudio).toBe(settled.saveAudio);
   });
 
   it("does not let a delayed progress write overwrite a newer text save", async () => {
@@ -191,6 +228,85 @@ describe("useReaderLibrary", () => {
     expect(result.current.activeDocument?.notes[0].text).toBe("great");
   });
 
+  it("adds, recolours and removes highlights and stores each change", async () => {
+    const { result } = renderHook(() => useReaderLibrary("First words. Second words. Third words."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const id = result.current.activeDocument!.id;
+    const stored = async () => (await listReaderDocuments()).find((document) => document.id === id);
+
+    act(() => result.current.addHighlight({ start: 26, end: 40, color: "yellow" }));
+    // A drag that catches the space before the words is trimmed to them.
+    act(() => result.current.addHighlight({ start: 12, end: 26, color: "green" }));
+    // A range of whitespace highlights nothing.
+    act(() => result.current.addHighlight({ start: 12, end: 13, color: "blue" }));
+    const highlights = result.current.activeDocument!.highlights!;
+    expect(highlights.map(({ quote, color }) => ({ quote, color }))).toEqual([
+      { quote: "Second words.", color: "green" },
+      { quote: "Third words.", color: "yellow" },
+    ]);
+    await waitFor(async () => expect((await stored())?.highlights).toHaveLength(2));
+
+    const [second, third] = highlights;
+    act(() => result.current.updateHighlight(second.id, { color: "pink" }));
+    expect(result.current.activeDocument!.highlights![0]).toMatchObject({ id: second.id, color: "pink" });
+    expect(result.current.activeDocument!.highlights![0].updatedAt).toBeGreaterThan(second.updatedAt);
+    await waitFor(async () => expect((await stored())?.highlights?.[0].color).toBe("pink"));
+
+    const beforeInvalid = result.current.activeDocument;
+    act(() => result.current.updateHighlight(third.id, { color: "magenta" as never }));
+    act(() => result.current.removeHighlight("missing"));
+    expect(result.current.activeDocument).toBe(beforeInvalid);
+
+    act(() => result.current.removeHighlight(second.id));
+    expect(result.current.activeDocument!.highlights!.map((highlight) => highlight.id)).toEqual([third.id]);
+    await waitFor(async () => expect((await stored())?.highlights?.map((highlight) => highlight.id))
+      .toEqual([third.id]));
+  });
+
+  it("moves highlights with their words when the text is edited", async () => {
+    const seed = "Keep this phrase. Drop these words. Keep that phrase.";
+    const { result } = renderHook(() => useReaderLibrary(seed));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.addHighlight({ start: 0, end: 17, color: "yellow" }));
+    act(() => result.current.addHighlight({ start: 18, end: 35, color: "blue" }));
+    act(() => result.current.addHighlight({ start: 36, end: seed.length, color: "green" }));
+
+    // The section editor knows the span it replaced; the hint narrows the scan to it.
+    const edited = "Keep this phrase. Keep that phrase.";
+    act(() => result.current.updateActiveText(edited, {
+      preserveText: true,
+      deferStructure: true,
+      hint: { start: 18, previousEnd: 36, nextEnd: 18 },
+    }));
+
+    const highlights = result.current.activeDocument!.highlights!;
+    expect(highlights.map(({ quote, color }) => ({ quote, color }))).toEqual([
+      { quote: "Keep this phrase.", color: "yellow" },
+      { quote: "Keep that phrase.", color: "green" },
+    ]);
+    for (const highlight of highlights) {
+      expect(edited.slice(highlight.start, highlight.end)).toBe(highlight.quote);
+    }
+  });
+
+  it("ignores an edit hint that does not describe the edit", async () => {
+    const seed = "Alpha passage here. Beta passage here.";
+    const { result } = renderHook(() => useReaderLibrary(seed));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    act(() => result.current.addHighlight({ start: 20, end: seed.length, color: "yellow" }));
+    act(() => result.current.addBookmark({ label: "Beta", textOffset: 20, positionSec: 0 }));
+
+    const edited = `Intro. ${seed}`;
+    act(() => result.current.updateActiveText(edited, {
+      preserveText: true,
+      hint: { start: 30, previousEnd: 31, nextEnd: 31 },
+    }));
+
+    const document = result.current.activeDocument!;
+    expect(edited.slice(document.highlights![0].start, document.highlights![0].end)).toBe("Beta passage here.");
+    expect(document.bookmarks[0].textOffset).toBe(27);
+  });
+
   it("flushes pending text and progress when the hook unmounts", async () => {
     const { result, unmount } = renderHook(() => useReaderLibrary("Original reader text."));
     await waitFor(() => expect(result.current.loading).toBe(false));
@@ -207,6 +323,87 @@ describe("useReaderLibrary", () => {
       expect(stored?.text).toBe("Flushed reader text.");
       expect(stored?.progress.positionSec).toBe(3);
       expect(stored?.progress.textOffset).toBe(7);
+    });
+  });
+
+  it("remembers a book's listening profile with the book and ignores an unchanged one", async () => {
+    const { result } = renderHook(() => useReaderLibrary("Original reader text."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const profile = { engine: "kokoro", voice: "af_nova", playbackRate: 1.25 };
+
+    act(() => result.current.updateActiveListening(profile));
+    const saved = result.current.activeDocument!;
+    expect(saved.listening).toMatchObject(profile);
+    expect(saved.updatedAt).toBeGreaterThan(saved.createdAt - 1);
+
+    act(() => result.current.updateActiveListening(profile));
+    expect(result.current.activeDocument).toBe(saved);
+
+    await waitFor(async () => {
+      const stored = (await listReaderDocuments()).find((document) => document.id === saved.id);
+      expect(stored?.listening).toMatchObject(profile);
+    }, { timeout: 2_000 });
+  });
+
+  describe("progress persistence", () => {
+    it("throttles a moving position into small progress writes and never rewrites the book", async () => {
+      const { saveDocument, saveProgress } = installProgressDesktopBridge();
+      const { result } = renderHook(() => useReaderLibrary("Ignored seed text."));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      saveDocument.mockClear();
+
+      vi.useFakeTimers();
+      try {
+        for (let step = 1; step <= 10; step += 1) {
+          act(() => {
+            result.current.updateProgress({ positionSec: step, totalDurationSec: 60, textOffset: step });
+            vi.advanceTimersByTime(750);
+          });
+        }
+        // 7.5 s in: one write fired at the 5 s mark with the position it had then.
+        expect(saveProgress).toHaveBeenCalledTimes(1);
+        expect(saveProgress.mock.calls[0][1]).toMatchObject({ positionSec: 7 });
+        act(() => { vi.advanceTimersByTime(5_000); });
+        expect(saveProgress).toHaveBeenCalledTimes(2);
+        expect(saveProgress.mock.calls[1][1]).toMatchObject({ positionSec: 10 });
+        expect(saveDocument).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("writes the position at once on flushProgress and when the page is hidden", async () => {
+      const { saveProgress } = installProgressDesktopBridge();
+      const { result } = renderHook(() => useReaderLibrary("Ignored seed text."));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      vi.useFakeTimers();
+      try {
+        act(() => result.current.updateProgress({ positionSec: 3, totalDurationSec: 9, textOffset: 2 }));
+        expect(saveProgress).not.toHaveBeenCalled();
+        act(() => result.current.flushProgress());
+        expect(saveProgress).toHaveBeenCalledTimes(1);
+
+        act(() => result.current.updateProgress({ positionSec: 4, totalDurationSec: 9, textOffset: 3 }));
+        const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+        act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+        visibility.mockRestore();
+        expect(saveProgress).toHaveBeenCalledTimes(2);
+        expect(saveProgress.mock.calls[1][1]).toMatchObject({ positionSec: 4 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("flushes a pending position through the progress record on page hide", async () => {
+      const { saveDocument, saveProgress } = installProgressDesktopBridge();
+      const { result } = renderHook(() => useReaderLibrary("Ignored seed text."));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      saveDocument.mockClear();
+      act(() => result.current.updateProgress({ positionSec: 8, totalDurationSec: 9, textOffset: 5 }));
+      act(() => { window.dispatchEvent(new Event("pagehide")); });
+      expect(saveProgress).toHaveBeenCalledTimes(1);
+      expect(saveDocument).not.toHaveBeenCalled();
     });
   });
 

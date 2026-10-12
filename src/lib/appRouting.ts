@@ -1,18 +1,23 @@
-export type AppPage = "studio" | "reader" | "neutts" | "qwen3";
+import { ENGINES, SETUP_PAGE_ENGINE_IDS, type SetupPageEngineId } from "../models/registry";
+
+/** Studio, the Reader, the desktop Voice Library, and one desktop page per engine that has a setup page. */
+export type AppPage = "studio" | "reader" | "voices" | SetupPageEngineId;
 
 export const PAGE_TABS: Array<{ key: AppPage; label: string }> = [
   { key: "studio", label: "Studio" },
   { key: "reader", label: "Reader" },
-  { key: "neutts", label: "NeuTTS Nano" },
-  { key: "qwen3", label: "Qwen3-TTS" },
+  { key: "voices", label: "Voices" },
+  ...SETUP_PAGE_ENGINE_IDS.map((id) => ({ key: id, label: ENGINES[id].setupPage.tabLabel })),
 ];
 
-export const PAGE_PATH: Record<AppPage, string> = {
-  studio: "/studio",
-  reader: "/reader",
-  neutts: "/neutts",
-  qwen3: "/qwen3",
-};
+/** Every page lives at `/<page>`, under the entry's base path. */
+export const PAGE_PATH = Object.fromEntries(
+  PAGE_TABS.map(({ key }) => [key, `/${key}`]),
+) as Record<AppPage, string>;
+
+export function isSetupPage(page: AppPage): page is SetupPageEngineId {
+  return (SETUP_PAGE_ENGINE_IDS as readonly AppPage[]).includes(page);
+}
 
 function normalizePathname(pathname: string): string {
   return pathname.toLowerCase().replace(/\/+$/, "") || "/";
@@ -42,11 +47,13 @@ export function getPagePath(page: AppPage, routeBasePath = ""): string {
 
 export function getPageFromPath(pathname: string, showDesktopTabs: boolean, routeBasePath = ""): AppPage {
   const normalized = stripRouteBasePath(pathname, routeBasePath);
-  if (normalized === "/reader") return "reader";
-  if (normalized === "/studio") return "studio";
-  if (showDesktopTabs && normalized === "/neutts") return "neutts";
-  if (showDesktopTabs && normalized === "/qwen3") return "qwen3";
-  return "studio";
+  if (normalized === PAGE_PATH.reader) return "reader";
+  if (normalized === PAGE_PATH.studio) return "studio";
+  if (showDesktopTabs && normalized === PAGE_PATH.voices) return "voices";
+  const setupPage = showDesktopTabs
+    ? SETUP_PAGE_ENGINE_IDS.find((id) => PAGE_PATH[id] === normalized)
+    : undefined;
+  return setupPage ?? "studio";
 }
 
 export function getCanonicalPagePath(pathname: string, showDesktopTabs: boolean, routeBasePath = ""): string {

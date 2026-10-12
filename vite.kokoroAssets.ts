@@ -9,13 +9,28 @@ const KOKORO_ONNX_RUNTIME_DIST_CANDIDATES = [
   "node_modules/onnxruntime-web/dist",
 ];
 const KOKORO_BROWSER_BUILD_SUFFIX = "/node_modules/kokoro-js/dist/kokoro.web.js";
+// The same eSpeak NG build (phonemizer 1.2.1, English voices only) that
+// kokoro.web.js inlines, as a standalone module for the workers that phonemize
+// without kokoro-js (Kitten, Paradee, Piper). kokoro.web.js keeps its copy
+// private and bundles ONNX Runtime and Transformers.js beside it, so those
+// workers cannot share it.
+const PHONEMIZER_BUILD = "node_modules/phonemizer/dist/phonemizer.js";
 const KOKORO_BUNDLED_JSEP_WASM_URL_RE =
   /new URL\(\s*(["'])ort-wasm-simd-threaded\.jsep\.wasm\1\s*,\s*import\.meta\.url\s*\)/g;
 const KOKORO_ENV_WASM_PATHS_ONLY_RE =
   /const\s+(\w+)=\{set wasmPaths\((\w+)\)\{(\w+)\.backends\.onnx\.wasm\.wasmPaths=\2\},get wasmPaths\(\)\{return \3\.backends\.onnx\.wasm\.wasmPaths\}\};/;
+// kokoro-js keeps its phonemizer private: `async function df(text,
+// language = "a", normalize = true)` in 1.2.1, which generate() runs before
+// tokenizing with truncation at the model's 512-token context. The worker
+// re-runs that exact phonemizer to count tokens before generating.
+const KOKORO_PHONEMIZE_FUNCTION_RE = /async function ([\w$]+)\([\w$]+,[\w$]+="a",[\w$]+=!0\)/g;
+const KOKORO_EXPORTS_RE = /export\{([^{}]*\bas KokoroTTS\b[^{}]*)\};?\s*$/;
+// `?url` and `?raw` imports load the file's URL or text, not the module.
+const ASSET_QUERY_RE = /[?&](?:url|raw)(?:&|$)/;
 
 function isKokoroBrowserBuild(id: string): boolean {
-  return normalizePath(id).split("?")[0].endsWith(KOKORO_BROWSER_BUILD_SUFFIX);
+  const normalized = normalizePath(id);
+  return normalized.split("?")[0].endsWith(KOKORO_BROWSER_BUILD_SUFFIX) && !ASSET_QUERY_RE.test(normalized);
 }
 
 function suppressKokoroBundledJsepWasmWarning(code: string): string {
@@ -43,12 +58,50 @@ function exposeKokoroWasmThreadConfig(code: string): string {
   );
 }
 
-function transformKokoroBrowserBuild(code: string): string {
-  return exposeKokoroWasmThreadConfig(suppressKokoroBundledJsepWasmWarning(code));
+function exposeKokoroPhonemizer(code: string): string {
+  const exports = KOKORO_EXPORTS_RE.exec(code);
+  if (!exports || /\bas phonemize\b/.test(exports[1])) return code;
+  const candidates = [...code.matchAll(KOKORO_PHONEMIZE_FUNCTION_RE)].map((match) => match[1]);
+  // Exporting the wrong function would be worse than exporting none.
+  if (candidates.length !== 1) return code;
+  return code.replace(KOKORO_EXPORTS_RE, (_match, list: string) => `export{${candidates[0]} as phonemize,${list}};`);
+}
+
+/**
+ * The source fixes kokoro.web.js needs. Each regex targets the minified
+ * kokoro-js 1.2.1 build that package.json pins; `missing` names every fix
+ * that did not apply, so a kokoro-js bump fails loudly instead of shipping a
+ * worker that silently lost its thread setting or token counting.
+ */
+export function transformKokoroBrowserBuild(code: string): { code: string; missing: string[] } {
+  const transformed = exposeKokoroPhonemizer(exposeKokoroWasmThreadConfig(suppressKokoroBundledJsepWasmWarning(code)));
+  const missing: string[] = [];
+  KOKORO_BUNDLED_JSEP_WASM_URL_RE.lastIndex = 0;
+  if (!transformed.includes("/* @vite-ignore */ ") || KOKORO_BUNDLED_JSEP_WASM_URL_RE.test(transformed)) {
+    missing.push("the ONNX Runtime JSEP wasm URL");
+  }
+  if (!transformed.includes("set numThreads(")) missing.push("the WASM numThreads setting");
+  if (!/\bas phonemize\b/.test(KOKORO_EXPORTS_RE.exec(transformed)?.[1] ?? "")) {
+    missing.push("the phonemize export");
+  }
+  return { code: transformed, missing };
+}
+
+function describeMissingPatches(missing: readonly string[]): string {
+  return `kokoro-js/dist/kokoro.web.js no longer matches the patches in vite.kokoroAssets.ts (${missing.join(", ")}). `
+    + "Re-verify every patch against the installed kokoro-js build.";
 }
 
 function resolveKokoroBrowserBuild(rootDir: string): string {
   return resolve(rootDir, `.${KOKORO_BROWSER_BUILD_SUFFIX}`);
+}
+
+function resolvePhonemizerBuild(rootDir: string): string {
+  const buildPath = resolve(rootDir, PHONEMIZER_BUILD);
+  if (!existsSync(buildPath)) {
+    throw new Error(`Missing phonemizer build: ${PHONEMIZER_BUILD}. Check the phonemizer dependency before building.`);
+  }
+  return normalizePath(buildPath);
 }
 
 function resolveKokoroOnnxRuntimeAsset(rootDir: string, filename: string): string {
@@ -79,7 +132,8 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
     transform(code, id) {
       if (!isKokoroBrowserBuild(id)) return null;
 
-      const transformed = transformKokoroBrowserBuild(code);
+      const { code: transformed, missing } = transformKokoroBrowserBuild(code);
+      if (missing.length > 0) this.warn(describeMissingPatches(missing));
       return transformed === code ? null : { code: transformed, map: null };
     },
     load(id) {
@@ -87,6 +141,7 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
 
       const mjsPath = resolveKokoroOnnxRuntimeAsset(rootDir, "ort-wasm-simd-threaded.jsep.mjs");
       const wasmPath = resolveKokoroOnnxRuntimeAsset(rootDir, "ort-wasm-simd-threaded.jsep.wasm");
+      const phonemizerPath = resolvePhonemizerBuild(rootDir);
 
       if (isBuild) {
         const mjsReferenceId = this.emitFile({
@@ -95,14 +150,23 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
           source: readFileSync(mjsPath),
         });
 
-        // Shipped byte-for-byte (after the two source fixes above) instead of
+        // Shipped byte-for-byte (after the source fixes above) instead of
         // being bundled: Rolldown's rewrite of the embedded espeak-ng runtime
         // leaves it with an empty voice list, so every phonemization fails
         // with `Invalid language identifier: "en-us"`.
+        const kokoroBuild = transformKokoroBrowserBuild(readFileSync(resolveKokoroBrowserBuild(rootDir), "utf8"));
+        if (kokoroBuild.missing.length > 0) throw new Error(describeMissingPatches(kokoroBuild.missing));
         const kokoroReferenceId = this.emitFile({
           type: "asset",
           name: "kokoro.web.js",
-          source: transformKokoroBrowserBuild(readFileSync(resolveKokoroBrowserBuild(rootDir), "utf8")),
+          source: kokoroBuild.code,
+        });
+        // Byte-for-byte as well, for the same reason: bundling it leaves
+        // eSpeak NG without voices.
+        const phonemizerReferenceId = this.emitFile({
+          type: "asset",
+          name: "phonemizer.js",
+          source: readFileSync(phonemizerPath),
         });
 
         return [
@@ -110,17 +174,21 @@ export function kokoroOnnxWasmAssetPlugin(rootDir: string = process.cwd()): Plug
           `const mjsUrl = import.meta.ROLLUP_FILE_URL_${mjsReferenceId};`,
           "export const KOKORO_ONNX_JSEP_ASSETS = { mjs: mjsUrl, wasm: wasmUrl };",
           `export const KOKORO_WEB_MODULE_URL = import.meta.ROLLUP_FILE_URL_${kokoroReferenceId};`,
+          `export const PHONEMIZER_MODULE_URL = import.meta.ROLLUP_FILE_URL_${phonemizerReferenceId};`,
         ].join("\n");
       }
 
-      // Dev serves the file as its own module through `transform` above, which
-      // keeps it out of dependency pre-bundling for the same reason.
+      // Dev serves both eSpeak NG builds as modules of their own (kokoro.web.js
+      // through `transform` above), which keeps them out of dependency
+      // pre-bundling for the same reason.
       return [
         `import mjsUrl from ${JSON.stringify(`${mjsPath}?url`)};`,
         `import wasmUrl from ${JSON.stringify(`${wasmPath}?url`)};`,
         `import kokoroUrl from ${JSON.stringify(`${resolveKokoroBrowserBuild(rootDir)}?url`)};`,
+        `import phonemizerUrl from ${JSON.stringify(`${phonemizerPath}?url`)};`,
         "export const KOKORO_ONNX_JSEP_ASSETS = { mjs: mjsUrl, wasm: wasmUrl };",
         "export const KOKORO_WEB_MODULE_URL = kokoroUrl;",
+        "export const PHONEMIZER_MODULE_URL = phonemizerUrl;",
       ].join("\n");
     },
   };

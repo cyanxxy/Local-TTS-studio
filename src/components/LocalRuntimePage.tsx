@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type {
   LocalTtsCacheInfo,
-  LocalTtsAudioChunkEvent,
   LocalTtsGenerateResult,
   LocalTtsModel,
   LocalTtsProgressEvent,
@@ -10,7 +9,10 @@ import type {
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { GenerationStats } from "../types";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
+import { useQwen3Warmup } from "../hooks/useQwen3Warmup";
+import { createLocalAudioAssembler, createLocalRequestId } from "../lib/localTtsStream";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
+import { clearStagedReference, useStagedReference, type StagedReference } from "../lib/voiceLibrary/stagedReference";
 import {
   hasPrimaryShortcutModifier,
   isEditableShortcutTarget,
@@ -40,6 +42,7 @@ import {
   formatBytes,
   sha256Hex,
   wavDurationSeconds,
+  type Float32AudioChunk,
   type StatusTone,
 } from "./localRuntime/utils";
 
@@ -49,8 +52,8 @@ interface LocalRuntimePageProps {
   name: string;
   releaseDate: string;
   params: string;
-  highlights: string[];
-  links: Array<{ label: string; href: string }>;
+  highlights: readonly string[];
+  links: ReadonlyArray<{ label: string; href: string }>;
   initialText?: string;
 }
 
@@ -80,31 +83,6 @@ function qwen3ReferenceGuidance(durationSec: number | null): StatusMessage {
   return { tone: "success", text: `Reference WAV loaded (${duration}).` };
 }
 
-interface ReceivedAudioChunk {
-  audio: ArrayBuffer;
-  sampleCount: number;
-  silenceAfterSamples: number;
-}
-
-function buildPlaybackSamples(chunk: ReceivedAudioChunk): Float32Array {
-  const samples = new Float32Array(chunk.audio, 0, chunk.sampleCount);
-  const silenceAfterSamples = Math.max(0, chunk.silenceAfterSamples);
-  const output = new Float32Array(samples.length + silenceAfterSamples);
-  for (let index = 0; index < samples.length; index += 1) {
-    const value = samples[index];
-    output[index] = Number.isFinite(value) ? value : 0;
-  }
-  return output;
-}
-
-function createLocalRequestId(model: LocalTtsModel): string {
-  return `${model}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function createProbeRequestId(model: LocalTtsModel): string {
-  return `${model}-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
 const GENERATION_TIMING_LABELS: Array<[string, string]> = [
   ["modelLoadSec", "load"],
   ["referenceEncodingSec", "reference"],
@@ -132,7 +110,7 @@ function formatStartingGenerationStatus(model: LocalTtsModel, profileLabel: stri
   return `Starting Qwen3 ${profileLabel} with ${provider}.`;
 }
 
-export function LocalRuntimePage({
+function LocalRuntimePageBody({
   active = true,
   model,
   name,
@@ -162,6 +140,22 @@ export function LocalRuntimePage({
 
   const [qwen3ReferenceAudioGuidance, setQwen3ReferenceAudioGuidance] = useState<StatusMessage>(null);
 
+  // A reference the Voice Library sent here. It is taken during render, so the
+  // page never paints the old reference first, and then released.
+  const stagedNeutts = useStagedReference("neutts");
+  const [takenStaged, setTakenStaged] = useState<StagedReference | null>(null);
+  if (model === "neutts" && stagedNeutts && stagedNeutts !== takenStaged) {
+    setTakenStaged(stagedNeutts);
+    setReferenceText(stagedNeutts.transcript);
+    setReferenceAudioName(`${stagedNeutts.name} (Voice Library)`);
+    setReferenceWavBase64(stagedNeutts.wavBase64);
+    setReferenceCodesBase64(null);
+    setReferenceAudioGuidance({ tone: "success", text: "Reference loaded from the Voice Library." });
+  }
+  useEffect(() => {
+    if (takenStaged) clearStagedReference("neutts");
+  }, [takenStaged]);
+
   const [generateBusy, setGenerateBusy] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<LocalTtsProgressEvent | null>(null);
   const [result, setResult] = useState<LocalTtsGenerateResult | null>(null);
@@ -175,9 +169,15 @@ export function LocalRuntimePage({
   const activeRequestIdRef = useRef<string | null>(null);
   const activeProbeRequestIdRef = useRef<string | null>(null);
   const activeRequestGenerationVersionRef = useRef<number | null>(null);
-  const streamedAudioChunksRef = useRef<ReceivedAudioChunk[]>([]);
+  // The PCM of the finished request, kept to build its WAV once at completion.
+  const streamedAudioChunksRef = useRef<Float32AudioChunk[]>([]);
   const streamedAudioSampleRateRef = useRef<number | null>(null);
   const scheduledAudioChunkCountRef = useRef(0);
+  // Puts streamed audio back in order. It never changes, so the bridge
+  // subscription survives re-renders; its sink tracks the latest props.
+  const [assembler] = useState(() => createLocalAudioAssembler());
+  const pendingChunkStatusRef = useRef<StatusMessage>(null);
+  const chunkStatusFlushCancelRef = useRef<(() => void) | null>(null);
   const pendingGenerationProgressRef = useRef<LocalTtsProgressEvent | null>(null);
   const generationProgressFlushCancelRef = useRef<(() => void) | null>(null);
   const audioPlayer = useAudioPlayer();
@@ -185,9 +185,13 @@ export function LocalRuntimePage({
     beginStream: beginAudioStream,
     download: downloadAudio,
     endStream: endAudioStream,
+    getCurrentTime: getPlaybackTime,
     reset: resetAudioPlayer,
     scheduleChunk: scheduleAudioChunk,
+    skip: skipPlayback,
     stopAll: stopAudioPlayer,
+    togglePlay,
+    totalDuration: playerTotalDuration,
   } = audioPlayer;
 
   const electronAvailable = !!window.electron?.localTts;
@@ -224,10 +228,14 @@ export function LocalRuntimePage({
     streamedAudioChunksRef.current = [];
     streamedAudioSampleRateRef.current = null;
     scheduledAudioChunkCountRef.current = 0;
+    assembler.reset();
+    chunkStatusFlushCancelRef.current?.();
+    chunkStatusFlushCancelRef.current = null;
+    pendingChunkStatusRef.current = null;
     resetAudioPlayer();
     setAudioUrl(null);
     setResult(null);
-  }, [resetAudioPlayer]);
+  }, [assembler, resetAudioPlayer]);
 
   const invalidateGeneration = useCallback((options: { runtimeChanged?: boolean } = {}) => {
     generationVersionRef.current += 1;
@@ -295,7 +303,7 @@ export function LocalRuntimePage({
     if (!window.electron?.localTts) return;
     runtimeVersionRef.current += 1;
     const runtimeVersion = runtimeVersionRef.current;
-    const requestId = createProbeRequestId(model);
+    const requestId = createLocalRequestId(model, "probe");
 
     setRuntimeBusy(true);
     setGenerationProgress(null);
@@ -340,23 +348,6 @@ export function LocalRuntimePage({
   }, [isCurrentPageVersion, model]);
 
   useEffect(() => {
-    pageVersionRef.current += 1;
-    runtimeVersionRef.current += 1;
-    generationVersionRef.current += 1;
-    activeRequestIdRef.current = null;
-    activeProbeRequestIdRef.current = null;
-    activeRequestGenerationVersionRef.current = null;
-    setRuntime(null);
-    setRuntimeBusy(false);
-    setCacheInfo(null);
-    setCacheBusy(false);
-    setGenerationProgress(null);
-    setStatus(null);
-    setGenerateBusy(false);
-    clearGeneratedResult();
-  }, [clearGeneratedResult, model]);
-
-  useEffect(() => {
     if (!electronAvailable) return;
     const pageVersion = pageVersionRef.current;
 
@@ -372,28 +363,7 @@ export function LocalRuntimePage({
   }, [electronAvailable, model, refreshCacheInfo, refreshQwen3Setup, runProbe]);
 
   // Pre-warm the selected model inside the resident Rust worker.
-  const warmedKeyRef = useRef<string | null>(null);
-  const warmingKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (model !== "qwen3" || !electronAvailable || generateBusy) return;
-    const modelPath = qwen3.modelPath.trim();
-    if (!modelPath || qwen3.readiness === "missing") return;
-    const warmKey = `${qwen3.profile.repo}:${modelPath}`;
-    if (warmedKeyRef.current === warmKey || warmingKeyRef.current === warmKey) return;
-    warmingKeyRef.current = warmKey;
-    let active = true;
-    void window.electron?.localTts?.warm?.({
-      model,
-      mode: qwen3.profile.mode,
-      modelPath,
-      modelRepo: qwen3.profile.repo,
-    }).then((result) => {
-      if (active && result.warmed) warmedKeyRef.current = warmKey;
-    }).catch(() => undefined).finally(() => {
-      if (warmingKeyRef.current === warmKey) warmingKeyRef.current = null;
-    });
-    return () => { active = false; };
-  }, [electronAvailable, generateBusy, model, qwen3.modelPath, qwen3.profile, qwen3.readiness]);
+  useQwen3Warmup(model === "qwen3" && electronAvailable, generateBusy, qwen3);
 
   useEffect(() => {
     if (!electronAvailable || !window.electron?.localTts) return;
@@ -433,61 +403,73 @@ export function LocalRuntimePage({
   }, [electronAvailable, model]);
 
   useEffect(() => {
+    assembler.setSink((part) => {
+      const sampleRate = part.sampleRate;
+      const chunkNumber = part.chunkIndex + 1;
+      if (part.kind === "gap") {
+        // The WAV is rebuilt from the retained chunks, so the silence joins the
+        // chunk it follows.
+        const followed = streamedAudioChunksRef.current[part.chunkIndex];
+        if (followed) followed.silenceAfterSamples += part.samples.length;
+      } else {
+        streamedAudioSampleRateRef.current = sampleRate;
+        streamedAudioChunksRef.current[part.chunkIndex] = {
+          audio: part.samples.buffer as ArrayBuffer,
+          sampleCount: part.samples.length,
+          silenceAfterSamples: 0,
+        };
+        scheduledAudioChunkCountRef.current += 1;
+      }
+      // A gap carries its chunk's label, so it extends that chunk's segment
+      // instead of adding a segment of silence.
+      void scheduleAudioChunk({
+        audio: part.samples,
+        samplingRate: sampleRate,
+        text: `${name} chunk ${chunkNumber}`,
+        index: chunkNumber,
+        total: part.declaredTotal > 0 ? part.declaredTotal : chunkNumber,
+        textStart: 0,
+        textEnd: 0,
+        pauseAfterSec: part.pauseAfterSec,
+      }).catch((err: unknown) => {
+        if (!mountedRef.current) return;
+        setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
+      });
+      if (part.kind === "gap") return;
+
+      if (part.declaredTotal > 0 && scheduledAudioChunkCountRef.current === part.declaredTotal) {
+        const completeChunks = streamedAudioChunksRef.current.slice(0, part.declaredTotal);
+        setNewAudioUrl(float32ChunksToWavUrl(completeChunks, sampleRate));
+      }
+      // Chunks can arrive many times per frame: show only the latest status
+      // once per frame instead of re-rendering this whole page for each one.
+      pendingChunkStatusRef.current = {
+        tone: "info",
+        text: part.declaredTotal > 0
+          ? `Received audio chunk ${chunkNumber}/${part.declaredTotal}.`
+          : `Received streaming audio chunk ${chunkNumber}.`,
+      };
+      chunkStatusFlushCancelRef.current?.();
+      chunkStatusFlushCancelRef.current = scheduleNextUiFrame(() => {
+        chunkStatusFlushCancelRef.current = null;
+        const next = pendingChunkStatusRef.current;
+        pendingChunkStatusRef.current = null;
+        if (next && mountedRef.current) setStatus(next);
+      });
+    });
+  }, [assembler, name, scheduleAudioChunk, setNewAudioUrl]);
+
+  useEffect(() => {
     if (!electronAvailable || !window.electron?.localTts) return;
 
-    return window.electron.localTts.subscribeAudioChunk((event: LocalTtsAudioChunkEvent) => {
+    return window.electron.localTts.subscribeAudioChunk((event) => {
       if (!mountedRef.current) return;
       if (event.model !== model) return;
       if (event.requestId !== activeRequestIdRef.current) return;
       if (activeRequestGenerationVersionRef.current !== generationVersionRef.current) return;
-      if (event.sampleCount <= 0 || event.audio.byteLength !== event.sampleCount * Float32Array.BYTES_PER_ELEMENT) return;
-
-      if (event.index === 0 || streamedAudioSampleRateRef.current !== event.sampleRate) {
-        streamedAudioChunksRef.current = [];
-        streamedAudioSampleRateRef.current = event.sampleRate;
-      }
-
-      streamedAudioChunksRef.current[event.index] = {
-        audio: event.audio,
-        sampleCount: event.sampleCount,
-        silenceAfterSamples: event.silenceAfterSamples,
-      };
-
-      const sampleRate = streamedAudioSampleRateRef.current ?? event.sampleRate;
-      const displayTotal = event.total > 0 ? event.total : event.index + 1;
-      // Advance a cursor through newly contiguous chunks instead of slicing and
-      // filtering the complete stream for every transport frame. The previous
-      // implementation made long generations quadratic in chunk count.
-      while (scheduledAudioChunkCountRef.current < streamedAudioChunksRef.current.length) {
-        const chunkIndex = scheduledAudioChunkCountRef.current;
-        const chunk = streamedAudioChunksRef.current[chunkIndex];
-        if (!chunk) break;
-        scheduledAudioChunkCountRef.current += 1;
-        void scheduleAudioChunk({
-          audio: buildPlaybackSamples(chunk),
-          samplingRate: sampleRate,
-          text: `${name} chunk ${chunkIndex + 1}`,
-          index: chunkIndex + 1,
-          total: displayTotal,
-          pauseAfterSec: chunk.silenceAfterSamples / sampleRate,
-        }).catch((err: unknown) => {
-          if (!mountedRef.current) return;
-          setStatus({ tone: "error", text: err instanceof Error ? err.message : String(err) });
-        });
-      }
-
-      if (event.total > 0 && scheduledAudioChunkCountRef.current === event.total) {
-        const completeChunks = streamedAudioChunksRef.current.slice(0, event.total);
-        setNewAudioUrl(float32ChunksToWavUrl(completeChunks, event.sampleRate));
-      }
-      setStatus({
-        tone: "info",
-        text: event.total > 0
-          ? `Received audio chunk ${event.index + 1}/${event.total}.`
-          : `Received streaming audio chunk ${event.index + 1}.`,
-      });
+      assembler.accept(event);
     });
-  }, [electronAvailable, model, name, scheduleAudioChunk, setNewAudioUrl]);
+  }, [assembler, electronAvailable, model]);
 
   useEffect(() => () => {
     if (!window.electron?.localTts) return;
@@ -697,7 +679,7 @@ export function LocalRuntimePage({
     if (!window.electron?.localTts) return;
     const pageVersion = pageVersionRef.current;
     const generationVersion = generationVersionRef.current;
-    const requestId = createLocalRequestId(model);
+    const requestId = createLocalRequestId(model, "generate");
 
     clearGeneratedResult();
     beginAudioStream();
@@ -757,13 +739,18 @@ export function LocalRuntimePage({
       const expectedChunks = generated.audioChunkCount;
       const sampleRate = streamedAudioSampleRateRef.current;
       const chunks = streamedAudioChunksRef.current.slice(0, expectedChunks);
-      const completeChunks = chunks.filter((chunk): chunk is ReceivedAudioChunk => !!chunk);
+      const completeChunks = chunks.filter((chunk): chunk is Float32AudioChunk => !!chunk);
       if (sampleRate == null || expectedChunks <= 0 || completeChunks.length !== expectedChunks) {
         throw new Error("Generation returned incomplete streamed audio.");
       }
       setNewAudioUrl(float32ChunksToWavUrl(completeChunks, sampleRate));
       endAudioStream();
       setGenerationProgress(null);
+      // A chunk-progress status may still be waiting for the next frame; drop it
+      // so it cannot overwrite this final status.
+      chunkStatusFlushCancelRef.current?.();
+      chunkStatusFlushCancelRef.current = null;
+      pendingChunkStatusRef.current = null;
       setStatus({
         tone: "success",
         text: formatGenerationStatus(generated),
@@ -777,6 +764,11 @@ export function LocalRuntimePage({
       endAudioStream();
       clearGeneratedResult();
       setGenerationProgress(null);
+      // A chunk-progress status may still be waiting for the next frame; drop it
+      // so it cannot overwrite this final status.
+      chunkStatusFlushCancelRef.current?.();
+      chunkStatusFlushCancelRef.current = null;
+      pendingChunkStatusRef.current = null;
       const message = err instanceof Error ? err.message : String(err);
       setStatus({
         tone: /cancelled/i.test(message) ? "info" : "error",
@@ -848,61 +840,53 @@ export function LocalRuntimePage({
   const busy = runtimeBusy || cacheBusy || qwen3.setupBusy || qwen3.downloadBusy || generateBusy;
   const runtimeReady = runtime?.ready ?? false;
 
+  // An effect event always sees the latest runtime and player state, so the
+  // document listener below changes only when the page is shown or hidden.
+  const handleLocalRuntimeShortcut = useEffectEvent((event: KeyboardEvent) => {
+    if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+    const primaryModifier = hasPrimaryShortcutModifier(event);
+
+    if (primaryModifier && event.key === "Enter") {
+      if (electronAvailable && runtimeReady && canGenerate && !busy) {
+        event.preventDefault();
+        void runGeneration();
+      }
+      return;
+    }
+
+    if (primaryModifier && event.key === ".") {
+      if (generateBusy) {
+        event.preventDefault();
+        void cancelActiveGeneration();
+      }
+      return;
+    }
+
+    if (isEditableShortcutTarget(event.target)) return;
+
+    if (!primaryModifier && !event.altKey && event.code === "Space" && playerTotalDuration > 0) {
+      event.preventDefault();
+      void togglePlay();
+      return;
+    }
+
+    if (!primaryModifier && event.altKey && playerTotalDuration > 0) {
+      if (event.key === "ArrowLeft") {
+        event.preventDefault();
+        skipPlayback(-10);
+      } else if (event.key === "ArrowRight") {
+        event.preventDefault();
+        skipPlayback(10);
+      }
+    }
+  });
+
   useEffect(() => {
     if (!active) return;
-
-    const handleLocalRuntimeShortcut = (event: KeyboardEvent) => {
-      if (document.querySelector('[role="dialog"][aria-modal="true"]')) return;
-      const primaryModifier = hasPrimaryShortcutModifier(event);
-
-      if (primaryModifier && event.key === "Enter") {
-        if (electronAvailable && runtimeReady && canGenerate && !busy) {
-          event.preventDefault();
-          void runGeneration();
-        }
-        return;
-      }
-
-      if (primaryModifier && event.key === ".") {
-        if (generateBusy) {
-          event.preventDefault();
-          void cancelActiveGeneration();
-        }
-        return;
-      }
-
-      if (isEditableShortcutTarget(event.target)) return;
-
-      if (!primaryModifier && !event.altKey && event.code === "Space" && audioPlayer.totalDuration > 0) {
-        event.preventDefault();
-        void audioPlayer.togglePlay();
-        return;
-      }
-
-      if (!primaryModifier && event.altKey && audioPlayer.totalDuration > 0) {
-        if (event.key === "ArrowLeft") {
-          event.preventDefault();
-          audioPlayer.skip(-10);
-        } else if (event.key === "ArrowRight") {
-          event.preventDefault();
-          audioPlayer.skip(10);
-        }
-      }
-    };
-
-    document.addEventListener("keydown", handleLocalRuntimeShortcut);
-    return () => document.removeEventListener("keydown", handleLocalRuntimeShortcut);
-  }, [
-    active,
-    audioPlayer,
-    busy,
-    canGenerate,
-    cancelActiveGeneration,
-    electronAvailable,
-    generateBusy,
-    runGeneration,
-    runtimeReady,
-  ]);
+    const listener = (event: KeyboardEvent) => handleLocalRuntimeShortcut(event);
+    document.addEventListener("keydown", listener);
+    return () => document.removeEventListener("keydown", listener);
+  }, [active]);
 
   const activeSegmentNumber = useMemo(() => {
     if (!audioPlayer.activeSegmentId) return null;
@@ -911,7 +895,7 @@ export function LocalRuntimePage({
   }, [audioPlayer.activeSegmentId, audioPlayer.segments]);
   const playerStats = useMemo<GenerationStats>(() => {
     const processingTime = result?.elapsedSec ?? 0;
-    const duration = audioPlayer.totalDuration || result?.durationSec || 0;
+    const duration = playerTotalDuration || result?.durationSec || 0;
     return {
       firstLatency: null,
       processingTime,
@@ -920,9 +904,9 @@ export function LocalRuntimePage({
       totalDuration: duration,
       // See the note in useQwen3LocalRuntime: sampled, not tracked, so the stats
       // object does not churn on every animation frame.
-      currentDuration: audioPlayer.getCurrentTime(),
+      currentDuration: getPlaybackTime(),
     };
-  }, [audioPlayer, result, text]);
+  }, [getPlaybackTime, playerTotalDuration, result, text]);
   const handleDownloadAudio = useCallback(() => {
     const url = audioUrlRef.current;
     if (url) {
@@ -1100,10 +1084,10 @@ export function LocalRuntimePage({
               activeSegmentNumber={activeSegmentNumber}
               stats={playerStats}
               isGenerating={generateBusy}
-              onTogglePlay={audioPlayer.togglePlay}
+              onTogglePlay={togglePlay}
               onSeek={audioPlayer.seek}
-              onSkipBackward={() => audioPlayer.skip(-10)}
-              onSkipForward={() => audioPlayer.skip(10)}
+              onSkipBackward={() => skipPlayback(-10)}
+              onSkipForward={() => skipPlayback(10)}
               onDownload={handleDownloadAudio}
               onStop={generateBusy ? () => { void cancelActiveGeneration(); } : stopAudioPlayer}
             />
@@ -1140,4 +1124,12 @@ export function LocalRuntimePage({
       />
     </div>
   );
+}
+
+/**
+ * A page's state belongs to the model it is showing, so switching models
+ * mounts a fresh page rather than resetting this one's state by hand.
+ */
+export function LocalRuntimePage(props: LocalRuntimePageProps) {
+  return <LocalRuntimePageBody key={props.model} {...props} />;
 }

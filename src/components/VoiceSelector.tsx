@@ -1,32 +1,19 @@
 import { useState, useRef, useEffect, useId } from "react";
 import { ChevronDown, Check } from "lucide-react";
-import type { ModelType } from "../types";
-import { MODELS } from "../constants";
+import type { ModelState, ModelType } from "../types";
+import { engineVoices } from "../models/registry";
+import type { EngineVoice } from "../models/types";
+import { ChatterboxVoiceControls } from "./ChatterboxVoiceControls";
+import { PiperVoiceBrowser } from "./PiperVoiceBrowser";
 
 interface VoiceSelectorProps {
   activeModel: ModelType;
   voice: string;
   onVoiceChange: (voice: string) => void;
+  /** Voices the loaded Kokoro model reported; other engines list their own. */
   kokoroVoices: string[];
-}
-
-const GROUP_LABELS: Record<string, string> = {
-  af: "American · Female",
-  am: "American · Male",
-  bf: "British · Female",
-  bm: "British · Male",
-};
-
-/** "af_heart" → "Heart" */
-function formatVoiceName(id: string): string {
-  const i = id.indexOf("_");
-  if (i === -1) return id;
-  const name = id.slice(i + 1).replace(/_/g, " ");
-  return name.charAt(0).toUpperCase() + name.slice(1);
-}
-
-function getGroup(id: string): string {
-  return GROUP_LABELS[id.slice(0, 2)] ?? "Other";
+  /** The active browser engine's load state; Piper reports its voice downloads through it. */
+  modelState?: ModelState;
 }
 
 export function VoiceSelector({
@@ -34,6 +21,7 @@ export function VoiceSelector({
   voice,
   onVoiceChange,
   kokoroVoices,
+  modelState,
 }: VoiceSelectorProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -41,10 +29,7 @@ export function VoiceSelector({
   const openRef = useRef(open);
   const menuId = useId();
 
-  const voices =
-    activeModel === "supertonic"
-      ? [...MODELS.supertonic.voices]
-      : kokoroVoices;
+  const voices = engineVoices(activeModel, { runtimeVoices: kokoroVoices });
 
   useEffect(() => {
     openRef.current = open;
@@ -61,6 +46,17 @@ export function VoiceSelector({
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
+  // Piper's twenty-odd voices need a browser of their own: grouped, filterable,
+  // with sizes, licences and attribution.
+  if (activeModel === "piper") {
+    return <PiperVoiceBrowser voice={voice} onVoiceChange={onVoiceChange} modelState={modelState} />;
+  }
+
+  // Chatterbox clones a reference clip instead of choosing from a list.
+  if (activeModel === "chatterbox") {
+    return <ChatterboxVoiceControls voice={voice} onVoiceChange={onVoiceChange} />;
+  }
+
   if (voices.length === 0) {
     return (
       <div className="flex flex-col gap-1.5">
@@ -70,24 +66,27 @@ export function VoiceSelector({
     );
   }
 
-  if (activeModel === "supertonic") {
+  // A short, ungrouped catalogue reads best as buttons; a grouped one (Kokoro's
+  // accents) gets a menu with a section per group.
+  if (!voices.every((entry) => entry.group)) {
     return (
       <div className="flex flex-col gap-1.5">
         <span className="text-sm font-semibold text-text-secondary">Voice</span>
         <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-          {voices.map((v) => (
+          {voices.map((entry) => (
             <button
-              key={v}
+              key={entry.id}
               type="button"
-              aria-pressed={voice === v}
-              onClick={() => onVoiceChange(v)}
+              aria-pressed={voice === entry.id}
+              onClick={() => onVoiceChange(entry.id)}
               className={`flex-1 py-2 px-3 text-sm rounded-xl border transition-all duration-200 ${
-                voice === v
+                voice === entry.id
                   ? "border-accent/40 bg-accent-light text-text-primary font-medium shadow-accent-sm"
                   : "border-border bg-text-primary/[0.03] text-text-muted hover:bg-text-primary/[0.07] hover:text-text-primary"
               }`}
             >
-              {v}
+              {entry.label}
+              {entry.detail && <span className="block text-2xs font-normal text-text-muted">{entry.detail}</span>}
             </button>
           ))}
         </div>
@@ -95,12 +94,11 @@ export function VoiceSelector({
     );
   }
 
-  // Kokoro: group by accent
-  const groups: Record<string, string[]> = {};
-  for (const v of voices) {
-    const g = getGroup(v);
-    (groups[g] ??= []).push(v);
+  const groups: Record<string, EngineVoice[]> = {};
+  for (const entry of voices) {
+    (groups[entry.group ?? "Other"] ??= []).push(entry);
   }
+  const selectedLabel = voices.find((entry) => entry.id === voice)?.label ?? voice;
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -123,7 +121,7 @@ export function VoiceSelector({
           aria-controls={open ? menuId : undefined}
           className="w-full flex items-center gap-2 px-3 py-2.5 text-sm rounded-xl border border-border bg-text-primary/[0.04] text-text-primary transition-all duration-200 hover:bg-text-primary/[0.07] active:scale-[0.98]"
         >
-          <span className="flex-1 text-left">{formatVoiceName(voice)}</span>
+          <span className="flex-1 text-left">{selectedLabel}</span>
           <ChevronDown
             size={14}
             className={`text-text-muted transition-transform duration-200 flex-shrink-0 ${open ? "rotate-180" : ""}`}
@@ -152,21 +150,21 @@ export function VoiceSelector({
                   <div className="px-3 pt-2.5 pb-1 text-xs font-semibold text-text-secondary">
                     {groupLabel}
                   </div>
-                  {groupVoices.map((v) => (
+                  {groupVoices.map((entry) => (
                     <button
-                      key={v}
+                      key={entry.id}
                       type="button"
                       role="menuitemradio"
-                      aria-checked={v === voice}
-                      onClick={() => { onVoiceChange(v); setOpen(false); }}
+                      aria-checked={entry.id === voice}
+                      onClick={() => { onVoiceChange(entry.id); setOpen(false); }}
                       className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-all duration-150 active:scale-[0.97] ${
-                        v === voice
+                        entry.id === voice
                           ? "text-text-primary bg-accent-light font-medium"
                           : "text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
                       }`}
                     >
-                      {formatVoiceName(v)}
-                      {v === voice && <Check size={12} className="text-accent flex-shrink-0" />}
+                      {entry.label}
+                      {entry.id === voice && <Check size={12} className="text-accent flex-shrink-0" />}
                     </button>
                   ))}
                 </div>

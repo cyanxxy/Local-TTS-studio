@@ -7,14 +7,45 @@ import { fileURLToPath } from "node:url";
 import electronPath from "electron";
 import { createServer } from "vite";
 import {
+  BENCHMARK_MODEL_SELECTIONS,
   createElectronOutputParser,
+  formatModelSummary,
   getRequestedModelExitCode,
 } from "./inference-speed-output.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const rootDir = path.resolve(path.dirname(scriptPath), "..");
-export const REPORT_SCHEMA_VERSION = 3;
-const BENCHMARK_MODELS = new Set(["both", "kokoro", "supertonic"]);
+// 4: generations run on a second, warm-loaded worker; adds coldLoadMs,
+// warmLoadMs, firstChunkMs, and the first-chunk median and best.
+export const REPORT_SCHEMA_VERSION = 4;
+
+export const USAGE = `Usage: npm run eval:inference -- [options]
+
+Benchmarks the browser Web Worker runtimes in a hidden Electron window and
+writes a JSON report.
+
+Options:
+  --model <name>       Runtimes to benchmark (default: both):
+                         kokoro       Kokoro
+                         supertonic   Supertonic 2
+                         supertonic3  Supertonic 3
+                         both         Kokoro and Supertonic 2
+                         all          Kokoro, Supertonic 2, and Supertonic 3
+  --iterations <n>     Measured generations per model, 1-100 (default: 3)
+  --warmups <n>        Unmeasured generations before them, 0-100 (default: 1)
+  --quality <n>        Quality/steps, 1-20 (default: 5)
+  --speed <n>          Speech speed, 0.85-1.15 (default: 1)
+  --timeout-ms <n>     Per-step and overall timeout, at least 1000 (default: 900000)
+  --port <n>           Preferred Vite port (default: 5174)
+  --text <text>        Input text (default: a built-in passage)
+  --text-file <path>   Read the input text from a file
+  --report-dir <path>  Report directory (default: reports/inference-speed)
+  --baseline <path>    Compare against a previous report
+  -h, --help           Show this help
+
+Each model records cold load (first LOAD on a fresh worker), warm load (LOAD
+on a second fresh worker, from the cache), first-audio latency, generation
+time, characters per second, real-time factor, and backend.`;
 
 const COMPARISON_FIELD_LABELS = {
   schemaVersion: "report schema version",
@@ -55,6 +86,7 @@ export function parseArgs(argv) {
     baseline: null,
     text: null,
     textFile: null,
+    help: false,
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -72,6 +104,11 @@ export function parseArgs(argv) {
       return value;
     };
 
+    if (arg === "--help" || arg === "-h") {
+      options.help = true;
+      continue;
+    }
+
     let value;
     if ((value = readValue("--model")) !== null) options.model = value;
     else if ((value = readValue("--iterations")) !== null) options.iterations = Number(value);
@@ -84,11 +121,11 @@ export function parseArgs(argv) {
     else if ((value = readValue("--baseline")) !== null) options.baseline = path.resolve(rootDir, value);
     else if ((value = readValue("--text-file")) !== null) options.textFile = path.resolve(rootDir, value);
     else if ((value = readValue("--text")) !== null) options.text = value;
-    else throw new Error(`Unknown inference benchmark option: ${arg}`);
+    else throw new Error(`Unknown inference benchmark option: ${arg}. Run with --help for usage.`);
   }
 
-  if (!BENCHMARK_MODELS.has(options.model)) {
-    throw new Error(`--model must be one of: ${[...BENCHMARK_MODELS].join(", ")}.`);
+  if (!BENCHMARK_MODEL_SELECTIONS.includes(options.model)) {
+    throw new Error(`--model must be one of: ${BENCHMARK_MODEL_SELECTIONS.join(", ")}.`);
   }
   if (!Number.isInteger(options.iterations) || options.iterations < 1 || options.iterations > 100) {
     throw new Error("--iterations must be an integer between 1 and 100.");
@@ -306,6 +343,10 @@ export function summarizeComparison(result, baseline) {
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.help) {
+    console.log(USAGE);
+    return;
+  }
   if (options.textFile) {
     options.text = await readFile(options.textFile, "utf8");
   }
@@ -363,11 +404,7 @@ async function main() {
 
     console.log(`Inference speed report: ${reportPath}`);
     for (const model of result.models) {
-      if (model.error) {
-        console.log(`${model.model}: ERROR ${model.error}`);
-        continue;
-      }
-      console.log(`${model.model}: mean ${model.summary.meanGenerationMs.toFixed(1)}ms, ${model.summary.meanCharsPerSec.toFixed(1)} chars/s, RTF ${model.summary.meanRtf.toFixed(3)}, backend ${model.backend}`);
+      console.log(formatModelSummary(model));
     }
 
     if (result.comparison?.length) {

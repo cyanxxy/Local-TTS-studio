@@ -1,11 +1,15 @@
 import { ExternalLink } from "lucide-react";
 import type { LocalTtsCacheInfo } from "../electron";
 import { AUDIO8_MODEL_DOWNLOAD_LABEL, AUDIO8_MODEL_URL, AUDIO8_VOICES } from "../constants";
+import { AUDIO8_TEMPERATURE_RANGE, type Audio8Settings } from "../models/audio8";
+import { SeedField } from "./SeedField";
 import { formatBytes, statusClass, type StatusTone } from "./localRuntime/utils";
 
 interface Audio8InlineSettingsProps {
   voice: string;
   onVoiceChange: (voice: string) => void;
+  settings: Audio8Settings;
+  onSamplingChange: (patch: Partial<Pick<Audio8Settings, "seed" | "temperature">>) => void;
   cacheInfo: LocalTtsCacheInfo | null;
   cacheBusy: boolean;
   cacheStatus: { tone: StatusTone; text: string } | null;
@@ -15,6 +19,8 @@ interface Audio8InlineSettingsProps {
 export function Audio8InlineSettings({
   voice,
   onVoiceChange,
+  settings,
+  onSamplingChange,
   cacheInfo,
   cacheBusy,
   cacheStatus,
@@ -43,6 +49,33 @@ export function Audio8InlineSettings({
           ))}
         </div>
       </div>
+      <div>
+        <div className="mb-1 flex items-baseline justify-between">
+          <label htmlFor="audio8-temperature" className="text-xs font-medium text-text-secondary">Variation (temperature)</label>
+          <span className="font-mono text-xs tabular-nums text-text-primary">
+            {settings.temperature === null ? "Default" : settings.temperature.toFixed(2)}
+          </span>
+        </div>
+        <input
+          id="audio8-temperature"
+          type="range"
+          min={AUDIO8_TEMPERATURE_RANGE.min}
+          max={AUDIO8_TEMPERATURE_RANGE.max}
+          step={AUDIO8_TEMPERATURE_RANGE.step}
+          value={settings.temperature ?? AUDIO8_TEMPERATURE_RANGE.max}
+          onChange={(event) => onSamplingChange({ temperature: event.target.valueAsNumber })}
+        />
+        {settings.temperature !== null && (
+          <button
+            type="button"
+            onClick={() => onSamplingChange({ temperature: null })}
+            className="mt-1 text-2xs text-text-muted underline hover:text-text-primary"
+          >
+            Use the model default
+          </button>
+        )}
+      </div>
+      <SeedField seed={settings.seed} onChange={(seed) => onSamplingChange({ seed })} />
       <p className="rounded-xl border border-accent/15 bg-accent-light/60 px-3 py-2 text-xs leading-5 text-text-secondary">
         Runs fully on-device after a one-time {AUDIO8_MODEL_DOWNLOAD_LABEL} model download. Text and generated audio stay local. {" "}
         <a

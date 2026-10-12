@@ -1,13 +1,26 @@
 // @vitest-environment node
 
-import { mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets";
+import { kokoroOnnxWasmAssetPlugin, transformKokoroBrowserBuild } from "./vite.kokoroAssets";
 
-function makeAssetRoot(): string {
+// The shapes every patch targets, as they appear in kokoro-js 1.2.1's minified build.
+const FAKE_KOKORO_BUILD = [
+  'const fallbackUrl = new URL("ort-wasm-simd-threaded.jsep.wasm", import.meta.url).href;',
+  'async function df(e,A="a",t=!0){return e}',
+  "class Ef{}class kf{}",
+  "const Mf={set wasmPaths(e){Wg.backends.onnx.wasm.wasmPaths=e},get wasmPaths(){return Wg.backends.onnx.wasm.wasmPaths}};",
+  "export{Ef as KokoroTTS,kf as TextSplitterStream,Mf as env};",
+].join("");
+
+const FAKE_PHONEMIZER_BUILD = "export const phonemize = async () => [];\n";
+
+function makeAssetRoot(kokoroBuild: string = FAKE_KOKORO_BUILD, { phonemizer = true } = {}): string {
   const root = mkdtempSync(join(tmpdir(), "kokoro-assets-"));
   const assetDir = join(root, "node_modules/kokoro-js/node_modules/onnxruntime-web/dist");
   mkdirSync(assetDir, { recursive: true });
@@ -15,10 +28,12 @@ function makeAssetRoot(): string {
   writeFileSync(join(assetDir, "ort-wasm-simd-threaded.jsep.wasm"), "");
   const kokoroDir = join(root, "node_modules/kokoro-js/dist");
   mkdirSync(kokoroDir, { recursive: true });
-  writeFileSync(
-    join(kokoroDir, "kokoro.web.js"),
-    'const fallbackUrl = new URL("ort-wasm-simd-threaded.jsep.wasm", import.meta.url).href;',
-  );
+  writeFileSync(join(kokoroDir, "kokoro.web.js"), kokoroBuild);
+  if (phonemizer) {
+    const phonemizerDir = join(root, "node_modules/phonemizer/dist");
+    mkdirSync(phonemizerDir, { recursive: true });
+    writeFileSync(join(phonemizerDir, "phonemizer.js"), FAKE_PHONEMIZER_BUILD);
+  }
   return root;
 }
 
@@ -51,8 +66,8 @@ function loadVirtualModule(plugin: KokoroPlugin, context: object = {}): string {
   return String(loadModule(plugin, "\0virtual:kokoro-onnx-wasm-assets", context));
 }
 
-function transformCode(plugin: KokoroPlugin, code: string, id: string): string | null {
-  const result = pluginHook(plugin.transform, "transform").call({}, code, id);
+function transformCode(plugin: KokoroPlugin, code: string, id: string, warn = vi.fn()): string | null {
+  const result = pluginHook(plugin.transform, "transform").call({ warn }, code, id);
   if (typeof result === "string") return result;
   if (result && typeof result === "object" && "code" in result) {
     return String(result.code);
@@ -107,7 +122,35 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
       .find((file) => file.name === "kokoro.web.js");
 
     expect(kokoroAsset?.source).toContain("/* @vite-ignore */");
+    expect(kokoroAsset?.source).toContain("export{df as phonemize,Ef as KokoroTTS,kf as TextSplitterStream,Mf as env};");
     expect(code).toContain("export const KOKORO_WEB_MODULE_URL = import.meta.ROLLUP_FILE_URL_kokoroRef;");
+  });
+
+  it("ships phonemizer.js byte-for-byte as an unbundled asset during build", () => {
+    const plugin = kokoroOnnxWasmAssetPlugin(makeAssetRoot());
+    const emitFile = vi.fn<(file: { type: string; name: string; source: Uint8Array | string }) => string>(
+      (file) => (file.name === "phonemizer.js" ? "phonemizerRef" : "otherRef"),
+    );
+
+    pluginHook(plugin.configResolved, "configResolved").call({}, { command: "build" } as never);
+    const code = loadVirtualModule(plugin, { emitFile });
+    const phonemizerAssets = emitFile.mock.calls.map(([file]) => file).filter((file) => file.name === "phonemizer.js");
+
+    expect(phonemizerAssets).toHaveLength(1);
+    expect(phonemizerAssets[0].type).toBe("asset");
+    expect(Buffer.from(phonemizerAssets[0].source).toString("utf8")).toBe(FAKE_PHONEMIZER_BUILD);
+    expect(code).toContain("export const PHONEMIZER_MODULE_URL = import.meta.ROLLUP_FILE_URL_phonemizerRef;");
+    expect(code).not.toContain("phonemizer.js?url");
+  });
+
+  it("fails the build when a kokoro-js patch no longer applies", () => {
+    const root = makeAssetRoot('const fallbackUrl = new URL("ort-wasm-simd-threaded.jsep.wasm", import.meta.url).href;');
+    const plugin = kokoroOnnxWasmAssetPlugin(root);
+
+    pluginHook(plugin.configResolved, "configResolved").call({}, { command: "build" } as never);
+
+    expect(() => loadVirtualModule(plugin, { emitFile: vi.fn(() => "ref") }))
+      .toThrow("kokoro-js/dist/kokoro.web.js no longer matches the patches in vite.kokoroAssets.ts (the WASM numThreads setting, the phonemize export).");
   });
 
   it("serves kokoro.web.js by URL during dev", () => {
@@ -117,21 +160,45 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
     expect(code).toContain("export const KOKORO_WEB_MODULE_URL = kokoroUrl;");
   });
 
+  it("serves phonemizer.js by URL during dev so it skips dependency pre-bundling", () => {
+    const code = loadVirtualModule(kokoroOnnxWasmAssetPlugin(makeAssetRoot()));
+
+    expect(code).toContain("phonemizer/dist/phonemizer.js?url");
+    expect(code).toContain("export const PHONEMIZER_MODULE_URL = phonemizerUrl;");
+  });
+
   it("suppresses Vite asset rewriting for Kokoro's bundled ONNX JSEP wasm fallback", () => {
     const root = makeAssetRoot();
     const plugin = kokoroOnnxWasmAssetPlugin(root);
     const code =
       'const fallbackUrl = new URL("ort-wasm-simd-threaded.jsep.wasm", import.meta.url).href;';
 
+    const warn = vi.fn();
     const transformed = transformCode(
       plugin,
       code,
       join(root, "node_modules/kokoro-js/dist/kokoro.web.js"),
+      warn,
     );
 
     expect(transformed).toContain(
       'new URL(/* @vite-ignore */ "ort-wasm-simd-threaded.jsep.wasm", import.meta.url)',
     );
+    // A partial build is still served in dev, with a warning naming what is missing.
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("(the WASM numThreads setting, the phonemize export)"));
+  });
+
+  it("leaves the dev server's ?url import of kokoro.web.js alone", () => {
+    const root = makeAssetRoot();
+    const plugin = kokoroOnnxWasmAssetPlugin(root);
+    const warn = vi.fn();
+    const id = join(root, "node_modules/kokoro-js/dist/kokoro.web.js");
+
+    // The virtual module imports the build with ?url, which loads as a
+    // one-line module exporting the URL; only the module itself is patched.
+    expect(transformCode(plugin, `export default "/@fs${id}"`, `${id}?url`, warn)).toBeNull();
+    expect(transformCode(plugin, FAKE_KOKORO_BUILD, `${id}?t=1700000000000`, warn)).toContain("as phonemize");
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it("exposes Kokoro's internal ONNX Runtime wasm thread setting", () => {
@@ -150,10 +217,61 @@ describe("kokoroOnnxWasmAssetPlugin", () => {
     expect(transformed).toContain("get numThreads(){return Wg.backends.onnx.wasm.numThreads}");
   });
 
+  it("re-exports kokoro-js's private phonemizer exactly once", () => {
+    const { code, missing } = transformKokoroBrowserBuild(FAKE_KOKORO_BUILD);
+
+    expect(missing).toEqual([]);
+    expect(code.endsWith("export{df as phonemize,Ef as KokoroTTS,kf as TextSplitterStream,Mf as env};")).toBe(true);
+    expect(transformKokoroBrowserBuild(code).code).toBe(code);
+  });
+
+  it("exports no phonemizer when the candidate is ambiguous", () => {
+    const ambiguous = FAKE_KOKORO_BUILD.replace("class Ef{}", 'async function zz(e,A="a",t=!0){return e}class Ef{}');
+    const { code, missing } = transformKokoroBrowserBuild(ambiguous);
+
+    expect(code).not.toContain("as phonemize");
+    expect(missing).toEqual(["the phonemize export"]);
+  });
+
+  it("applies every patch to the pinned kokoro-js build, whose phonemizer then runs", () => {
+    const pinned = readFileSync("node_modules/kokoro-js/dist/kokoro.web.js", "utf8");
+    const { code, missing } = transformKokoroBrowserBuild(pinned);
+    expect(missing).toEqual([]);
+
+    // kokoro.web.js is self-contained, so the patched build runs under plain
+    // Node: phonemize must be the function generate() uses ("a" is American
+    // English, "b" British), producing one token per phoneme symbol.
+    const modulePath = join(mkdtempSync(join(tmpdir(), "kokoro-web-")), "kokoro.web.mjs");
+    writeFileSync(modulePath, code);
+    const script = [
+      `const kokoro = await import(${JSON.stringify(pathToFileURL(modulePath).href)});`,
+      'console.log(JSON.stringify([await kokoro.phonemize("Hello world.", "a"), await kokoro.phonemize("Hello world.", "b")]));',
+    ].join("\n");
+    const output = execFileSync(process.execPath, ["--input-type=module", "-e", script], { encoding: "utf8" });
+
+    expect(JSON.parse(output.trim().split("\n").at(-1)!)).toEqual(["həlˈoʊ wˈɜːld.", "həlˈəʊ wˈɜːld."]);
+  });
+
   it("throws a clear error when a required asset is missing", () => {
     const root = mkdtempSync(join(tmpdir(), "kokoro-assets-missing-"));
     const plugin = kokoroOnnxWasmAssetPlugin(root);
 
     expect(() => loadModule(plugin, "\0virtual:kokoro-onnx-wasm-assets")).toThrow("Missing Kokoro ONNX Runtime asset");
+  });
+
+  it("throws a clear error when the phonemizer build is missing", () => {
+    const plugin = kokoroOnnxWasmAssetPlugin(makeAssetRoot(FAKE_KOKORO_BUILD, { phonemizer: false }));
+
+    expect(() => loadVirtualModule(plugin)).toThrow("Missing phonemizer build");
+  });
+
+  it("targets the installed phonemizer 1.2.1 English-only eSpeak NG build", () => {
+    const installed = JSON.parse(readFileSync(resolve("node_modules/phonemizer/package.json"), "utf8")) as { version: string };
+    const build = readFileSync(resolve("node_modules/phonemizer/dist/phonemizer.js"), "utf8");
+
+    expect(installed.version).toBe("1.2.1");
+    // Boolean checks: a failing toContain would print the whole 1.3 MB bundle.
+    expect(build.includes('ke=["en"]')).toBe(true);
+    expect(/export\{\w+ as list_voices,\w+ as phonemize\};\s*$/.test(build)).toBe(true);
   });
 });

@@ -53,6 +53,16 @@ function toEntryId(cacheName: string, url: string): string {
   return `${cacheName}${CACHE_KEY_DELIMITER}${url}`;
 }
 
+/**
+ * Recovers an entry's URL from its primary key. The key always starts with the
+ * cache name, so slicing past it stays exact even when a name or URL itself
+ * contains the delimiter.
+ */
+function urlFromEntryId(cacheName: string, entryId: string): string {
+  const prefix = `${cacheName}${CACHE_KEY_DELIMITER}`;
+  return entryId.startsWith(prefix) ? entryId.slice(prefix.length) : entryId;
+}
+
 function requestToPromise<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -122,16 +132,25 @@ async function writeEntry(cacheName: string, url: string, response: Response): P
   await transactionDone(transaction);
 }
 
-async function deleteEntry(cacheName: string, url: string): Promise<boolean> {
-  const existing = await readEntry(cacheName, url);
-  if (!existing) return false;
+// Every cached model file is one record holding the whole body (hundreds of
+// MB for the largest), so listing, existence checks, and deletions below walk
+// keys only. A value cursor or get() would deserialize each body just to read
+// its cache name.
 
+async function deleteEntry(cacheName: string, url: string): Promise<boolean> {
   const db = await openDatabase();
   const transaction = db.transaction(CACHE_STORE_NAME, "readwrite");
   const store = transaction.objectStore(CACHE_STORE_NAME);
-  store.delete(toEntryId(cacheName, url));
+  const entryId = toEntryId(cacheName, url);
+  const countRequest = store.count(entryId);
+  let existed = false;
+  countRequest.onsuccess = () => {
+    existed = countRequest.result > 0;
+    // Issued from the success callback so it joins the same transaction.
+    if (existed) store.delete(entryId);
+  };
   await transactionDone(transaction);
-  return true;
+  return existed;
 }
 
 async function deleteByCacheName(cacheName: string): Promise<boolean> {
@@ -139,7 +158,7 @@ async function deleteByCacheName(cacheName: string): Promise<boolean> {
   const transaction = db.transaction(CACHE_STORE_NAME, "readwrite");
   const store = transaction.objectStore(CACHE_STORE_NAME);
   const index = store.index("cacheName");
-  const request = index.openCursor(IDBKeyRange.only(cacheName));
+  const request = index.openKeyCursor(IDBKeyRange.only(cacheName));
   let deletedAny = false;
 
   await new Promise<void>((resolve, reject) => {
@@ -167,7 +186,9 @@ async function deleteMatchingEntries(
   const db = await openDatabase();
   const transaction = db.transaction(CACHE_STORE_NAME, "readwrite");
   const store = transaction.objectStore(CACHE_STORE_NAME);
-  const request = store.openCursor();
+  // The cacheName index yields each record's name (cursor.key) and primary key
+  // without its value; the URL is recovered from the primary key.
+  const request = store.index("cacheName").openKeyCursor();
   const selectedNames = cacheNames ? new Set(cacheNames) : null;
   const deleted: PersistentCacheEntryRef[] = [];
 
@@ -179,15 +200,16 @@ async function deleteMatchingEntries(
         return;
       }
 
-      const entry = cursor.value as CacheEntryRecord;
-      const ref = {
-        cacheName: entry.cacheName,
-        url: entry.url,
-      };
-
-      if ((!selectedNames || selectedNames.has(entry.cacheName)) && matches(ref)) {
-        deleted.push(ref);
-        cursor.delete();
+      const cacheName = String(cursor.key);
+      if (!selectedNames || selectedNames.has(cacheName)) {
+        const ref = {
+          cacheName,
+          url: urlFromEntryId(cacheName, String(cursor.primaryKey)),
+        };
+        if (matches(ref)) {
+          deleted.push(ref);
+          store.delete(cursor.primaryKey);
+        }
       }
 
       cursor.continue();
@@ -205,7 +227,8 @@ async function listCacheNames(): Promise<string[]> {
   const db = await openDatabase();
   const transaction = db.transaction(CACHE_STORE_NAME, "readonly");
   const store = transaction.objectStore(CACHE_STORE_NAME);
-  const request = store.openCursor();
+  // "nextunique" visits each distinct cache name once, reading keys only.
+  const request = store.index("cacheName").openKeyCursor(null, "nextunique");
   const names = new Set<string>();
 
   await new Promise<void>((resolve, reject) => {
@@ -215,8 +238,7 @@ async function listCacheNames(): Promise<string[]> {
         resolve();
         return;
       }
-      const entry = cursor.value as CacheEntryRecord;
-      names.add(entry.cacheName);
+      names.add(String(cursor.key));
       cursor.continue();
     };
     request.onerror = () => reject(request.error ?? new Error("Failed to read cache entries."));
@@ -244,8 +266,9 @@ function createPersistentCacheStorage(): CacheStorageLike | null {
           if (toMethod(request) !== "GET") return undefined;
           const entry = await readEntry(cacheName, toUrl(request));
           if (!entry) return undefined;
-          const bodyCopy = entry.body.slice(0);
-          return new Response(bodyCopy, {
+          // IndexedDB hands back a fresh structured clone on every read, so the
+          // body is already private to this response.
+          return new Response(entry.body, {
             status: entry.status,
             statusText: entry.statusText,
             headers: new Headers(entry.headers),

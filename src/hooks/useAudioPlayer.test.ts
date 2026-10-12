@@ -1,6 +1,11 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS } from "../constants";
+import {
+  AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
+  PLAYBACK_RATES,
+} from "../constants";
 import * as audioExportClientModule from "../lib/audioExportClient";
 import * as exportAudioModule from "../lib/exportAudio";
 import { useAudioPlayer } from "./useAudioPlayer";
@@ -163,6 +168,85 @@ describe("useAudioPlayer", () => {
     expect(result.current.isPlaying).toBe(false);
   });
 
+  it("starts the output device when a stream begins, before any chunk arrives", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+
+    await act(async () => {
+      result.current.beginStream();
+    });
+
+    const ctx = MockAudioContext.instances[0];
+    expect(ctx).toBeDefined();
+    expect(ctx.resume).toHaveBeenCalledTimes(1);
+    expect(ctx.state).toBe("running");
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 4, 4));
+    });
+    // The device was already running, so the first chunk does not resume it again.
+    expect(ctx.resume).toHaveBeenCalledTimes(1);
+    expect(MockAudioContext.instances).toHaveLength(1);
+    expect(result.current.isPlaying).toBe(true);
+  });
+
+  it("leaves a paused stream paused when a new stream begins", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 4, 4));
+      await result.current.togglePlay();
+    });
+    const ctx = MockAudioContext.instances[0];
+    expect(ctx.state).toBe("suspended");
+
+    await act(async () => {
+      result.current.beginStream();
+    });
+
+    expect(ctx.resume).toHaveBeenCalledTimes(1);
+    expect(ctx.state).toBe("suspended");
+  });
+
+  it("does not let a blocked output surface at stream start", async () => {
+    MockAudioContext.resumeError = new Error("blocked");
+    const { result } = renderHook(() => useAudioPlayer());
+
+    await act(async () => {
+      result.current.beginStream();
+    });
+
+    expect(result.current.error).toBeNull();
+  });
+
+  it("schedules the first chunk of a running device with only its output latency of lead", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      result.current.beginStream();
+    });
+    const ctx = MockAudioContext.instances[0];
+    ctx.currentTime = 10;
+    (ctx as unknown as { baseLatency: number }).baseLatency = 0.02;
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 4, 4));
+    });
+
+    const [when] = ctx.createdSources[0].startedWith!;
+    expect(when).toBeCloseTo(10.02);
+  });
+
+  it("keeps a wider start lead while the device is still starting", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    MockAudioContext.resumeGate = new Promise(() => undefined);
+
+    await act(async () => {
+      await Promise.race([result.current.scheduleChunk(makeChunk("First", 4, 4)), Promise.resolve()]);
+    });
+
+    const ctx = MockAudioContext.instances[0];
+    expect(ctx.state).toBe("suspended");
+    expect(ctx.createdSources[0].startedWith![0]).toBeCloseTo(0.05);
+  });
+
   it("retains full history for long sessions instead of dropping old chunks", async () => {
     const { result } = renderHook(() => useAudioPlayer());
 
@@ -178,6 +262,112 @@ describe("useAudioPlayer", () => {
     expect(result.current.totalDuration).toBe(950);
     expect(result.current.segments[0]?.startSec).toBe(0);
     expect(result.current.segments[1]?.startSec).toBe(500);
+  });
+
+  it("advances the content epoch only when the buffered audio is replaced wholesale", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    const initial = result.current.getContentEpoch();
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Streamed", 4, 2));
+      await result.current.scheduleChunk(makeChunk("Streamed more", 4, 2));
+    });
+    act(() => result.current.truncateAudioChunks(1));
+    expect(result.current.getContentEpoch()).toBe(initial);
+
+    act(() => result.current.reset());
+    expect(result.current.getContentEpoch()).toBe(initial + 1);
+
+    act(() => result.current.restoreAudioCache([{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000,
+      text: "Restored",
+      index: 1,
+      total: 1,
+    }]));
+    expect(result.current.getContentEpoch()).toBe(initial + 2);
+  });
+
+  it("plays at every speed the speed picker offers", () => {
+    const { result } = renderHook(() => useAudioPlayer());
+
+    for (const rate of [...PLAYBACK_RATES].reverse()) {
+      act(() => result.current.setPlaybackRate(rate));
+      expect(result.current.playbackRate).toBe(rate);
+      expect(result.current.getPlaybackSnapshot().playbackRate).toBe(rate);
+    }
+
+    act(() => result.current.restoreAudioCache([{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000,
+      text: "Restored slowly",
+      index: 1,
+      total: 1,
+    }], { playbackRate: MIN_PLAYBACK_RATE }));
+    expect(result.current.playbackRate).toBe(MIN_PLAYBACK_RATE);
+  });
+
+  it("keeps its identity until its state changes and its functions for its lifetime", async () => {
+    const { result, rerender } = renderHook(() => useAudioPlayer());
+    const initial = result.current;
+
+    rerender();
+    expect(result.current).toBe(initial);
+
+    act(() => result.current.setPlaybackRate(1.5));
+    expect(result.current).not.toBe(initial);
+    expect(result.current.playbackRate).toBe(1.5);
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Streamed", 4, 4));
+    });
+    flushNextAnimationFrame();
+    act(() => result.current.reset());
+
+    const functionNames = (Object.keys(initial) as Array<keyof typeof initial>)
+      .filter((key) => typeof initial[key] === "function");
+    expect(functionNames.length).toBeGreaterThan(20);
+    for (const name of functionNames) expect(result.current[name], name).toBe(initial[name]);
+    expect(result.current.clock).toBe(initial.clock);
+  });
+
+  it("reports the playback snapshot from the buffers it would save, not from render state", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    act(() => result.current.beginStream());
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Streamed", 6, 4));
+    });
+    // The duration reaches React state only on the next frame; the snapshot
+    // already describes the chunk that a save would include.
+    expect(result.current.totalDuration).toBe(0);
+    expect(result.current.getPlaybackSnapshot()).toEqual({
+      playbackRate: 1,
+      totalDuration: 1.5,
+      synthesisComplete: false,
+    });
+
+    act(() => result.current.endStream({ completed: true }));
+    expect(result.current.getPlaybackSnapshot().synthesisComplete).toBe(true);
+    act(() => result.current.truncateAudioChunks(0));
+    expect(result.current.getPlaybackSnapshot()).toEqual({
+      playbackRate: 1,
+      totalDuration: 0,
+      synthesisComplete: false,
+    });
+    act(() => result.current.restoreAudioCache([{
+      audio: new Float32Array(8).buffer,
+      samplingRate: 4,
+      text: "Restored",
+      index: 1,
+      total: 1,
+    }], { synthesisComplete: true, playbackRate: 1.25 }));
+    expect(result.current.getPlaybackSnapshot()).toEqual({
+      playbackRate: 1.25,
+      totalDuration: 2,
+      synthesisComplete: true,
+    });
+    act(() => result.current.reset());
+    expect(result.current.getPlaybackSnapshot().synthesisComplete).toBe(false);
   });
 
   it("can roll back streamed chunks to a section checkpoint", async () => {
@@ -467,9 +657,10 @@ describe("useAudioPlayer", () => {
     act(() => {
       result.current.setPlaybackRate(3);
       result.current.setPlaybackRate(2.0001);
-      result.current.setPlaybackRate(0.5);
     });
-    expect(result.current.playbackRate).toBe(0.75);
+    expect(result.current.playbackRate).toBe(MAX_PLAYBACK_RATE);
+    act(() => result.current.setPlaybackRate(0.25));
+    expect(result.current.playbackRate).toBe(MIN_PLAYBACK_RATE);
 
     act(() => {
       result.current.replaceSegment("missing", makeChunk("No-op", 5, 10));
@@ -505,48 +696,109 @@ describe("useAudioPlayer", () => {
   });
 
   it("downloads audio and VTT/JSON captions, while empty downloads are no-ops", async () => {
-    const downloadAudioSpy = vi.spyOn(audioExportClientModule, "downloadAudioChunks").mockResolvedValue();
+    const exported = {
+      blob: new Blob(["audio"]),
+      extension: "flac",
+      report: { integratedLufs: -16 },
+      timings: [],
+      gainDb: 1,
+      limiterReductionDb: 0,
+    } as unknown as exportAudioModule.ExportResult;
+    const exportSpy = vi.spyOn(audioExportClientModule, "exportAudioChunks").mockResolvedValue(exported);
     const downloadBlobSpy = vi.spyOn(exportAudioModule, "downloadBlob").mockImplementation(() => {});
     const { result } = renderHook(() => useAudioPlayer());
 
     await act(async () => {
-      await result.current.download();
+      expect(await result.current.download()).toBeNull();
       result.current.downloadCaptions("vtt");
     });
-    expect(downloadAudioSpy).not.toHaveBeenCalled();
+    expect(exportSpy).not.toHaveBeenCalled();
     expect(downloadBlobSpy).not.toHaveBeenCalled();
 
+    const options = {
+      format: "flac-16",
+      sampleRate: "source",
+      bitrateKbps: 192,
+      mastering: { enabled: false, targetLufs: -16, truePeakDb: -1 },
+    } as const;
+    const request = { fileName: "Story-af_heart" };
     await act(async () => {
       await result.current.scheduleChunk(makeChunk("Caption text", 12, 12));
-      await result.current.download({
-        format: "wav-f32",
-        sampleRate: "source",
-        bitrateKbps: 192,
-        mastering: {
-          enabled: false,
-          targetLufs: -16,
-          truePeakDb: -1,
-        },
-      });
+      expect(await result.current.download(options, request)).toBe(exported);
       result.current.downloadCaptions("vtt");
       result.current.downloadCaptions("json");
     });
 
-    expect(downloadAudioSpy).toHaveBeenCalledWith([
-      { audio: expect.any(Float32Array), samplingRate: 12 },
-    ], {
-      format: "wav-f32",
-      sampleRate: "source",
-      bitrateKbps: 192,
-      mastering: {
-        enabled: false,
-        targetLufs: -16,
-        truePeakDb: -1,
-      },
+    expect(exportSpy).toHaveBeenCalledWith([
+      { audio: expect.any(Float32Array), samplingRate: 12, pauseAfterSec: undefined },
+    ], options, request);
+    expect(downloadBlobSpy).toHaveBeenCalledTimes(3);
+    expect(downloadBlobSpy.mock.calls[0]?.[0]).toBe(exported.blob);
+    expect(downloadBlobSpy.mock.calls[0]?.[1]).toBe("Story-af_heart.flac");
+    expect(downloadBlobSpy.mock.calls[1]?.[1]).toBe("tts-captions.vtt");
+    expect(downloadBlobSpy.mock.calls[2]?.[1]).toBe("tts-timestamps.json");
+
+    await act(async () => {
+      await result.current.download();
     });
-    expect(downloadBlobSpy).toHaveBeenCalledTimes(2);
-    expect(downloadBlobSpy.mock.calls[0]?.[1]).toBe("tts-captions.vtt");
-    expect(downloadBlobSpy.mock.calls[1]?.[1]).toBe("tts-timestamps.json");
+    expect(downloadBlobSpy.mock.calls[3]?.[1]).toBe("tts-audio.flac");
+  });
+
+  it("writes captions at the times a trimmed and padded export puts them", async () => {
+    const downloadBlobSpy = vi.spyOn(exportAudioModule, "downloadBlob").mockImplementation(() => {});
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk({
+        audio: new Float32Array(4), samplingRate: 1, text: "Hello there", index: 1, total: 1, pauseAfterSec: 0,
+      });
+    });
+
+    const firstCue = async (post?: { headSec: number }) => {
+      downloadBlobSpy.mockClear();
+      act(() => result.current.downloadCaptions("srt", "passage", post));
+      const [blob] = downloadBlobSpy.mock.calls[0] as unknown as [Blob];
+      return (await blob.text()).split("\n")[1];
+    };
+    expect(await firstCue()).toBe("00:00:00,000 --> 00:00:04,000");
+    expect(await firstCue({ headSec: 2 })).toBe("00:00:02,000 --> 00:00:06,000");
+  });
+
+  it("reports the sample rate of the audio it holds", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    expect(result.current.getSourceSampleRate()).toBeNull();
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 24, 24));
+    });
+    expect(result.current.getSourceSampleRate()).toBe(24);
+
+    act(() => result.current.reset());
+    expect(result.current.getSourceSampleRate()).toBeNull();
+  });
+
+  it("lays captions out in the chosen style", async () => {
+    const downloadBlobSpy = vi.spyOn(exportAudioModule, "downloadBlob").mockImplementation(() => {});
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk({
+        audio: new Float32Array(4),
+        samplingRate: 1,
+        text: "one two three four five six",
+        index: 1,
+        total: 1,
+        pauseAfterSec: 0,
+      });
+    });
+
+    const cues = async (style?: "readable" | "short" | "passage") => {
+      downloadBlobSpy.mockClear();
+      act(() => result.current.downloadCaptions("srt", style));
+      const [blob] = downloadBlobSpy.mock.calls[0] as unknown as [Blob];
+      return (await blob.text()).trim().split(/\n\n/).length;
+    };
+    expect(await cues()).toBe(1);
+    expect(await cues("passage")).toBe(1);
+    expect(await cues("short")).toBeGreaterThan(1);
   });
 
   it("stays stopped when AudioContext resume fails", async () => {

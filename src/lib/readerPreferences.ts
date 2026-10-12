@@ -9,6 +9,8 @@ export interface ReaderViewPreferences {
   tone: ReaderTone;
   focusMode: boolean;
   autoAdvance: boolean;
+  /** Render the next part in the background while this one plays, so turning to it is instant. */
+  prepareAhead: boolean;
 }
 
 export const DEFAULT_READER_VIEW_PREFERENCES: ReaderViewPreferences = {
@@ -18,6 +20,7 @@ export const DEFAULT_READER_VIEW_PREFERENCES: ReaderViewPreferences = {
   tone: "paper",
   focusMode: false,
   autoAdvance: true,
+  prepareAhead: true,
 };
 
 const STORAGE_KEY = "open-tts-reader-view-v1";
@@ -56,6 +59,9 @@ export function normalizeReaderViewPreferences(
     autoAdvance: typeof preferences?.autoAdvance === "boolean"
       ? preferences.autoAdvance
       : DEFAULT_READER_VIEW_PREFERENCES.autoAdvance,
+    prepareAhead: typeof preferences?.prepareAhead === "boolean"
+      ? preferences.prepareAhead
+      : DEFAULT_READER_VIEW_PREFERENCES.prepareAhead,
   };
 }
 

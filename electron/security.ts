@@ -80,6 +80,29 @@ export function buildContentSecurityPolicy(isDev: boolean): string {
   ].join("; ");
 }
 
-export function shouldGrantPermission(): boolean {
-  return false;
+export interface PermissionContext {
+  permission: string;
+  /** URL of the frame asking, when Electron supplies one. */
+  requestingUrl?: string;
+  /** Request flow: every media type asked for. */
+  mediaTypes?: readonly string[];
+  /** Check flow: the single media type being checked. */
+  mediaType?: string;
+}
+
+/**
+ * Everything is denied except microphone capture: a `media` permission whose
+ * media types are exclusively `audio`, asked for by a trusted app URL. Video,
+ * mixed audio+video, an unknown media type, and untrusted origins stay denied.
+ */
+export function shouldGrantPermission(
+  context?: PermissionContext,
+  options: { allowDevServer?: boolean } = { allowDevServer: true },
+): boolean {
+  if (!context || context.permission !== "media") return false;
+  if (!context.requestingUrl || !isAllowedAppUrl(context.requestingUrl, options)) return false;
+  if (context.mediaTypes !== undefined) {
+    return context.mediaTypes.length > 0 && context.mediaTypes.every((type) => type === "audio");
+  }
+  return context.mediaType === "audio";
 }

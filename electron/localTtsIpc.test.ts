@@ -5,10 +5,10 @@ import { MAX_REFERENCE_CODES_BASE64_LENGTH } from "./localTtsLimits";
 import {
   BRIDGE_RESULT_PREFIX,
   assertLocalModel,
-  assertTrustedIpcSender,
   isRecord,
   isStringArray,
   parseBridgeEnvelopeResult,
+  parseBridgeFailureLine,
   parseBridgeGenerateResult,
   parseBridgeProbeResult,
   parseBridgeProgressResult,
@@ -20,33 +20,17 @@ import {
   parseOptionalStringArray,
   parseRequestId,
   parseRequiredText,
+  reportedBridgeFailure,
   sanitizeCacheRequest,
   sanitizeCancelRequest,
   sanitizeGenerationContinuation,
   sanitizeGeneratePayload,
+  sanitizeKeepWarmRequest,
+  sanitizeReleaseKeepWarmRequest,
   sanitizeWarmRequest,
 } from "./localTtsIpc";
 
-function makeEvent(url: string, frameUrl?: string) {
-  return {
-    senderFrame: frameUrl === undefined ? undefined : { url: frameUrl },
-    sender: {
-      getURL: () => url,
-    },
-  };
-}
-
-describe("localTtsIpc sender and primitive parsers", () => {
-  it("accepts trusted app senders and rejects untrusted IPC senders", () => {
-    expect(() => assertTrustedIpcSender(makeEvent("https://evil.test", "app://-/studio") as never)).not.toThrow();
-    expect(() => assertTrustedIpcSender(makeEvent("http://localhost:5173/qwen3") as never)).not.toThrow();
-    expect(() => assertTrustedIpcSender(
-      makeEvent("http://localhost:5173/qwen3") as never,
-      { allowDevServer: false },
-    )).toThrow("Rejected IPC");
-    expect(() => assertTrustedIpcSender(makeEvent("https://example.com") as never)).toThrow("Rejected IPC");
-  });
-
+describe("localTtsIpc primitive parsers", () => {
   it("validates local model identifiers and records", () => {
     expect(assertLocalModel("neutts")).toBe("neutts");
     expect(assertLocalModel("qwen3")).toBe("qwen3");
@@ -86,6 +70,9 @@ describe("localTtsIpc sender and primitive parsers", () => {
     expect(() => parseRequestId(`${" ".repeat(120)}x`)).toThrow("exceeds 120");
     expect(() => parseRequestId("bad/id")).toThrow("may contain only");
     expect(() => parseRequestId("bad..id")).toThrow("consecutive dots");
+    // Other ids share the rules and name their own field.
+    expect(() => parseRequestId(" ", { required: true, field: "leaseId" })).toThrow("`leaseId` is required.");
+    expect(() => parseRequestId("bad/id", { field: "leaseId" })).toThrow("`leaseId` may contain only");
 
     expect(parseOptionalStringArray(["a", "b"], "warnings")).toEqual(["a", "b"]);
     expect(() => parseOptionalStringArray(["a", 1], "warnings")).toThrow("array of strings");
@@ -442,6 +429,43 @@ describe("localTtsIpc request sanitizers", () => {
     expect(() => sanitizeWarmRequest({ model: "qwen3", mode: "customVoice", modelPath: "/model", topP: 0.9 }))
       .toThrow("Unknown Qwen3-TTS warm-up field");
   });
+
+  it("sanitizes keep-warm leases with the warm-up rules, deriving the mode from the profile", () => {
+    const modelRepo = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
+    const lease = { leaseId: "lease-1", model: "qwen3", modelPath: "/models/qwen3", modelRepo };
+    const expected = {
+      leaseId: "lease-1",
+      model: "qwen3",
+      payload: { mode: "customVoice", modelPath: "/models/qwen3", modelRepo },
+    };
+    expect(sanitizeKeepWarmRequest(lease, "darwin", "arm64")).toEqual(expected);
+    expect(sanitizeKeepWarmRequest({ ...lease, mode: "customVoice" }, "darwin", "arm64")).toEqual(expected);
+
+    expect(() => sanitizeKeepWarmRequest({ ...lease, mode: "voiceDesign" }, "darwin", "arm64"))
+      .toThrow("Unsupported Qwen3-TTS warm-up profile");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, modelRepo: "unknown/repo" }, "darwin", "arm64"))
+      .toThrow("Unsupported Qwen3-TTS mode");
+    expect(() => sanitizeKeepWarmRequest(lease, "linux", "x64")).toThrow("Unsupported Qwen3-TTS warm-up profile");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, modelPath: undefined }, "darwin", "arm64"))
+      .toThrow("`modelPath` is required");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, model: "neutts" }, "darwin", "arm64"))
+      .toThrow("Only Qwen3-TTS models can be kept warm.");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, leaseId: undefined }, "darwin", "arm64"))
+      .toThrow("`leaseId` is required.");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, leaseId: "../lease" }, "darwin", "arm64"))
+      .toThrow("`leaseId` may contain only");
+    expect(() => sanitizeKeepWarmRequest({ ...lease, text: "hello" }, "darwin", "arm64"))
+      .toThrow("Unknown keep-warm field: `text`.");
+    expect(() => sanitizeKeepWarmRequest(null)).toThrow("Invalid keep-warm request payload.");
+  });
+
+  it("sanitizes keep-warm releases", () => {
+    expect(sanitizeReleaseKeepWarmRequest({ leaseId: " lease-1 " })).toEqual({ leaseId: "lease-1" });
+    expect(() => sanitizeReleaseKeepWarmRequest({})).toThrow("`leaseId` is required.");
+    expect(() => sanitizeReleaseKeepWarmRequest({ leaseId: "lease-1", model: "qwen3" }))
+      .toThrow("Unknown keep-warm field: `model`.");
+    expect(() => sanitizeReleaseKeepWarmRequest("lease-1")).toThrow("Invalid keep-warm release payload.");
+  });
 });
 
 describe("localTtsIpc bridge result parsing", () => {
@@ -528,32 +552,66 @@ describe("localTtsIpc bridge result parsing", () => {
     expect(() => parseBridgeGenerateResult({ ...generateResult, phaseTimingsSec: { bad: -1 } })).toThrow("phaseTimingsSec");
   });
 
-  it("parses one-shot probe envelopes and rejects one-shot generate results", () => {
+  it("parses one-shot probe envelopes", () => {
     const probeEnvelope = `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: true, result: probeResult })}`;
-    expect(parseBridgeResult(`noise\n${probeEnvelope}\n`, "", "probe")).toEqual(probeResult);
+    expect(parseBridgeResult(`noise\n${probeEnvelope}\n`, "")).toEqual(probeResult);
 
+    // A generate-shaped result is not a probe result.
     const generateEnvelope = `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: true, result: generateResult })}`;
-    expect(() => parseBridgeResult(generateEnvelope, "", "generate"))
-      .toThrow("One-shot generate bridge results are not supported");
-    expect(() => parseBridgeResult("", "stderr text", "probe")).toThrow("stderr text");
-    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}{bad`, "", "probe")).toThrow("Failed parsing");
-    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "Bridge failed" })}`, "", "probe"))
+    expect(() => parseBridgeResult(generateEnvelope, "")).toThrow("`ready` boolean");
+    expect(() => parseBridgeResult("", "stderr text")).toThrow("stderr text");
+    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}{bad`, "")).toThrow("Failed parsing");
+    expect(() => parseBridgeResult(`${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "Bridge failed" })}`, ""))
       .toThrow("Bridge failed");
-  });
-
-  it("parses WebSocket envelopes", () => {
-    expect(parseBridgeEnvelopeResult({ ok: true, result: generateResult }, "generate")).toEqual(generateResult);
-    expect(parseBridgeEnvelopeResult({ ok: true, result: probeResult }, "probe")).toEqual(probeResult);
-    expect(() => parseBridgeEnvelopeResult({ ok: false, error: "request failed" }, "generate"))
-      .toThrow("request failed");
 
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
-    expect(() => parseBridgeEnvelopeResult({
-      ok: false,
-      error: "request failed",
-      details: "stack",
-    }, "generate")).toThrow("request failed");
+    expect(() => parseBridgeResult(
+      `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "Bridge failed", details: "stack" })}`,
+      "",
+    )).toThrow("Bridge failed");
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("local bridge details\nstack"));
     errorSpy.mockRestore();
+  });
+
+  it("parses WebSocket generate envelopes", () => {
+    expect(parseBridgeEnvelopeResult({ ok: true, result: generateResult })).toEqual(generateResult);
+    // A probe-shaped result is not a generate result.
+    expect(() => parseBridgeEnvelopeResult({ ok: true, result: probeResult })).toThrow("sampleRate");
+    expect(() => parseBridgeEnvelopeResult({ ok: false, error: "request failed", details: "stack" }))
+      .toThrow("request failed");
+    expect(() => parseBridgeEnvelopeResult({ ok: false })).toThrow("Local bridge failed.");
+    expect(() => parseBridgeEnvelopeResult({ result: generateResult })).toThrow("Missing required `ok` field.");
+  });
+
+  it("reads the failure out of one exit envelope line, sanitized and bounded", () => {
+    const failure = (value: unknown) => `${BRIDGE_RESULT_PREFIX}${JSON.stringify(value)}`;
+
+    expect(parseBridgeFailureLine(failure({ ok: false, error: "  Model\nload\u0007failed  " })))
+      .toBe("Model load failed");
+    expect(parseBridgeFailureLine(failure({ ok: false, error: "x".repeat(3_000) }))).toHaveLength(2_000);
+    expect(parseBridgeFailureLine(failure({ ok: false, error: "   " }))).toBe("");
+    // Not a failure envelope at all.
+    expect(parseBridgeFailureLine("__PORT__1234")).toBeNull();
+    expect(parseBridgeFailureLine(failure({ ok: true, result: {} }))).toBeNull();
+    expect(parseBridgeFailureLine(failure({ ok: false }))).toBeNull();
+    expect(parseBridgeFailureLine(`${BRIDGE_RESULT_PREFIX}{broken`)).toBeNull();
+  });
+
+  it("finds the failure in the last exit envelope a process printed", () => {
+    const failure = (error: string) => `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error })}`;
+
+    expect(reportedBridgeFailure(`__PORT__1\n${failure("older")}\r\n  ${failure("Metal device lost")}  \n`))
+      .toBe("Metal device lost");
+    // The last envelope decides, even when it reports nothing usable.
+    expect(reportedBridgeFailure(`${failure("older")}\n${failure(" ")}\n`)).toBeNull();
+    expect(reportedBridgeFailure("__PORT__1\nplain output\n")).toBeNull();
+    expect(reportedBridgeFailure("")).toBeNull();
+  });
+
+  it("ignores a reported failure the renderer would take for a deliberate stop", () => {
+    const failure = (error: string) => `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error })}`;
+
+    expect(reportedBridgeFailure(`${failure("Metal device lost")}\n${failure("Generation CANCELLED by MLX")}\n`))
+      .toBeNull();
   });
 });

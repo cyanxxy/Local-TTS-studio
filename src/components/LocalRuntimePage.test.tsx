@@ -11,6 +11,7 @@ import { MAX_REFERENCE_CODES_FILE_BYTES } from "../../electron/localTtsLimits";
 import { LocalRuntimePage } from "./LocalRuntimePage";
 import { PlaybackClock } from "../lib/playbackClock";
 import { float32ChunksToWavBytes } from "./localRuntime/utils";
+import { getStagedReference, resetStagedReferences, stageReference } from "../lib/voiceLibrary/stagedReference";
 
 const CUSTOM_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const BASE_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
@@ -208,6 +209,9 @@ describe("LocalRuntimePage", () => {
   afterEach(() => {
     delete window.electron;
     vi.restoreAllMocks();
+    // The Qwen3 provider persists its settings; one test's profile must not
+    // become the next test's starting profile.
+    localStorage.clear();
   });
 
   it("shows the native provider and immutable runtime revision", async () => {
@@ -219,6 +223,22 @@ describe("LocalRuntimePage", () => {
     expect(screen.getByRole("heading", { name: "Qwen model ready" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Re-download model" })).toHaveLength(1);
     expect(screen.queryByText(/device map|dtype|attention|top-p|api_server|Candle/i)).not.toBeInTheDocument();
+  });
+
+  it("starts from a clean page when the model changes", async () => {
+    const view = renderPage();
+    expect(await screen.findByText("Provider: mlx")).toBeInTheDocument();
+    // The next model's probe stays pending, so only a reset can clear the old facts.
+    probe.mockReturnValue(new Promise(() => undefined));
+
+    view.rerender(
+      <Qwen3RuntimeProvider>
+        <LocalRuntimePage {...props("neutts")} />
+      </Qwen3RuntimeProvider>,
+    );
+
+    expect(screen.queryByText("Provider: mlx")).not.toBeInTheDocument();
+    await waitFor(() => expect(probe).toHaveBeenLastCalledWith(expect.objectContaining({ model: "neutts" })));
   });
 
   it("makes a dynamically resolved CPU fallback visible", async () => {
@@ -248,6 +268,28 @@ describe("LocalRuntimePage", () => {
     fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
 
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps one shortcut listener while the page re-renders", async () => {
+    const addListener = vi.spyOn(document, "addEventListener");
+    const keydownSubscriptions = () => addListener.mock.calls.filter(([type]) => type === "keydown").length;
+    renderPage();
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    const subscribed = keydownSubscriptions();
+
+    // Every keystroke re-renders the page and hands it a new player object.
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
+      target: { value: "A different sentence for the local runtime." },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
+      target: { value: "Another different sentence for the local runtime." },
+    });
+
+    expect(keydownSubscriptions()).toBe(subscribed);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Generate" })).toBeEnabled());
+    fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    addListener.mockRestore();
   });
 
   it("rejects oversized local-runtime text before IPC generation", async () => {
@@ -344,6 +386,17 @@ describe("LocalRuntimePage", () => {
     for (const removed of ["baseModelPath", "deviceMap", "dtype", "attnImplementation", "topP", "seed"]) {
       expect(generate.mock.calls[0][0].payload).not.toHaveProperty(removed);
     }
+  });
+
+  it("keeps the final status when generation finishes before the chunk status flushes", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    // Let any frame-coalesced chunk status flush; it must not replace the result.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(screen.queryByText(/Received (streaming )?audio chunk/)).not.toBeInTheDocument();
   });
 
   it("offers per-passage token limits and forwards an optional seed", async () => {
@@ -480,6 +533,31 @@ describe("LocalRuntimePage", () => {
       referenceCodesBase64: "AQID",
       referenceText: "Exact words",
     }));
+  });
+
+  it("generates NeuTTS from a reference the Voice Library staged, then releases it", async () => {
+    probe.mockResolvedValue({ ready: true, message: "NeuTTS ready", runtime: "rust", package: "neutts" });
+    stageReference({
+      voiceId: "v1",
+      name: "My voice",
+      target: "neutts",
+      wavBase64: "AQID",
+      transcript: "Library words",
+      language: "English",
+      durationSec: 5,
+      sha256: "d".repeat(64),
+    });
+    renderPage("neutts");
+    await waitFor(() => expect(screen.getByLabelText("Reference transcript")).toHaveValue("Library words"));
+    expect(getStagedReference("neutts")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(generate.mock.calls[0][0].payload).toEqual(expect.objectContaining({
+      referenceAudioBase64: "AQID",
+      referenceText: "Library words",
+    }));
+    resetStagedReferences();
   });
 
   it("rejects NeuTTS code files above the 64 KiB renderer limit", async () => {

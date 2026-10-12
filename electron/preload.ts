@@ -22,8 +22,14 @@ interface CancelRequest extends CacheRequest {
   requestId: string;
 }
 
+interface KeepWarmRequest {
+  model: "qwen3";
+  modelRepo: string;
+  modelPath: string;
+  mode?: string;
+}
+
 const READER_AUDIO_STREAM_TIMEOUT_MS = 5 * 60 * 1000;
-const LOCAL_TTS_AUDIO_DELIVERY_TIMEOUT_MS = 10_000;
 const MAX_READER_AUDIO_CHUNKS = 16_384;
 const MAX_READER_AUDIO_CHUNK_BYTES = 16 * 1024 * 1024;
 const MAX_READER_AUDIO_ENTRY_BYTES = 256 * 1024 * 1024;
@@ -32,87 +38,131 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-interface PendingLocalTtsAudioDelivery {
-  expectedChunkCount: number | null;
-  receivedChunkIndexes: Set<number>;
-  finish: ((cause?: Error) => void) | null;
+type AudioChunkListener = (event: unknown) => void;
+
+interface GenerateOptions {
+  /**
+   * Receives this request's audio chunks, and only this request's. Without
+   * it, the chunks go to every `subscribeAudioChunk` listener instead.
+   */
+  onAudioChunk?: AudioChunkListener;
 }
 
-const pendingLocalTtsAudioDeliveries = new Map<string, PendingLocalTtsAudioDelivery>();
+interface LocalTtsAudioStream {
+  onAudioChunk: AudioChunkListener | null;
+  // Set by `cancel`: chunks still in flight are dropped from then on.
+  stopped: boolean;
+  end: () => void;
+}
 
-function finishLocalTtsAudioDeliveryIfComplete(delivery: PendingLocalTtsAudioDelivery): void {
-  if (
-    delivery.expectedChunkCount != null
-    && delivery.receivedChunkIndexes.size >= delivery.expectedChunkCount
-  ) {
-    delivery.finish?.();
+// The generations this window has running, by request id.
+const localTtsAudioStreams = new Map<string, LocalTtsAudioStream>();
+const audioChunkSubscribers = new Set<AudioChunkListener>();
+
+// A listener bug must neither stop delivery to the others nor disappear: it
+// surfaces as an uncaught error in the renderer's console instead.
+function callListener(listener: AudioChunkListener, event: unknown): void {
+  try {
+    listener(event);
+  } catch (error) {
+    queueMicrotask(() => {
+      throw error;
+    });
   }
 }
 
-// `webContents.send("local-tts:audio-chunk")` and the reply to
-// `ipcRenderer.invoke("local-tts:generate")` use separate Electron IPC
-// messages. Track delivery in preload so the generate promise cannot resolve
-// before renderer listeners have synchronously received every declared chunk.
-ipcRenderer.on("local-tts:audio-chunk", (_event: IpcRendererEvent, payload: unknown) => {
-  if (!isRecord(payload) || typeof payload.requestId !== "string") return;
-  if (
-    typeof payload.index !== "number"
-    || !Number.isSafeInteger(payload.index)
-    || payload.index < 0
-  ) return;
-  const delivery = pendingLocalTtsAudioDeliveries.get(payload.requestId);
-  if (!delivery) return;
-  delivery.receivedChunkIndexes.add(payload.index);
-  finishLocalTtsAudioDeliveryIfComplete(delivery);
+// Main sends each chunk of a generation and then an end marker on this one
+// channel, and Electron keeps a channel's messages in order. Seeing the end
+// marker therefore means every chunk of that request has been handed out,
+// however the invoke reply races the stream.
+ipcRenderer.on("local-tts:audio-stream", (_event: IpcRendererEvent, message: unknown) => {
+  if (!isRecord(message) || typeof message.requestId !== "string") return;
+  const stream = localTtsAudioStreams.get(message.requestId);
+  if (!stream) return;
+  const { type, ...chunk } = message;
+  if (type === "end") {
+    stream.end();
+    return;
+  }
+  if ((type !== "chunk" && type !== "gap") || stream.stopped) return;
+  // A gap rides the same ordered channel as the chunks it sits between, and
+  // reaches the same listeners, told apart by `kind`.
+  const event = type === "gap" ? { kind: "gap", ...chunk } : chunk;
+  if (stream.onAudioChunk) {
+    callListener(stream.onAudioChunk, event);
+    return;
+  }
+  for (const listener of [...audioChunkSubscribers]) callListener(listener, event);
 });
 
-async function generateLocalTts(request: LocalBridgeRequest): Promise<unknown> {
-  if (pendingLocalTtsAudioDeliveries.has(request.requestId)) {
-    throw new Error(`A local TTS request with id ${request.requestId} is already active.`);
-  }
-  const delivery: PendingLocalTtsAudioDelivery = {
-    expectedChunkCount: null,
-    receivedChunkIndexes: new Set(),
-    finish: null,
-  };
-  pendingLocalTtsAudioDeliveries.set(request.requestId, delivery);
+// The id main runs a request under, and so stamps on its stream messages:
+// main trims the id it is given (see parseRequestId in localTtsIpc.ts).
+function localTtsRequestId(request: unknown): string | undefined {
+  const requestId = isRecord(request) ? request.requestId : undefined;
+  return typeof requestId === "string" ? requestId.trim() : undefined;
+}
 
+async function generateLocalTts(request: LocalBridgeRequest, options?: GenerateOptions): Promise<unknown> {
+  const requestId = localTtsRequestId(request);
+  // Main rejects a request without a usable id before streaming anything.
+  if (requestId === undefined) return ipcRenderer.invoke("local-tts:generate", request);
+  if (localTtsAudioStreams.has(requestId)) {
+    throw new Error(`A local TTS request with id ${requestId} is already active.`);
+  }
+  const onAudioChunk = options?.onAudioChunk;
+  let end!: () => void;
+  const ended = new Promise<void>((resolve) => {
+    end = resolve;
+  });
+  localTtsAudioStreams.set(requestId, {
+    onAudioChunk: typeof onAudioChunk === "function" ? onAudioChunk : null,
+    stopped: false,
+    end,
+  });
   try {
     const result: unknown = await ipcRenderer.invoke("local-tts:generate", request);
-    const expectedChunkCount = isRecord(result) ? result.audioChunkCount : undefined;
-    if (
-      typeof expectedChunkCount !== "number"
-      || !Number.isSafeInteger(expectedChunkCount)
-      || expectedChunkCount <= 0
-    ) {
-      return result;
-    }
-    delivery.expectedChunkCount = expectedChunkCount;
-    if (delivery.receivedChunkIndexes.size >= expectedChunkCount) return result;
-
-    await new Promise<void>((resolve, reject) => {
-      let settled = false;
-      const finish = (cause?: Error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        delivery.finish = null;
-        if (cause) reject(cause);
-        else resolve();
-      };
-      const timeout = setTimeout(() => {
-        finish(new Error(
-          `Local TTS audio delivery timed out after receiving ${delivery.receivedChunkIndexes.size} of ${expectedChunkCount} chunks.`,
-        ));
-      }, LOCAL_TTS_AUDIO_DELIVERY_TIMEOUT_MS);
-      delivery.finish = finish;
-      finishLocalTtsAudioDeliveryIfComplete(delivery);
-    });
+    // Main sends the end marker before it replies, so it is on its way.
+    await ended;
     return result;
   } finally {
-    delivery.finish = null;
-    pendingLocalTtsAudioDeliveries.delete(request.requestId);
+    localTtsAudioStreams.delete(requestId);
   }
+}
+
+function cancelLocalTts(request: CancelRequest): Promise<unknown> {
+  // Stop delivery here at once: chunks already queued behind the cancel must
+  // not reach a renderer that has moved on.
+  const requestId = localTtsRequestId(request);
+  const stream = requestId === undefined ? undefined : localTtsAudioStreams.get(requestId);
+  if (stream) stream.stopped = true;
+  return ipcRenderer.invoke("local-tts:cancel", request);
+}
+
+// Takes out a lease that keeps the named model resident in main until the
+// returned function is called. The function may be called at any time, once
+// or more: a release that overtakes the acquisition is sent after it.
+function keepLocalModelWarm(request: KeepWarmRequest): () => void {
+  const leaseId = `lease-${crypto.randomUUID()}`;
+  const held = ipcRenderer.invoke("local-tts:keep-warm", { ...request, leaseId }).then(
+    () => true,
+    (error: unknown) => {
+      // Best effort, like warm(): the model is then only kept for the usual
+      // idle window, which is not worth failing the caller over.
+      console.warn("Could not keep the local model warm:", error);
+      return false;
+    },
+  );
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    void held.then((acquired) => {
+      if (!acquired) return;
+      return ipcRenderer.invoke("local-tts:release-keep-warm", { leaseId });
+    }).catch((error: unknown) => {
+      console.warn("Could not release a local model keep-warm lease:", error);
+    });
+  };
 }
 
 function saveReaderAudio(value: unknown): Promise<void> {
@@ -362,11 +412,17 @@ contextBridge.exposeInMainWorld("electron", {
     listDocuments: () => ipcRenderer.invoke("reader-library:list-documents"),
     getDocument: (id: string) => ipcRenderer.invoke("reader-library:get-document", { id }),
     saveDocument: (document: unknown) => ipcRenderer.invoke("reader-library:save-document", { document }),
+    saveProgress: (documentId: string, progress: unknown) => (
+      ipcRenderer.invoke("reader-library:save-progress", { documentId, progress })
+    ),
     deleteDocument: (id: string) => ipcRenderer.invoke("reader-library:delete-document", { id }),
     getActiveDocumentId: () => ipcRenderer.invoke("reader-library:get-active-document-id"),
     setActiveDocumentId: (id: string) => ipcRenderer.invoke("reader-library:set-active-document-id", { id }),
     saveAudio: saveReaderAudio,
     getAudio: getReaderAudio,
+    getAudioSignature: (documentId: string, sectionId: string) => (
+      ipcRenderer.invoke("reader-library:get-audio-signature", { documentId, sectionId })
+    ),
     deleteAudio: (documentId: string, sectionId?: string) => (
       ipcRenderer.invoke("reader-library:delete-audio", { documentId, sectionId })
     ),
@@ -395,7 +451,8 @@ contextBridge.exposeInMainWorld("electron", {
     warm: (request: { model: LocalModel; mode?: string; modelPath?: string; modelRepo?: string }) => (
       ipcRenderer.invoke("local-tts:warm", request)
     ),
-    cancel: (request: CancelRequest) => ipcRenderer.invoke("local-tts:cancel", request),
+    keepWarm: keepLocalModelWarm,
+    cancel: cancelLocalTts,
     getCacheInfo: (request: CacheRequest) => ipcRenderer.invoke("local-tts:cache-info", request),
     clearCache: (request: CacheRequest) => ipcRenderer.invoke("local-tts:clear-cache", request),
     getQwen3Setup: (request?: { modelRepo?: string }) => ipcRenderer.invoke("local-tts:qwen3-setup", request),
@@ -419,11 +476,18 @@ contextBridge.exposeInMainWorld("electron", {
         ipcRenderer.off("local-tts:progress", wrapped);
       };
     },
-    subscribeAudioChunk: (listener: (event: unknown) => void) => {
-      const wrapped = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
-      ipcRenderer.on("local-tts:audio-chunk", wrapped);
+    // Chunks of requests started without their own `onAudioChunk` listener.
+    subscribeAudioChunk: (listener: AudioChunkListener) => {
+      audioChunkSubscribers.add(listener);
       return () => {
-        ipcRenderer.off("local-tts:audio-chunk", wrapped);
+        audioChunkSubscribers.delete(listener);
+      };
+    },
+    subscribeModelEvicted: (listener: (event: unknown) => void) => {
+      const wrapped = (_event: IpcRendererEvent, payload: unknown) => listener(payload);
+      ipcRenderer.on("local-tts:model-evicted", wrapped);
+      return () => {
+        ipcRenderer.off("local-tts:model-evicted", wrapped);
       };
     },
   },

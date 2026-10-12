@@ -1,6 +1,48 @@
 export const RESULT_PREFIX = "INFERENCE_SPEED_RESULT_JSON:";
 export const ERROR_PREFIX = "INFERENCE_SPEED_ERROR_JSON:";
-const BENCHMARK_MODELS = new Set(["both", "kokoro", "supertonic"]);
+// Mirrors BENCHMARK_MODELS and BENCHMARK_MODEL_SELECTIONS in
+// src/eval/inferenceSpeedOptions.ts; vite.inferenceSpeedEval.test.ts keeps them equal.
+export const BENCHMARK_MODELS = Object.freeze(["kokoro", "supertonic", "supertonic3"]);
+export const BENCHMARK_MODEL_SELECTIONS = Object.freeze([...BENCHMARK_MODELS, "both", "all"]);
+
+/** The runtimes a `--model` selection benchmarks, in run order. */
+export function resolveRequestedModels(requestedModel) {
+  if (!BENCHMARK_MODEL_SELECTIONS.includes(requestedModel)) {
+    throw new Error(`Unsupported requested benchmark model: ${requestedModel}`);
+  }
+  if (requestedModel === "all") return [...BENCHMARK_MODELS];
+  if (requestedModel === "both") return ["kokoro", "supertonic"];
+  return [requestedModel];
+}
+
+function formatMs(value) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}ms` : "n/a";
+}
+
+function formatFixed(value, digits) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toFixed(digits) : "n/a";
+}
+
+/**
+ * One CLI line per model result. Values a runtime could not produce (no audio,
+ * or a report from before the cold/warm split) print as `n/a`.
+ */
+export function formatModelSummary(model) {
+  if (model.error) return `${model.model}: ERROR ${model.error}`;
+  const summary = model.summary ?? {};
+  // Reports from before schema 4 recorded only `loadMs`, which was the cold load.
+  const coldLoadMs = model.coldLoadMs ?? model.loadMs;
+  return [
+    `${model.model}: cold load ${formatMs(coldLoadMs)}`,
+    `warm load ${formatMs(model.warmLoadMs)}`,
+    `first audio ${formatMs(model.firstChunkMs)}`,
+    `mean ${formatMs(summary.meanGenerationMs)}`,
+    `mean first chunk ${formatMs(summary.meanFirstChunkMs)}`,
+    `${formatFixed(summary.meanCharsPerSec, 1)} chars/s`,
+    `RTF ${formatFixed(summary.meanRtf, 3)}`,
+    `backend ${model.backend ?? "n/a"}`,
+  ].join(", ");
+}
 
 export function createLineBuffer(handleLine) {
   let buffered = "";
@@ -70,10 +112,7 @@ export function createElectronOutputParser(writeOutput = () => {}) {
 }
 
 export function getRequestedModelFailures(result, requestedModel) {
-  if (!BENCHMARK_MODELS.has(requestedModel)) {
-    throw new Error(`Unsupported requested benchmark model: ${requestedModel}`);
-  }
-  const requested = requestedModel === "both" ? ["kokoro", "supertonic"] : [requestedModel];
+  const requested = resolveRequestedModels(requestedModel);
   const failures = [];
   for (const model of requested) {
     const matches = result.models.filter((entry) => entry.model === model);

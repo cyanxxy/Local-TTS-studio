@@ -9,6 +9,7 @@ import {
   buildQwen3TextUnits,
   QWEN3_UNIT_MAX_CHARS,
 } from "./qwenChunking";
+import { encodeSpeechBreakMark } from "./speechBreakMarks";
 
 /** Replays the bridge on one request: IPC `trim()`, then split_text_units. */
 function unitTexts(text: string): string[] {
@@ -176,5 +177,43 @@ describe("buildQwen3TextUnits", () => {
     expect(sections.every((section) => (
       countUnicodeScalars(section.text) <= MAX_LOCAL_TTS_TEXT_LENGTH
     ))).toBe(true);
+  });
+});
+
+describe("buildQwen3RequestPlan pause marks", () => {
+  it("is unchanged without marks", () => {
+    const text = "One sentence. Another sentence.";
+    expect(buildQwen3RequestPlan(text).sections).toHaveLength(1);
+    expect(buildQwen3RequestPlan(text).sections[0].pauseAfterSec).toBe(0);
+  });
+
+  it("ends a request at every mark and carries the pause", () => {
+    const text = `Hi.\n\nOk.${encodeSpeechBreakMark(1.5)}Yes\n\nNo.`;
+    const plan = buildQwen3RequestPlan(text);
+
+    expect(plan.sections.map((section) => section.text)).toEqual(["Hi.\n\nOk.", "Yes\n\nNo."]);
+    expect(plan.sections.map((section) => section.pauseAfterSec)).toEqual([1.5, 0]);
+    expect(plan.sections[0].pauseKind).toBe("sentence");
+    expect(plan.units.map((unit) => unit.pauseAfterSec)).toEqual([1.5, 0]);
+    for (const section of plan.sections) {
+      expect(text.slice(section.start, section.end)).toBe(section.text);
+    }
+    expect(plan.sections[1]).toMatchObject({ unitStart: 1, unitEnd: 2 });
+    expect(text.slice(plan.units[1].start, plan.units[1].end)).toBe("Yes\n\nNo.");
+  });
+
+  it("adds up marks with nothing between them and keeps a trailing pause", () => {
+    const text = `Hello.${encodeSpeechBreakMark(1)}${encodeSpeechBreakMark(0.5)}${encodeSpeechBreakMark(0.25)}`;
+    const plan = buildQwen3RequestPlan(text);
+    expect(plan.sections).toHaveLength(1);
+    expect(plan.sections[0].pauseAfterSec).toBe(1.75);
+    expect(buildQwen3RequestPlan(`A.${encodeSpeechBreakMark(8)}${encodeSpeechBreakMark(8)}`).sections[0].pauseAfterSec).toBe(10);
+  });
+
+  it("ignores marks before any text", () => {
+    const plan = buildQwen3RequestPlan(`${encodeSpeechBreakMark(2)}Hello.`);
+    expect(plan.sections).toHaveLength(1);
+    expect(plan.sections[0]).toMatchObject({ text: "Hello.", pauseAfterSec: 0 });
+    expect(buildQwen3RequestPlan(encodeSpeechBreakMark(2))).toEqual({ sections: [], units: [] });
   });
 });

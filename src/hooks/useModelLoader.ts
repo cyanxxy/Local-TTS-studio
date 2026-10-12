@@ -1,22 +1,59 @@
-import { useState, useEffect, useRef, useCallback } from "react";
-import type { ModelState, ModelType, WorkerOutMessage } from "../types";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
+import { BROWSER_ENGINE_IDS, ENGINES, type BrowserEngineId } from "../models/registry";
+import type { ModelState, WorkerOutMessage } from "../types";
+import { BROWSER_WORKER_FACTORIES } from "./browserWorkers";
+import { workerEventMessage } from "./workerGeneration";
 
-interface UseModelLoaderReturn {
-  kokoroState: ModelState;
-  supertonicState: ModelState;
-  kokoroWorker: React.RefObject<Worker | null>;
-  supertonicWorker: React.RefObject<Worker | null>;
-  kokoroVoices: string[];
-  hardRestartModel: (model: ModelType) => void;
-  loadModel: (model: ModelType) => void;
-  reloadModel: (model: ModelType) => void;
+type EngineRecord<T> = { readonly [Id in BrowserEngineId]: T };
+
+/** A live worker together with what callers may need to know about it. */
+export interface BrowserWorkerLease {
+  worker: Worker;
+  /** Aborts when the pool terminates or replaces this worker. */
+  lifetime: AbortSignal;
+  /** Whether the worker reported its model loaded. */
+  ready: boolean;
 }
 
-interface UseModelLoaderOptions {
-  enabled?: boolean;
-  preferredSupertonicVoice?: string;
+/** A loaded worker held for one piece of work; `release` lets the pool evict it again. */
+export interface AcquiredBrowserWorker {
+  worker: Worker;
+  lifetime: AbortSignal;
+  release: () => void;
+}
+
+export interface UseModelLoaderReturn {
+  states: EngineRecord<ModelState>;
+  /** Voice ids each loaded model reported; empty until it has loaded. */
+  voices: EngineRecord<string[]>;
+  /** The engine's current worker, or null while it is not resident. */
+  getWorker: (model: BrowserEngineId) => Worker | null;
+  getWorkerLease: (model: BrowserEngineId) => BrowserWorkerLease | null;
+  /**
+   * Resolves with the engine's worker once its model has loaded, starting the
+   * worker and the load when needed, whichever engine is selected. The worker
+   * stays resident until `release`. Rejects when the model cannot load, the
+   * browser cannot run the engine, the pool unmounts, or `signal` aborts.
+   */
+  acquireWorker: (model: BrowserEngineId, signal: AbortSignal) => Promise<AcquiredBrowserWorker>;
+  hardRestartModel: (model: BrowserEngineId) => void;
+  loadModel: (model: BrowserEngineId) => void;
+  reloadModel: (model: BrowserEngineId) => void;
+}
+
+export interface UseModelLoaderOptions {
+  /** A visible surface runs the browser model: its worker starts and its model loads. */
+  active?: boolean;
+  /**
+   * Some surface still selects the browser model. Its resident worker then
+   * stays loaded while no visible surface uses it, instead of being evicted
+   * after the idle grace period. `active` implies it.
+   */
+  retain?: boolean;
+  /** Passed to an engine's worker when it loads, e.g. the Supertonic 2 voice to warm. */
+  preferredVoices?: Partial<Record<BrowserEngineId, string>>;
   debugProfiling?: boolean;
-  supportedModels?: readonly ModelType[];
+  supportedModels?: readonly BrowserEngineId[];
 }
 
 const INITIAL_MODEL_STATE: ModelState = {
@@ -27,449 +64,460 @@ const INITIAL_MODEL_STATE: ModelState = {
   backend: null,
 };
 
-const BROWSER_MODEL_IDLE_EVICT_MS = 15_000;
+const NO_VOICES: string[] = [];
+
+/** How long a browser model no surface uses stays loaded before its worker is evicted. */
+export const BROWSER_MODEL_IDLE_EVICT_MS = 15_000;
+
+interface PoolEntry {
+  resident: boolean;
+  /**
+   * Identifies one worker lifetime. Every (re)start bumps it, and a worker is
+   * spawned at most once per revision, so a render that still shows an older
+   * revision can never resurrect a worker that was deliberately retired.
+   */
+  revision: number;
+  /** Outstanding `acquireWorker` holds; a held engine is never evicted. */
+  holds: number;
+  state: ModelState;
+  voices: string[];
+}
+
+type PoolState = EngineRecord<PoolEntry>;
+
+type PoolAction =
+  | { type: "reside"; model: BrowserEngineId }
+  | { type: "hold"; model: BrowserEngineId }
+  | { type: "release"; model: BrowserEngineId }
+  | { type: "state"; model: BrowserEngineId; update: (state: ModelState) => ModelState }
+  | { type: "ready"; model: BrowserEngineId; state: ModelState; voices?: string[] }
+  /**
+   * The worker is gone: start a fresh one (`respawn`), or leave the engine
+   * unloaded. A held engine always comes back.
+   */
+  | { type: "restart"; model: BrowserEngineId; respawn: boolean; forgetVoices: boolean };
 
 function clampPercent(percent: number): number {
   return Math.max(0, Math.min(100, percent));
 }
 
-function workerEventMessage(event: Event, fallback: string): string {
-  if (event instanceof ErrorEvent && event.message) return event.message;
-  if (event.type === "messageerror") return `${fallback} The worker sent an unreadable message.`;
-  return fallback;
+function mapEngines<T>(map: (model: BrowserEngineId) => T): EngineRecord<T> {
+  return Object.fromEntries(BROWSER_ENGINE_IDS.map((model) => [model, map(model)])) as EngineRecord<T>;
+}
+
+function initialPool(resident: BrowserEngineId | null): PoolState {
+  return mapEngines((model) => ({
+    resident: model === resident,
+    revision: 0,
+    holds: 0,
+    state: INITIAL_MODEL_STATE,
+    voices: NO_VOICES,
+  }));
+}
+
+function reside(entry: PoolEntry): PoolEntry {
+  return entry.resident ? entry : { ...entry, resident: true, revision: entry.revision + 1 };
+}
+
+function poolReducer(pool: PoolState, action: PoolAction): PoolState {
+  const entry = pool[action.model];
+  let next: PoolEntry;
+  switch (action.type) {
+    case "reside":
+      next = reside(entry);
+      if (next === entry) return pool;
+      break;
+    case "hold":
+      next = { ...reside(entry), holds: entry.holds + 1 };
+      break;
+    case "release":
+      next = { ...entry, holds: Math.max(0, entry.holds - 1) };
+      break;
+    case "state":
+      next = { ...entry, state: action.update(entry.state) };
+      break;
+    case "ready":
+      next = { ...entry, state: action.state, voices: action.voices ?? entry.voices };
+      break;
+    case "restart": {
+      const respawn = action.respawn || entry.holds > 0;
+      if (!respawn && !entry.resident && entry.state === INITIAL_MODEL_STATE
+        && (!action.forgetVoices || entry.voices === NO_VOICES)) return pool;
+      next = {
+        ...entry,
+        resident: respawn,
+        revision: respawn ? entry.revision + 1 : entry.revision,
+        state: INITIAL_MODEL_STATE,
+        voices: action.forgetVoices ? NO_VOICES : entry.voices,
+      };
+      break;
+    }
+  }
+  return { ...pool, [action.model]: next };
+}
+
+interface Lease extends BrowserWorkerLease {
+  revision: number;
+  retire: AbortController;
+  /** The last load failure, until the next load starts. */
+  failure: string | null;
 }
 
 /**
- * Manages loading both TTS models via Web Workers.
- * Workers are created on startup, but models load lazily when selected.
- * Inactive workers are evicted after a short grace period so their model
- * allocations do not remain resident for the lifetime of the page.
+ * The browser engines' module workers, one per registry engine with
+ * `picker: "browser"`.
+ *
+ * Only the selected engine's worker starts, and only once a visible surface
+ * runs it (or `acquireWorker` asks for an engine). Every other worker is
+ * evicted after `BROWSER_MODEL_IDLE_EVICT_MS`, and so is the selected one when
+ * no surface selects the browser model any more (`retain`), so model
+ * allocations never outlive their use by long.
  */
 export function useModelLoader(
-  activeModel: ModelType,
+  activeModel: BrowserEngineId,
   {
-    enabled = true,
-    preferredSupertonicVoice,
+    active = true,
+    retain = false,
+    preferredVoices,
     debugProfiling = false,
-    supportedModels = ["kokoro", "supertonic"],
+    supportedModels = BROWSER_ENGINE_IDS,
   }: UseModelLoaderOptions = {},
 ): UseModelLoaderReturn {
-  const [kokoroState, setKokoroState] = useState<ModelState>(INITIAL_MODEL_STATE);
-  const [supertonicState, setSupertonicState] = useState<ModelState>(INITIAL_MODEL_STATE);
-  const [kokoroVoices, setKokoroVoices] = useState<string[]>([]);
+  const supportsActive = supportedModels.includes(activeModel);
+  const [pool, dispatch] = useReducer(
+    poolReducer,
+    active && supportsActive ? activeModel : null,
+    initialPool,
+  );
+  // The selected engine joins the pool the moment a visible surface runs it;
+  // adjusting during render spawns its worker in this same commit.
+  if (active && supportsActive && !pool[activeModel].resident) {
+    dispatch({ type: "reside", model: activeModel });
+  }
 
-  const kokoroWorker = useRef<Worker | null>(null);
-  const supertonicWorker = useRef<Worker | null>(null);
-  const kokoroLoadRequestedRef = useRef(false);
-  const supertonicLoadRequestedRef = useRef(false);
+  const leasesRef = useRef(new Map<BrowserEngineId, Lease>());
+  const loadRequestedRef = useRef(new Set<BrowserEngineId>());
+  // The last revision each engine had a worker constructed (or attempted) for.
+  const spawnedRevisionRef = useRef(new Map<BrowserEngineId, number>());
+  // Why an engine's latest worker could not be constructed, until one is.
+  const spawnFailuresRef = useRef(new Map<BrowserEngineId, string>());
+  const evictionTimersRef = useRef(new Map<BrowserEngineId, number>());
+  // Wakes pending `acquireWorker` calls whenever a lease changes.
+  const listenersRef = useRef(new Set<() => void>());
+  const disposedRef = useRef(false);
   const activeModelRef = useRef(activeModel);
-  const preferredSupertonicVoiceRef = useRef(preferredSupertonicVoice);
+  const activeRef = useRef(active);
+  const preferredVoicesRef = useRef(preferredVoices);
   const debugProfilingRef = useRef(debugProfiling);
-  const supportsKokoro = supportedModels.includes("kokoro");
-  const supportsSupertonic = supportedModels.includes("supertonic");
-  const [kokoroResident, setKokoroResident] = useState(enabled && supportsKokoro);
-  const [supertonicResident, setSupertonicResident] = useState(enabled && supportsSupertonic);
-  const [kokoroWorkerRevision, setKokoroWorkerRevision] = useState(0);
-  const [supertonicWorkerRevision, setSupertonicWorkerRevision] = useState(0);
+  const supportedKey = supportedModels.join(",");
 
   useEffect(() => {
     activeModelRef.current = activeModel;
-    preferredSupertonicVoiceRef.current = preferredSupertonicVoice;
+    activeRef.current = active;
+    preferredVoicesRef.current = preferredVoices;
     debugProfilingRef.current = debugProfiling;
-  }, [activeModel, debugProfiling, preferredSupertonicVoice]);
+  }, [active, activeModel, debugProfiling, preferredVoices]);
 
-  const setLoadingState = useCallback((model: ModelType) => {
-    const setter = model === "kokoro" ? setKokoroState : setSupertonicState;
-    setter((prev) => ({
-      ...prev,
-      loading: true,
-      downloadProgress: 0,
-      error: null,
-      backend: null,
-    }));
+  const isSupported = useCallback(
+    (model: BrowserEngineId) => supportedKey.split(",").includes(model),
+    [supportedKey],
+  );
+
+  const notify = useCallback(() => {
+    for (const listener of [...listenersRef.current]) listener();
   }, []);
 
-  const setLoadFailure = useCallback((model: ModelType, message: string) => {
-    const requestedRef = model === "kokoro" ? kokoroLoadRequestedRef : supertonicLoadRequestedRef;
-    const setter = model === "kokoro" ? setKokoroState : setSupertonicState;
-    requestedRef.current = false;
-    setter((prev) => ({
-      ...prev,
-      ready: false,
-      loading: false,
-      error: message,
-      backend: null,
-    }));
-  }, []);
+  /** Terminates the engine's worker, if any, and fails whatever was waiting on it. */
+  const retireWorker = useCallback((model: BrowserEngineId) => {
+    loadRequestedRef.current.delete(model);
+    const lease = leasesRef.current.get(model);
+    if (!lease) return;
+    leasesRef.current.delete(model);
+    lease.worker.onmessage = null;
+    lease.worker.onerror = null;
+    lease.worker.onmessageerror = null;
+    lease.worker.terminate();
+    lease.retire.abort();
+    notify();
+  }, [notify]);
 
-  const hardRestartModel = useCallback((model: ModelType) => {
-    const isActive = activeModelRef.current === model;
-    if (model === "kokoro") {
-      const worker = kokoroWorker.current;
-      kokoroWorker.current = null;
-      worker?.terminate();
-      kokoroLoadRequestedRef.current = false;
-      setKokoroState(INITIAL_MODEL_STATE);
-      setKokoroVoices([]);
-      setKokoroResident(isActive);
-      if (isActive) setKokoroWorkerRevision((revision) => revision + 1);
-      return;
+  /** The selected engine comes straight back while a visible surface runs it. */
+  const shouldRespawn = useCallback(
+    (model: BrowserEngineId) => activeRef.current && activeModelRef.current === model,
+    [],
+  );
+
+  const setLoadFailure = useCallback((model: BrowserEngineId, message: string) => {
+    loadRequestedRef.current.delete(model);
+    const lease = leasesRef.current.get(model);
+    if (lease) lease.failure = message;
+    dispatch({
+      type: "state",
+      model,
+      update: (state) => ({ ...state, ready: false, loading: false, error: message, backend: null }),
+    });
+    notify();
+  }, [notify]);
+
+  const hardRestartModel = useCallback((model: BrowserEngineId) => {
+    retireWorker(model);
+    dispatch({ type: "restart", model, respawn: shouldRespawn(model), forgetVoices: true });
+  }, [retireWorker, shouldRespawn]);
+
+  const handleMessage = useCallback((model: BrowserEngineId, worker: Worker, message: WorkerOutMessage) => {
+    const lease = leasesRef.current.get(model);
+    if (lease?.worker !== worker) return;
+    switch (message.type) {
+      case "LOAD_PROGRESS":
+        dispatch({
+          type: "state",
+          model,
+          // A loaded engine reports progress when a generation downloads a
+          // file the load did not need (Piper's next voice); the model stays
+          // ready and its backend unchanged while that runs.
+          update: (state) => state.ready
+            ? { ...state, loading: message.percent < 100, downloadProgress: clampPercent(message.percent) }
+            : {
+                ...state,
+                loading: true,
+                downloadProgress: clampPercent(message.percent),
+                error: null,
+                backend: null,
+              },
+        });
+        break;
+      case "READY":
+        loadRequestedRef.current.delete(model);
+        lease.ready = true;
+        lease.failure = null;
+        dispatch({
+          type: "ready",
+          model,
+          state: { ready: true, loading: false, downloadProgress: 100, error: null, backend: message.backend ?? null },
+          voices: message.voices,
+        });
+        notify();
+        break;
+      case "CANCELLED":
+        // The worker closed itself after a hard cancel.
+        retireWorker(model);
+        dispatch({ type: "restart", model, respawn: shouldRespawn(model), forgetVoices: false });
+        break;
+      case "ERROR":
+        if (message.scope === "generate") break;
+        setLoadFailure(model, message.message);
+        break;
     }
+  }, [notify, retireWorker, setLoadFailure, shouldRespawn]);
 
-    const worker = supertonicWorker.current;
-    supertonicWorker.current = null;
-    worker?.terminate();
-    supertonicLoadRequestedRef.current = false;
-    setSupertonicState(INITIAL_MODEL_STATE);
-    setSupertonicResident(isActive);
-    if (isActive) setSupertonicWorkerRevision((revision) => revision + 1);
-  }, []);
+  // Starts every worker the pool wants and retires every one it no longer
+  // does. Diffing against the live leases keeps each worker for exactly as
+  // long as its engine stays resident at the same revision.
+  useEffect(() => {
+    const leases = leasesRef.current;
+    for (const model of BROWSER_ENGINE_IDS) {
+      const entry = pool[model];
+      const wanted = entry.resident && isSupported(model);
+      const lease = leases.get(model);
+      if (lease && (!wanted || lease.revision !== entry.revision)) retireWorker(model);
+      if (!wanted || leases.has(model) || entry.revision <= (spawnedRevisionRef.current.get(model) ?? -1)) continue;
+      spawnedRevisionRef.current.set(model, entry.revision);
 
-  const loadModel = useCallback((model: ModelType) => {
-    if (!enabled) return;
-    if (model === "kokoro" && !supportsKokoro) return;
-    if (model === "supertonic" && !supportsSupertonic) return;
+      let worker: Worker;
+      try {
+        worker = BROWSER_WORKER_FACTORIES[model]();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        spawnFailuresRef.current.set(model, message);
+        queueMicrotask(() => setLoadFailure(model, message));
+        continue;
+      }
+      spawnFailuresRef.current.delete(model);
+      const failure = `${ENGINES[model].label} worker failed.`;
+      worker.onmessage = (event: MessageEvent<WorkerOutMessage>) => handleMessage(model, worker, event.data);
+      worker.onerror = (event) => {
+        if (leases.get(model)?.worker === worker) setLoadFailure(model, workerEventMessage(event, failure));
+      };
+      worker.onmessageerror = (event) => {
+        if (leases.get(model)?.worker === worker) setLoadFailure(model, workerEventMessage(event, failure));
+      };
+      const retire = new AbortController();
+      leases.set(model, {
+        worker,
+        lifetime: retire.signal,
+        ready: false,
+        revision: entry.revision,
+        retire,
+        failure: null,
+      });
+      notify();
+    }
+  }, [handleMessage, isSupported, notify, pool, retireWorker, setLoadFailure]);
 
-    const worker = model === "kokoro" ? kokoroWorker.current : supertonicWorker.current;
-    const requestedRef = model === "kokoro" ? kokoroLoadRequestedRef : supertonicLoadRequestedRef;
-    if (!worker || requestedRef.current) return;
+  useEffect(() => {
+    const timers = evictionTimersRef.current;
+    const listeners = listenersRef.current;
+    const spawnedRevisions = spawnedRevisionRef.current;
+    disposedRef.current = false;
+    return () => {
+      disposedRef.current = true;
+      for (const timeoutId of timers.values()) window.clearTimeout(timeoutId);
+      timers.clear();
+      for (const model of BROWSER_ENGINE_IDS) retireWorker(model);
+      // Every worker is gone, so a remount (StrictMode replays effects) may
+      // start the current revisions again.
+      spawnedRevisions.clear();
+      for (const listener of [...listeners]) listener();
+    };
+  }, [retireWorker]);
 
-    requestedRef.current = true;
-    setLoadingState(model);
+  const startLoad = useCallback((model: BrowserEngineId, forceReload: boolean) => {
+    const lease = leasesRef.current.get(model);
+    if (!lease || !isSupported(model) || loadRequestedRef.current.has(model)) return;
+    if (lease.ready && !forceReload) return;
+    loadRequestedRef.current.add(model);
+    lease.ready = false;
+    lease.failure = null;
+    dispatch({
+      type: "state",
+      model,
+      update: (state) => ({
+        ...state,
+        ready: forceReload ? false : state.ready,
+        loading: true,
+        downloadProgress: 0,
+        error: null,
+        backend: null,
+      }),
+    });
     try {
-      worker.postMessage({
+      lease.worker.postMessage({
         type: "LOAD",
-        preferredVoice: model === "supertonic" ? preferredSupertonicVoiceRef.current : undefined,
+        ...(forceReload ? { forceReload: true } : {}),
+        preferredVoice: preferredVoicesRef.current?.[model],
         debugProfiling: debugProfilingRef.current,
       });
     } catch (error) {
       setLoadFailure(model, error instanceof Error ? error.message : String(error));
     }
-  }, [enabled, setLoadFailure, setLoadingState, supportsKokoro, supportsSupertonic]);
+  }, [isSupported, setLoadFailure]);
 
-  const reloadModel = useCallback((model: ModelType) => {
-    if (!enabled) return;
-    if (model === "kokoro" && !supportsKokoro) return;
-    if (model === "supertonic" && !supportsSupertonic) return;
+  const loadModel = useCallback((model: BrowserEngineId) => startLoad(model, false), [startLoad]);
+  const reloadModel = useCallback((model: BrowserEngineId) => startLoad(model, true), [startLoad]);
 
-    const worker = model === "kokoro" ? kokoroWorker.current : supertonicWorker.current;
-    const requestedRef = model === "kokoro" ? kokoroLoadRequestedRef : supertonicLoadRequestedRef;
-    if (!worker || requestedRef.current) return;
-
-    requestedRef.current = true;
-    if (model === "kokoro") {
-      setKokoroState((prev) => ({
-        ...prev,
-        ready: false,
-        loading: true,
-        downloadProgress: 0,
-        error: null,
-        backend: null,
-      }));
-    } else {
-      setSupertonicState((prev) => ({
-        ...prev,
-        ready: false,
-        loading: true,
-        downloadProgress: 0,
-        error: null,
-        backend: null,
-      }));
-    }
-
-    try {
-      worker.postMessage({
-        type: "LOAD",
-        forceReload: true,
-        preferredVoice: model === "supertonic" ? preferredSupertonicVoiceRef.current : undefined,
-        debugProfiling: debugProfilingRef.current,
-      });
-    } catch (error) {
-      setLoadFailure(model, error instanceof Error ? error.message : String(error));
-    }
-  }, [enabled, setLoadFailure, supportsKokoro, supportsSupertonic]);
-
-  const handleKokoroMessage = useCallback((e: MessageEvent<WorkerOutMessage>) => {
-    const msg = e.data;
-    switch (msg.type) {
-      case "LOAD_PROGRESS":
-        setKokoroState((prev) => ({
-          ...prev,
-          loading: true,
-          downloadProgress: clampPercent(msg.percent),
-          error: null,
-          backend: null,
-        }));
-        break;
-      case "READY":
-        kokoroLoadRequestedRef.current = false;
-        setKokoroState({
-          ready: true,
-          loading: false,
-          downloadProgress: 100,
-          error: null,
-          backend: msg.backend ?? null,
-        });
-        if (msg.voices) setKokoroVoices(msg.voices);
-        break;
-      case "CANCELLED":
-        kokoroLoadRequestedRef.current = false;
-        setKokoroState(INITIAL_MODEL_STATE);
-        if (activeModelRef.current === "kokoro") {
-          setKokoroResident(true);
-          setKokoroWorkerRevision((revision) => revision + 1);
-        } else {
-          setKokoroResident(false);
-        }
-        break;
-      case "ERROR":
-        if (msg.scope === "generate") break;
-        kokoroLoadRequestedRef.current = false;
-        setKokoroState((prev) => ({
-          ...prev,
-          ready: false,
-          loading: false,
-          error: msg.message,
-          backend: null,
-        }));
-        break;
-    }
-  }, []);
-
-  const handleSupertonicMessage = useCallback((e: MessageEvent<WorkerOutMessage>) => {
-    const msg = e.data;
-    switch (msg.type) {
-      case "LOAD_PROGRESS":
-        setSupertonicState((prev) => ({
-          ...prev,
-          loading: true,
-          downloadProgress: clampPercent(msg.percent),
-          error: null,
-          backend: null,
-        }));
-        break;
-      case "READY":
-        supertonicLoadRequestedRef.current = false;
-        setSupertonicState({
-          ready: true,
-          loading: false,
-          downloadProgress: 100,
-          error: null,
-          backend: msg.backend ?? null,
-        });
-        break;
-      case "CANCELLED":
-        supertonicLoadRequestedRef.current = false;
-        setSupertonicState(INITIAL_MODEL_STATE);
-        if (activeModelRef.current === "supertonic") {
-          setSupertonicResident(true);
-          setSupertonicWorkerRevision((revision) => revision + 1);
-        } else {
-          setSupertonicResident(false);
-        }
-        break;
-      case "ERROR":
-        if (msg.scope === "generate") break;
-        supertonicLoadRequestedRef.current = false;
-        setSupertonicState((prev) => ({
-          ...prev,
-          ready: false,
-          loading: false,
-          error: msg.message,
-          backend: null,
-        }));
-        break;
-    }
-  }, []);
-
+  const activeEntry = pool[activeModel];
+  // Loads the selected engine once its worker is up. It runs a microtask
+  // after the spawn pass above so the worker exists by then.
   useEffect(() => {
-    let disposed = false;
-    if (!enabled) {
-      kokoroLoadRequestedRef.current = false;
-      supertonicLoadRequestedRef.current = false;
-      queueMicrotask(() => {
-        if (disposed) return;
-        setKokoroResident(false);
-        setSupertonicResident(false);
-        setKokoroState(INITIAL_MODEL_STATE);
-        setSupertonicState(INITIAL_MODEL_STATE);
-      });
-      return () => {
-        disposed = true;
-      };
-    }
-
-    queueMicrotask(() => {
-      if (disposed) return;
-      if (!supportsKokoro) setKokoroResident(false);
-      if (!supportsSupertonic) setSupertonicResident(false);
-
-      if (activeModel === "kokoro" && supportsKokoro) {
-        setKokoroResident(true);
-      } else if (activeModel === "supertonic" && supportsSupertonic) {
-        setSupertonicResident(true);
-      }
-    });
-
-    const inactiveModel = activeModel === "kokoro" ? "supertonic" : "kokoro";
-    const timeoutId = window.setTimeout(() => {
-      if (inactiveModel === "kokoro") {
-        kokoroLoadRequestedRef.current = false;
-        setKokoroState(INITIAL_MODEL_STATE);
-        setKokoroVoices([]);
-        setKokoroResident(false);
-      } else {
-        supertonicLoadRequestedRef.current = false;
-        setSupertonicState(INITIAL_MODEL_STATE);
-        setSupertonicResident(false);
-      }
-    }, BROWSER_MODEL_IDLE_EVICT_MS);
-
-    return () => {
-      disposed = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [activeModel, enabled, supportsKokoro, supportsSupertonic]);
-
-  useEffect(() => {
-    if (!enabled || !supportsKokoro || !kokoroResident) {
-      kokoroWorker.current = null;
-      return;
-    }
-
-    let worker: Worker | null = null;
-    let disposed = false;
-    const reportLoadFailure = (model: ModelType, message: string) => {
-      queueMicrotask(() => {
-        if (!disposed) {
-          setLoadFailure(model, message);
-        }
-      });
-    };
-
-    try {
-      worker = new Worker(
-        new URL("../workers/kokoro.worker.ts", import.meta.url),
-        { type: "module" },
-      );
-    } catch (error) {
-      reportLoadFailure("kokoro", error instanceof Error ? error.message : String(error));
-    }
-
-    if (worker) {
-      worker.onmessage = handleKokoroMessage;
-      worker.onerror = (event) => {
-        setLoadFailure("kokoro", workerEventMessage(event, "Kokoro worker failed."));
-      };
-      worker.onmessageerror = (event) => {
-        setLoadFailure("kokoro", workerEventMessage(event, "Kokoro worker failed."));
-      };
-    }
-
-    kokoroWorker.current = worker;
-
-    return () => {
-      disposed = true;
-      kokoroLoadRequestedRef.current = false;
-      if (kokoroWorker.current === worker) {
-        kokoroWorker.current = null;
-        worker?.terminate();
-      }
-    };
-  }, [
-    enabled,
-    handleKokoroMessage,
-    kokoroResident,
-    kokoroWorkerRevision,
-    setLoadFailure,
-    supportsKokoro,
-  ]);
-
-  useEffect(() => {
-    if (!enabled || !supportsSupertonic || !supertonicResident) {
-      supertonicWorker.current = null;
-      return;
-    }
-
-    let worker: Worker | null = null;
-    let disposed = false;
-    const reportLoadFailure = (message: string) => {
-      queueMicrotask(() => {
-        if (!disposed) setLoadFailure("supertonic", message);
-      });
-    };
-
-    try {
-      worker = new Worker(
-        new URL("../workers/supertonic.worker.ts", import.meta.url),
-        { type: "module" },
-      );
-    } catch (error) {
-      reportLoadFailure(error instanceof Error ? error.message : String(error));
-    }
-
-    if (worker) {
-      worker.onmessage = handleSupertonicMessage;
-      worker.onerror = (event) => {
-        setLoadFailure("supertonic", workerEventMessage(event, "Supertonic worker failed."));
-      };
-      worker.onmessageerror = (event) => {
-        setLoadFailure("supertonic", workerEventMessage(event, "Supertonic worker failed."));
-      };
-    }
-
-    supertonicWorker.current = worker;
-
-    return () => {
-      disposed = true;
-      supertonicLoadRequestedRef.current = false;
-      if (supertonicWorker.current === worker) {
-        supertonicWorker.current = null;
-        worker?.terminate();
-      }
-    };
-  }, [
-    enabled,
-    handleSupertonicMessage,
-    setLoadFailure,
-    supertonicResident,
-    supertonicWorkerRevision,
-    supportsSupertonic,
-  ]);
-
-  useEffect(() => {
-    if (!enabled) return;
+    if (!active || !activeEntry.resident) return;
     let disposed = false;
     queueMicrotask(() => {
-      if (!disposed) {
-        loadModel(activeModel);
-      }
+      if (!disposed) loadModel(activeModel);
     });
     return () => {
       disposed = true;
     };
-  }, [
-    activeModel,
-    enabled,
-    kokoroResident,
-    kokoroWorkerRevision,
-    loadModel,
-    supertonicResident,
-    supertonicWorkerRevision,
-  ]);
+  }, [active, activeEntry.resident, activeEntry.revision, activeModel, loadModel]);
 
-  const visibleKokoroState = enabled ? kokoroState : INITIAL_MODEL_STATE;
-  const visibleSupertonicState = enabled ? supertonicState : INITIAL_MODEL_STATE;
-  const visibleKokoroVoices = enabled ? kokoroVoices : [];
+  // Gives every resident worker that nothing needs one grace period, then
+  // evicts it. A worker that becomes needed again within it keeps running.
+  useEffect(() => {
+    const timers = evictionTimersRef.current;
+    for (const model of BROWSER_ENGINE_IDS) {
+      const entry = pool[model];
+      const needed = !entry.resident || entry.holds > 0 || ((active || retain) && model === activeModel);
+      const timeoutId = timers.get(model);
+      if (needed) {
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+        timers.delete(model);
+      } else if (timeoutId === undefined) {
+        timers.set(model, window.setTimeout(() => {
+          timers.delete(model);
+          retireWorker(model);
+          dispatch({ type: "restart", model, respawn: false, forgetVoices: true });
+        }, BROWSER_MODEL_IDLE_EVICT_MS));
+      }
+    }
+  }, [active, activeModel, pool, retain, retireWorker]);
 
-  return {
-    kokoroState: visibleKokoroState,
-    supertonicState: visibleSupertonicState,
-    kokoroWorker,
-    supertonicWorker,
-    kokoroVoices: visibleKokoroVoices,
+  const getWorker = useCallback((model: BrowserEngineId) => leasesRef.current.get(model)?.worker ?? null, []);
+  const getWorkerLease = useCallback((model: BrowserEngineId): BrowserWorkerLease | null => (
+    leasesRef.current.get(model) ?? null
+  ), []);
+
+  const acquireWorker = useCallback((model: BrowserEngineId, signal: AbortSignal) => (
+    new Promise<AcquiredBrowserWorker>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason);
+        return;
+      }
+      if (!isSupported(model) || disposedRef.current) {
+        reject(new Error(`${ENGINES[model].label} is not available in this browser.`));
+        return;
+      }
+      let held = true;
+      const release = () => {
+        if (!held) return;
+        held = false;
+        dispatch({ type: "release", model });
+      };
+      let loadObserved = false;
+      const settle = () => {
+        listenersRef.current.delete(check);
+        signal.removeEventListener("abort", onAbort);
+      };
+      const fail = (error: unknown) => {
+        settle();
+        release();
+        reject(error);
+      };
+      function onAbort() {
+        fail(signal.reason);
+      }
+      function check() {
+        if (disposedRef.current) {
+          fail(new Error(`${ENGINES[model].label} stopped.`));
+          return;
+        }
+        const lease = leasesRef.current.get(model);
+        if (!lease) {
+          const spawnFailure = spawnFailuresRef.current.get(model);
+          if (spawnFailure !== undefined) fail(new Error(spawnFailure));
+          return;
+        }
+        if (lease.ready) {
+          settle();
+          resolve({ worker: lease.worker, lifetime: lease.lifetime, release });
+          return;
+        }
+        // A failure from before this call gets one fresh attempt; one seen
+        // after a load started (here or by anyone else) is final.
+        if (lease.failure !== null && loadObserved) {
+          fail(new Error(lease.failure));
+          return;
+        }
+        loadObserved = true;
+        startLoad(model, false);
+      }
+
+      dispatch({ type: "hold", model });
+      listenersRef.current.add(check);
+      signal.addEventListener("abort", onAbort, { once: true });
+      check();
+    })
+  ), [isSupported, startLoad]);
+
+  const states = useMemo(() => mapEngines((model) => pool[model].state), [pool]);
+  const voices = useMemo(() => mapEngines((model) => pool[model].voices), [pool]);
+
+  return useMemo(() => ({
+    states,
+    voices,
+    getWorker,
+    getWorkerLease,
+    acquireWorker,
     hardRestartModel,
     loadModel,
     reloadModel,
-  };
+  }), [acquireWorker, getWorker, getWorkerLease, hardRestartModel, loadModel, reloadModel, states, voices]);
 }

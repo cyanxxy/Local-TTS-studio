@@ -24,6 +24,8 @@ interface ChunkingOptions {
   minCharacters?: number;
   maxCharacters?: number;
   runtime?: ChunkingRuntimeProfile;
+  /** Caps the first chunk and ramps up from there; see rampedBudget. */
+  firstChunkMaxCharacters?: number;
 }
 
 interface ChunkingLimits {
@@ -69,11 +71,51 @@ const PAUSE_SECONDS: Record<ChunkPauseKind, number> = {
   paragraph: 0.44,
 };
 
+// The first unit of a generation is the audio's time to first sound, so it is
+// capped well below the full budget; see rampedBudget.
+export const KOKORO_FIRST_UNIT_MAX_CHARS = 140;
+export const SUPERTONIC_FIRST_CHUNK_MAX_CHARS = 160;
+// A capped first unit is cut at a clause break only when the part kept
+// before it is at least this share of the cap.
+const FIRST_UNIT_MIN_CLAUSE_SHARE = 0.4;
+
+// A clause break, ending after the whitespace that follows it: a comma,
+// semicolon, or colon (with any closing quote), a spaced dash, or full-width
+// clause punctuation, which needs no space.
+const CLAUSE_BREAK = /[,;:]["'”’)\]]*\s+|\s[—–-]\s+|[，；：、]\s*/g;
+
 /** Two consecutive line breaks (LF or CRLF) — a paragraph boundary. */
 const PARAGRAPH_BREAK = /\r?\n\r?\n/;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
+}
+
+/**
+ * The character budget of the unit at `index` (0-based) when the first unit
+ * is capped at `firstMax`: the cap doubles with each unit until it reaches
+ * `fullMax`. Each unit is generated while the previous one plays, so a unit
+ * at most twice as long as the one before keeps playback ahead of synthesis.
+ */
+export function rampedBudget(index: number, firstMax: number | undefined, fullMax: number): number {
+  if (firstMax === undefined) return fullMax;
+  return Math.min(fullMax, Math.max(1, Math.floor(firstMax)) * 2 ** index);
+}
+
+/**
+ * Where a leading range longer than `maxChars` can end at its last clause
+ * break within the cap: the offset where the rest starts, or null when no
+ * clause break keeps a meaningful first part. Sentences are never cut
+ * anywhere else, since a cut mid-clause would be audible.
+ */
+function findLeadingClauseBreak(text: string, start: number, end: number, maxChars: number): number | null {
+  if (end - start <= maxChars) return null;
+  let best: number | null = null;
+  for (const match of text.slice(start, start + maxChars).matchAll(CLAUSE_BREAK)) {
+    const offset = start + match.index + match[0].length;
+    if (match.index >= maxChars * FIRST_UNIT_MIN_CLAUSE_SHARE && offset < end) best = offset;
+  }
+  return best;
 }
 
 function isParagraphBreakAt(text: string, index: number): boolean {
@@ -438,7 +480,33 @@ export function getAdaptiveChunkLimits(
   };
 }
 
-function buildChunkRanges(text: string, units: SemanticUnit[], limits: ChunkingLimits): ChunkRange[] {
+/** The limits for the chunk at `index` when the first chunk is capped; see rampedBudget. */
+function rampLimits(limits: ChunkingLimits, index: number, firstMax: number | undefined): ChunkingLimits {
+  const maxCharacters = rampedBudget(index, firstMax, limits.maxCharacters);
+  if (maxCharacters === limits.maxCharacters) return limits;
+  return {
+    minCharacters: Math.min(limits.minCharacters, maxCharacters),
+    maxCharacters,
+    targetCharacters: Math.min(limits.targetCharacters, maxCharacters),
+  };
+}
+
+/** Cuts a leading sentence longer than the first chunk's cap at a clause break. */
+function splitLeadingSentence(text: string, units: SemanticUnit[], firstMax: number | undefined): SemanticUnit[] {
+  const [first, ...rest] = units;
+  if (firstMax === undefined || first?.kind !== "sentence") return units;
+  const breakAt = findLeadingClauseBreak(text, first.start, first.end, firstMax);
+  const head = breakAt === null ? null : trimRangeToContent(text, first.start, breakAt);
+  if (breakAt === null || !head) return units;
+  return [{ ...first, ...head }, { ...first, start: breakAt }, ...rest];
+}
+
+function buildChunkRanges(
+  text: string,
+  units: SemanticUnit[],
+  fullLimits: ChunkingLimits,
+  firstChunkMaxCharacters?: number,
+): ChunkRange[] {
   if (units.length === 0) return [];
 
   const ranges: ChunkRange[] = [];
@@ -459,6 +527,7 @@ function buildChunkRanges(text: string, units: SemanticUnit[], limits: ChunkingL
       continue;
     }
 
+    const limits = rampLimits(fullLimits, ranges.length, firstChunkMaxCharacters);
     const currentLength = current.end - current.start;
     const candidateEnd = unit.end;
     const candidateLength = candidateEnd - current.start;
@@ -505,8 +574,9 @@ export function chunkWithConstraintsDetailed(
   if (!text.trim()) return [];
 
   const limits = getAdaptiveChunkLimits(options.runtime, options);
-  const units = extractSemanticUnits(text, limits.maxCharacters);
-  const ranges = buildChunkRanges(text, units, limits);
+  const firstMax = options.firstChunkMaxCharacters;
+  const units = splitLeadingSentence(text, extractSemanticUnits(text, limits.maxCharacters), firstMax);
+  const ranges = buildChunkRanges(text, units, limits, firstMax);
 
   return ranges.map((range, index) => {
     const next = ranges[index + 1] ?? null;
@@ -579,16 +649,45 @@ function splitOversizedKokoroUnit(
   }));
 }
 
+/** Cuts a leading sentence longer than the first unit's cap at a clause break. */
+function splitLeadingKokoroSentence(
+  text: string,
+  units: KokoroInferenceUnit[],
+  firstMax: number | undefined,
+): KokoroInferenceUnit[] {
+  const [first, ...rest] = units;
+  if (firstMax === undefined || first?.start === undefined || first.end === undefined) return units;
+  const breakAt = findLeadingClauseBreak(text, first.start, first.end, firstMax);
+  const head = breakAt === null ? null : trimRangeToContent(text, first.start, breakAt);
+  if (breakAt === null || !head) return units;
+  return [
+    { text: text.slice(head.start, head.end), start: head.start, end: head.end },
+    { text: text.slice(breakAt, first.end), start: breakAt, end: first.end },
+    ...rest,
+  ];
+}
+
 /**
  * Builds the inference units Kokoro actually generates: sentences are merged
  * greedily until the per-backend character budget is reached. Shared by the
  * worker (to drive generation) and the reader preview (to draw matching section
  * boundaries), so the editor never shows more sections than are produced.
+ *
+ * With `firstUnitMaxChars`, the budget ramps up from that cap (see
+ * rampedBudget) and a longer first sentence is cut at a clause break, so the
+ * first audio arrives sooner.
  */
-export function buildKokoroInferenceUnits(text: string, maxInferenceChars: number): KokoroInferenceUnit[] {
+export function buildKokoroInferenceUnits(
+  text: string,
+  maxInferenceChars: number,
+  { firstUnitMaxChars }: { firstUnitMaxChars?: number } = {},
+): KokoroInferenceUnit[] {
   const safeMaxInferenceChars = Math.max(1, Math.floor(maxInferenceChars));
-  const sentenceUnits = buildKokoroSentenceRanges(text)
-    .flatMap((unit) => splitOversizedKokoroUnit(text, unit, safeMaxInferenceChars));
+  const sentenceUnits = splitLeadingKokoroSentence(
+    text,
+    buildKokoroSentenceRanges(text).flatMap((unit) => splitOversizedKokoroUnit(text, unit, safeMaxInferenceChars)),
+    firstUnitMaxChars,
+  );
   if (sentenceUnits.length === 0) return [];
 
   const mergedUnits: KokoroInferenceUnit[] = [];
@@ -605,6 +704,7 @@ export function buildKokoroInferenceUnits(text: string, maxInferenceChars: numbe
       continue;
     }
 
+    const budget = rampedBudget(mergedUnits.length, firstUnitMaxChars, safeMaxInferenceChars);
     // Every line in the Reader is its own paragraph (or a heading), so a unit
     // never crosses a line break: the break becomes a real pause instead of
     // the heading running straight into the text it introduces.
@@ -615,14 +715,14 @@ export function buildKokoroInferenceUnits(text: string, maxInferenceChars: numbe
       && current.start !== undefined
       && unit.end !== undefined
       && unit.end > current.start
-      && unit.end - current.start <= safeMaxInferenceChars;
+      && unit.end - current.start <= budget;
     const fallbackText = `${current.text} ${unit.text}`;
     const candidateText: string = canMergeByRange
       ? getTextBetween(text, current.start, unit.end, fallbackText)
       : fallbackText;
     const canMergeByText = current.start === undefined
       && unit.start === undefined
-      && candidateText.length <= safeMaxInferenceChars;
+      && candidateText.length <= budget;
 
     if (canMergeByRange || canMergeByText) {
       current = { text: candidateText, start: current.start, end: unit.end };
@@ -644,7 +744,7 @@ export function buildKokoroInferenceUnits(text: string, maxInferenceChars: numbe
  */
 export function chunkForKokoroDetailed(text: string, runtime?: ChunkingRuntimeProfile): TextChunk[] {
   const maxInferenceChars = getKokoroMaxInferenceChars(runtime?.backend);
-  const units = buildKokoroInferenceUnits(text, maxInferenceChars);
+  const units = buildKokoroInferenceUnits(text, maxInferenceChars, { firstUnitMaxChars: KOKORO_FIRST_UNIT_MAX_CHARS });
 
   return units.map((unit, index, all) => {
     const start = unit.start ?? 0;
@@ -665,6 +765,18 @@ export function chunkForKokoroDetailed(text: string, runtime?: ChunkingRuntimePr
   });
 }
 
+/**
+ * Supertonic's chunks with the first chunk capped, so its first audio
+ * arrives sooner. The Supertonic workers generate exactly these and the
+ * Reader previews the same boundaries.
+ */
+export function chunkForSupertonicDetailed(text: string, options: ChunkingOptions = {}): TextChunk[] {
+  return chunkWithConstraintsDetailed(text, {
+    ...options,
+    firstChunkMaxCharacters: options.firstChunkMaxCharacters ?? SUPERTONIC_FIRST_CHUNK_MAX_CHARS,
+  });
+}
+
 export function chunkTextForModelDetailed(
   text: string,
   model: ModelType,
@@ -674,7 +786,7 @@ export function chunkTextForModelDetailed(
   if (!trimmed) return [];
 
   if (model === "supertonic") {
-    return chunkWithConstraintsDetailed(text, options);
+    return chunkForSupertonicDetailed(text, options);
   }
 
   // Kokoro merges adjacent sentences per backend budget; mirror that here so the
@@ -688,6 +800,53 @@ export function chunkTextForModel(
   options: ChunkingOptions = {},
 ): string[] {
   return chunkTextForModelDetailed(text, model, options).map((chunk) => chunk.text);
+}
+
+// Boundaries a split may follow, most natural first: a sentence end, a
+// clause break, then any space. Each pattern ends after the whitespace that
+// follows the boundary (full-width punctuation needs none), so a split never
+// separates a word from its punctuation.
+const SPLIT_BOUNDARY_TIERS = [
+  /[.!?…]["'”’)\]]*\s+|[。？！]["'”’」』)\]]*\s*/g,
+  CLAUSE_BREAK,
+  /\s+/g,
+];
+// A tier is used only when its best boundary leaves each part at least this
+// share of the text; otherwise a less natural but more even boundary wins.
+const SPLIT_MIN_SIDE_SHARE = 0.2;
+
+/**
+ * Where to cut `text` in two near its middle, preferring a sentence end,
+ * then a clause break, then a space, and only as a last resort the grapheme
+ * boundary closest to the middle. Returns the offset where the second part
+ * starts: text.slice(0, offset).trimEnd() and text.slice(offset) are both
+ * non-empty. Returns null when the text cannot be split that way.
+ */
+export function findSplitNearMiddle(text: string): number | null {
+  const contentEnd = text.trimEnd().length;
+  const contentStart = text.length - text.trimStart().length;
+  if (contentEnd - contentStart < 2) return null;
+  const middle = (contentStart + contentEnd) / 2;
+  const minSide = (contentEnd - contentStart) * SPLIT_MIN_SIDE_SHARE;
+  let fallback: number | null = null;
+
+  for (const tier of SPLIT_BOUNDARY_TIERS) {
+    let best: number | null = null;
+    for (const match of text.matchAll(tier)) {
+      const offset = match.index + match[0].length;
+      // Both parts must keep some content.
+      if (match.index <= contentStart || offset >= contentEnd) continue;
+      if (best === null || Math.abs(offset - middle) < Math.abs(best - middle)) best = offset;
+    }
+    if (best === null) continue;
+    if (best - contentStart >= minSide && contentEnd - best >= minSide) return best;
+    fallback ??= best;
+  }
+  if (fallback !== null) return fallback;
+
+  // One unbroken run, such as a long number or URL: cut between graphemes.
+  const hardSplit = adjustSplitToTextBoundary(text, contentStart, Math.floor(middle), contentEnd);
+  return hardSplit > contentStart && hardSplit < contentEnd ? hardSplit : null;
 }
 
 export function rechunkChunkForRetry(

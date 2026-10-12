@@ -1,5 +1,6 @@
-import type { IpcMainInvokeEvent } from "electron";
+import { errorMessage, readsAsCancellation } from "./errors";
 import type { GenerationContinuation } from "./generateRateLimiter";
+import { isRecord } from "./guards";
 import {
   getQwen3Profile,
   qwen3ProfileSupportsRuntime,
@@ -12,22 +13,22 @@ import {
 import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
   MAX_REFERENCE_AUDIO_BASE64_LENGTH,
+  MAX_REFERENCE_CACHE_KEY_LENGTH,
   MAX_REFERENCE_CODES_BASE64_LENGTH,
+  MAX_REFERENCE_TEXT_LENGTH,
+  NEUTTS_DEFAULT_MODEL_REPO,
   QWEN3_MAX_NEW_TOKENS_PER_PASSAGE,
   QWEN3_MAX_SEED,
   QWEN3_MIN_NEW_TOKENS,
   exceedsUnicodeScalarLimit,
 } from "./localTtsLimits";
-import { isAllowedAppUrl } from "./security";
 
 export const BRIDGE_RESULT_PREFIX = "__RESULT__";
-export const BRIDGE_PROGRESS_PREFIX = "__PROGRESS__";
 export const LOCAL_MODELS = ["neutts", "qwen3"] as const;
+const MAX_REQUEST_ID_LENGTH = 120;
 
-const MAX_REFERENCE_TEXT_LENGTH = 2000;
-
-const ALLOWED_NEUTTS_MODELS = new Set([
-  "neuphonic/neutts-nano-q4-gguf",
+export const ALLOWED_NEUTTS_MODELS: ReadonlySet<string> = new Set([
+  NEUTTS_DEFAULT_MODEL_REPO,
   "neuphonic/neutts-air-q4-gguf",
   "neuphonic/neutts-air-q8-gguf",
   "neuphonic/neutts-nano-german-q4-gguf",
@@ -36,7 +37,7 @@ const ALLOWED_NEUTTS_MODELS = new Set([
 ]);
 
 const LEGACY_NEUTTS_MODEL_REPLACEMENTS = new Map([
-  ["neuphonic/neutts-nano-q8-gguf", "neuphonic/neutts-nano-q4-gguf"],
+  ["neuphonic/neutts-nano-q8-gguf", NEUTTS_DEFAULT_MODEL_REPO],
   ["neuphonic/neutts-nano-german-q8-gguf", "neuphonic/neutts-nano-german-q4-gguf"],
   ["neuphonic/neutts-nano-french-q8-gguf", "neuphonic/neutts-nano-french-q4-gguf"],
   ["neuphonic/neutts-nano-spanish-q8-gguf", "neuphonic/neutts-nano-spanish-q4-gguf"],
@@ -135,16 +136,6 @@ export interface BridgeProgressResult {
   elapsedSec?: number;
 }
 
-export function assertTrustedIpcSender(
-  event: IpcMainInvokeEvent,
-  options: { allowDevServer?: boolean } = { allowDevServer: true },
-): void {
-  const senderUrl = event.senderFrame?.url ?? event.sender.getURL();
-  if (!isAllowedAppUrl(senderUrl, options)) {
-    throw new Error("Rejected IPC from untrusted sender.");
-  }
-}
-
 export function assertLocalModel(model: string): LocalModel {
   if (LOCAL_MODELS.includes(model as LocalModel)) {
     return model as LocalModel;
@@ -152,9 +143,7 @@ export function assertLocalModel(model: string): LocalModel {
   throw new Error(`Unsupported local model: ${model}`);
 }
 
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+export { isRecord };
 
 export function parseRequiredText(
   value: unknown,
@@ -260,24 +249,26 @@ export function parseOptionalStringArray(value: unknown, field: string): string[
   return value;
 }
 
-export function parseRequestId(value: unknown, { required = false }: { required?: boolean } = {}): string | undefined {
+export function parseRequestId(
+  value: unknown,
+  { required = false, field = "requestId" }: { required?: boolean; field?: string } = {},
+): string | undefined {
   if (value == null) {
-    if (required) throw new Error("`requestId` is required.");
+    if (required) throw new Error(`\`${field}\` is required.`);
     return undefined;
   }
-  if (typeof value !== "string") throw new Error("`requestId` must be a string.");
-  if (value.length > 120) throw new Error("`requestId` exceeds 120 characters.");
+  if (typeof value !== "string") throw new Error(`\`${field}\` must be a string.`);
+  if (value.length > MAX_REQUEST_ID_LENGTH) throw new Error(`\`${field}\` exceeds ${MAX_REQUEST_ID_LENGTH} characters.`);
   const requestId = value.trim();
   if (!requestId) {
-    if (required) throw new Error("`requestId` is required.");
+    if (required) throw new Error(`\`${field}\` is required.`);
     return undefined;
   }
-  if (requestId.length > 120) throw new Error("`requestId` exceeds 120 characters.");
   if (!/^[A-Za-z0-9._-]+$/.test(requestId)) {
-    throw new Error("`requestId` may contain only letters, numbers, dots, underscores, and dashes.");
+    throw new Error(`\`${field}\` may contain only letters, numbers, dots, underscores, and dashes.`);
   }
   if (requestId.includes("..")) {
-    throw new Error("`requestId` may not contain consecutive dots.");
+    throw new Error(`\`${field}\` may not contain consecutive dots.`);
   }
   return requestId;
 }
@@ -405,7 +396,7 @@ export function sanitizeQwen3Payload(
     MAX_REFERENCE_AUDIO_BASE64_LENGTH,
   );
   const referenceCacheKey = parseOptionalString(payload.referenceCacheKey, "referenceCacheKey", {
-    maxLength: 120,
+    maxLength: MAX_REFERENCE_CACHE_KEY_LENGTH,
     pattern: /^(?!.*\.\.)[A-Za-z0-9._-]+$/,
   });
 
@@ -498,6 +489,51 @@ export function sanitizeWarmRequest(
     modelRepo,
     payload: { mode, modelPath, modelRepo },
   };
+}
+
+export interface KeepWarmRequest {
+  leaseId: string;
+  model: "qwen3";
+  /** The warm-up payload of the model the lease keeps resident. */
+  payload: Record<string, unknown>;
+}
+
+/**
+ * A keep-warm lease: the warm-up fields of the Qwen3 model to keep resident
+ * (`mode` may be left out; it follows from the profile) plus the renderer's
+ * own id for the lease. Only Qwen3 has a short idle eviction worth holding
+ * off.
+ */
+export function sanitizeKeepWarmRequest(
+  request: unknown,
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+): KeepWarmRequest {
+  if (!isRecord(request)) throw new Error("Invalid keep-warm request payload.");
+  const unknownField = Object.keys(request).find((field) => (
+    !["leaseId", "model", "mode", "modelPath", "modelRepo"].includes(field)
+  ));
+  if (unknownField) throw new Error(`Unknown keep-warm field: \`${unknownField}\`.`);
+  const leaseId = parseRequestId(request.leaseId, { required: true, field: "leaseId" })!;
+  const model = assertLocalModel(String(request.model));
+  if (model !== "qwen3") throw new Error("Only Qwen3-TTS models can be kept warm.");
+  const mode = request.mode ?? (typeof request.modelRepo === "string"
+    ? getQwen3Profile(request.modelRepo.trim())?.mode
+    : undefined);
+  const { payload } = sanitizeWarmRequest({
+    model,
+    mode,
+    modelPath: request.modelPath,
+    modelRepo: request.modelRepo,
+  }, platform, arch);
+  return { leaseId, model, payload };
+}
+
+export function sanitizeReleaseKeepWarmRequest(request: unknown): { leaseId: string } {
+  if (!isRecord(request)) throw new Error("Invalid keep-warm release payload.");
+  const unknownField = Object.keys(request).find((field) => field !== "leaseId");
+  if (unknownField) throw new Error(`Unknown keep-warm field: \`${unknownField}\`.`);
+  return { leaseId: parseRequestId(request.leaseId, { required: true, field: "leaseId" })! };
 }
 
 export function sanitizeCacheRequest(request: unknown): CacheRequest {
@@ -690,11 +726,56 @@ export function parseBridgeGenerateResult(result: unknown): BridgeGenerateResult
   return parsed;
 }
 
+const MAX_REPORTED_FAILURE_CHARS = 2_000;
+
+/**
+ * The `error` of one `__RESULT__{"ok":false,…}` stdout line, with control
+ * characters blanked and its length capped for display, or null when the line
+ * is not such a failure envelope. The bridge prints one whenever it exits with
+ * an error, during startup or later.
+ */
+export function parseBridgeFailureLine(line: string): string | null {
+  if (!line.startsWith(BRIDGE_RESULT_PREFIX)) return null;
+  try {
+    const parsed: unknown = JSON.parse(line.slice(BRIDGE_RESULT_PREFIX.length));
+    if (!isRecord(parsed) || parsed.ok !== false || typeof parsed.error !== "string") return null;
+    return [...parsed.error]
+      .map((character) => {
+        const code = character.charCodeAt(0);
+        return code <= 0x1F || code === 0x7F ? " " : character;
+      })
+      .join("")
+      .trim()
+      .slice(0, MAX_REPORTED_FAILURE_CHARS);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The failure in the last result line of `stdout`, if the bridge printed one on
+ * its way out. It explains a crash to the renderer, so a report that would read
+ * as a cancellation there is ignored; the diagnostics log keeps the stdout.
+ */
+export function reportedBridgeFailure(stdout: string): string | null {
+  const lines = stdout.split(/\r?\n/);
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim();
+    if (!line.startsWith(BRIDGE_RESULT_PREFIX)) continue;
+    const reported = parseBridgeFailureLine(line);
+    return reported && !readsAsCancellation(reported) ? reported : null;
+  }
+  return null;
+}
+
+/**
+ * Parses the stdout of the one-shot `--action probe` subprocess, the only
+ * bridge action that still reports through a stdout result line.
+ */
 export function parseBridgeResult(
   stdout: string,
   stderr: string,
-  action: BridgeAction,
-): BridgeProbeResult | BridgeGenerateResult {
+): BridgeProbeResult {
   const lines = stdout
     .split(/\r?\n/)
     .map((line) => line.trim())
@@ -718,45 +799,30 @@ export function parseBridgeResult(
       details: typeof decoded.details === "string" ? decoded.details : undefined,
     };
   } catch (err) {
-    throw new Error(`Failed parsing bridge result: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(`Failed parsing bridge result: ${errorMessage(err)}`);
   }
 
   if (!parsed.ok) {
     if (parsed.details) {
-      console.error(`[local-tts:${action}] local bridge details\n${parsed.details}`);
+      console.error(`[local-tts:probe] local bridge details\n${parsed.details}`);
     }
     throw new Error(parsed.error ?? "Local bridge failed.");
-  }
-
-  if (action !== "probe") {
-    throw new Error("One-shot generate bridge results are not supported; generation is WebSocket-binary only.");
   }
 
   return parseBridgeProbeResult(parsed.result);
 }
 
-export function parseBridgeEnvelopeResult(
-  decoded: unknown,
-  action: BridgeAction,
-): BridgeProbeResult | BridgeGenerateResult {
+/**
+ * Parses the terminal result frame of a WebSocket generate request. The worker
+ * pool settles failed envelopes itself, so only a successful one reaches here;
+ * a failed one is still rejected rather than trusted.
+ */
+export function parseBridgeEnvelopeResult(decoded: unknown): BridgeGenerateResult {
   if (!isRecord(decoded) || typeof decoded.ok !== "boolean") {
     throw new Error("Missing required `ok` field.");
   }
-  const parsed = {
-    ok: decoded.ok,
-    result: decoded.result,
-    error: typeof decoded.error === "string" ? decoded.error : undefined,
-    details: typeof decoded.details === "string" ? decoded.details : undefined,
-  };
-
-  if (!parsed.ok) {
-    if (parsed.details) {
-      console.error(`[local-tts:${action}] local bridge details\n${parsed.details}`);
-    }
-    throw new Error(parsed.error ?? "Local bridge failed.");
+  if (!decoded.ok) {
+    throw new Error(typeof decoded.error === "string" ? decoded.error : "Local bridge failed.");
   }
-
-  return action === "probe"
-    ? parseBridgeProbeResult(parsed.result)
-    : parseBridgeGenerateResult(parsed.result);
+  return parseBridgeGenerateResult(decoded.result);
 }

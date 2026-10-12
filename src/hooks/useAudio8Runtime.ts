@@ -2,16 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { LocalTtsCacheInfo } from "../electron";
 import type { StatusTone } from "../components/localRuntime/utils";
 import { MIN_TEXT_LENGTH } from "../constants";
-import { concatFloat32Arrays, createSilence } from "../lib/audio";
-import { chunkWithConstraintsDetailed } from "../lib/chunking";
-import { resolvePauseSeconds, tuneChunkText } from "../lib/textTuning";
+import type { EngineRuntime, SynthesisRequest } from "../shared/engineRuntime";
 import type { GenerationStats, GenerationTuningSettings, ModelState } from "../types";
+import { audio8ErrorMessage, audio8RequestId, streamAudio8Synthesis } from "./audio8Synthesis";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import { useSynthesisQueue } from "./useSynthesisQueue";
 
 interface Options {
   active: boolean;
   text: string;
   voice: string;
+  /** Sampling for the surface generation; null fields leave the model's own. */
+  sampling?: { seed: number | null; temperature: number | null };
   generationSettings: GenerationTuningSettings;
   player: UseAudioPlayerReturn;
   setShowPlayer: (show: boolean) => void;
@@ -34,32 +36,19 @@ interface GenerationAttempt {
   chunkCount: number;
 }
 
+export interface Audio8Runtime extends EngineRuntime<"audio8"> {
+  cacheInfo: LocalTtsCacheInfo | null;
+  cacheBusy: boolean;
+  cacheStatus: CacheStatus | null;
+  clearCache: () => void;
+}
+
 const INITIAL_STATE: ModelState = { ready: false, loading: false, downloadProgress: 0, error: null, backend: null };
 const INITIAL_STATS: GenerationStats = { firstLatency: null, processingTime: 0, charsPerSec: 0, rtf: 0, totalDuration: 0, currentDuration: 0 };
+const BRIDGE_MISSING = "Audio8 local inference requires the Electron app.";
+const BRIDGE_MISSING_STATE: ModelState = { ...INITIAL_STATE, error: BRIDGE_MISSING };
 
-// Audio8 re-prefills the voice-reference prompt before every chunk emits its
-// first token, so small chunks pay that fixed cost over and over; large ones
-// delay the first audible sample. 180 characters is the compromise. Kokoro
-// derives its budget from the backend (`KOKORO_*_MAX_INFERENCE_CHARS`) and
-// Qwen3 mirrors the Rust unit size (`QWEN3_UNIT_MAX_CHARS`); Audio8 has no
-// equivalent upstream constraint to mirror, so the number is tuned here.
-// `getAdaptiveChunkLimits` clamps the floor up to 40 regardless; 30 is kept
-// verbatim because it is what sets the derived 105-character target.
-const AUDIO8_MIN_CHUNK_CHARACTERS = 30;
-const AUDIO8_MAX_CHUNK_CHARACTERS = 180;
-
-function id(kind: string): string {
-  return `audio8-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
-}
-
-function errorMessage(error: unknown): string {
-  // `ipcRenderer.invoke` wraps every main-process rejection as
-  // "Error invoking remote method '<channel>': Error: <message>". The channel
-  // name is noise to the reader, so strip the wrapper and keep the cause.
-  return (error instanceof Error ? error.message : String(error)).replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-}
-
-export function useAudio8Runtime({ active, text, voice, generationSettings, player, setShowPlayer }: Options) {
+export function useAudio8Runtime({ active, text, voice, sampling, generationSettings, player, setShowPlayer }: Options): Audio8Runtime {
   const [modelState, setModelState] = useState<ModelState>(INITIAL_STATE);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
@@ -69,29 +58,30 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
   const [cacheBusy, setCacheBusy] = useState(false);
   const [cacheStatus, setCacheStatus] = useState<CacheStatus | null>(null);
   const [loadRevision, setLoadRevision] = useState(0);
-  const generationVersion = useRef(0);
-  const activeRequest = useRef<string | null>(null);
+  // Aborting the running generation cancels its bridge request in flight.
+  const activeGeneration = useRef<AbortController | null>(null);
   const generationAttempt = useRef<GenerationAttempt | null>(null);
   const loadAttempt = useRef<LoadAttempt | null>(null);
   const mounted = useRef(true);
   const bridge = window.electron?.audio8;
-  const bridgeRef = useRef(bridge);
-  const playerRef = useRef(player);
-  bridgeRef.current = bridge;
-  playerRef.current = player;
+  // The player's functions are stable for its lifetime, so depending on them
+  // (rather than on the player object, which changes with its state) keeps
+  // every callback below stable while audio streams.
+  const { beginStream, endStream, reset: resetPlayer, scheduleChunk, stopAll } = player;
+  const { queue, busy: synthesisBusy, holdForeground } = useSynthesisQueue(isGenerating);
 
+  // The preload bridge and the player's functions never change while the page
+  // is open, so this runs its cleanup on unmount only.
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
-      generationVersion.current += 1;
-      const requestId = activeRequest.current;
-      activeRequest.current = null;
+      activeGeneration.current?.abort();
+      activeGeneration.current = null;
       generationAttempt.current = null;
-      if (requestId && bridgeRef.current) void bridgeRef.current.cancel({ requestId }).catch(() => undefined);
-      playerRef.current.endStream();
+      endStream();
     };
-  }, []);
+  }, [bridge, endStream]);
 
   const refreshCacheInfo = useCallback(async () => {
     if (!bridge) return;
@@ -124,18 +114,14 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
   }, [bridge]);
 
   useEffect(() => {
-    if (!active) return;
-    if (!bridge) {
-      setModelState({ ...INITIAL_STATE, error: "Audio8 local inference requires the Electron app." });
-      return;
-    }
+    if (!active || !bridge) return;
     // Reusing the in-flight (or settled) attempt is what makes reactivation
     // free. Switching to another model and back re-runs this effect, and
     // StrictMode double-invokes it in development; starting over each time
     // would issue a second 572 MiB download. Only `retryLoad` bumps the
     // revision, so only `retryLoad` starts a new attempt.
     if (loadAttempt.current?.revision === loadRevision) return;
-    const attempt: LoadAttempt = { revision: loadRevision, requestId: id("load") };
+    const attempt: LoadAttempt = { revision: loadRevision, requestId: audio8RequestId("load") };
     loadAttempt.current = attempt;
     setModelState({ ...INITIAL_STATE, loading: true });
     // Deliberately not cancelled on deactivate or unmount: the download is
@@ -149,41 +135,55 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
       void refreshCacheInfo();
     }, (cause: unknown) => {
       if (!mounted.current || loadAttempt.current !== attempt) return;
-      setModelState({ ...INITIAL_STATE, error: errorMessage(cause) });
+      setModelState({ ...INITIAL_STATE, error: audio8ErrorMessage(cause) });
     });
   }, [active, bridge, loadRevision, refreshCacheInfo]);
 
   useEffect(() => {
-    if (active) void refreshCacheInfo();
-  }, [active, refreshCacheInfo]);
+    if (!active || !bridge) return;
+    let current = true;
+    // The size readout is informational, so a failed stat is ignored.
+    bridge.getCacheInfo().then((info) => {
+      if (current && mounted.current) setCacheInfo(info);
+    }, () => undefined);
+    return () => {
+      current = false;
+    };
+  }, [active, bridge]);
 
   const cancelActiveGeneration = useCallback(() => {
-    generationVersion.current += 1;
-    const requestId = activeRequest.current;
-    activeRequest.current = null;
+    activeGeneration.current?.abort();
+    activeGeneration.current = null;
     generationAttempt.current = null;
-    if (requestId && bridge) void bridge.cancel({ requestId }).catch(() => undefined);
     setIsGenerating(false);
-    player.endStream();
-  }, [bridge, player]);
+    endStream();
+  }, [endStream]);
 
   useEffect(() => {
-    if (!active && activeRequest.current) cancelActiveGeneration();
+    if (!active && activeGeneration.current) cancelActiveGeneration();
   }, [active, cancelActiveGeneration]);
 
   const resetGeneratedAudio = useCallback(() => {
     cancelActiveGeneration();
-    player.reset();
+    resetPlayer();
     setShowPlayer(false);
     setGenerationProgress(0);
     setStats(INITIAL_STATS);
     setError(null);
-  }, [cancelActiveGeneration, player, setShowPlayer]);
+  }, [cancelActiveGeneration, resetPlayer, setShowPlayer]);
 
-  const canGenerate = modelState.ready && !isGenerating && text.trim().length >= MIN_TEXT_LENGTH;
+  // Without the preload bridge there is nothing to load; say why.
+  const visibleModelState = bridge ? modelState : BRIDGE_MISSING_STATE;
+  const canGenerate = visibleModelState.ready
+    && !isGenerating
+    && !synthesisBusy
+    && text.trim().length >= MIN_TEXT_LENGTH;
   const handleGenerate = useCallback(() => {
     if (!canGenerate || !bridge) return;
-    const version = ++generationVersion.current;
+    holdForeground();
+    activeGeneration.current?.abort();
+    const generation = new AbortController();
+    activeGeneration.current = generation;
     const started = performance.now();
     let synthesizedSeconds = 0;
     let playbackSeconds = 0;
@@ -193,65 +193,83 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
     setGenerationProgress(0);
     setStats(INITIAL_STATS);
     setError(null);
-    player.reset();
-    player.beginStream();
+    resetPlayer();
+    beginStream();
     setShowPlayer(true);
-    const chunks = chunkWithConstraintsDetailed(text, {
-      minCharacters: AUDIO8_MIN_CHUNK_CHARACTERS,
-      maxCharacters: AUDIO8_MAX_CHUNK_CHARACTERS,
-    });
+    const isCurrent = () => activeGeneration.current === generation;
     void (async () => {
       try {
-        for (let index = 0; index < chunks.length; index += 1) {
-          if (version !== generationVersion.current) return;
-          const chunk = chunks[index];
-          const requestId = id("generate");
-          activeRequest.current = requestId;
-          generationAttempt.current = { requestId, chunkIndex: index, chunkCount: chunks.length };
-          const tuned = tuneChunkText(chunk.text, generationSettings.pronunciationRules ?? [], generationSettings.emphasisStrength ?? 0);
-          const result = await bridge.generate({ requestId, text: tuned, voice });
-          if (version !== generationVersion.current) return;
-          // `Audio8GenerateResult` promises both fields, but nothing validates
-          // the payload as it crosses IPC — the declaration is the renderer's
-          // assertion about the main process, not a checked contract. Both
-          // failures are silent rather than loud without this guard:
-          // `new Float32Array(undefined)` yields an empty array, and a zero
-          // sample rate turns every derived duration into NaN. A generation
-          // that "succeeds" with no audio is the worst outcome here.
-          if (!(result.audio instanceof ArrayBuffer) || !result.sampleRate) throw new Error("Audio8 returned invalid local audio.");
-          const generated = new Float32Array(result.audio);
-          const pauseSec = index + 1 === chunks.length ? 0 : resolvePauseSeconds(chunk.pauseKind, chunk.pauseAfterSec, generationSettings.pauseOverridesSec);
-          const audio = pauseSec > 0 ? concatFloat32Arrays([generated, createSilence(pauseSec, result.sampleRate)]) : generated;
-          await player.scheduleChunk({ audio, samplingRate: result.sampleRate, text: chunk.text, index: index + 1, total: chunks.length, textStart: chunk.start, textEnd: chunk.end, pauseAfterSec: pauseSec, pauseKind: chunk.pauseKind });
-          synthesizedSeconds += generated.length / result.sampleRate;
-          playbackSeconds += audio.length / result.sampleRate;
-          processedCharacters += chunk.text.length;
+        const passages = streamAudio8Synthesis(
+          bridge,
+          { text, voice, tuning: generationSettings, sampling },
+          generation.signal,
+          (requestId, chunkIndex, chunkCount) => {
+            generationAttempt.current = { requestId, chunkIndex, chunkCount };
+          },
+        );
+        for await (const passage of passages) {
+          if (!isCurrent()) return;
+          await scheduleChunk(passage);
+          const playedSeconds = passage.audio.length / passage.samplingRate;
+          synthesizedSeconds += playedSeconds - (passage.pauseAfterSec ?? 0);
+          playbackSeconds += playedSeconds;
+          processedCharacters += passage.text.length;
           const elapsed = (performance.now() - started) / 1000;
           firstLatency ??= elapsed;
-          setGenerationProgress(((index + 1) / chunks.length) * 100);
+          setGenerationProgress((passage.index / passage.total) * 100);
           setStats({ firstLatency, processingTime: elapsed, charsPerSec: processedCharacters / elapsed, rtf: elapsed / synthesizedSeconds, totalDuration: playbackSeconds, currentDuration: playbackSeconds });
         }
-        if (version === generationVersion.current) {
-          activeRequest.current = null;
+        if (isCurrent()) {
+          activeGeneration.current = null;
           generationAttempt.current = null;
           setIsGenerating(false);
-          player.endStream({ completed: true });
+          endStream({ completed: true });
         }
       } catch (cause) {
-        if (version !== generationVersion.current) return;
-        activeRequest.current = null;
+        if (!isCurrent()) return;
+        activeGeneration.current = null;
         generationAttempt.current = null;
         setIsGenerating(false);
-        player.endStream();
-        setError(errorMessage(cause));
+        endStream();
+        setError(audio8ErrorMessage(cause));
       }
     })();
-  }, [bridge, canGenerate, generationSettings, player, setShowPlayer, text, voice]);
+  }, [
+    beginStream,
+    bridge,
+    canGenerate,
+    endStream,
+    generationSettings,
+    holdForeground,
+    resetPlayer,
+    sampling,
+    scheduleChunk,
+    setShowPlayer,
+    text,
+    voice,
+  ]);
+
+  const synthesize = useCallback((request: SynthesisRequest<"audio8">) => queue.enqueue((signal) => {
+    if (!bridge) throw new Error(BRIDGE_MISSING);
+    return streamAudio8Synthesis(
+      bridge,
+      {
+        text: request.text,
+        voice: request.settings.voice,
+        tuning: request.tuning,
+        sampling: {
+          seed: request.seed ?? request.settings.seed,
+          temperature: request.settings.temperature,
+        },
+      },
+      signal,
+    );
+  }, request.signal), [bridge, queue]);
 
   const handleStop = useCallback(() => {
     cancelActiveGeneration();
-    player.stopAll();
-  }, [cancelActiveGeneration, player]);
+    stopAll();
+  }, [cancelActiveGeneration, stopAll]);
   const retryLoad = useCallback(() => setLoadRevision((revision) => revision + 1), []);
 
   const clearCache = useCallback(() => {
@@ -271,12 +289,12 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
           ? { tone: "success", text: "Audio8 model cache cleared. Retry when you want to download it again." }
           : { tone: "info", text: "Audio8 was unloaded. No cached model files were found." });
       }, (cause: unknown) => {
-        if (mounted.current) setCacheStatus({ tone: "error", text: errorMessage(cause) });
+        if (mounted.current) setCacheStatus({ tone: "error", text: audio8ErrorMessage(cause) });
       })
       .finally(() => {
         if (mounted.current) setCacheBusy(false);
       });
   }, [bridge, cacheBusy, cancelActiveGeneration, refreshCacheInfo]);
 
-  return useMemo(() => ({ modelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, cacheInfo, cacheBusy, cacheStatus, clearCache }), [modelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, cacheInfo, cacheBusy, cacheStatus, clearCache]);
+  return useMemo(() => ({ id: "audio8", modelState: visibleModelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, synthesize, cacheInfo, cacheBusy, cacheStatus, clearCache }), [visibleModelState, canGenerate, isGenerating, generationProgress, stats, error, handleGenerate, handleStop, cancelActiveGeneration, resetGeneratedAudio, retryLoad, synthesize, cacheInfo, cacheBusy, cacheStatus, clearCache]);
 }

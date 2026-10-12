@@ -1,14 +1,19 @@
-import { useState, useRef, useCallback, useEffect } from "react";
-import type { AudioExportOptions, CaptionExportFormat } from "../types";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
+import type { CaptionExportFormat } from "../types";
+import type { CaptionStyle } from "../lib/appState";
+import type { PostProcessingOptions } from "../lib/audio/postProcess";
+import { retimeChunksForExport } from "../lib/creator/captionTiming";
 import type { CachedReaderAudioChunk } from "../lib/readerDocument";
 import {
   AUDIO_PLAYER_RETAIN_BEHIND_SECONDS,
   AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS,
+  MAX_PLAYBACK_RATE,
+  MIN_PLAYBACK_RATE,
 } from "../constants";
 import { PlaybackClock } from "../lib/playbackClock";
-import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
-import { downloadAudioChunks } from "../lib/audioExportClient";
-import { downloadBlob } from "../lib/exportAudio";
+import { buildCaptionJson, buildSrt, buildVtt, type CaptionBuildOptions } from "../lib/captions";
+import { exportAudioChunks, type AudioExportRequest } from "../lib/audioExportClient";
+import { downloadBlob, type ExportOptions, type ExportResult } from "../lib/exportAudio";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
 import {
   appendAudioSegment,
@@ -23,6 +28,19 @@ import {
 
 export type { AudioChunkData, AudioSegment } from "../lib/audioTimeline";
 
+/** What a saved Reader section records alongside its PCM. */
+export interface AudioPlaybackSnapshot {
+  playbackRate: number;
+  totalDuration: number;
+  synthesisComplete: boolean;
+}
+
+/**
+ * The player's state and controls. The object keeps its identity until a state
+ * field changes; every function keeps its identity for the player's lifetime,
+ * so callbacks and effects should depend on the functions they call rather
+ * than on the whole object.
+ */
 export interface UseAudioPlayerReturn {
   isPlaying: boolean;
   /** True only after the entire synthesis succeeds, not merely when transport ends. */
@@ -47,12 +65,31 @@ export interface UseAudioPlayerReturn {
   skip: (deltaSeconds: number) => void;
   jumpToSegment: (segmentId: string) => void;
   setPlaybackRate: (rate: number) => void;
-  download: (options?: AudioExportOptions) => Promise<void>;
-  downloadCaptions: (format: CaptionExportFormat) => void;
+  /**
+   * Renders the audio in the export worker and saves it. Resolves with the
+   * export's loudness report and timeline, or null when there was no audio.
+   * Rejects with an AbortError when `request.signal` aborts.
+   */
+  download: (options?: ExportOptions, request?: AudioExportRequest) => Promise<ExportResult | null>;
+  /** Saves captions; `post` moves the cues to where an export with those finishing options puts them. */
+  downloadCaptions: (format: CaptionExportFormat, style?: CaptionStyle, post?: PostProcessingOptions) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
   getAudioChunkCount: () => number;
+  /** The sample rate the engine produced the buffered audio at, or null while there is none. */
+  getSourceSampleRate: () => number | null;
+  /**
+   * Increments whenever the buffered audio is replaced wholesale (a reset or a
+   * restored cache). A runtime that generated the current audio can compare
+   * it later to tell whether the player still holds its audio.
+   */
+  getContentEpoch: () => number;
   truncateAudioChunks: (count: number) => void;
   getAudioCacheSnapshot: () => CachedReaderAudioChunk[];
+  /**
+   * Read at call time from the same buffers as `getAudioCacheSnapshot`, so a
+   * saved section never pairs its PCM with a duration one UI frame stale.
+   */
+  getPlaybackSnapshot: () => AudioPlaybackSnapshot;
   restoreAudioCache: (
     chunks: readonly CachedReaderAudioChunk[],
     options?: { currentTime?: number; playbackRate?: number; synthesisComplete?: boolean },
@@ -63,10 +100,18 @@ export interface UseAudioPlayerReturn {
   stopAll: () => void;
 }
 
-const MIN_PLAYBACK_RATE = 0.75;
-const MAX_PLAYBACK_RATE = 2.0;
+/** Cue layouts for the caption styles. */
+const CAPTION_LAYOUTS: Record<CaptionStyle, CaptionBuildOptions["layout"]> = {
+  readable: {},
+  short: { maxWordsPerCue: 3 },
+  passage: false,
+};
+
 /** Background-safe cadence for extending the playback schedule. */
 const SCHEDULE_TOPUP_INTERVAL_MS = 1000;
+// How far ahead of the context clock the first chunk of a stream is scheduled.
+const MIN_START_LEAD_SECONDS = 0.012;
+const COLD_START_LEAD_SECONDS = 0.05;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -117,7 +162,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const segmentCounterRef = useRef(0);
   const autoPlayOnChunkRef = useRef(true);
   const streamCompleteRef = useRef(true);
+  // Mirrors `isSynthesisComplete` for imperative reads.
+  const synthesisCompleteRef = useRef(false);
   const playbackOperationRef = useRef(0);
+  const contentEpochRef = useRef(0);
   // Lowest chunk index that may still hold a decoded AudioBuffer. Pruning walks
   // forward from here instead of rescanning every chunk on every frame.
   const decodedLowIndexRef = useRef(0);
@@ -131,6 +179,11 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       audioContextRef.current = new AudioContext();
     }
     return audioContextRef.current;
+  }, []);
+
+  const commitSynthesisComplete = useCallback((complete: boolean) => {
+    synthesisCompleteRef.current = complete;
+    setIsSynthesisComplete(complete);
   }, []);
 
   const failPlaybackStart = useCallback(() => {
@@ -569,7 +622,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }
 
     if (nextPlayTimeRef.current === 0) {
-      nextPlayTimeRef.current = ctx.currentTime + 0.05;
+      // A running device needs only its own output latency of lead. One still
+      // starting up keeps a margin so the first samples are not clipped.
+      const startLead = ctx.state === "running" ? Math.max(MIN_START_LEAD_SECONDS, ctx.baseLatency ?? 0) : COLD_START_LEAD_SECONDS;
+      nextPlayTimeRef.current = ctx.currentTime + startLead;
       timelineAnchorRef.current = currentTimeRef.current;
       contextAnchorRef.current = nextPlayTimeRef.current;
     }
@@ -699,29 +755,33 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     syncCurrentTime(live);
   }, [getLiveTimelineTime, replayFromOffset, syncCurrentTime]);
 
-  const download = useCallback(async (options?: AudioExportOptions) => {
-    if (allChunksRef.current.length === 0) return;
+  const download = useCallback(async (options?: ExportOptions, request: AudioExportRequest = {}) => {
+    if (allChunksRef.current.length === 0) return null;
 
-    await downloadAudioChunks(allChunksRef.current.map((chunk) => ({
+    const result = await exportAudioChunks(allChunksRef.current.map((chunk) => ({
       audio: chunk.audio,
       samplingRate: chunk.samplingRate,
-    })), options);
+      pauseAfterSec: chunk.pauseAfterSec,
+    })), options, request);
+    downloadBlob(result.blob, `${request.fileName || "tts-audio"}.${result.extension}`);
+    return result;
   }, []);
 
-  const downloadCaptions = useCallback((format: CaptionExportFormat) => {
+  const downloadCaptions = useCallback((format: CaptionExportFormat, style: CaptionStyle = "readable", post?: PostProcessingOptions) => {
     if (allChunksRef.current.length === 0) return;
 
-    const segments = buildCaptionSegments(allChunksRef.current);
+    const segments = buildCaptionSegments(retimeChunksForExport(allChunksRef.current, post));
 
     if (segments.length === 0) return;
 
+    const build: CaptionBuildOptions = { layout: CAPTION_LAYOUTS[style] };
     if (format === "srt") {
-      downloadBlob(new Blob([buildSrt(segments)], { type: "application/x-subrip" }), "tts-captions.srt");
+      downloadBlob(new Blob([buildSrt(segments, build)], { type: "application/x-subrip" }), "tts-captions.srt");
       return;
     }
 
     if (format === "vtt") {
-      downloadBlob(new Blob([buildVtt(segments)], { type: "text/vtt" }), "tts-captions.vtt");
+      downloadBlob(new Blob([buildVtt(segments, build)], { type: "text/vtt" }), "tts-captions.vtt");
       return;
     }
 
@@ -805,12 +865,20 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }))
   ), []);
 
+  const getPlaybackSnapshot = useCallback((): AudioPlaybackSnapshot => ({
+    playbackRate: playbackRateRef.current,
+    totalDuration: totalDurationRef.current,
+    synthesisComplete: synthesisCompleteRef.current,
+  }), []);
+
   const getAudioChunkCount = useCallback(() => allChunksRef.current.length, []);
+  const getSourceSampleRate = useCallback(() => allChunksRef.current[0]?.samplingRate ?? null, []);
+  const getContentEpoch = useCallback(() => contentEpochRef.current, []);
 
   const truncateAudioChunks = useCallback((count: number) => {
     const retainedCount = clamp(Math.floor(Number.isFinite(count) ? count : 0), 0, allChunksRef.current.length);
     if (retainedCount >= allChunksRef.current.length) return;
-    setIsSynthesisComplete(false);
+    commitSynthesisComplete(false);
 
     const wasPlaying = isPlayingRef.current;
     const playbackSnapshot = wasPlaying ? getLiveTimelineTime() : currentTimeRef.current;
@@ -827,6 +895,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     decodedLowIndexRef.current = 0;
     pruneBufferedAudio(nextTime);
   }, [
+    commitSynthesisComplete,
     getLiveTimelineTime,
     pruneBufferedAudio,
     rebuildSegmentState,
@@ -840,6 +909,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     options: { currentTime?: number; playbackRate?: number; synthesisComplete?: boolean } = {},
   ) => {
     playbackOperationRef.current += 1;
+    contentEpochRef.current += 1;
     stopAllNodes();
     cancelTimelineStateFlush();
     segmentCounterRef.current = 0;
@@ -886,7 +956,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     activeSegmentCursorRef.current = Math.max(0, scheduleCursorRef.current);
     autoPlayOnChunkRef.current = false;
     streamCompleteRef.current = true;
-    setIsSynthesisComplete(options.synthesisComplete === true);
+    commitSynthesisComplete(options.synthesisComplete === true);
     interruptedRef.current = false;
     isPlayingRef.current = false;
     setIsPlaying(false);
@@ -898,18 +968,42 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     updateActiveSegment(restoredTime);
     decodedLowIndexRef.current = 0;
     pruneBufferedAudio(restoredTime);
-  }, [cancelTimelineStateFlush, clock, findChunkIndexAtTime, pruneBufferedAudio, stopAllNodes, updateActiveSegment]);
+  }, [
+    cancelTimelineStateFlush,
+    clock,
+    commitSynthesisComplete,
+    findChunkIndexAtTime,
+    pruneBufferedAudio,
+    stopAllNodes,
+    updateActiveSegment,
+  ]);
+
+  // Starts the output device before the first chunk exists, so its start-up
+  // (slowest on Bluetooth) overlaps inference instead of following it. Failure
+  // is left for the first chunk to report: it retries the resume itself.
+  const prepareOutput = useCallback(async () => {
+    if (typeof AudioContext === "undefined") return;
+    try {
+      const ctx = getContext();
+      if (ctx.state === "suspended") await ctx.resume();
+    } catch {
+      // Nothing is playing yet; scheduleChunk surfaces a blocked output.
+    }
+  }, [getContext]);
 
   const beginStream = useCallback(() => {
     streamCompleteRef.current = false;
-    setIsSynthesisComplete(false);
-  }, []);
+    commitSynthesisComplete(false);
+    // A stream the listener paused stays paused; only one that will autoplay
+    // needs the device running.
+    if (autoPlayOnChunkRef.current) void prepareOutput();
+  }, [commitSynthesisComplete, prepareOutput]);
 
   const endStream = useCallback((options: { completed?: boolean } = {}) => {
     streamCompleteRef.current = true;
     // Generic end calls also run after successful callbacks and when playback
     // stops. Only a new stream/reset may clear a previously completed result.
-    if (options.completed) setIsSynthesisComplete(true);
+    if (options.completed) commitSynthesisComplete(true);
 
     if (
       isPlayingRef.current
@@ -923,10 +1017,11 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
       syncCurrentTime(totalDurationRef.current);
       stopAllNodes();
     }
-  }, [stopAllNodes, syncCurrentTime]);
+  }, [commitSynthesisComplete, stopAllNodes, syncCurrentTime]);
 
   const reset = useCallback(() => {
     playbackOperationRef.current += 1;
+    contentEpochRef.current += 1;
     stopAllNodes();
     cancelTimelineStateFlush();
 
@@ -940,7 +1035,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     interruptedRef.current = false;
     autoPlayOnChunkRef.current = true;
     streamCompleteRef.current = true;
-    setIsSynthesisComplete(false);
+    commitSynthesisComplete(false);
     setError(null);
 
     setSegments([]);
@@ -951,7 +1046,14 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
 
     syncCurrentTime(0);
     syncTotalDuration(0);
-  }, [cancelTimelineStateFlush, commitActiveSegmentId, stopAllNodes, syncCurrentTime, syncTotalDuration]);
+  }, [
+    cancelTimelineStateFlush,
+    commitActiveSegmentId,
+    commitSynthesisComplete,
+    stopAllNodes,
+    syncCurrentTime,
+    syncTotalDuration,
+  ]);
 
   const stopAll = useCallback(() => {
     playbackOperationRef.current += 1;
@@ -984,7 +1086,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     };
   }, [cancelTimelineStateFlush, stopAllNodes]);
 
-  return {
+  return useMemo(() => ({
     isPlaying,
     isSynthesisComplete,
     error,
@@ -1005,12 +1107,46 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     downloadCaptions,
     replaceSegment,
     getAudioChunkCount,
+    getSourceSampleRate,
+    getContentEpoch,
     truncateAudioChunks,
     getAudioCacheSnapshot,
+    getPlaybackSnapshot,
     restoreAudioCache,
     beginStream,
     endStream,
     reset,
     stopAll,
-  };
+  }), [
+    activeSegmentId,
+    beginStream,
+    clock,
+    download,
+    downloadCaptions,
+    endStream,
+    error,
+    getAudioCacheSnapshot,
+    getAudioChunkCount,
+    getSourceSampleRate,
+    getContentEpoch,
+    getCurrentTime,
+    getPlaybackSnapshot,
+    isPlaying,
+    isSynthesisComplete,
+    jumpToSegment,
+    playbackRate,
+    replaceSegment,
+    reset,
+    restoreAudioCache,
+    scheduleChunk,
+    seek,
+    seekTo,
+    segments,
+    setPlaybackRate,
+    skip,
+    stopAll,
+    togglePlay,
+    totalDuration,
+    truncateAudioChunks,
+  ]);
 }

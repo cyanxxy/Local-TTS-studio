@@ -2,13 +2,15 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "re
 import { createPortal } from "react-dom";
 import { Check, ChevronDown } from "lucide-react";
 import type { ModelType, ModelState } from "../types";
-import { MODELS } from "../constants";
+import { BROWSER_ENGINE_IDS, getEngine } from "../models/registry";
 
 interface ModelToggleProps {
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   kokoroState: ModelState;
   supertonicState: ModelState;
+  /** The load state of every other browser engine (Kitten, Paradee, Piper); one that is missing reads as not yet loaded. */
+  modelStates?: Partial<Record<ModelType, ModelState>>;
   visibleModels?: readonly ModelType[];
   unavailableModels?: Partial<Record<ModelType, string>>;
   desktopModelOptions?: ModelToggleDesktopOption[];
@@ -41,11 +43,14 @@ interface MenuPosition {
   maxHeight: number;
 }
 
-const MODEL_PARAMS: Record<ModelType, string> = {
-  kokoro: "82M",
-  supertonic: "300M",
+const NOT_LOADED: ModelState = {
+  ready: false,
+  loading: false,
+  downloadProgress: 0,
+  error: null,
+  backend: null,
 };
-const DEFAULT_VISIBLE_MODELS: readonly ModelType[] = ["kokoro", "supertonic"];
+
 const EMPTY_DESKTOP_MODEL_OPTIONS: ModelToggleDesktopOption[] = [];
 
 const FOCUSABLE_SELECTOR = [
@@ -89,7 +94,8 @@ export function ModelToggle({
   onModelChange,
   kokoroState,
   supertonicState,
-  visibleModels = DEFAULT_VISIBLE_MODELS,
+  modelStates,
+  visibleModels = BROWSER_ENGINE_IDS,
   unavailableModels,
   desktopModelOptions = EMPTY_DESKTOP_MODEL_OPTIONS,
 }: ModelToggleProps) {
@@ -104,22 +110,27 @@ export function ModelToggle({
   const hasSelectedDesktopModel = desktopModelOptions.some((option) => option.selected);
 
   const choices = useMemo<ModelChoice[]>(() => {
-    const browserModels: Array<{ key: ModelType; label: string; state: ModelState }> = [
-      { key: "kokoro", label: MODELS.kokoro.label, state: kokoroState },
-      { key: "supertonic", label: MODELS.supertonic.label, state: supertonicState },
-    ];
+    const browserStates: Partial<Record<ModelType, ModelState>> = {
+      ...modelStates,
+      kokoro: kokoroState,
+      supertonic: supertonicState,
+    };
     return [
-      ...browserModels
-        .filter(({ key }) => visibleModels.includes(key))
-        .map(({ key, label, state }) => ({
-          id: key,
-          label,
-          detail: `${MODEL_PARAMS[key]} · ${statusText(state)}`,
-          selected: !hasSelectedDesktopModel && activeModel === key,
-          state,
-          unavailableReason: unavailableModels?.[key],
-          onSelect: () => onModelChange(key),
-        })),
+      ...BROWSER_ENGINE_IDS
+        .filter((id) => visibleModels.includes(id))
+        .map((id) => {
+          const engine = getEngine(id);
+          const state = browserStates[id] ?? NOT_LOADED;
+          return {
+            id,
+            label: engine.label,
+            detail: `${engine.params} · ${statusText(state)}`,
+            selected: !hasSelectedDesktopModel && activeModel === id,
+            state,
+            unavailableReason: unavailableModels?.[id],
+            onSelect: () => onModelChange(id),
+          };
+        }),
       ...desktopModelOptions.map((option) => ({
         id: `desktop-${option.key}`,
         label: option.label,
@@ -129,7 +140,7 @@ export function ModelToggle({
         onSelect: option.onSelect,
       })),
     ];
-  }, [activeModel, desktopModelOptions, hasSelectedDesktopModel, kokoroState, onModelChange, supertonicState, unavailableModels, visibleModels]);
+  }, [activeModel, desktopModelOptions, hasSelectedDesktopModel, kokoroState, modelStates, onModelChange, supertonicState, unavailableModels, visibleModels]);
 
   const selected = choices.find((choice) => choice.selected) ?? choices[0];
 

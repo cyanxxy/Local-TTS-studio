@@ -3,8 +3,11 @@ import { strFromU8, unzipSync, type UnzipFileInfo } from "fflate";
 import {
   createReaderDocument,
   deriveDocumentTitle,
+  isReaderDocumentCover,
   normalizeReaderText,
+  READER_COVER_MAX_DATA_URL_CHARS,
   type ReaderChapter,
+  type ReaderDocumentCover,
   type ReaderDocumentRecord,
 } from "./readerDocument";
 
@@ -88,42 +91,108 @@ function parseMarkup(markup: string, contentType: DOMParserSupportedType): Docum
   return document;
 }
 
-function blockText(element: Element): string {
-  if (element.tagName.toLowerCase() === "li") {
-    return `• ${cleanText(element.textContent ?? "")}`;
-  }
-  return cleanText(element.textContent ?? "");
+// Elements that start a new paragraph. Text owned directly by any of these
+// (text nodes or inline children) becomes one block, so wrappers such as
+// <blockquote><p> or <li><p> yield their text once and plain <div> paragraphs
+// are kept alongside <p> siblings.
+const BLOCK_TAGS = new Set([
+  "address", "article", "aside", "blockquote", "body", "caption", "center", "dd", "details", "dialog",
+  "div", "dl", "dt", "fieldset", "figcaption", "figure", "footer", "form", "h1", "h2", "h3", "h4", "h5",
+  "h6", "header", "hgroup", "hr", "legend", "li", "main", "menu", "nav", "ol", "p", "pre", "section",
+  "summary", "table", "tbody", "td", "tfoot", "th", "thead", "tr", "ul",
+]);
+// Never readable: code, styling, ruby annotations (which would read furigana
+// twice), embedded media and graphics (whose fallback or label text is not
+// prose), and form controls. MathML reads its alttext when it has one.
+const SKIPPED_TAGS = new Set([
+  "audio", "button", "canvas", "embed", "iframe", "noscript", "object", "option", "rp", "rt", "script",
+  "select", "style", "svg", "template", "textarea", "video",
+]);
+
+/** One line of text, for titles and labels lifted from markup. */
+function singleLine(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
 }
 
-function extractSections(root: ParentNode, fallbackTitle: string): ExtractedSection[] {
-  const blocks = [...root.querySelectorAll("h1, h2, h3, h4, h5, h6, p, li, blockquote, pre")];
+interface ExtractedBlock {
+  /** The nearest block element that owns the text. */
+  owner: Element;
+  text: string;
+}
+
+/**
+ * Splits `root` into leaf text blocks in document order. Mixed content such as
+ * `<div>Lead<p>Body</p>Tail</div>` yields "Lead", "Body", and "Tail".
+ * Recursion depth follows element nesting, which the HTML parser bounds.
+ */
+function extractBlocks(root: Element): ExtractedBlock[] {
+  const blocks: ExtractedBlock[] = [];
+  const walk = (owner: Element) => {
+    let buffer = "";
+    const flush = () => {
+      const text = cleanText(buffer);
+      buffer = "";
+      if (text) blocks.push({ owner, text });
+    };
+    const visit = (node: Node) => {
+      for (const child of node.childNodes) {
+        if (child.nodeType === Node.TEXT_NODE || child.nodeType === Node.CDATA_SECTION_NODE) {
+          buffer += (child as CharacterData).data;
+          continue;
+        }
+        if (child.nodeType !== Node.ELEMENT_NODE) continue;
+        const element = child as Element;
+        const tag = element.localName.toLowerCase();
+        if (SKIPPED_TAGS.has(tag)) continue;
+        if (tag === "math") {
+          const alttext = singleLine(element.getAttribute("alttext") ?? "");
+          if (alttext) buffer += ` ${alttext} `;
+        } else if (tag === "br") {
+          buffer += "\n";
+        } else if (BLOCK_TAGS.has(tag)) {
+          flush();
+          walk(element);
+        } else {
+          visit(element);
+        }
+      }
+    };
+    visit(owner);
+    flush();
+  };
+  walk(root);
+  return blocks;
+}
+
+function extractSections(root: Element, fallbackTitle: string): ExtractedSection[] {
   const sections: ExtractedSection[] = [];
   let current: ExtractedSection = { title: fallbackTitle, level: 1, text: "" };
+  // A list item's bullet goes on its first block only, so <li><p>A</p><p>B</p>
+  // reads as one item and a nested list's items get their own bullets.
+  const bulletedItems = new Set<Element>();
 
   const flush = () => {
     const text = cleanText(current.text);
     if (text) sections.push({ ...current, text });
   };
 
-  for (const element of blocks) {
-    const tag = element.tagName.toLowerCase();
-    const text = blockText(element);
-    if (!text) continue;
-
+  for (const { owner, text: blockText } of extractBlocks(root)) {
+    const tag = owner.localName.toLowerCase();
     if (/^h[1-6]$/.test(tag)) {
       if (cleanText(current.text)) flush();
-      current = { title: text.slice(0, 160), level: Number(tag.slice(1)), text: text };
+      current = { title: singleLine(blockText).slice(0, 160), level: Number(tag.slice(1)), text: blockText };
       continue;
     }
 
+    const item = owner.closest("li");
+    let text = blockText;
+    if (item && root.contains(item) && !bulletedItems.has(item)) {
+      bulletedItems.add(item);
+      text = `• ${text}`;
+    }
     current.text += `${current.text ? "\n\n" : ""}${text}`;
   }
   flush();
-
-  if (sections.length === 0) {
-    const text = cleanText(root.textContent ?? "");
-    if (text) sections.push({ title: fallbackTitle, level: 1, text });
-  }
   return sections;
 }
 
@@ -175,9 +244,15 @@ function xmlLocalText(document: Document, localName: string): string {
   return cleanText(nodes[0]?.textContent ?? "");
 }
 
+interface EpubManifestItem {
+  href: string;
+  mediaType: string;
+  properties: string;
+}
+
 function epubNavigationLabels(
   files: Record<string, Uint8Array>,
-  manifest: Map<string, { href: string; mediaType: string; properties: string }>,
+  manifest: Map<string, EpubManifestItem>,
   opfPath: string,
 ): Map<string, string> {
   const labels = new Map<string, string>();
@@ -190,11 +265,123 @@ function epubNavigationLabels(
   const document = parseMarkup(strFromU8(bytes), "text/html");
   for (const link of document.querySelectorAll("nav a[href], a[href]")) {
     const href = link.getAttribute("href");
-    const label = cleanText(link.textContent ?? "");
+    const label = singleLine(link.textContent ?? "");
     if (!href || !label) continue;
     labels.set(zipPath(navPath, href.split("#")[0]), label.slice(0, 160));
   }
   return labels;
+}
+
+type CoverImageType = "jpeg" | "png" | "gif" | "webp";
+
+// Declared media types worth reading. "image/jpg" is a common mislabel of
+// JPEG in real-world EPUBs; the bytes decide the final type either way.
+const COVER_MEDIA_TYPES: ReadonlySet<string> = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/gif",
+  "image/webp",
+]);
+
+function isCoverMediaType(mediaType: string): boolean {
+  return COVER_MEDIA_TYPES.has(mediaType.trim().toLowerCase());
+}
+
+// The longest data-URL prefix ("jpeg"/"webp") bounds the raw bytes that can
+// still fit the record's cover cap once base64-encoded.
+const MAX_COVER_BYTES = Math.floor(
+  (READER_COVER_MAX_DATA_URL_CHARS - "data:image/jpeg;base64,".length) / 4,
+) * 3;
+
+function hasPrefix(bytes: Uint8Array, prefix: readonly number[], offset = 0): boolean {
+  return prefix.every((byte, index) => bytes[offset + index] === byte);
+}
+
+/** Identifies a raster image by its magic bytes rather than trusting the manifest. */
+function sniffCoverImageType(bytes: Uint8Array): CoverImageType | null {
+  if (hasPrefix(bytes, [0xff, 0xd8, 0xff])) return "jpeg";
+  if (hasPrefix(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "png";
+  if (hasPrefix(bytes, [0x47, 0x49, 0x46, 0x38]) && (bytes[4] === 0x37 || bytes[4] === 0x39) && bytes[5] === 0x61) {
+    return "gif";
+  }
+  if (hasPrefix(bytes, [0x52, 0x49, 0x46, 0x46]) && hasPrefix(bytes, [0x57, 0x45, 0x42, 0x50], 8)) return "webp";
+  return null;
+}
+
+/** Base64-encodes in chunks so large images never overflow the argument stack. */
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+// "cover" as a word of its own: "cover.jpg" and "book-cover" match, while
+// "discover.png" and "recovery-map.png" do not.
+const COVER_NAME = /(?<!\p{L})cover(?!\p{L})/iu;
+// Bounds how many images a book can make the importer inflate for its cover.
+const MAX_COVER_CANDIDATES = 4;
+
+/**
+ * Raster cover candidates in order of trust: the EPUB 3 `cover-image`
+ * property, then the EPUB 2 `<meta name="cover">` reference, then manifest
+ * items named "cover". The first that decodes wins.
+ */
+function findEpubCoverItems(opf: Document, manifest: Map<string, EpubManifestItem>): EpubManifestItem[] {
+  const items = [...manifest.entries()];
+  const coverMeta = [...opf.getElementsByTagNameNS("*", "meta")]
+    .find((meta) => meta.getAttribute("name") === "cover");
+  const metaItem = manifest.get(coverMeta?.getAttribute("content") ?? "");
+  const candidates = [
+    ...items.filter(([, item]) => item.properties.split(/\s+/).includes("cover-image")).map(([, item]) => item),
+    ...(metaItem ? [metaItem] : []),
+    ...items.filter(([id, item]) => COVER_NAME.test(`${id} ${item.href}`)).map(([, item]) => item),
+  ];
+  return [...new Set(candidates)].filter((item) => isCoverMediaType(item.mediaType)).slice(0, MAX_COVER_CANDIDATES);
+}
+
+/**
+ * Reads the EPUB's raster cover as a data URL. A cover is optional: anything
+ * unexpected (SVG, mismatched bytes, oversized, missing, corrupt) skips it
+ * instead of failing the import.
+ */
+function readEpubCover(
+  archive: Uint8Array,
+  opf: Document,
+  opfPath: string,
+  manifest: Map<string, EpubManifestItem>,
+  budget: EpubExpansionBudget,
+): ReaderDocumentCover | undefined {
+  const coverPaths = findEpubCoverItems(opf, manifest).map((item) => zipPath(opfPath, item.href));
+  if (coverPaths.length === 0) return undefined;
+  const entryNames = new Set(coverPaths.flatMap((path) => [path, encodeURI(path)]));
+
+  let files: Record<string, Uint8Array>;
+  try {
+    files = unzipSync(archive, {
+      filter: (entry: UnzipFileInfo) => {
+        if (!entryNames.has(entry.name)) return false;
+        if (entry.originalSize > MAX_COVER_BYTES || entry.originalSize > budget.remaining) return false;
+        budget.remaining -= entry.originalSize;
+        return true;
+      },
+    });
+  } catch {
+    return undefined;
+  }
+  for (const path of coverPaths) {
+    const bytes = findZipEntry(files, path);
+    // The declared size gated inflation; the inflated bytes are what count.
+    if (!bytes || bytes.length > MAX_COVER_BYTES) continue;
+    const type = sniffCoverImageType(bytes);
+    if (!type) continue;
+    const cover = { dataUrl: `data:image/${type};base64,${bytesToBase64(bytes)}` };
+    if (isReaderDocumentCover(cover)) return cover;
+  }
+  return undefined;
 }
 
 export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDocumentRecord {
@@ -234,7 +421,7 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
   const language = xmlLocalText(opf, "language");
   const description = xmlLocalText(opf, "description");
 
-  const manifest = new Map<string, { href: string; mediaType: string; properties: string }>();
+  const manifest = new Map<string, EpubManifestItem>();
   for (const item of opf.getElementsByTagNameNS("*", "item")) {
     const id = item.getAttribute("id");
     const href = item.getAttribute("href");
@@ -274,7 +461,7 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
     if (!contentBytes) continue;
     const contentDocument = parseMarkup(strFromU8(contentBytes), "text/html");
     const fallbackTitle = navigationLabels.get(contentPath)
-      || cleanText(contentDocument.querySelector("title")?.textContent ?? "")
+      || singleLine(contentDocument.querySelector("title")?.textContent ?? "")
       || `Chapter ${sections.length + 1}`;
     const extracted = extractSections(contentDocument.body, fallbackTitle);
     if (extracted.length === 0) continue;
@@ -285,6 +472,7 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
   const parts = sectionsToDocumentParts(sections);
   if (!parts.text) throw new Error(`No readable text found in "${fileName}".`);
   assertReaderTextLimit(parts.text);
+  const cover = readEpubCover(bytes, opf, opfPath, manifest, budget);
   return createReaderDocument({
     title,
     author,
@@ -294,15 +482,19 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
     sourceName: fileName,
     text: parts.text,
     chapters: parts.chapters,
+    ...(cover ? { cover } : {}),
   });
 }
 
 export function parseHtmlReaderDocument(payload: RemoteDocumentPayload): ReaderDocumentRecord {
   const sourceDocument = parseMarkup(payload.html, "text/html");
+  // Read before Readability, which rewrites the document in place.
+  const declaredLanguage = sourceDocument.documentElement.getAttribute("lang") ?? "";
   const readable = new Readability(sourceDocument, { charThreshold: 80 }).parse();
   const title = cleanText(readable?.title ?? sourceDocument.title) || new URL(payload.finalUrl).hostname;
   const author = cleanText(readable?.byline ?? "");
   const description = cleanText(readable?.excerpt ?? "");
+  const language = cleanText(readable?.lang || declaredLanguage);
   const articleDocument = readable?.content
     ? parseMarkup(`<article>${readable.content}</article>`, "text/html")
     : sourceDocument;
@@ -315,6 +507,7 @@ export function parseHtmlReaderDocument(payload: RemoteDocumentPayload): ReaderD
   return createReaderDocument({
     title,
     author,
+    language,
     description,
     sourceType: "url",
     sourceName: new URL(payload.finalUrl).hostname,

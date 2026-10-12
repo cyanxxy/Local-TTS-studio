@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { getEngine } from "../models/registry";
 import { Controls } from "./Controls";
 import { ControlsProvider, type ControlsContextValue } from "./ControlsContext";
 
 const defaultProps: ControlsContextValue = {
-  activeModel: "supertonic" as const,
+  qualityRange: getEngine("supertonic").capabilities.quality,
   quality: 5,
   onQualityChange: vi.fn(),
   onGenerate: vi.fn(),
@@ -38,20 +39,36 @@ describe("Controls", () => {
     expect(screen.getByText(/Preparing/)).toBeInTheDocument();
   });
 
-  it("shows quality slider only for Supertonic", () => {
+  it("shows the quality slider only for engines with a quality range", () => {
+    const onQualityChange = vi.fn();
     const { rerender } = render(
-      <ControlsProvider value={{ ...defaultProps, activeModel: "supertonic" }}>
+      <ControlsProvider value={{ ...defaultProps, onQualityChange }}>
         <Controls />
       </ControlsProvider>,
     );
     expect(screen.getByText("Quality")).toBeInTheDocument();
+    const slider = screen.getByRole("slider");
+    expect(slider).toHaveAttribute("min", "1");
+    expect(slider).toHaveAttribute("max", "20");
+    expect(slider).toHaveAttribute("step", "1");
+    fireEvent.change(slider, { target: { value: "8" } });
+    expect(onQualityChange).toHaveBeenCalledWith(8);
+
+    for (const engine of ["kokoro", "audio8", "qwen3"] as const) {
+      rerender(
+        <ControlsProvider value={{ ...defaultProps, qualityRange: getEngine(engine).capabilities.quality }}>
+          <Controls />
+        </ControlsProvider>,
+      );
+      expect(screen.queryByText("Quality"), engine).not.toBeInTheDocument();
+    }
 
     rerender(
-      <ControlsProvider value={{ ...defaultProps, activeModel: "kokoro" }}>
+      <ControlsProvider value={{ ...defaultProps, qualityRange: getEngine("supertonic3").capabilities.quality }}>
         <Controls />
       </ControlsProvider>,
     );
-    expect(screen.queryByText("Quality")).not.toBeInTheDocument();
+    expect(screen.getByText("Quality")).toBeInTheDocument();
   });
 
   it("shows Stop button during generation", () => {

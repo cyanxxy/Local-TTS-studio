@@ -1,7 +1,8 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { GenerationTuningSettings, WorkerInMessage, WorkerOutMessage } from "../types";
+import type { GenerationTuningSettings, ModelType, WorkerInMessage, WorkerOutMessage } from "../types";
 import { useTTS } from "./useTTS";
+import { WORKER_ABORT_TIMEOUT_MS } from "./workerGeneration";
 
 class MockWorker {
   public postedMessages: WorkerInMessage[] = [];
@@ -44,6 +45,12 @@ const SETTINGS: GenerationTuningSettings = {
   emphasisStrength: 0.5,
 };
 
+
+/** A `getWorker` over per-engine worker refs, read at call time. */
+function workerLookup(refs: Partial<Record<ModelType, { current: Worker | null }>>) {
+  return (model: ModelType) => refs[model]?.current ?? null;
+}
+
 describe("useTTS", () => {
   let now = 0;
   let animationFrameCallbacks: FrameRequestCallback[];
@@ -76,8 +83,7 @@ describe("useTTS", () => {
     const onComplete = vi.fn();
 
     const { result } = renderHook(() => useTTS({
-      kokoroWorker: { current: kokoroWorker as unknown as Worker },
-      supertonicWorker: { current: null },
+      getWorker: workerLookup({ kokoro: { current: kokoroWorker as unknown as Worker }, supertonic: { current: null } }),
       onAudioChunk,
       onComplete,
     }));
@@ -147,8 +153,7 @@ describe("useTTS", () => {
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 
     const { result } = renderHook(() => useTTS({
-      kokoroWorker: { current: null },
-      supertonicWorker: { current: worker as unknown as Worker },
+      getWorker: workerLookup({ kokoro: { current: null }, supertonic: { current: worker as unknown as Worker } }),
       onAudioChunk: vi.fn(),
       onComplete: vi.fn(),
     }));
@@ -184,8 +189,7 @@ describe("useTTS", () => {
   it("ignores missing workers and can cancel an active generation", () => {
     const worker = new MockWorker();
     const { result } = renderHook(() => useTTS({
-      kokoroWorker: { current: worker as unknown as Worker },
-      supertonicWorker: { current: null },
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
       onAudioChunk: vi.fn(),
       onComplete: vi.fn(),
     }));
@@ -203,5 +207,73 @@ describe("useTTS", () => {
     expect(worker.postedMessages.at(-1)).toEqual({ type: "CANCEL" });
     expect(result.current.isGenerating).toBe(false);
     expect(worker.listenerCount()).toBe(0);
+  });
+
+  it("aborts the active generation softly and reports a worker that never answers", () => {
+    vi.useFakeTimers();
+    const worker = new MockWorker();
+    const { result } = renderHook(() => useTTS({
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
+      onAudioChunk: vi.fn(),
+      onComplete: vi.fn(),
+    }));
+    const onUnresponsive = vi.fn();
+
+    // Nothing is running, so nothing is aborted.
+    act(() => result.current.abort(onUnresponsive));
+    expect(worker.postedMessages).toEqual([]);
+
+    act(() => result.current.generate("Hello", "kokoro", "af_heart", SETTINGS));
+    const generation = worker.postedMessages[0];
+    const generationId = generation.type === "GENERATE" ? generation.generationId : undefined;
+    act(() => result.current.abort(onUnresponsive));
+
+    expect(worker.postedMessages.at(-1)).toEqual({ type: "ABORT", generationId });
+    expect(worker.postedMessages.some((message) => message.type === "CANCEL")).toBe(false);
+    expect(result.current.isGenerating).toBe(false);
+    act(() => vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS));
+    expect(onUnresponsive).toHaveBeenCalledExactlyOnceWith(worker);
+    vi.useRealTimers();
+  });
+
+  it("does not report an abort the worker answered", () => {
+    vi.useFakeTimers();
+    const worker = new MockWorker();
+    const { result } = renderHook(() => useTTS({
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
+      onAudioChunk: vi.fn(),
+      onComplete: vi.fn(),
+    }));
+    const onUnresponsive = vi.fn();
+    act(() => result.current.generate("Hello", "kokoro", "af_heart", SETTINGS));
+    const generation = worker.postedMessages[0];
+    const generationId = generation.type === "GENERATE" ? generation.generationId : undefined;
+    act(() => result.current.abort(onUnresponsive));
+
+    act(() => worker.emit({ type: "ABORTED", generationId }));
+    act(() => vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS * 2));
+
+    expect(onUnresponsive).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("keeps its identity across renders until its state changes", () => {
+    const worker = new MockWorker();
+    const options = {
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
+      onAudioChunk: vi.fn(),
+      onComplete: vi.fn(),
+    };
+    const { result, rerender } = renderHook(() => useTTS(options));
+    const initial = result.current;
+
+    rerender();
+    expect(result.current).toBe(initial);
+
+    act(() => result.current.generate("Hello", "kokoro", "af_heart", SETTINGS));
+    expect(result.current).not.toBe(initial);
+    expect(result.current.isGenerating).toBe(true);
+    expect(result.current.generate).toBe(initial.generate);
+    expect(result.current.cancel).toBe(initial.cancel);
   });
 });

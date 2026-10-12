@@ -5,9 +5,11 @@ import { createHash } from "crypto";
 import { EventEmitter } from "events";
 import net from "net";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { NativeFailureDiagnostics } from "./errors";
 import { BRIDGE_RESULT_PREFIX } from "./localTtsIpc";
 import {
   createWebSocketBridgeWorkerPool,
+  type CreateWebSocketBridgeWorkerPoolOptions,
   type WebSocketWorkerSpawnConfig,
   type WebSocketWorkerSpawnRuntimeConfig,
 } from "./webSocketBridgeWorker";
@@ -221,7 +223,10 @@ const RUN_DEFAULTS = {
 
 function makePool(
   onMessage?: (message: Record<string, unknown>, server: FakeWebSocketServer) => void,
-  poolOverrides: { cancelDrainMs?: number; connectTimeoutMs?: number } = {},
+  poolOverrides: Partial<Pick<
+    CreateWebSocketBridgeWorkerPoolOptions<TestModel>,
+    "cancelDrainMs" | "connectTimeoutMs" | "onListenerError" | "idleEvictMs" | "onWorkerExit"
+  >> = {},
   handshakeDelayMs = 0,
 ) {
   const children: FakeChild[] = [];
@@ -354,8 +359,10 @@ describe("createWebSocketBridgeWorkerPool", () => {
     expect(second.response).toMatchObject({ ok: true, requestId: "r2" });
   });
 
-  it("converts pcm16-encoded audio chunks to Float32 before delivery", async () => {
-    const { pool } = makePool((message, server) => {
+  it.each(["opus", "pcm16"])("rejects an audio chunk that declares a %s encoding", async (encoding) => {
+    // Float32 is the only wire format; Int16 would quantise wav-f32/wav-pcm24
+    // exports, so no encoding field is accepted at all.
+    const { pool, children } = makePool((message, server) => {
       server.sendJson({
         type: "audio_chunk",
         requestId: message.requestId,
@@ -364,87 +371,21 @@ describe("createWebSocketBridgeWorkerPool", () => {
         sampleRate: 24000,
         sampleCount: 2,
         silenceAfterSamples: 0,
-        encoding: "pcm16",
+        encoding,
       });
-      const audio = Buffer.alloc(2 * Int16Array.BYTES_PER_ELEMENT);
-      audio.writeInt16LE(16384, 0);
-      audio.writeInt16LE(-32768, 2);
-      server.sendBinary(audio);
-      server.sendJson({
-        type: "result",
-        requestId: message.requestId,
-        ok: true,
-        result: {
-          audioTransport: "websocket-binary",
-          audioChunkCount: 1,
-          sampleRate: 24000,
-          modelRepo: "R",
-          durationSec: 1,
-          elapsedSec: 2,
-          phaseTimingsSec: {},
-        },
-      });
+      server.sendBinary(Buffer.alloc(2 * Int16Array.BYTES_PER_ELEMENT));
     });
-    const audioChunks: { sampleCount: number; audio: ArrayBuffer }[] = [];
+    const audioChunks: unknown[] = [];
 
-    const run = await pool.run("qwen3", {
+    await expect(pool.run("qwen3", {
       ...RUN_DEFAULTS,
       requestId: "r1",
       payload: { text: "one" },
       spawnConfig: SPAWN_CONFIG,
       onAudioChunk: (payload) => audioChunks.push(payload),
-    });
-
-    expect(run.response).toMatchObject({ ok: true, requestId: "r1" });
-    expect(audioChunks).toHaveLength(1);
-    expect(audioChunks[0].sampleCount).toBe(2);
-    const samples = new Float32Array(audioChunks[0].audio);
-    expect(Array.from(samples)).toEqual([0.5, -1]);
-  });
-
-  it("rejects a pcm16 audio chunk whose binary frame has a Float32 byte length", async () => {
-    const { pool } = makePool((message, server) => {
-      server.sendJson({
-        type: "audio_chunk",
-        requestId: message.requestId,
-        index: 0,
-        total: 0,
-        sampleRate: 24000,
-        sampleCount: 2,
-        silenceAfterSamples: 0,
-        encoding: "pcm16",
-      });
-      server.sendBinary(Buffer.alloc(2 * Float32Array.BYTES_PER_ELEMENT));
-    });
-
-    await expect(pool.run("qwen3", {
-      ...RUN_DEFAULTS,
-      requestId: "r1",
-      payload: { text: "one" },
-      spawnConfig: SPAWN_CONFIG,
-    })).rejects.toThrow(/unexpected byte length/);
-  });
-
-  it("rejects an audio chunk with an unsupported encoding", async () => {
-    const { pool } = makePool((message, server) => {
-      server.sendJson({
-        type: "audio_chunk",
-        requestId: message.requestId,
-        index: 0,
-        total: 0,
-        sampleRate: 24000,
-        sampleCount: 2,
-        silenceAfterSamples: 0,
-        encoding: "opus",
-      });
-    });
-
-    await expect(pool.run("qwen3", {
-      ...RUN_DEFAULTS,
-      requestId: "r1",
-      payload: { text: "one" },
-      spawnConfig: SPAWN_CONFIG,
     })).rejects.toThrow(/unsupported encoding/);
+    expect(audioChunks).toEqual([]);
+    expect(children[0].killed).toBe(true);
   });
 
   it("keeps a cancellation authoritative over a success result already in flight", async () => {
@@ -1412,6 +1353,142 @@ describe("createWebSocketBridgeWorkerPool", () => {
     servers[0].close();
   });
 
+  describe("unit gaps", () => {
+    function sendUnitChunk(server: FakeWebSocketServer, requestId: unknown, index: number, unit: number) {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId,
+        index,
+        total: 0,
+        sampleRate: 24_000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+        textUnitIndex: unit,
+        textUnitTotal: 2,
+      });
+      server.sendBinary(Buffer.alloc(2 * Float32Array.BYTES_PER_ELEMENT));
+    }
+
+    function sendGap(server: FakeWebSocketServer, requestId: unknown, overrides: Record<string, unknown> = {}) {
+      server.sendJson({
+        type: "unit_gap",
+        requestId,
+        sampleRate: 24_000,
+        textUnitIndex: 0,
+        textUnitTotal: 2,
+        silenceSamples: 4_800,
+        ...overrides,
+      });
+    }
+
+    function finish(server: FakeWebSocketServer, requestId: unknown, audioChunkCount: number) {
+      server.sendJson({
+        type: "result",
+        requestId,
+        ok: true,
+        result: { audioChunkCount, sampleRate: 24_000, modelRepo: "R", durationSec: 1, elapsedSec: 1, phaseTimingsSec: {} },
+      });
+    }
+
+    it("delivers a gap in stream order between the chunks it separates and keeps it out of the chunk count", async () => {
+      const { pool } = makePool((message, server) => {
+        sendUnitChunk(server, message.requestId, 0, 0);
+        sendGap(server, message.requestId);
+        sendUnitChunk(server, message.requestId, 1, 1);
+        finish(server, message.requestId, 2);
+      });
+      const events: string[] = [];
+      const gaps: unknown[] = [];
+
+      await pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "two units" },
+        spawnConfig: SPAWN_CONFIG,
+        onAudioChunk: (chunk) => events.push(`chunk ${chunk.index}`),
+        onAudioGap: (gap) => {
+          events.push("gap");
+          gaps.push(gap);
+        },
+      });
+
+      expect(events).toEqual(["chunk 0", "gap", "chunk 1"]);
+      expect(gaps).toEqual([{
+        requestId: "r1",
+        afterChunkIndex: 0,
+        sampleRate: 24_000,
+        silenceSamples: 4_800,
+        textUnitIndex: 0,
+        textUnitTotal: 2,
+      }]);
+    });
+
+    it("accepts a gap even when nobody listens for it", async () => {
+      const { pool } = makePool((message, server) => {
+        sendUnitChunk(server, message.requestId, 0, 0);
+        sendGap(server, message.requestId);
+        finish(server, message.requestId, 1);
+      });
+      await expect(pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "unheard" },
+        spawnConfig: SPAWN_CONFIG,
+      })).resolves.toBeDefined();
+    });
+
+    it("fails the request and stops the worker when a gap breaks the stream rules", async () => {
+      const { pool, children, servers } = makePool((message, server) => {
+        sendUnitChunk(server, message.requestId, 0, 0);
+        sendGap(server, message.requestId, { textUnitIndex: 1 });
+      });
+      await expect(pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "bad gap" },
+        spawnConfig: SPAWN_CONFIG,
+      })).rejects.toThrow(/text unit other than the last/);
+      expect(children[0].killed).toBe(true);
+      servers[0].close();
+    });
+
+    it("counts a gap's silence against the request byte limit", async () => {
+      const children: FakeChild[] = [];
+      const servers: FakeWebSocketServer[] = [];
+      const spawn = vi.fn((_model: TestModel, config: WebSocketWorkerSpawnRuntimeConfig) => {
+        const child = new FakeChild();
+        const server = new FakeWebSocketServer(
+          config.host,
+          config.port,
+          `/${config.authToken}`,
+          (port) => child.emitStdout(`__PORT__${port}\n`),
+          (message, connectedServer) => {
+            sendUnitChunk(connectedServer, message.requestId, 0, 0);
+            sendGap(connectedServer, message.requestId);
+          },
+        );
+        child.onKill = () => server.close();
+        children.push(child);
+        servers.push(server);
+        return child as unknown as ChildProcessWithoutNullStreams;
+      });
+      const pool = createWebSocketBridgeWorkerPool<TestModel>({
+        spawn,
+        idleEvictMs: 60_000,
+        connectTimeoutMs: 5_000,
+        // Room for the 2-sample chunk but not for 4,800 samples of silence.
+        maxRequestAudioBytes: 64,
+      });
+      await expect(pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "long silence" },
+        spawnConfig: SPAWN_CONFIG,
+      })).rejects.toThrow(/64-byte request limit/);
+      servers[0].close();
+    });
+  });
+
   it("rejects audio that exceeds the cumulative request byte limit", async () => {
     const children: FakeChild[] = [];
     const servers: FakeWebSocketServer[] = [];
@@ -1716,5 +1793,526 @@ describe("createWebSocketBridgeWorkerPool", () => {
     })).rejects.toThrow(/unexpected byte length/);
     expect(children[0].killed).toBe(true);
     servers[0].close();
+  });
+});
+
+type DiagnosedError = Error & { diagnostics?: NativeFailureDiagnostics };
+
+/** The error a run rejects with; fails the test if the run resolves. */
+async function rejectionOf(run: Promise<unknown>): Promise<DiagnosedError> {
+  try {
+    await run;
+  } catch (error) {
+    return error as DiagnosedError;
+  }
+  throw new Error("Expected the run to reject.");
+}
+
+describe("native failure diagnostics", () => {
+  const SUCCESS_RESULT = {
+    audioTransport: "websocket-binary",
+    audioChunkCount: 1,
+    sampleRate: 24000,
+    modelRepo: "R",
+    durationSec: 1,
+    elapsedSec: 1,
+    phaseTimingsSec: {},
+  };
+
+  function runRequest(pool: ReturnType<typeof makePool>["pool"], requestId = "r1", overrides = {}) {
+    return pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId,
+      payload: { text: "x" },
+      spawnConfig: SPAWN_CONFIG,
+      ...overrides,
+    });
+  }
+
+  it("explains a mid-request crash with the bridge's last stderr lines", async () => {
+    const { pool, children, servers } = makePool(() => {
+      children[0].emitStderr(
+        "loading weights\n\x1b[31mthread 'main' panicked at src/runtime.rs:42:7:\x1b[0m\nindex out of bounds\n",
+      );
+      children[0].exit(101);
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    expect(error.message).toBe([
+      "Rust local bridge exited before returning a result (code 101).",
+      "Native output:",
+      "loading weights",
+      "thread 'main' panicked at src/runtime.rs:42:7:",
+      "index out of bounds",
+    ].join("\n"));
+    expect(error.diagnostics).toMatchObject({
+      exitCode: 101,
+      signal: null,
+      stderr: expect.stringContaining("index out of bounds"),
+    });
+    servers[0].close();
+  });
+
+  it("waits for the stderr pipe to drain when the exit is observed first", async () => {
+    const { pool, children, servers } = makePool(() => {
+      const child = children[0];
+      // 'exit' can beat the final stderr read; the abort message lands after it.
+      child.emit("exit", null, "SIGABRT");
+      setTimeout(() => {
+        child.emitStderr("libc++abi: terminating due to uncaught exception\n");
+        child.emit("close", null, "SIGABRT");
+      }, 20);
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    expect(error.message).toBe(
+      "Rust local bridge exited before returning a result (signal SIGABRT).\n"
+      + "Native output:\nlibc++abi: terminating due to uncaught exception",
+    );
+    expect(error.diagnostics).toMatchObject({ exitCode: null, signal: "SIGABRT" });
+    servers[0].close();
+  });
+
+  it("stops waiting for output that never drains", async () => {
+    const { pool, children, servers } = makePool(() => {
+      children[0].emitStderr("partial output\n");
+      // No 'close': the pipe stays open, so only the bounded grace period ends the wait.
+      children[0].emit("exit", 1, null);
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    expect(error.message).toBe(
+      "Rust local bridge exited before returning a result (code 1).\nNative output:\npartial output",
+    );
+    servers[0].close();
+  });
+
+  it("reports the failure the bridge printed on its way out", async () => {
+    const { pool, children, servers } = makePool(() => {
+      children[0].emitStdout(
+        `${BRIDGE_RESULT_PREFIX}${JSON.stringify({ ok: false, error: "Metal device\nlost", details: "chain" })}\n`,
+      );
+      children[0].exit(1);
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    expect(error.message).toBe("Rust local bridge exited before returning a result (code 1): Metal device lost");
+    expect(error.diagnostics?.stdout).toContain("Metal device");
+    servers[0].close();
+  });
+
+  it("keeps the WebSocket token out of failure messages and diagnostics", async () => {
+    const { pool, children, servers, spawn } = makePool(() => {
+      const { authToken } = spawn.mock.calls[0][1];
+      children[0].emitStderr(`rejected ws://127.0.0.1:1/${authToken}\n`);
+      children[0].emitStdout(`echo ${authToken}\n`);
+      children[0].exit(1);
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+    const { authToken } = spawn.mock.calls[0][1];
+
+    expect(error.message).toContain("rejected ws://127.0.0.1:1/[redacted]");
+    expect(error.message).not.toContain(authToken);
+    expect(JSON.stringify(error.diagnostics)).not.toContain(authToken);
+    expect(error.diagnostics?.stdout).toContain("echo [redacted]");
+    servers[0].close();
+  });
+
+  it("leaves an excerpt that mentions cancellation out of the message", async () => {
+    // The renderer reads any message mentioning "cancelled" as a deliberate
+    // stop, which would hide this crash from the user.
+    const { pool, children, servers } = makePool(() => {
+      children[0].emitStderr("decode step cancelled by allocator\n");
+      children[0].exit(134);
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    expect(error.message).toBe("Rust local bridge exited before returning a result (code 134).");
+    expect(error.diagnostics?.stderr).toContain("decode step cancelled by allocator");
+    servers[0].close();
+  });
+
+  it("settles a Stop at once while a crashed request collects its last output", async () => {
+    let markCrashed!: () => void;
+    const crashed = new Promise<void>((resolve) => { markCrashed = resolve; });
+    const { pool, children, servers, spawn } = makePool((message, server) => {
+      if (message.requestId === "r1") {
+        children[0].emit("exit", 1, null);
+        markCrashed();
+        return;
+      }
+      sendAudioChunk(server, message.requestId);
+      server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: SUCCESS_RESULT });
+    });
+    const outcome = runRequest(pool).then(() => "resolved", (error: Error) => error.message);
+    await crashed;
+
+    expect(pool.cancel("r1")).toBe(true);
+
+    // Well inside the output grace period: the cancel itself settled the run.
+    await expect(Promise.race([outcome, delay(150).then(() => "still pending")]))
+      .resolves.toBe("Generation cancelled.");
+    // Stop then Play: the settled crash no longer holds the model.
+    await expect(runRequest(pool, "r2")).resolves.toMatchObject({ response: { ok: true, requestId: "r2" } });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    for (const server of servers) server.close();
+  });
+
+  it("keeps the model busy until a crashed request has settled", async () => {
+    let markCrashed!: () => void;
+    const crashed = new Promise<void>((resolve) => { markCrashed = resolve; });
+    const { pool, children, servers, spawn } = makePool((message, server) => {
+      if (message.requestId === "r1") {
+        // Never closes, so the failure waits out the whole grace period.
+        children[0].emit("exit", 1, null);
+        markCrashed();
+        return;
+      }
+      sendAudioChunk(server, message.requestId);
+      server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: SUCCESS_RESULT });
+    });
+    const first = rejectionOf(runRequest(pool, "r1"));
+    await crashed;
+
+    // A replacement worker started now could be killed by a late cancel for r1.
+    await expect(runRequest(pool, "r2")).rejects.toThrow("A qwen3 generation is already running.");
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect((await first).message).toBe("Rust local bridge exited before returning a result (code 1).");
+
+    await expect(runRequest(pool, "r3")).resolves.toMatchObject({ response: { ok: true, requestId: "r3" } });
+    expect(spawn).toHaveBeenCalledTimes(2);
+    for (const server of servers) server.close();
+  });
+
+  it("honours a final result that races the process exit", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      sendAudioChunk(server, message.requestId);
+      server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: SUCCESS_RESULT });
+      // The exit is observed before the client has read either frame.
+      children[0].emit("exit", 0, null);
+    });
+    const audioChunks: unknown[] = [];
+
+    await expect(runRequest(pool, "r1", { onAudioChunk: (chunk: unknown) => audioChunks.push(chunk) }))
+      .resolves.toMatchObject({ response: { ok: true, requestId: "r1" } });
+    expect(audioChunks).toHaveLength(1);
+    servers[0].close();
+  });
+
+  it("adds the bridge's last stderr lines to a startup failure", async () => {
+    const spawn = vi.fn(() => {
+      const child = new FakeChild();
+      setTimeout(() => {
+        child.emitStderr("dyld: Library not loaded: @rpath/libmlx.dylib\n");
+        child.emitStdout(`${BRIDGE_RESULT_PREFIX}{"ok":false,"error":"Failed to load the MLX runtime."}\n`);
+        child.exit(1);
+      }, 0);
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+    const pool = createWebSocketBridgeWorkerPool<TestModel>({ spawn, idleEvictMs: 60_000, connectTimeoutMs: 1_000 });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    expect(error.message).toBe(
+      "Failed to start Rust local bridge worker: Failed to load the MLX runtime.\n"
+      + "Native output:\ndyld: Library not loaded: @rpath/libmlx.dylib",
+    );
+    expect(error.diagnostics).toMatchObject({ exitCode: 1, stderr: expect.stringContaining("libmlx") });
+  });
+
+  it("adds the flood to an output-limit failure", async () => {
+    const { pool, children, servers } = makePool(() => {
+      children[0].emitStderr("MLX warning: falling back to CPU\n".repeat(4));
+    });
+
+    const error = await rejectionOf(runRequest(pool, "r1", { maxStderrBytes: 64 }));
+
+    expect(error.message).toMatch(/^Rust local bridge stderr exceeded 64 bytes\.\nNative output:\nMLX warning/);
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("keeps an application failure's message and carries its error chain", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      children[0].emitStderr("warning: reference shorter than 3 s\n");
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: false,
+        error: "Reference cache entry was not found.",
+        details: "Reference cache entry was not found.\n\nCaused by:\n    key abc",
+      });
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    // The renderer matches this text, so no native output is appended to it.
+    expect(error.message).toBe("Reference cache entry was not found.");
+    expect(error.diagnostics).toEqual({
+      details: "Reference cache entry was not found.\n\nCaused by:\n    key abc",
+      stderr: "warning: reference shorter than 3 s\n",
+      stdout: expect.stringContaining("__PORT__"),
+      exitCode: null,
+      signal: null,
+    });
+    expect(children[0].killed).toBe(false);
+    servers[0].close();
+  });
+
+  it("keeps native output out of protocol failures and skips a chain that repeats the message", async () => {
+    const { pool, children, servers } = makePool((message, server) => {
+      children[0].emitStderr("unrelated warning\n");
+      server.sendJson({ type: "error", requestId: message.requestId, error: "Bridge failed.", details: "Bridge failed." });
+    });
+
+    const error = await rejectionOf(runRequest(pool));
+
+    expect(error.message).toBe("Bridge failed.");
+    expect(error.diagnostics).not.toHaveProperty("details");
+    expect(error.diagnostics?.stderr).toBe("unrelated warning\n");
+    expect(children[0].killed).toBe(true);
+    servers[0].close();
+  });
+
+  it("reports a throwing consumer once per listener and keeps serving the request", async () => {
+    const onListenerError = vi.fn(() => {
+      throw new Error("the reporter is broken too");
+    });
+    const { pool, servers } = makePool((message, server) => {
+      server.sendJson({ type: "progress", requestId: message.requestId, phase: "inference", message: "1" });
+      server.sendJson({ type: "progress", requestId: message.requestId, phase: "inference", message: "2" });
+      sendAudioChunk(server, message.requestId, { index: 0, total: 2 });
+      sendAudioChunk(server, message.requestId, { index: 1, total: 2 });
+      server.sendJson({
+        type: "result",
+        requestId: message.requestId,
+        ok: true,
+        result: { ...SUCCESS_RESULT, audioChunkCount: 2 },
+      });
+    }, { onListenerError });
+    const progressFailure = new Error("progress consumer bug");
+    const audioFailure = new Error("audio consumer bug");
+
+    await expect(runRequest(pool, "r1", {
+      onProgress: () => {
+        throw progressFailure;
+      },
+      onAudioChunk: () => {
+        throw audioFailure;
+      },
+    })).resolves.toMatchObject({ response: { ok: true } });
+
+    expect(onListenerError.mock.calls).toEqual([
+      [progressFailure, { requestId: "r1", listener: "progress" }],
+      [audioFailure, { requestId: "r1", listener: "audioChunk" }],
+    ]);
+    servers[0].close();
+  });
+});
+
+describe("worker residency", () => {
+  // Warm commands succeed or fail on request; anything else is a generation.
+  function residencyPool(
+    poolOverrides: Parameters<typeof makePool>[1] = {},
+    { failWarm = false }: { failWarm?: boolean } = {},
+  ) {
+    return makePool((message, server) => {
+      server.sendJson(failWarm
+        ? { type: "result", requestId: message.requestId, ok: false, error: "No such model." }
+        : { type: "result", requestId: message.requestId, ok: true, result: {} });
+    }, poolOverrides);
+  }
+
+  function warm(pool: ReturnType<typeof makePool>["pool"], requestId: string, residencyKey?: string) {
+    return pool.run("qwen3", {
+      ...RUN_DEFAULTS,
+      requestId,
+      command: "warm",
+      payload: {},
+      spawnConfig: SPAWN_CONFIG,
+      ...(residencyKey ? { residencyKey } : {}),
+    });
+  }
+
+  it("times idle eviction by what the last successful request left loaded", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children } = residencyPool({ idleEvictMs });
+
+    await warm(pool, "w1", "model-a");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", "model-a");
+
+    // A request without a key says nothing about what is loaded.
+    await warm(pool, "w2");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", null);
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+  });
+
+  it("forgets what a worker holds once a request fails", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children } = residencyPool({ idleEvictMs }, { failWarm: true });
+
+    await expect(warm(pool, "w1", "model-a")).rejects.toThrow("No such model.");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", null);
+    children[0].exit();
+  });
+
+  // Warm-ups succeed; a generation fails as handled, or waits for its cancel
+  // and acknowledges it, as the bridge does.
+  function failingGenerationPool(poolOverrides: Parameters<typeof makePool>[1], { hold = false } = {}) {
+    return makePool((message, server) => {
+      if (message.command === "warm") {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: {} });
+      } else if (message.command === "cancel") {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: false, error: "Generation cancelled." });
+      } else if (!hold) {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: false, error: "Bad voice." });
+      }
+    }, poolOverrides);
+  }
+
+  function generate(pool: ReturnType<typeof makePool>["pool"], requestId: string, residencyKey: string) {
+    return pool.run("qwen3", { ...RUN_DEFAULTS, requestId, payload: {}, spawnConfig: SPAWN_CONFIG, residencyKey });
+  }
+
+  it("keeps what a worker holds through a handled failure aimed at the loaded model", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children } = failingGenerationPool({ idleEvictMs });
+    await warm(pool, "w1", "model-a");
+
+    await expect(generate(pool, "g1", "model-a")).rejects.toThrow("Bad voice.");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", "model-a");
+
+    // A failed request for another model may have unloaded the first.
+    await expect(generate(pool, "g2", "model-b")).rejects.toThrow("Bad voice.");
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", null);
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+  });
+
+  it("keeps what a worker holds through a cancel it drains", async () => {
+    const idleEvictMs = vi.fn(() => 60_000);
+    const { pool, children, servers } = failingGenerationPool({ idleEvictMs }, { hold: true });
+    await warm(pool, "w1", "model-a");
+    const run = generate(pool, "g1", "model-a");
+    await waitFor(() => servers[0].messages.length === 2);
+
+    expect(pool.cancel("g1")).toBe(true);
+    await expect(run).rejects.toThrow(/cancelled/i);
+    // The bridge's acknowledgement restarts the clock of the still-loaded model.
+    await waitFor(() => idleEvictMs.mock.calls.length === 3);
+    expect(idleEvictMs).toHaveBeenLastCalledWith("qwen3", "model-a");
+    expect(children[0].killed).toBe(false);
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+  });
+
+  it("re-times an idle worker without restarting its clock", async () => {
+    let evictAfterMs = 60_000;
+    const onWorkerExit = vi.fn();
+    const { pool } = residencyPool({ idleEvictMs: () => evictAfterMs, onWorkerExit });
+    const beforeWarm = Date.now();
+    await warm(pool, "w1", "model-a");
+    const afterWarm = Date.now();
+    const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
+    const now = vi.spyOn(Date, "now").mockReturnValue(afterWarm + 10_000);
+
+    // However often it is re-timed, a 60 s window still ends 60 s after the
+    // worker went idle.
+    pool.refreshIdleEviction("qwen3");
+    pool.refreshIdleEviction("qwen3");
+    const delayMs = setTimeoutSpy.mock.lastCall![1]!;
+    expect(delayMs).toBeLessThanOrEqual(50_000);
+    expect(delayMs).toBeGreaterThanOrEqual(50_000 - (afterWarm - beforeWarm));
+
+    // A window that has already run out evicts at once.
+    evictAfterMs = 5_000;
+    pool.refreshIdleEviction("qwen3");
+    expect(setTimeoutSpy.mock.lastCall![1]).toBe(0);
+    now.mockRestore();
+    setTimeoutSpy.mockRestore();
+    await waitFor(() => onWorkerExit.mock.calls.length === 1);
+  });
+
+  it("re-times an idle worker's eviction when asked", async () => {
+    let evictAfterMs = 60_000;
+    const onWorkerExit = vi.fn();
+    const { pool, children } = residencyPool({ idleEvictMs: () => evictAfterMs, onWorkerExit });
+
+    await warm(pool, "w1", "model-a");
+    evictAfterMs = 20;
+    pool.refreshIdleEviction("neutts");
+    pool.refreshIdleEviction("qwen3");
+
+    await waitFor(() => onWorkerExit.mock.calls.length === 1);
+    expect(onWorkerExit).toHaveBeenCalledWith("qwen3", { reason: "idle" });
+    expect(children[0].killed).toBe(true);
+  });
+
+  it("leaves a busy worker's clock alone until it is idle again", async () => {
+    const onWorkerExit = vi.fn();
+    let evictAfterMs = 60_000;
+    const { pool, children, servers } = makePool(undefined, { idleEvictMs: () => evictAfterMs, onWorkerExit });
+
+    const run = pool.run("qwen3", { ...RUN_DEFAULTS, requestId: "r1", payload: {}, spawnConfig: SPAWN_CONFIG });
+    await waitFor(() => servers[0]?.messages.length === 1);
+    evictAfterMs = 0;
+    pool.refreshIdleEviction("qwen3");
+    await delay(30);
+    expect(onWorkerExit).not.toHaveBeenCalled();
+
+    servers[0].sendJson({ type: "result", requestId: "r1", ok: false, error: "Nope." });
+    await expect(run).rejects.toThrow("Nope.");
+    await waitFor(() => onWorkerExit.mock.calls.length === 1);
+    expect(children[0].killed).toBe(true);
+  });
+
+  it("reports why each connected worker went away, once", async () => {
+    const onWorkerExit = vi.fn();
+    const { pool, children } = residencyPool({ onWorkerExit });
+
+    await warm(pool, "w1");
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+    await shutdown;
+    expect(onWorkerExit.mock.calls).toEqual([["qwen3", { reason: "stopped" }]]);
+
+    await warm(pool, "w2");
+    children[1].exit(1);
+    await waitFor(() => onWorkerExit.mock.calls.length === 2);
+    expect(onWorkerExit).toHaveBeenLastCalledWith("qwen3", { reason: "failed" });
+  });
+
+  it("says nothing about a worker that never finished starting", async () => {
+    const onWorkerExit = vi.fn();
+    const { pool, children } = makePool(undefined, { onWorkerExit });
+    const spawned = pool.run("qwen3", { ...RUN_DEFAULTS, requestId: "r1", payload: {}, spawnConfig: SPAWN_CONFIG });
+    expect(pool.cancel("r1")).toBe(true);
+    children[0].exit(null as unknown as number);
+    await expect(spawned).rejects.toThrow(/cancelled/i);
+
+    expect(onWorkerExit).not.toHaveBeenCalled();
+  });
+
+  it("keeps tearing down when the exit observer throws", async () => {
+    const { pool, children } = residencyPool({
+      onWorkerExit: () => {
+        throw new Error("observer bug");
+      },
+    });
+    await warm(pool, "w1");
+    const shutdown = pool.shutdown("qwen3");
+    children[0].exit();
+
+    await expect(shutdown).resolves.toBe(true);
   });
 });

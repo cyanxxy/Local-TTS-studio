@@ -9,7 +9,7 @@ import { PassThrough, Readable } from "stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Audio8AssetCache, type Audio8AssetProgress } from "./audio8AssetCache";
 import type { Audio8Asset } from "./audio8Model";
-import type { UrlRequest } from "./qwen3ModelDownload";
+import type { UrlRequest } from "./nativeModels/hubHttps";
 
 const MODEL_REVISION = "818569c6b832118ad68d61bbd873abe250fcd68a";
 const VOICE_SPACE_REVISION = "6417ebaafc996620bebc3eb27cde0d5acb19f13b";

@@ -11,12 +11,14 @@ import {
   clearReaderLibraryForTests,
   getActiveReaderDocumentId,
   getCachedReaderAudio,
+  getCachedReaderAudioSignature,
   isReaderLibrarySupported,
   isReaderLibraryShutdownError,
   listReaderDocuments,
   openReaderLibrary,
   saveCachedReaderAudio,
   saveReaderDocument,
+  saveReaderProgress,
   setActiveReaderDocumentId,
 } from "./readerLibrary";
 
@@ -369,5 +371,41 @@ describe("isReaderLibraryShutdownError", () => {
     ]) {
       expect(isReaderLibraryShutdownError(cause), String(cause)).toBe(false);
     }
+  });
+
+  describe("reading progress", () => {
+    const progress = {
+      positionSec: 1, totalDurationSec: 2, textOffset: 3, chapterId: null, sectionId: null, percent: 0.1, updatedAt: 9,
+    };
+
+    it("sends only the progress record over the bridge", async () => {
+      const saveProgress = vi.fn(async () => undefined);
+      const bridge = installDesktopBridge({ saveProgress });
+      await saveReaderProgress("book", progress);
+      expect(saveProgress).toHaveBeenCalledWith("book", progress);
+      expect(bridge.saveDocument).not.toHaveBeenCalled();
+    });
+
+    it("saves the whole book through a bridge that predates the progress channel", async () => {
+      const bridge = installDesktopBridge();
+      const document = createReaderDocument({ id: "book", text: "Text" });
+      await saveReaderProgress("book", progress, document);
+      expect(bridge.saveDocument).toHaveBeenCalledWith(document);
+    });
+  });
+
+  describe("audio signatures", () => {
+    it("asks the bridge for the signature alone", async () => {
+      const getAudioSignature = vi.fn(async () => "sig");
+      const bridge = installDesktopBridge({ getAudioSignature });
+      expect(await getCachedReaderAudioSignature("book", "section")).toBe("sig");
+      expect(getAudioSignature).toHaveBeenCalledWith("book", "section");
+      expect(bridge.getAudio).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the audio itself through a bridge that predates the channel", async () => {
+      installDesktopBridge({ getAudio: vi.fn(async () => null) });
+      expect(await getCachedReaderAudioSignature("book", "section")).toBeNull();
+    });
   });
 });

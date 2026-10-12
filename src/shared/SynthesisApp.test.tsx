@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import WebApp from "../apps/web/WebApp";
@@ -6,7 +6,10 @@ import { SynthesisApp } from "./SynthesisApp";
 import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelLoader } from "../hooks/useModelLoader";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
-import type { ModelState } from "../types";
+import type { ModelState, ModelType } from "../types";
+import { getDefaultQwen3Profile, type Qwen3Profile } from "../../electron/qwen3Profiles";
+import { ENGINES, engineSignatureParts, type DesktopInlineEngineId } from "../models/registry";
+import type { PersistedEngineSettings } from "../lib/appState";
 import {
   buildAudioSignature,
   buildReaderSections,
@@ -66,13 +69,14 @@ const mock = vi.hoisted(() => {
     initialAppState: {
       model: "kokoro",
       text: "Initial script with enough text.",
-      voicesByModel: {
-        kokoro: "af_heart",
-        supertonic: "Female",
-      },
       quality: 5,
-      audio8Voice: "clara",
+      desktopModels: {
+        studio: null as DesktopInlineEngineId | null,
+        reader: null as DesktopInlineEngineId | null,
+      },
     },
+    // Filled from the real descriptor defaults by resetMockState.
+    initialEngineSettings: {} as PersistedEngineSettings,
     initialCreatorState: {
       preset: "youtube-shorts",
       speed: 1,
@@ -85,12 +89,14 @@ const mock = vi.hoisted(() => {
       exportBitrateKbps: 320,
       masteringEnabled: true,
     },
+    readerError: null as Error | null,
     modelLoader: {
-      kokoroState: readyState,
-      supertonicState: readyState,
-      kokoroWorker: { current: null },
-      supertonicWorker: { current: null },
-      kokoroVoices: ["af_heart", "af_bella"],
+      states: { kokoro: readyState, supertonic: readyState } as Partial<Record<ModelType, ModelState>>,
+      getWorker: vi.fn(() => null),
+      voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] as string[] } as Partial<Record<ModelType, string[]>>,
+      getWorkerLease: vi.fn(() => null),
+      acquireWorker: vi.fn(),
+      hardRestartModel: vi.fn(),
       loadModel: vi.fn(),
       reloadModel: vi.fn(),
     },
@@ -111,12 +117,15 @@ const mock = vi.hoisted(() => {
       skip: vi.fn(),
       jumpToSegment: vi.fn(),
       setPlaybackRate: vi.fn(),
-      download: vi.fn(async () => {}),
+      download: vi.fn(async () => null),
       downloadCaptions: vi.fn(),
       replaceSegment: vi.fn(),
       getAudioChunkCount: vi.fn(() => 0),
+      getSourceSampleRate: vi.fn(() => null),
+      getContentEpoch: vi.fn(() => 0),
       truncateAudioChunks: vi.fn(),
       getAudioCacheSnapshot: vi.fn((): CachedReaderAudio["chunks"] => []),
+      getPlaybackSnapshot: vi.fn(() => ({ playbackRate: 1, totalDuration: 4, synthesisComplete: false })),
       restoreAudioCache: vi.fn(),
       beginStream: vi.fn(),
       endStream: vi.fn(),
@@ -144,7 +153,11 @@ const mock = vi.hoisted(() => {
       pauseCommaSec: 0.1,
       pauseSentenceSec: 0.2,
       pauseParagraphSec: 0.3,
-      pronunciationLexicon: "",
+      dictionaries: [] as never[],
+      normalizeSpeech: false,
+      cleanupOnSpeak: false,
+      speechSettings: { dictionaries: [] as never[], normalize: false, cleanup: false },
+      captionStyle: "readable",
       generationSettings: {
         speed: 1,
         quality: 5,
@@ -166,7 +179,7 @@ const mock = vi.hoisted(() => {
       onPauseCommaChange: vi.fn(),
       onPauseSentenceChange: vi.fn(),
       onPauseParagraphChange: vi.fn(),
-      onPronunciationLexiconChange: vi.fn(),
+      onDictionariesChange: vi.fn(),
       onExportFormatChange: vi.fn(),
       onExportSampleRateChange: vi.fn(),
       onExportBitrateChange: vi.fn(),
@@ -223,6 +236,7 @@ const mock = vi.hoisted(() => {
     },
     persistAppState: vi.fn(),
     persistCreatorState: vi.fn(),
+    persistEngineSettings: vi.fn(),
     getWebGPUStatus: vi.fn(),
     readerLibrary: {
       documents: [] as ReaderDocumentRecord[],
@@ -237,6 +251,8 @@ const mock = vi.hoisted(() => {
       finalizeActiveTextEdit: vi.fn(),
       updateActiveMetadata: vi.fn(),
       updateProgress: vi.fn(),
+      updateActiveListening: vi.fn(),
+      flushProgress: vi.fn(),
       addBookmark: vi.fn(),
       removeBookmark: vi.fn(),
       addNote: vi.fn(),
@@ -244,10 +260,16 @@ const mock = vi.hoisted(() => {
       removeNote: vi.fn(),
       saveAudio: vi.fn(async () => undefined),
       loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+      hasAudio: vi.fn(async () => false),
       clearAudio: vi.fn(async () => undefined),
     },
   };
 });
+
+// The OS media session is covered by its own tests; jsdom cannot play media.
+vi.mock("../hooks/useReaderMediaSession", () => ({
+  useReaderMediaSession: vi.fn(),
+}));
 
 vi.mock("../hooks/useAppRouting", () => ({
   useAppRouting: () => mock.routing,
@@ -302,15 +324,24 @@ vi.mock("../hooks/useModelCacheControls", () => ({
 vi.mock("../lib/appState", () => ({
   getInitialAppState: () => mock.initialAppState,
   getInitialCreatorState: () => mock.initialCreatorState,
+  getInitialEngineSettings: () => mock.initialEngineSettings,
   persistAppState: mock.persistAppState,
   persistCreatorState: mock.persistCreatorState,
+  persistEngineSettings: mock.persistEngineSettings,
 }));
 
 vi.mock("../lib/browserSupport", () => ({
   getLocalBrowserSupport: () => mock.browserSupport,
-  getDefaultSupportedModel: () => mock.browserSupport.supportedModels[0],
+  getDefaultSupportedModel: (support: { supportedModels: readonly string[] }) => support.supportedModels[0],
   getUnsupportedModelMessage: (model: string) => mock.browserSupport.unsupportedModelMessages[model] ?? null,
-  isModelSupportedInBrowser: (model: string) => mock.browserSupport.supportedModels.includes(model),
+  isModelSupportedInBrowser: (model: string, support: { supportedModels: readonly string[] }) => support.supportedModels.includes(model),
+  withoutUnavailableModels: (
+    support: { supportedModels: readonly string[] },
+    unavailable: Record<string, string>,
+  ) => ({ ...support, supportedModels: support.supportedModels.filter((model) => !(model in unavailable)) }),
+  getWebGPUUnavailableModelMessages: (available: boolean | null) => (
+    available === false ? { chatterbox: "Chatterbox Turbo needs WebGPU, which this device does not provide." } : {}
+  ),
 }));
 
 vi.mock("../lib/webgpu", () => ({
@@ -370,7 +401,7 @@ vi.mock("../components/ControlsContext", () => ({
     onStop: () => void;
     onQualityChange: (value: number) => void;
     quality: number;
-    activeModel: string;
+    qualityRange: { min: number; max: number } | null;
     canGenerate: boolean;
     isGenerating: boolean;
     modelReady: boolean;
@@ -385,7 +416,9 @@ vi.mock("../components/ControlsContext", () => ({
       <button type="button" onClick={() => value.onQualityChange(value.quality + 1)}>quality-up</button>
       {/* Every field Studio hands to Controls is rendered so a test can tell
           which runtime each one came from. */}
-      <div data-testid="controls-active-model">{value.activeModel}</div>
+      <div data-testid="controls-quality-range">
+        {value.qualityRange ? `${value.qualityRange.min}-${value.qualityRange.max}` : "none"}
+      </div>
       <div data-testid="controls-can-generate">{String(value.canGenerate)}</div>
       <div data-testid="controls-is-generating">{String(value.isGenerating)}</div>
       <div data-testid="controls-model-ready">{String(value.modelReady)}</div>
@@ -418,14 +451,17 @@ vi.mock("../components/SettingsPanel", () => ({
 }));
 
 vi.mock("../components/CreatorToolsPanel", () => ({
-  CreatorToolsPanel: ({ onDownloadAudio, onDownloadCaptions, speedDisabled }: {
-    onDownloadAudio: () => void;
+  CreatorToolsPanel: ({ audioExport, onDownloadCaptions, engineSupport }: {
+    audioExport: { start: () => void };
     onDownloadCaptions: (format: "srt" | "vtt" | "json") => void;
-    speedDisabled?: boolean;
+    engineSupport?: { engineLabel: string; speed: boolean; pauses: boolean; normalization: boolean; speechLanguage?: string };
   }) => (
     <div>
-      <div data-testid="creator-speed-disabled">{String(speedDisabled ?? false)}</div>
-      <button type="button" onClick={onDownloadAudio}>creator-audio</button>
+      <div data-testid="creator-engine">{engineSupport?.engineLabel ?? "none"}</div>
+      <div data-testid="creator-speed-disabled">{String(engineSupport ? !engineSupport.speed : false)}</div>
+      <div data-testid="creator-pauses-disabled">{String(engineSupport ? !engineSupport.pauses : false)}</div>
+      <div data-testid="creator-language">{engineSupport?.speechLanguage ?? "default"}</div>
+      <button type="button" onClick={audioExport.start}>creator-audio</button>
       <button type="button" onClick={() => onDownloadCaptions("vtt")}>creator-vtt</button>
     </div>
   ),
@@ -453,8 +489,8 @@ vi.mock("../components/AudioPlayer", () => ({
   ),
 }));
 
-vi.mock("../components/AdvancedReaderPage", () => ({
-  AdvancedReaderPage: ({
+vi.mock("../components/AdvancedReaderPage", () => {
+  const ReaderView = ({
     text,
     onTextChange,
     onImportDocument,
@@ -464,6 +500,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onModelChange,
     onVoiceChange,
     onQualityChange,
+    onPlaybackRateChange,
     onGenerate,
     onRetryLoad,
     onStop,
@@ -478,6 +515,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onNavigateToOffset,
     onEditStart,
     onEditEnd,
+    onAutoAdvanceHoldChange,
     canGenerate,
     isGenerating,
     modelReady,
@@ -495,6 +533,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onModelChange: (model: "kokoro" | "supertonic") => void;
     onVoiceChange: (voice: string) => void;
     onQualityChange: (value: number) => void;
+    onPlaybackRateChange: (rate: number) => void;
     onGenerate: () => void;
     onRetryLoad: () => void;
     onStop: () => void;
@@ -509,6 +548,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
     onNavigateToOffset?: (offset: number, positionSec?: number) => void;
     onEditStart?: () => void;
     onEditEnd?: () => void;
+    onAutoAdvanceHoldChange?: (held: boolean) => void;
     canGenerate?: boolean;
     isGenerating?: boolean;
     modelReady?: boolean;
@@ -544,6 +584,9 @@ vi.mock("../components/AdvancedReaderPage", () => ({
       )}
       <button type="button" onClick={() => onTextChange("Reader text with enough length.")}>reader-text</button>
       <button type="button" onClick={onEditStart}>reader-edit-start</button>
+      {onAutoAdvanceHoldChange && (
+        <button type="button" onClick={() => onAutoAdvanceHoldChange(true)}>reader-hold-continuation</button>
+      )}
       <button
         type="button"
         onClick={() => {
@@ -556,6 +599,7 @@ vi.mock("../components/AdvancedReaderPage", () => ({
       <button type="button" onClick={() => onModelChange("supertonic")}>reader-model</button>
       <button type="button" onClick={() => onVoiceChange("af_bella")}>reader-voice</button>
       <button type="button" onClick={() => onQualityChange(6)}>reader-quality</button>
+      <button type="button" onClick={() => onPlaybackRateChange(1.5)}>reader-rate</button>
       <button type="button" onClick={onGenerate}>reader-generate</button>
       <button type="button" onClick={onRetryLoad}>reader-retry</button>
       <button type="button" onClick={onStop}>reader-stop</button>
@@ -574,8 +618,14 @@ vi.mock("../components/AdvancedReaderPage", () => ({
         </button>
       ))}
     </div>
-  ),
-}));
+  );
+  return {
+    AdvancedReaderPage: (props: Parameters<typeof ReaderView>[0]) => {
+      if (mock.readerError) throw mock.readerError;
+      return ReaderView(props);
+    },
+  };
+});
 
 vi.mock("../components/LocalRuntimePage", () => ({
   LocalRuntimePage: ({ model, name }: { model: string; name: string }) => (
@@ -584,6 +634,10 @@ vi.mock("../components/LocalRuntimePage", () => ({
       <input data-testid={`local-draft-${model}`} defaultValue={`${model} draft`} />
     </div>
   ),
+}));
+
+vi.mock("../components/voices/VoicesRoute", () => ({
+  VoicesRoute: () => <div data-testid="voices-route">Voice Library</div>,
 }));
 
 function resetMockState() {
@@ -607,18 +661,28 @@ function resetMockState() {
   mock.initialAppState = {
     model: "kokoro",
     text: "Initial script with enough text.",
-    voicesByModel: {
-      kokoro: "af_heart",
-      supertonic: "Female",
-    },
     quality: 5,
-    audio8Voice: "clara",
+    desktopModels: { studio: null, reader: null },
   };
+  mock.initialEngineSettings = {
+    kokoro: ENGINES.kokoro.defaultSettings,
+    supertonic: { ...ENGINES.supertonic.defaultSettings, voice: "Female" },
+    kitten: ENGINES.kitten.defaultSettings,
+    paradee: ENGINES.paradee.defaultSettings,
+    piper: ENGINES.piper.defaultSettings,
+    chatterbox: ENGINES.chatterbox.defaultSettings,
+    audio8: ENGINES.audio8.defaultSettings,
+    supertonic3: ENGINES.supertonic3.defaultSettings,
+    neutts: ENGINES.neutts.defaultSettings,
+    qwen3: ENGINES.qwen3.defaultSettings,
+  };
+  mock.readerError = null;
   mock.modelLoader = {
     ...mock.modelLoader,
-    kokoroState: mock.readyState,
-    supertonicState: mock.readyState,
-    kokoroVoices: ["af_heart", "af_bella"],
+    states: { kokoro: mock.readyState, supertonic: mock.readyState },
+    voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] },
+    getWorkerLease: vi.fn(() => null),
+    hardRestartModel: vi.fn(),
     loadModel: vi.fn(),
     reloadModel: vi.fn(),
   };
@@ -639,11 +703,19 @@ function resetMockState() {
     seek: vi.fn(),
     skip: vi.fn(),
     jumpToSegment: vi.fn(),
-    download: vi.fn(async () => {}),
+    download: vi.fn(async () => null),
     downloadCaptions: vi.fn(),
     getAudioChunkCount: vi.fn(() => 0),
+    getSourceSampleRate: vi.fn(() => null),
+    getContentEpoch: vi.fn(() => 0),
     truncateAudioChunks: vi.fn(),
     getAudioCacheSnapshot: vi.fn(() => []),
+    // Read from the latest mocked player state, as the real one reads its refs.
+    getPlaybackSnapshot: vi.fn(() => ({
+      playbackRate: mock.player.playbackRate,
+      totalDuration: mock.player.totalDuration,
+      synthesisComplete: mock.player.isSynthesisComplete,
+    })),
     restoreAudioCache: vi.fn(),
     beginStream: vi.fn(),
     endStream: vi.fn(),
@@ -655,6 +727,15 @@ function resetMockState() {
     isGenerating: false,
     error: null,
     generationProgress: 0,
+  };
+  mock.creator = {
+    ...mock.creator,
+    generationSettings: {
+      speed: 1,
+      quality: 5,
+      pauseOverridesSec: { none: 0, comma: 0.1, sentence: 0.2, paragraph: 0.3 },
+      pronunciationRules: [],
+    },
   };
   mock.generation = {
     ...mock.generation,
@@ -713,6 +794,8 @@ function resetMockState() {
     finalizeActiveTextEdit: vi.fn(),
     updateActiveMetadata: vi.fn(),
     updateProgress: vi.fn(),
+    updateActiveListening: vi.fn(),
+    flushProgress: vi.fn(),
     addBookmark: vi.fn(),
     removeBookmark: vi.fn(),
     addNote: vi.fn(),
@@ -720,6 +803,7 @@ function resetMockState() {
     removeNote: vi.fn(),
     saveAudio: vi.fn(async () => undefined),
     loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+    hasAudio: vi.fn(async () => false),
     clearAudio: vi.fn(async () => undefined),
   };
   mock.localTts.probe.mockResolvedValue({
@@ -760,12 +844,41 @@ function resetMockState() {
   mock.getWebGPUStatus.mockResolvedValue({ available: false, message: "No GPU available" });
 }
 
+/** The signature the Reader stores for Kokoro audio made with the mocked Creator settings. */
+function kokoroReaderSignature(text: string, voice = "af_heart"): string {
+  const parts = engineSignatureParts("kokoro", {
+    settings: { voice },
+    tuning: mock.creator.generationSettings,
+    quality: 5,
+  });
+  if (!parts) throw new Error("Kokoro always has a signature.");
+  return buildAudioSignature({ text, model: "kokoro", ...parts });
+}
+
+/** The signature the Reader stores for Supertonic 2 audio made with the mocked Creator settings. */
+function supertonicReaderSignature(text: string, language: string): string {
+  const parts = engineSignatureParts("supertonic", {
+    settings: { voice: "Female", language },
+    tuning: mock.creator.generationSettings,
+    quality: 5,
+  });
+  if (!parts) throw new Error("Supertonic 2 always has a signature.");
+  return buildAudioSignature({ text, model: "supertonic", ...parts });
+}
+
 function showOptionalDesktopModels() {
   localStorage.setItem("open-tts-preferences-v1", JSON.stringify({
     showNeuTTS: true,
     showQwen3TTS: true,
   }));
 }
+
+/** What every export request carries: cancel, progress and a descriptive file name. */
+const exportRequest = {
+  signal: expect.any(AbortSignal),
+  fileName: expect.stringMatching(/^.+-\d{8}-\d{6}$/),
+  onProgress: expect.any(Function),
+};
 
 describe("SynthesisApp", () => {
   beforeEach(() => {
@@ -802,8 +915,10 @@ describe("SynthesisApp", () => {
     expect(mock.generation.cancelActiveGeneration).toHaveBeenCalledWith();
     expect(mock.generation.resetGeneratedAudio).toHaveBeenCalled();
 
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("none");
     fireEvent.click(screen.getByRole("button", { name: "switch-supertonic" }));
     expect(mock.modelLoader.loadModel).toHaveBeenCalledWith("supertonic");
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("1-20");
 
     fireEvent.click(screen.getByRole("button", { name: "voice-bella" }));
     fireEvent.click(screen.getByRole("button", { name: "quality-up" }));
@@ -819,8 +934,8 @@ describe("SynthesisApp", () => {
     expect(mock.generation.handleStop).toHaveBeenCalled();
     expect(mock.cache.clearCache).toHaveBeenCalled();
     expect(mock.cache.redownloadActiveModel).toHaveBeenCalled();
-    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions);
-    expect(mock.player.downloadCaptions).toHaveBeenCalledWith("vtt");
+    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions, exportRequest);
+    expect(mock.player.downloadCaptions).toHaveBeenCalledWith("vtt", "readable", undefined);
     expect(screen.getByTestId("audio-player")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "toggle-play" }));
@@ -863,7 +978,12 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "reader-text" }));
     expect(mock.readerLibrary.updateActiveText).toHaveBeenCalledWith(
       "Reader text with enough length.",
-      { preserveText: true, deferStructure: false },
+      {
+        preserveText: true,
+        deferStructure: false,
+        // The section is the whole document, so the hint spans all of it.
+        hint: { start: 0, previousEnd: readerDocument.text.length, nextEnd: "Reader text with enough length.".length },
+      },
     );
 
     mock.routing = {
@@ -874,6 +994,26 @@ describe("SynthesisApp", () => {
     };
     view.rerender(<WebApp />);
     expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("A new Studio-only script.");
+  });
+
+  it("switches Studio to Dialogue mode and back without losing the single-voice script", async () => {
+    render(<WebApp />);
+    expect(screen.getByRole("textbox", { name: "script" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Generation History/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dialogue" }));
+    const script = await screen.findByRole("textbox", { name: "Dialogue script" });
+    expect(screen.queryByRole("textbox", { name: "script" })).not.toBeInTheDocument();
+    fireEvent.change(script, { target: { value: "Anna: Hello there.\nBen: Hi Anna." } });
+    expect(screen.getByLabelText("Voice for Anna")).toBeInTheDocument();
+    expect(screen.getByLabelText("Voice for Ben")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Single voice" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toBeInTheDocument();
+
+    // The dialogue session stays alive while hidden.
+    fireEvent.click(screen.getByRole("button", { name: "Dialogue" }));
+    expect(await screen.findByRole("textbox", { name: "Dialogue script" })).toHaveValue("Anna: Hello there.\nBen: Hi Anna.");
   });
 
   it("supports Audio8 local generation in both Studio and Reader", async () => {
@@ -887,7 +1027,10 @@ describe("SynthesisApp", () => {
     expect(screen.getByRole("button", { name: "studio-desktop-audio8-selected" })).toBeInTheDocument();
     expect(screen.getByText(/Audio8 ONNX INT4 synthesis runs locally/i)).toBeInTheDocument();
     expect(screen.getByText(/Text and generated audio stay local/i)).toBeInTheDocument();
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Audio8 TTS");
     expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("true");
+    expect(screen.getByTestId("creator-pauses-disabled")).toHaveTextContent("false");
+    expect(screen.getByTestId("creator-language")).toHaveTextContent("default");
     fireEvent.click(screen.getByRole("button", { name: "generate" }));
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(1);
 
@@ -905,8 +1048,142 @@ describe("SynthesisApp", () => {
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps Studio's unsaved audio across a visit to the Reader and restores it on return", async () => {
+    const studioChunks = [{
+      audio: new Float32Array([0.3, 0.4]).buffer,
+      samplingRate: 24_000,
+      text: "Studio line.",
+      index: 0,
+      total: 1,
+    }];
+    mock.player.getAudioCacheSnapshot.mockReturnValue(studioChunks);
+    mock.playerClock.set(2.5);
+    mock.player.getPlaybackSnapshot.mockReturnValue({ playbackRate: 1.5, totalDuration: 4, synthesisComplete: true });
+    const book = createReaderDocument({ id: "keeper-book", text: "A book to read after Studio." });
+    mock.readerLibrary.documents = [book];
+    mock.readerLibrary.activeDocument = book;
+    const view = render(<WebApp />);
+
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<WebApp />);
+    await screen.findByTestId("reader-text-value");
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    // The Reader emptied the player; what it holds now is not Studio's.
+    mock.player.getAudioCacheSnapshot.mockReturnValue([]);
+    mock.player.restoreAudioCache.mockClear();
+
+    mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+    view.rerender(<WebApp />);
+    await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(studioChunks, {
+      currentTime: 2.5,
+      playbackRate: 1.5,
+      synthesisComplete: true,
+    }));
+  });
+
+  describe("per-book listening profile", () => {
+    const readerRoute = () => {
+      mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    };
+    const desktopBridge = () => Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+
+    it("remembers a speed change alone, and keeps a Reader voice and speed out of Studio", async () => {
+      readerRoute();
+      const book = createReaderDocument({ id: "scoped-book", text: "A book to listen to. ".repeat(40) });
+      mock.readerLibrary.documents = [book];
+      mock.readerLibrary.activeDocument = book;
+      const view = render(<WebApp />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "reader-rate" }));
+      expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1.5);
+      // Not pinned to the engine and voice that happen to be global.
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenCalledWith({ playbackRate: 1.5 });
+
+      fireEvent.click(screen.getByRole("button", { name: "reader-voice" }));
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenLastCalledWith(
+        expect.objectContaining({ engine: "kokoro", voice: "af_bella" }),
+      );
+      mock.persistEngineSettings.mockClear();
+      mock.player.setPlaybackRate.mockClear();
+
+      // Back in Studio, its own voice and speed return.
+      mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+      view.rerender(<WebApp />);
+      await waitFor(() => expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1));
+      await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ kokoro: expect.objectContaining({ voice: mock.initialEngineSettings.kokoro.voice }) }),
+      ));
+    });
+
+    it("remembers the engine the listener picks for the open book", async () => {
+      desktopBridge();
+      readerRoute();
+      const document = createReaderDocument({ id: "profile-book", text: "A book to listen to. ".repeat(40) });
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-audio8" }));
+
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenCalledWith(
+        expect.objectContaining({ engine: "audio8", voice: expect.any(String), playbackRate: expect.any(Number) }),
+      );
+    });
+
+    it("applies a book's remembered engine and speed when it opens", async () => {
+      desktopBridge();
+      readerRoute();
+      const base = createReaderDocument({ id: "profile-book", text: "A book to listen to. ".repeat(40) });
+      const document: ReaderDocumentRecord = {
+        ...base,
+        listening: { engine: "audio8", voice: "Clara", playbackRate: 1.5, updatedAt: 5 },
+      };
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+      expect(await screen.findByRole("button", { name: "reader-desktop-audio8-selected" })).toBeInTheDocument();
+      expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1.5);
+      await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+        expect.objectContaining({ desktopModels: expect.objectContaining({ reader: "audio8" }) }),
+      ));
+      await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    });
+  });
+
+  it("keeps the browser model loaded across page switches and stops only the engine left behind", async () => {
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
+    // Studio runs Audio8, but the Reader still selects the browser model.
+    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ active: false, retain: true }));
+    mock.audio8Runtime.cancelActiveGeneration.mockClear();
+
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    await screen.findByTestId("reader-text-value");
+    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ active: true, retain: true }));
+    expect(mock.audio8Runtime.cancelActiveGeneration).toHaveBeenCalled();
+
+    mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    mock.audio8Runtime.cancelActiveGeneration.mockClear();
+    mock.routing = { ...mock.routing, activePage: "neutts", isReaderPage: false, isStudioPage: false };
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    // Leaving Studio stops Studio's engine; nothing ever restarted the browser model.
+    expect(mock.audio8Runtime.cancelActiveGeneration).toHaveBeenCalledTimes(1);
+    expect(mock.modelLoader.hardRestartModel).not.toHaveBeenCalled();
+  });
+
   it("restores and persists the selected Audio8 voice", async () => {
-    mock.initialAppState.audio8Voice = "iris";
+    mock.initialEngineSettings = { ...mock.initialEngineSettings, audio8: { voice: "iris", seed: null, temperature: null } };
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
       configurable: true,
@@ -915,8 +1192,123 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
 
     expect(screen.getByRole("button", { name: /IrisEnglish/i })).toHaveAttribute("aria-pressed", "true");
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ audio8: { voice: "iris", seed: null, temperature: null } }),
+    ));
+  });
+
+  it("reopens each surface on its last desktop model and persists the selection", async () => {
+    mock.initialAppState = {
+      ...mock.initialAppState,
+      desktopModels: { studio: "audio8", reader: "supertonic3" },
+    };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    const view = render(
+      <SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />,
+    );
+
+    expect(screen.getByRole("button", { name: "studio-desktop-audio8-selected" })).toBeInTheDocument();
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Audio8 TTS");
     await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
-      expect.objectContaining({ audio8Voice: "iris" }),
+      expect.objectContaining({ desktopModels: { studio: "audio8", reader: "supertonic3" } }),
+    ));
+
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(
+      <SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />,
+    );
+    expect(await screen.findByRole("button", { name: "reader-desktop-supertonic3-selected" })).toBeInTheDocument();
+
+    mock.persistAppState.mockClear();
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-audio8" }));
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+      expect.objectContaining({ desktopModels: { studio: "audio8", reader: "audio8" } }),
+    ));
+  });
+
+  it("runs the browser model while a surface's saved desktop model is unavailable, keeping the choice", async () => {
+    mock.initialAppState = {
+      ...mock.initialAppState,
+      desktopModels: { studio: "supertonic3", reader: "qwen3" },
+    };
+    const view = render(<WebApp />);
+
+    expect(screen.queryByRole("button", { name: /studio-desktop-/ })).not.toBeInTheDocument();
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Kokoro");
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<WebApp />);
+    expect(await screen.findByTestId("reader-text-value")).toBeInTheDocument();
+    expect(screen.queryByTestId("reader-desktop-voice")).not.toBeInTheDocument();
+    expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ active: true }));
+    // A launch where the engine is available again reopens on it.
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+      expect.objectContaining({ desktopModels: { studio: "supertonic3", reader: "qwen3" } }),
+    ));
+  });
+
+  it("restores and persists the Supertonic 3 voice and language", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "supertonic3", reader: null } };
+    mock.initialEngineSettings = {
+      ...mock.initialEngineSettings,
+      supertonic3: { voice: "F2", language: "ja", seed: null },
+    };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />);
+
+    expect(screen.getByLabelText("Supertonic 3 voice")).toHaveValue("F2");
+    expect(screen.getByLabelText("Supertonic 3 language")).toHaveValue("ja");
+    fireEvent.change(screen.getByLabelText("Supertonic 3 language"), { target: { value: "de" } });
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ supertonic3: { voice: "F2", language: "de", seed: null } }),
+    ));
+    // Qwen3's settings are persisted by its own provider, never by Studio.
+    expect(mock.persistEngineSettings.mock.calls.every(([settings]) => !("qwen3" in settings))).toBe(true);
+  });
+
+  it("saves a Supertonic 3 seed with its other settings", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "supertonic3", reader: null } };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />);
+
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "314" } });
+
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ supertonic3: expect.objectContaining({ seed: 314 }) }),
+    ));
+  });
+
+  it("saves Audio8's temperature and seed with its voice", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "audio8", reader: null } };
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.change(screen.getByLabelText(/Variation/), { target: { value: "0.4" } });
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "8" } });
+
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ audio8: { voice: "clara", seed: 8, temperature: 0.4 } }),
     ));
   });
 
@@ -974,7 +1366,8 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("controls-loading-progress")).toHaveTextContent("100");
     expect(screen.getByTestId("controls-generation-progress")).toHaveTextContent("7");
     expect(screen.getByTestId("controls-is-generating")).toHaveTextContent("false");
-    expect(screen.getByTestId("controls-active-model")).toHaveTextContent("kokoro");
+    // Kokoro has no quality range, so Studio shows no quality slider.
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("none");
     expect(screen.getByTestId("player-processing-time")).toHaveTextContent("11");
     expect(screen.getByText("browser generation failed")).toBeInTheDocument();
 
@@ -986,8 +1379,8 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("controls-generation-progress")).toHaveTextContent("42");
     expect(screen.getByTestId("controls-is-generating")).toHaveTextContent("true");
     expect(screen.getByTestId("controls-can-generate")).toHaveTextContent("false");
-    // Audio8 has no quality control, so it presents as Kokoro to Controls.
-    expect(screen.getByTestId("controls-active-model")).toHaveTextContent("kokoro");
+    // Audio8 ignores quality, so the slider stays hidden.
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("none");
     expect(screen.getByText("audio8 generation failed")).toBeInTheDocument();
     expect(screen.queryByText("browser generation failed")).not.toBeInTheDocument();
 
@@ -1083,6 +1476,84 @@ describe("SynthesisApp", () => {
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
   });
 
+  it("shows the Voice Library only on the desktop build's voices page", async () => {
+    mock.routing = { ...mock.routing, activePage: "voices", isReaderPage: false, isStudioPage: false };
+    const desktop = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    expect(await screen.findByTestId("voices-route")).toBeInTheDocument();
+    desktop.unmount();
+
+    render(<SynthesisApp enableDesktopRuntimes={false} />);
+    expect(screen.queryByTestId("voices-route")).not.toBeInTheDocument();
+  });
+
+  it("shows Chatterbox's own settings in Studio and saves a change to them", async () => {
+    mock.browserSupport = { ...mock.browserSupport, supportedModels: ["kokoro", "chatterbox"] };
+    mock.initialAppState = { ...mock.initialAppState, model: "chatterbox" };
+    mock.getWebGPUStatus.mockResolvedValue({ available: true, reason: null, message: null });
+    mock.modelLoader = {
+      ...mock.modelLoader,
+      states: { kokoro: mock.readyState, supertonic: mock.readyState, chatterbox: mock.readyState },
+      voices: { kokoro: [], supertonic: [], chatterbox: ["chatterbox-default"] },
+    };
+    render(<WebApp />);
+
+    const temperature = await screen.findByLabelText(/Variation/);
+    expect(temperature).toHaveValue("0.8");
+    fireEvent.change(temperature, { target: { value: "1.25" } });
+    expect(screen.getByLabelText(/Variation/)).toHaveValue("1.25");
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "12" } });
+    expect(screen.getByLabelText("Seed")).toHaveValue(12);
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+
+    // A tag lands at the end of the script, after a space.
+    const script = (screen.getByRole("textbox", { name: "script" }) as HTMLTextAreaElement).value;
+    fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue(`${script} [laugh]`);
+    fireEvent.click(screen.getByRole("button", { name: "Add [sigh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue(`${script} [laugh] [sigh]`);
+
+    // Into an empty script, or one that already ends in a space, no extra space is added.
+    fireEvent.change(screen.getByRole("textbox", { name: "script" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add [sigh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("[sigh]");
+    fireEvent.change(screen.getByRole("textbox", { name: "script" }), { target: { value: "Hello " } });
+    fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("Hello [laugh]");
+  });
+
+  it("runs the default model when the saved Chatterbox cannot run without WebGPU, and keeps the saved choice", async () => {
+    mock.browserSupport = { ...mock.browserSupport, supportedModels: ["kokoro", "chatterbox"] };
+    mock.initialAppState = { ...mock.initialAppState, model: "chatterbox" };
+    mock.getWebGPUStatus.mockResolvedValue({ available: false, reason: null, message: "No GPU available" });
+    mock.modelLoader = {
+      ...mock.modelLoader,
+      states: { kokoro: mock.readyState, supertonic: mock.readyState, chatterbox: mock.readyState },
+    };
+    render(<WebApp />);
+
+    await waitFor(() => expect(screen.getByText("No GPU available")).toBeInTheDocument());
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalled());
+
+    // Kokoro runs in its place, so Chatterbox's own controls are absent...
+    expect(screen.queryByLabelText(/Variation/)).not.toBeInTheDocument();
+    expect(mock.modelLoader.loadModel).not.toHaveBeenCalledWith("chatterbox");
+    // ...but the saved choice survives for a later launch.
+    expect(mock.persistAppState.mock.calls.every(([state]) => state.model === "chatterbox")).toBe(true);
+  });
+
+  it("names every browser model the build ships in the footer", () => {
+    mock.browserSupport = {
+      ...mock.browserSupport,
+      supportedModels: ["kokoro", "kitten", "paradee", "piper"],
+    };
+    render(<WebApp />);
+
+    const footer = screen.getByRole("contentinfo");
+    for (const label of ["Kokoro", "Supertonic", "Kitten TTS", "Paradee", "Piper"]) {
+      expect(within(footer).getByText(label)).toBeInTheDocument();
+    }
+  });
+
   it("hides the desktop runtimes when the web build runs inside Electron", async () => {
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
@@ -1171,7 +1642,16 @@ describe("SynthesisApp", () => {
     const normalizedDraft = "CHAPTER REPLACED\n\n\nDraft ending.   ";
     expect(mock.readerLibrary.updateActiveText).toHaveBeenCalledWith(
       `${before}${normalizedDraft}${after}`,
-      { preserveText: true, deferStructure: true },
+      {
+        preserveText: true,
+        deferStructure: true,
+        // Only the span the draft replaced needs scanning for annotations.
+        hint: {
+          start: before.length,
+          previousEnd: text.length - after.length,
+          nextEnd: before.length + normalizedDraft.length,
+        },
+      },
     );
     expect(mock.readerLibrary.clearAudio).toHaveBeenCalledWith(document.id, originalSectionRecord.id);
     expect(mock.readerLibrary.finalizeActiveTextEdit).toHaveBeenCalledWith(document.id);
@@ -1214,10 +1694,11 @@ describe("SynthesisApp", () => {
     expect(createSupertonic3Worker).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-supertonic3" }));
+    expect(screen.getByTestId("controls-quality-range")).toHaveTextContent("1-20");
 
     await waitFor(() => expect(createSupertonic3Worker).toHaveBeenCalledTimes(1));
     await waitFor(() => expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1])
-      .toEqual(expect.objectContaining({ enabled: false })));
+      .toEqual(expect.objectContaining({ active: false })));
     expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
     unmount();
     expect(worker.terminate).toHaveBeenCalledTimes(1);
@@ -1257,6 +1738,30 @@ describe("SynthesisApp", () => {
 
     expect(screen.getByRole("button", { name: "reader-desktop-supertonic3-selected" })).toBeInTheDocument();
     await waitFor(() => expect(worker.postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false }));
+  });
+
+  it("attaches its keyboard shortcut listener once however often it re-renders", () => {
+    const addListener = vi.spyOn(document, "addEventListener");
+    const keydownSubscriptions = () => addListener.mock.calls.filter(([type]) => type === "keydown").length;
+    const { rerender } = render(<WebApp />);
+    const subscribed = keydownSubscriptions();
+    expect(subscribed).toBeGreaterThan(0);
+
+    // A new player state or a different runtime state each used to replace
+    // the document listener.
+    mock.player = { ...mock.player, totalDuration: 9, isPlaying: true };
+    rerender(<WebApp />);
+    mock.generation.isGenerationBusy = true;
+    mock.player = { ...mock.player, totalDuration: 12 };
+    rerender(<WebApp />);
+
+    expect(keydownSubscriptions()).toBe(subscribed);
+    // The one listener still acts on the latest state.
+    fireEvent.keyDown(document, { key: ".", ctrlKey: true });
+    expect(mock.generation.handleStop).toHaveBeenCalledTimes(1);
+    fireEvent.keyDown(document, { key: " ", code: "Space" });
+    expect(mock.player.togglePlay).toHaveBeenCalledTimes(1);
+    addListener.mockRestore();
   });
 
   it("supports macOS and Windows keyboard shortcuts without hijacking text entry", async () => {
@@ -1317,6 +1822,23 @@ describe("SynthesisApp", () => {
     });
   });
 
+  it("contains a Reader failure to the Reader and retries it on request", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    mock.readerError = new Error("The Reader chunk could not be loaded.");
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    render(<WebApp />);
+
+    expect(await screen.findByText("The Reader could not be shown")).toBeInTheDocument();
+    expect(screen.getByText("The Reader chunk could not be loaded.")).toBeInTheDocument();
+    // The header and page tabs, and with them the rest of the app, survive.
+    expect(screen.getByRole("heading", { name: "Open TTS" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open app settings" })).toBeInTheDocument();
+
+    mock.readerError = null;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    expect(await screen.findByTestId("reader-text-value")).toBeInTheDocument();
+  });
+
   it("orchestrates reader controls and segment jumps", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
@@ -1347,7 +1869,7 @@ describe("SynthesisApp", () => {
     expect(mock.modelLoader.loadModel).toHaveBeenCalledWith("supertonic");
     expect(mock.cache.retryActiveModelLoad).toHaveBeenCalled();
     expect(mock.generation.handleStop).toHaveBeenCalled();
-    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions);
+    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions, exportRequest);
     expect(mock.generation.handleRetakeSegment).toHaveBeenCalledWith("seg-1");
     expect(mock.player.jumpToSegment).toHaveBeenCalledWith("seg-1");
     expect(mock.player.jumpToSegment).not.toHaveBeenCalledWith("");
@@ -1516,6 +2038,89 @@ describe("SynthesisApp", () => {
     }));
   });
 
+  describe("automatic continuation at a section's end", () => {
+    async function finishFirstSection(hold: boolean) {
+      mock.player.isSynthesisComplete = true;
+      mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+      localStorage.setItem("open-tts-reader-view-v1", JSON.stringify({ autoAdvance: true }));
+      mock.routing = {
+        activePage: "reader",
+        availableTabs: [
+          { key: "studio", label: "Studio" },
+          { key: "reader", label: "Reader" },
+        ],
+        isReaderPage: true,
+        isStudioPage: false,
+        navigateToPage: vi.fn(),
+      };
+      const document = createReaderDocument({
+        id: "held-reader",
+        text: "A long chapter keeps its sections apart. ".repeat(900),
+      });
+      const sections = buildReaderSections(document.text, document.chapters);
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      mock.playerClock.set(3);
+      mock.player.totalDuration = 4;
+      mock.player.activeSegmentId = "ending-segment";
+      mock.player.segments = [{
+        id: "ending-segment",
+        text: "ending range",
+        startSec: 0,
+        endSec: 4,
+        index: 1,
+        total: 1,
+        textStart: 0,
+        textEnd: sections[0].end - sections[0].start,
+      }];
+      mock.player.getAudioCacheSnapshot.mockReturnValue([]);
+
+      const view = render(<WebApp />);
+      await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
+      // The sleep timer reports that the next section must not start by itself.
+      if (hold) fireEvent.click(screen.getByRole("button", { name: "reader-hold-continuation" }));
+      mock.readerLibrary.updateProgress.mockClear();
+      act(() => mock.playerClock.set(4));
+      await waitFor(() => expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ textOffset: sections[1].start, positionSec: 0 }),
+      ));
+
+      // The library applies the page turn, and the next section is entered
+      // with nothing saved for it.
+      mock.player.segments = [];
+      mock.player.totalDuration = 0;
+      mock.playerClock.set(0);
+      const turned = {
+        ...document,
+        progress: {
+          ...document.progress,
+          textOffset: sections[1].start,
+          chapterId: sections[1].chapterId,
+          sectionId: sections[1].id,
+          positionSec: 0,
+        },
+      };
+      mock.readerLibrary.activeDocument = turned;
+      mock.readerLibrary.documents = [turned];
+      view.rerender(<WebApp />);
+      await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[1].id));
+      // The restore effect starts playback and generation on a zero timer.
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+    }
+
+    it("generates the next section by itself", async () => {
+      await finishFirstSection(false);
+      expect(mock.generation.handleGenerate).toHaveBeenCalledTimes(1);
+    });
+
+    it("turns the page without playing or generating the next section while the sleep timer holds it", async () => {
+      mock.player.togglePlay.mockClear();
+      await finishFirstSection(true);
+      expect(mock.generation.handleGenerate).not.toHaveBeenCalled();
+      expect(mock.player.togglePlay).not.toHaveBeenCalled();
+    });
+  });
+
   it("keeps incomplete section playback from skipping unread text", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
@@ -1625,13 +2230,7 @@ describe("SynthesisApp", () => {
       documentId: document.id,
       chapterId: section.chapterId,
       sectionId: section.id,
-      signature: buildAudioSignature({
-        text: document.text,
-        model: "kokoro",
-        voice: "af_heart",
-        quality: 5,
-        tuning: mock.creator.generationSettings,
-      }),
+      signature: kokoroReaderSignature(document.text),
       chunks: [{
         audio: cachedAudio,
         samplingRate: 24_000,
@@ -1668,6 +2267,72 @@ describe("SynthesisApp", () => {
     expect(mock.player.restoreAudioCache).toHaveBeenCalledTimes(1);
   });
 
+  it("saves Supertonic 2 Reader audio under its own language before switching languages", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    mock.initialAppState = { ...mock.initialAppState, model: "supertonic" };
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({
+      id: "supertonic-language",
+      text: "A paragraph with enough words for bounded Reader sections. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    expect(sections.length).toBeGreaterThan(1);
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    const sectionText = getReaderSectionText(document.text, sections[0]);
+    // A reset empties the player, as the real one does.
+    let playerAudio: CachedReaderAudio["chunks"] = [];
+    mock.player.getAudioCacheSnapshot.mockImplementation(() => playerAudio);
+    mock.generation.resetGeneratedAudio.mockImplementation(() => { playerAudio = []; });
+
+    render(<WebApp />);
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
+    // English audio generated for the first section.
+    playerAudio = [{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000, text: sectionText, index: 1, total: 1,
+    }];
+    fireEvent.change(await screen.findByLabelText("Supertonic 2 language"), { target: { value: "ko" } });
+    fireEvent.click(screen.getByRole("button", { name: "reader-next-section" }));
+
+    const savedSignatures = mock.readerLibrary.saveAudio.mock.calls
+      .map((call) => (call as unknown as [CachedReaderAudio])[0].signature);
+    expect(savedSignatures.length).toBeGreaterThan(0);
+    for (const signature of savedSignatures) {
+      expect(signature).toBe(supertonicReaderSignature(sectionText, "en"));
+    }
+    expect(savedSignatures).not.toContain(supertonicReaderSignature(sectionText, "ko"));
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+  });
+
+  it("clears Studio audio made in another Supertonic 2 language", () => {
+    mock.initialAppState = { ...mock.initialAppState, model: "supertonic" };
+    render(<WebApp />);
+    mock.generation.resetGeneratedAudio.mockClear();
+
+    fireEvent.change(screen.getByLabelText("Supertonic 2 language"), { target: { value: "en" } });
+    expect(mock.generation.resetGeneratedAudio).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Supertonic 2 language"), { target: { value: "fr" } });
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+    expect(mock.generation.resetGeneratedAudio).toHaveBeenCalledTimes(1);
+    expect(screen.getByLabelText("Supertonic 2 language")).toHaveValue("fr");
+  });
+
+  it("restores and persists the Supertonic 2 language", async () => {
+    mock.initialAppState = { ...mock.initialAppState, model: "supertonic" };
+    mock.initialEngineSettings = {
+      ...mock.initialEngineSettings,
+      supertonic: { voice: "Male 2", language: "pt" },
+    };
+    render(<WebApp />);
+
+    expect(screen.getByLabelText("Supertonic 2 language")).toHaveValue("pt");
+    fireEvent.change(screen.getByLabelText("Supertonic 2 language"), { target: { value: "ko" } });
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ supertonic: { voice: "Male 2", language: "ko" } }),
+    ));
+  });
+
   it("restores a revisited section from its clamped cached time instead of another section's progress", async () => {
     mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
     mock.routing = {
@@ -1697,13 +2362,7 @@ describe("SynthesisApp", () => {
         documentId: document.id,
         chapterId: sections[1].chapterId,
         sectionId: sections[1].id,
-        signature: buildAudioSignature({
-          text: sectionText,
-          model: "kokoro",
-          voice: "af_heart",
-          quality: 5,
-          tuning: mock.creator.generationSettings,
-        }),
+        signature: kokoroReaderSignature(sectionText),
         chunks: [{
           audio: cachedAudio,
           samplingRate: 24_000,
@@ -1863,7 +2522,7 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
     await waitFor(() => expect(vi.mocked(useModelLoader).mock.calls.at(-1)?.[1])
-      .toEqual(expect.objectContaining({ enabled: false })));
+      .toEqual(expect.objectContaining({ active: false })));
 
     fireEvent.click(screen.getByRole("button", { name: "Open app settings" }));
     fireEvent.click((await screen.findAllByRole("button", { name: "Optional models" }))[0]);
@@ -1913,6 +2572,145 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("link", { name: "Studio" }));
     const changedSignature = (mock.readerLibrary.saveAudio.mock.calls.at(-1) as unknown as [CachedReaderAudio])[0].signature;
     expect(changedSignature).not.toBe(originalSignature);
+  });
+
+  it("keeps Qwen3 Reader audio when a Creator control it ignores changes, unlike Kokoro", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({
+      id: "capability-cache",
+      text: "Reader audio depends only on what its engine reads.",
+    });
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+    mock.player.getAudioCacheSnapshot.mockReturnValue([{
+      audio: new Float32Array([0.1, -0.1]).buffer,
+      samplingRate: 24_000, text: document.text, index: 1, total: 1,
+    }]);
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    const flushedSignature = () => {
+      fireEvent.click(screen.getByRole("link", { name: "Studio" }));
+      return (mock.readerLibrary.saveAudio.mock.calls.at(-1) as unknown as [CachedReaderAudio])[0].signature;
+    };
+    const nudgeCreatorSpeed = () => {
+      const { generationSettings } = mock.creator;
+      mock.creator = { ...mock.creator, generationSettings: { ...generationSettings, speed: generationSettings.speed + 0.05 } };
+      view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    };
+
+    // Kokoro reads the Creator speed, so changing it invalidates the section.
+    await screen.findByRole("button", { name: "reader-desktop-qwen3" });
+    const kokoroSignature = flushedSignature();
+    expect(kokoroSignature).toBe(kokoroReaderSignature(document.text));
+    nudgeCreatorSpeed();
+    expect(flushedSignature()).not.toBe(kokoroSignature);
+
+    // Qwen3 never receives Creator speed or quality, so its audio survives both.
+    fireEvent.click(screen.getByRole("button", { name: "reader-desktop-qwen3" }));
+    await waitFor(() => expect(screen.getByTestId("reader-can-generate")).toHaveTextContent("true"));
+    const qwenSignature = flushedSignature();
+    nudgeCreatorSpeed();
+    expect(flushedSignature()).toBe(qwenSignature);
+    fireEvent.click(screen.getByRole("button", { name: "reader-quality" }));
+    expect(flushedSignature()).toBe(qwenSignature);
+  });
+
+  it("waits until Qwen3 knows its model directory before restoring or discarding a Reader section", async () => {
+    mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    const document = createReaderDocument({
+      id: "qwen-pending-setup",
+      text: "A paragraph with enough words for bounded Reader sections. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    expect(sections.length).toBeGreaterThan(1);
+    mock.readerLibrary.documents = [document];
+    mock.readerLibrary.activeDocument = document;
+
+    const setup = await mock.localTts.getQwen3Setup();
+    let resolveSetup: (value: unknown) => void = () => undefined;
+    mock.localTts.getQwen3Setup.mockReturnValue(new Promise((resolve) => { resolveSetup = resolve; }));
+    const profile: Qwen3Profile = getDefaultQwen3Profile("darwin", "arm64");
+    const sectionText = getReaderSectionText(document.text, sections[1]);
+    const parts = engineSignatureParts("qwen3", {
+      settings: {
+        profile,
+        modelPath: setup.profiles[0].modelDir,
+        speaker: "Aiden",
+        language: "English",
+        instruct: "",
+        temperature: 0.9,
+        topK: 50,
+        maxNewTokens: 384,
+        seed: null,
+        referenceAudioSignature: "",
+        referenceText: "",
+      },
+      tuning: mock.creator.generationSettings,
+      quality: 5,
+    });
+    if (!parts) throw new Error("A located Qwen3 model has a signature.");
+    const cachedChunks = [{
+      audio: new Float32Array([0.3, -0.3]).buffer,
+      samplingRate: 24_000, text: sectionText, index: 1, total: 1,
+    }];
+    // Arguments are (documentId, sectionId); only the second section is cached.
+    mock.readerLibrary.loadAudio.mockImplementation(async (...args: unknown[]) => (
+      args[1] === sections[1].id
+        ? {
+            cacheKey: createReaderAudioCacheKey(document.id, sections[1].id),
+            documentId: document.id,
+            chapterId: sections[1].chapterId,
+            sectionId: sections[1].id,
+            signature: buildAudioSignature({ text: sectionText, model: "qwen3", ...parts }),
+            chunks: cachedChunks,
+            byteLength: cachedChunks[0].audio.byteLength,
+            currentTime: 0,
+            playbackRate: 1,
+            totalDuration: 1,
+            synthesisComplete: true,
+            updatedAt: Date.now(),
+          }
+        : null
+    ));
+
+    const view = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-qwen3" }));
+    fireEvent.click(screen.getByRole("button", { name: "reader-next-section" }));
+    const revisited: ReaderDocumentRecord = {
+      ...document,
+      progress: {
+        ...document.progress,
+        textOffset: sections[1].start,
+        chapterId: sections[1].chapterId,
+        sectionId: sections[1].id,
+      },
+    };
+    mock.readerLibrary.documents = [revisited];
+    mock.readerLibrary.activeDocument = revisited;
+    view.rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    await act(async () => { await Promise.resolve(); });
+
+    // Without a model directory there is no signature to judge the entry by:
+    // it is neither restored nor thrown away.
+    expect(mock.readerLibrary.loadAudio).not.toHaveBeenCalledWith(document.id, sections[1].id);
+    expect(mock.readerLibrary.clearAudio).not.toHaveBeenCalled();
+    expect(mock.player.restoreAudioCache).not.toHaveBeenCalled();
+
+    await act(async () => { resolveSetup(setup); });
+    await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(
+      cachedChunks,
+      expect.objectContaining({ synthesisComplete: true }),
+    ));
+    expect(mock.readerLibrary.clearAudio).not.toHaveBeenCalled();
   });
 
   it("runs Qwen3 from the reader model option without leaving the reader tab", async () => {
@@ -2206,8 +3004,16 @@ describe("SynthesisApp", () => {
 
     rerender(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
 
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Kokoro");
+    expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("false");
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-qwen3" }));
     expect(screen.getByRole("button", { name: "studio-desktop-qwen3-selected" })).toBeInTheDocument();
+    // Qwen3 receives the script as written and paces itself.
+    expect(screen.getByTestId("creator-engine")).toHaveTextContent("Qwen3-TTS");
+    expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("true");
+    expect(screen.getByTestId("creator-pauses-disabled")).toHaveTextContent("true");
+    // The pipeline reads Qwen3's language setting, so its dictionary and normalization follow it.
+    expect(screen.getByTestId("creator-language")).toHaveTextContent("en");
     fireEvent.click(screen.getByRole("button", { name: "Serena" }));
     expect(screen.getByRole("button", { name: "Serena" })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());

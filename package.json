@@ -1,7 +1,7 @@
 {
   "name": "offline-voice-studio",
   "private": true,
-  "version": "1.8.5",
+  "version": "1.9.0",
   "description": "A local-first text-to-speech studio for the web and desktop.",
   "author": "cyanxxy",
   "license": "Apache-2.0",
@@ -118,6 +118,9 @@
       "identity": null,
       "hardenedRuntime": false,
       "notarize": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Open TTS records your microphone only when you record a voice sample for voice cloning."
+      },
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "files": [

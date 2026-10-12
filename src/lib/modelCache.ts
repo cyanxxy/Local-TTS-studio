@@ -1,6 +1,9 @@
 import { env } from "@huggingface/transformers";
 import { MODELS } from "../constants";
 import type { ModelType } from "../types";
+import { KITTEN_CACHE_NAME, PARADEE_CACHE_NAME } from "./phonemeModels";
+import { PIPER_CACHE_NAME } from "./piperVoices";
+import { CHATTERBOX_DEFAULT_VOICE, CHATTERBOX_MODEL_ID } from "./chatterboxModel";
 import {
   clearPersistentCacheEntries,
   clearPersistentCacheStorage,
@@ -37,9 +40,27 @@ function isTransformersCacheEntryCacheKey(key: string): boolean {
   return isTransformersCacheKey(key);
 }
 
+/**
+ * Models whose workers keep their pinned files in a Cache Storage of their own
+ * rather than in the shared Transformers.js cache, so clearing one is deleting
+ * that cache (a Piper cache holds every voice downloaded so far).
+ */
+const OWN_CACHE_NAMES: Partial<Record<ModelType, string>> = {
+  kitten: KITTEN_CACHE_NAME,
+  paradee: PARADEE_CACHE_NAME,
+  piper: PIPER_CACHE_NAME,
+};
+
+/** Chatterbox keeps its pinned files in the shared Transformers.js cache, under these repositories. */
+const EXTRA_MODEL_REPOS: Partial<Record<ModelType, readonly string[]>> = {
+  chatterbox: [CHATTERBOX_MODEL_ID, CHATTERBOX_DEFAULT_VOICE.modelId],
+};
+
 function getModelCacheUrlMarkers(model: ModelType): string[] {
-  const modelId = MODELS[model].id;
-  return [modelId, encodeURIComponent(modelId)];
+  const modelIds = model in MODELS
+    ? [MODELS[model as keyof typeof MODELS].id]
+    : [...(EXTRA_MODEL_REPOS[model] ?? [])];
+  return modelIds.flatMap((modelId) => [modelId, encodeURIComponent(modelId)]);
 }
 
 function matchesModelCacheUrl(url: string, model: ModelType): boolean {
@@ -84,6 +105,16 @@ export async function clearModelCacheForModel(
 ): Promise<ClearModelCacheForModelResult> {
   const deletedKeys = new Set<string>();
   let deletedEntries = 0;
+
+  const ownCacheName = OWN_CACHE_NAMES[model];
+  if (ownCacheName !== undefined) {
+    if (isCacheStorageAvailable() && (await caches.has(ownCacheName))) {
+      const cache = await caches.open(ownCacheName);
+      deletedEntries = (await cache.keys()).length;
+      if (await caches.delete(ownCacheName)) deletedKeys.add(ownCacheName);
+    }
+    return { deletedEntries, deletedKeys: Array.from(deletedKeys) };
+  }
 
   if (isCacheStorageAvailable()) {
     const keys = await caches.keys();

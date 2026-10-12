@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps, ReactNode } from "react";
+import type { AudiobookExport } from "../hooks/useAudiobookExport";
 import { AdvancedReaderPage } from "./AdvancedReaderPage";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { GenerationStats, ModelState } from "../types";
@@ -12,7 +13,10 @@ import {
 import { DEFAULT_READER_VIEW_PREFERENCES } from "../lib/readerPreferences";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import { chunkTextForModelDetailed } from "../lib/chunking";
+import { chunkKittenText, chunkParadeeText, chunkPiperText } from "../lib/phonemeModels";
 import { PlaybackClock } from "../lib/playbackClock";
+import { estimateSegmentWords } from "./reader/readerSegments";
+import { READER_SHORTCUTS_DIALOG_ATTRIBUTE } from "./reader/readerShortcuts";
 
 function clockAt(seconds: number): PlaybackClock {
   const clock = new PlaybackClock();
@@ -53,6 +57,19 @@ vi.mock("./AudioPlayer", () => ({
     return <div data-testid="audio-player" />;
   },
 }));
+
+// The toolbar is not memoised, so it renders exactly when the page does.
+const toolbarRenderMock = vi.hoisted(() => vi.fn());
+
+vi.mock("./reader/ReaderToolbar", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./reader/ReaderToolbar")>();
+  return {
+    ReaderToolbar: (props: ComponentProps<typeof actual.ReaderToolbar>) => {
+      toolbarRenderMock();
+      return <actual.ReaderToolbar {...props} />;
+    },
+  };
+});
 
 const readyState: ModelState = {
   loading: false,
@@ -188,6 +205,50 @@ describe("AdvancedReaderPage", () => {
     expect(view.props.onTextChange).toHaveBeenCalledWith("CHAPTER TWO ");
   });
 
+  it("commits the last keystrokes to the open book before switching books mid-edit", () => {
+    const first = createReaderDocument({ id: "switch-one", title: "One", text: "First book." });
+    const second = createReaderDocument({ id: "switch-two", title: "Two", text: "Second book." });
+    const onEditEnd = vi.fn();
+    const onOpenDocument = vi.fn();
+    const view = renderReader({
+      text: first.text,
+      documents: [first, second],
+      activeDocument: first,
+      onEditEnd,
+      onOpenDocument,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Edit current section" }));
+    fireEvent.change(screen.getByLabelText("Reading Text"), { target: { value: "First book, revised." } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Two/ }));
+
+    expect(view.props.onTextChange).toHaveBeenCalledWith("First book, revised.");
+    expect(onEditEnd).toHaveBeenCalledTimes(1);
+    expect(onOpenDocument).toHaveBeenCalledWith("switch-two");
+    const commitOrder = vi.mocked(view.props.onTextChange).mock.invocationCallOrder[0];
+    expect(commitOrder).toBeLessThan(onOpenDocument.mock.invocationCallOrder[0]);
+  });
+
+  it("drops the selection toolbar in the same render that shows another book", () => {
+    const first = createReaderDocument({ id: "scope-one", title: "One", text: "A memorable first passage." });
+    const second = createReaderDocument({ id: "scope-two", title: "Two", text: "A different second passage." });
+    const view = renderReader({ text: first.text, documents: [first, second], activeDocument: first });
+    const textNode = view.container.querySelector("article span")!.firstChild!;
+    const range = document.createRange();
+    range.setStart(textNode, 2);
+    range.setEnd(textNode, 12);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.mouseUp(view.container.querySelector("article")!);
+    expect(screen.getByRole("toolbar", { name: "Selected passage" })).toBeInTheDocument();
+
+    view.rerender(<AdvancedReaderPage {...view.props} text={second.text} activeDocument={second} />);
+
+    expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+    window.getSelection()?.removeAllRanges();
+  });
+
   it("closes popovers with Escape and restores focus to their trigger", () => {
     renderReader();
     const trigger = screen.getByRole("button", { name: "Reading appearance" });
@@ -287,6 +348,194 @@ describe("AdvancedReaderPage", () => {
     selection.removeAllRanges();
   });
 
+  describe("exact seeking and sentence steps", () => {
+    const text = "First sentence here. Second one follows.\nA new paragraph starts. It ends.";
+    const segment = createSegment({ text, textStart: 0, textEnd: text.length, startSec: 0, endSec: 8 });
+    const words = estimateSegmentWords(segment);
+    const wordAt = (needle: string) => words.find((word) => word.start === text.indexOf(needle))!;
+
+    function renderTimed(timeSec: number, overrides: Partial<ComponentProps<typeof AdvancedReaderPage>> = {}) {
+      return renderReader({
+        text,
+        segments: [segment],
+        activeSegmentId: segment.id,
+        totalDuration: 8,
+        clock: clockAt(timeSec),
+        ...overrides,
+      });
+    }
+
+    it("listens from the exact double-clicked word, not the start of its passage", () => {
+      const { container, props } = renderTimed(0);
+      const offset = text.indexOf("Second") + 2;
+      selectArticleText(container, offset, offset);
+
+      fireEvent.doubleClick(container.querySelector("article")!);
+
+      expect(props.onSeek).toHaveBeenCalledWith(wordAt("Second").startSec / 8);
+      expect(props.onJumpToSegment).not.toHaveBeenCalled();
+    });
+
+    it("steps to the next sentence or paragraph from the spoken word", () => {
+      const { props } = renderTimed(wordAt("here.").startSec);
+
+      fireEvent.click(screen.getByRole("button", { name: "Next sentence" }));
+      expect(props.onSeek).toHaveBeenLastCalledWith(wordAt("Second").startSec / 8);
+
+      fireEvent.click(screen.getByRole("button", { name: "Next paragraph" }));
+      expect(props.onSeek).toHaveBeenLastCalledWith(wordAt("A new").startSec / 8);
+    });
+
+    it("restarts the spoken sentence, and goes to the one before from its first word", () => {
+      const midSentence = renderTimed(wordAt("follows.").startSec);
+      fireEvent.click(screen.getByRole("button", { name: "Previous sentence" }));
+      expect(midSentence.props.onSeek).toHaveBeenLastCalledWith(wordAt("Second").startSec / 8);
+      midSentence.unmount();
+
+      const firstWord = renderTimed(wordAt("Second").startSec);
+      fireEvent.click(screen.getByRole("button", { name: "Previous sentence" }));
+      expect(firstWord.props.onSeek).toHaveBeenLastCalledWith(0);
+    });
+
+    it("steps with Shift+arrow keys", () => {
+      const { props } = renderTimed(wordAt("Second").startSec);
+
+      fireEvent.keyDown(document.body, { key: "ArrowDown", shiftKey: true });
+      expect(props.onSeek).toHaveBeenLastCalledWith(wordAt("A new").startSec / 8);
+    });
+
+    it("turns the page when a step leaves the section", () => {
+      const book = createReaderDocument({
+        id: "stepping",
+        text: "A paragraph with enough words for a reading section. ".repeat(700),
+      });
+      const sections = buildReaderSections(book.text, book.chapters);
+      const onNavigateToOffset = vi.fn();
+      renderReader({
+        text: getReaderSectionText(book.text, sections[1]),
+        documents: [book],
+        activeDocument: { ...book, progress: { ...book.progress, textOffset: sections[1].start } },
+        activeChapter: book.chapters[0],
+        activeSection: sections[1],
+        previousSection: sections[0],
+        nextSection: sections[2] ?? null,
+        onNavigateToOffset,
+      });
+
+      fireEvent.click(screen.getByRole("button", { name: "Previous paragraph" }));
+      expect(onNavigateToOffset).toHaveBeenLastCalledWith(sections[0].start, undefined);
+    });
+
+    it("moves the reading position without audio", () => {
+      const onNavigateToOffset = vi.fn();
+      renderReader({ text, onNavigateToOffset });
+
+      fireEvent.click(screen.getByRole("button", { name: "Next sentence" }));
+      expect(onNavigateToOffset).toHaveBeenLastCalledWith(text.indexOf("Second"), undefined);
+      fireEvent.click(screen.getByRole("button", { name: "Next sentence" }));
+      expect(onNavigateToOffset).toHaveBeenLastCalledWith(text.indexOf("A new"), undefined);
+    });
+  });
+
+  describe("keyboard and screen-reader access", () => {
+    const text = "First paragraph to read.\nSecond paragraph follows.";
+
+    it("keeps one paragraph in the tab order and listens from it with Enter", () => {
+      const onNavigateToOffset = vi.fn();
+      const { container } = renderReader({ text, onNavigateToOffset });
+      const paragraphs = [...container.querySelectorAll<HTMLElement>("article [data-block-start]")];
+
+      expect(paragraphs.map((paragraph) => paragraph.tabIndex)).toEqual([0, -1]);
+      expect(paragraphs[0]).toHaveAccessibleDescription(/Press Enter to listen from this paragraph/);
+
+      paragraphs[0].focus();
+      fireEvent.keyDown(paragraphs[0], { key: "ArrowDown" });
+      expect(paragraphs[1]).toHaveFocus();
+      expect(paragraphs.map((paragraph) => paragraph.tabIndex)).toEqual([-1, 0]);
+
+      fireEvent.keyDown(paragraphs[1], { key: "Enter" });
+      expect(onNavigateToOffset).toHaveBeenCalledWith(text.indexOf("Second"), undefined);
+
+      fireEvent.keyDown(paragraphs[1], { key: "ArrowUp" });
+      expect(paragraphs[0]).toHaveFocus();
+    });
+
+    it("selects a paragraph with Shift+Enter so the toolbar can bookmark it", () => {
+      const book = createReaderDocument({ id: "keyboard-bookmark", text });
+      const onAddBookmark = vi.fn();
+      const { container } = renderReader({ text, documents: [book], activeDocument: book, onAddBookmark });
+      const second = container.querySelectorAll<HTMLElement>("article [data-block-start]")[1];
+
+      second.focus();
+      fireEvent.keyDown(second, { key: "Enter", shiftKey: true });
+
+      expect(window.getSelection()?.toString()).toBe("Second paragraph follows.");
+      fireEvent.click(screen.getByRole("button", { name: "Bookmark" }));
+      expect(onAddBookmark).toHaveBeenCalledWith(expect.objectContaining({
+        label: "Second paragraph follows.",
+        textOffset: text.indexOf("Second"),
+      }));
+    });
+
+    it("opens the selection toolbar for a selection made without the mouse", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = renderReader({ text });
+        const textNode = container.querySelector("article span")!.firstChild!;
+        const range = document.createRange();
+        range.setStart(textNode, 6);
+        range.setEnd(textNode, 15);
+        window.getSelection()!.removeAllRanges();
+        window.getSelection()!.addRange(range);
+        act(() => {
+          document.dispatchEvent(new Event("selectionchange"));
+        });
+        expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+
+        act(() => {
+          vi.advanceTimersByTime(250);
+        });
+        expect(screen.getByRole("toolbar", { name: "Selected passage" })).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+        window.getSelection()?.removeAllRanges();
+      }
+    });
+
+    it("waits for the mouseup while a pointer drag is still selecting", () => {
+      vi.useFakeTimers();
+      try {
+        const { container } = renderReader({ text });
+        const article = container.querySelector("article")!;
+        const textNode = article.querySelector("span")!.firstChild!;
+        fireEvent.pointerDown(article);
+        const range = document.createRange();
+        range.setStart(textNode, 6);
+        range.setEnd(textNode, 15);
+        window.getSelection()!.removeAllRanges();
+        window.getSelection()!.addRange(range);
+        act(() => {
+          document.dispatchEvent(new Event("selectionchange"));
+          vi.advanceTimersByTime(250);
+        });
+
+        expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+      } finally {
+        vi.useRealTimers();
+        window.getSelection()?.removeAllRanges();
+      }
+    });
+
+    it("marks the text with the book's language", () => {
+      const book = createReaderDocument({ id: "french", text: "Bonjour tout le monde.", language: "fr" });
+      const { container } = renderReader({ text: book.text, documents: [book], activeDocument: book });
+
+      expect(container.querySelector("article")).toHaveAttribute("lang", "fr");
+      fireEvent.click(screen.getByRole("button", { name: "Edit current section" }));
+      expect(screen.getByLabelText("Reading Text")).toHaveAttribute("lang", "fr");
+    });
+  });
+
   it("pages between reading sections with the arrow keys", () => {
     const book = createReaderDocument({
       id: "keyboard-reader",
@@ -343,6 +592,64 @@ describe("AdvancedReaderPage", () => {
     expect(onViewPreferencesChange).toHaveBeenCalledWith({ columnWidth: "wide" });
     // Auto-advance defaults on, so toggling the checkbox opts out.
     expect(onViewPreferencesChange).toHaveBeenCalledWith({ autoAdvance: false });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Prepare the next part" }));
+    expect(onViewPreferencesChange).toHaveBeenCalledWith({ prepareAhead: false });
+  });
+
+  it("tells the listener when the next part is being prepared and when it is ready", () => {
+    const document = createReaderDocument({
+      id: "prepared-reader",
+      title: "Prepared Reader",
+      text: "A paragraph with enough words for a reading section. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const props = {
+      activeDocument: document,
+      activeChapter: document.chapters[0],
+      activeSection: sections[0],
+      nextSection: sections[1],
+      text: document.text.slice(sections[0].start, sections[0].end),
+    };
+    const idle = renderReader({ ...props, nextPartStatus: null });
+    expect(screen.queryByText(/Next part ready|Preparing next part/)).not.toBeInTheDocument();
+    idle.unmount();
+
+    const preparing = renderReader({ ...props, nextPartStatus: "preparing" });
+    expect(screen.getByText("Preparing next part")).toBeInTheDocument();
+    preparing.unmount();
+
+    renderReader({ ...props, nextPartStatus: "ready" });
+    expect(screen.getByText("Next part ready")).toBeInTheDocument();
+  });
+
+  it("offers audiobook export only where it is wired, and reports a failed one outside its menu", () => {
+    const document = createReaderDocument({
+      id: "audiobook-reader",
+      title: "Audiobook Reader",
+      text: "# One\n\nFirst. ".repeat(20) + "# Two\n\nSecond. ".repeat(20),
+    });
+    const withoutExport = renderReader({ activeDocument: document, activeChapter: document.chapters[0] });
+    expect(screen.queryByRole("button", { name: "Export audiobook" })).not.toBeInTheDocument();
+    withoutExport.unmount();
+
+    const audiobook: AudiobookExport = {
+      state: {
+        status: "failed",
+        progress: null,
+        error: "engine fell over",
+        result: null,
+        scope: { kind: "book" },
+        format: "mp3",
+      },
+      planFor: () => null,
+      start: vi.fn(),
+      cancel: vi.fn(),
+      dismiss: vi.fn(),
+    };
+    renderReader({ activeDocument: document, activeChapter: document.chapters[0], audiobook });
+    expect(screen.getByRole("button", { name: "Export audiobook" })).toBeInTheDocument();
+    expect(screen.getByText(/Audiobook export failed: engine fell over/)).toBeInTheDocument();
   });
 
   it("navigates between bounded reading sections without seeking stale audio", () => {
@@ -546,6 +853,37 @@ describe("AdvancedReaderPage", () => {
     }).length);
   });
 
+  it.each([
+    ["kitten", "webgpu", chunkKittenText],
+    ["paradee", "wasm", (text: string) => chunkParadeeText(text)],
+    ["piper", "wasm", (text: string) => chunkPiperText(text)],
+  ] as const)("previews %s sections with the chunker its worker uses", (model, backend, chunker) => {
+    const text = "A compact sentence for a long Reader section, with a clause or two to cut at. ".repeat(60);
+    const state: ModelState = { ...readyState, backend };
+    renderReader({
+      text,
+      activeModel: model,
+      modelStates: { [model]: state },
+      voice: model === "piper" ? "en_US-kristin-medium" : model === "kitten" ? "Luna" : "heart",
+    });
+
+    const props = audioPlayerMock.mock.lastCall?.[0] as { sectionPreviewCount?: number };
+    expect(props.sectionPreviewCount).toBe(chunker(text, backend).length);
+    expect(props.sectionPreviewCount).toBeGreaterThan(1);
+  });
+
+  it.each([
+    ["kitten", "Luna", "Luna", "Kitten TTS"],
+    ["paradee", "heart", "Heart", "Paradee"],
+    ["piper", "en_US-libritts-high#12", "LibriTTS · High · Speaker 12", "Piper"],
+  ] as const)("labels the voice button with %s's own voice and model names", (model, voice, voiceLabel, modelLabel) => {
+    renderReader({ activeModel: model, voice, modelStates: { [model]: readyState } });
+
+    const button = screen.getByRole("button", { name: "Voice settings" });
+    expect(button).toHaveTextContent(voiceLabel);
+    expect(button).toHaveTextContent(modelLabel);
+  });
+
   it("keeps every Qwen preview section visible while audio is still streaming", () => {
     const text = "Reader section with a natural boundary. ".repeat(45);
     const units = buildQwen3TextUnits(text);
@@ -692,6 +1030,33 @@ describe("AdvancedReaderPage", () => {
     expect(activeWord()).toBe("world.");
   });
 
+  it("re-renders only the reading pane as the spoken word advances", () => {
+    const clock = clockAt(0.2);
+    const { container } = renderReader({
+      text: "Hello extraordinary world.",
+      totalDuration: 3,
+      clock,
+      isPlaying: true,
+      activeSegmentId: "segment-1",
+      segments: [createSegment({
+        text: "Hello extraordinary world.",
+        startSec: 0,
+        endSec: 3,
+        textStart: 0,
+        textEnd: 26,
+      })],
+    });
+    const pageRenders = toolbarRenderMock.mock.calls.length;
+    const dockRenders = audioPlayerMock.mock.calls.length;
+
+    act(() => clock.set(1.5));
+    act(() => clock.set(2.8));
+
+    expect(container.querySelector("[data-reader-active-word='true']")).toHaveTextContent("world.");
+    expect(toolbarRenderMock).toHaveBeenCalledTimes(pageRenders);
+    expect(audioPlayerMock).toHaveBeenCalledTimes(dockRenders);
+  });
+
   it("auto-scrolls again when the playback clock advances within one sentence", () => {
     const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get")
       .mockReturnValue(200);
@@ -759,7 +1124,7 @@ describe("AdvancedReaderPage", () => {
       author: "Local Author",
       text: "# Opening\nFirst text.\n\n# Ending\nFinal text.",
     });
-    renderReader({
+    const { props } = renderReader({
       text: document.text,
       documents: [document],
       activeDocument: document,
@@ -792,7 +1157,9 @@ describe("AdvancedReaderPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Open Reader library" }));
     fireEvent.click(screen.getByRole("tab", { name: "Contents" }));
     fireEvent.click(screen.getByRole("button", { name: /Ending/ }));
-    expect(onJumpToSegment).toHaveBeenCalledWith("segment-2");
+    // The chapter's first word starts its passage, two seconds in.
+    expect(props.onSeek).toHaveBeenCalledWith(0.5);
+    expect(onJumpToSegment).not.toHaveBeenCalled();
 
     fireEvent.click(screen.getByRole("tab", { name: "Bookmarks" }));
     fireEvent.click(screen.getByRole("button", { name: "Bookmark this position" }));
@@ -907,6 +1274,86 @@ describe("AdvancedReaderPage", () => {
     expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
   });
 
+  /** Selects `[start, end)` of the first paragraph, across however many spans it is split into. */
+  function selectArticleText(container: HTMLElement, start: number, end: number) {
+    const paragraph = container.querySelector("article [data-block-start]")!;
+    const walker = document.createTreeWalker(paragraph, NodeFilter.SHOW_TEXT);
+    const range = document.createRange();
+    let seen = 0;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      const length = node.textContent!.length;
+      if (start >= seen && start <= seen + length) range.setStart(node, start - seen);
+      if (end >= seen && end <= seen + length) {
+        range.setEnd(node, end - seen);
+        break;
+      }
+      seen += length;
+    }
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    fireEvent.mouseUp(container.querySelector("article")!);
+  }
+
+  it("highlights a selected passage over its whole range in the picked colour", () => {
+    const book = createReaderDocument({ id: "select-highlight", text: "A memorable passage belongs with its note." });
+    const onAddHighlight = vi.fn();
+    const { container } = renderReader({ text: book.text, documents: [book], activeDocument: book, onAddHighlight });
+
+    selectArticleText(container, 2, 19);
+    expect(screen.getByRole("group", { name: "Highlight" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Remove highlight" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Green highlight" }));
+
+    expect(onAddHighlight).toHaveBeenCalledWith({ start: 2, end: 19, color: "green" });
+    expect(screen.queryByRole("toolbar", { name: "Selected passage" })).toBeNull();
+  });
+
+  it("hides the highlight colours when highlights cannot be saved", () => {
+    const book = createReaderDocument({ id: "no-highlight", text: "A memorable passage belongs with its note." });
+    const { container } = renderReader({ text: book.text, documents: [book], activeDocument: book });
+
+    selectArticleText(container, 2, 19);
+    expect(screen.getByRole("toolbar", { name: "Selected passage" })).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Highlight" })).toBeNull();
+  });
+
+  it("paints saved highlights and recolours or removes the one a selection lies in", () => {
+    const text = "A memorable passage belongs with its note.";
+    const book = {
+      ...createReaderDocument({ id: "painted", text }),
+      highlights: [
+        { id: "hl-1", start: 2, end: 19, color: "pink" as const, quote: "memorable passage", createdAt: 1, updatedAt: 1 },
+        // Its words moved away in an edit, so it must not colour what is there now.
+        { id: "hl-2", start: 28, end: 32, color: "blue" as const, quote: "gone", createdAt: 1, updatedAt: 1 },
+      ],
+    };
+    const onAddHighlight = vi.fn();
+    const onUpdateHighlight = vi.fn();
+    const onRemoveHighlight = vi.fn();
+    const { container } = renderReader({
+      text,
+      documents: [book],
+      activeDocument: book,
+      onAddHighlight,
+      onUpdateHighlight,
+      onRemoveHighlight,
+    });
+
+    const painted = [...container.querySelectorAll<HTMLElement>("article [data-highlight]")];
+    expect(painted.map((span) => [span.textContent, span.dataset.highlight])).toEqual([["memorable passage", "pink"]]);
+
+    selectArticleText(container, 2, 11);
+    expect(screen.getByRole("group", { name: "Change highlight colour" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Pink highlight" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Purple highlight" }));
+    expect(onUpdateHighlight).toHaveBeenCalledWith("hl-1", { color: "purple" });
+    expect(onAddHighlight).not.toHaveBeenCalled();
+
+    selectArticleText(container, 2, 11);
+    fireEvent.click(screen.getByRole("button", { name: "Remove highlight" }));
+    expect(onRemoveHighlight).toHaveBeenCalledWith("hl-1");
+  });
+
   it("reports a failed generation in the dock instead of reading as ready", () => {
     renderReader({ generationError: "Invalid language identifier" });
     const props = audioPlayerMock.mock.calls.at(-1)?.[0] as {
@@ -922,7 +1369,8 @@ describe("AdvancedReaderPage", () => {
     renderReader({ onImmersiveChange });
 
     fireEvent.keyDown(document.body, { key: "?" });
-    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeInTheDocument();
+    const shortcuts = screen.getByRole("dialog", { name: "Keyboard shortcuts" });
+    expect(shortcuts).toHaveAttribute(READER_SHORTCUTS_DIALOG_ATTRIBUTE);
     fireEvent.keyDown(document, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull();
 
@@ -963,6 +1411,65 @@ describe("AdvancedReaderPage", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("holds auto-continuation at the chapter's end when the sleep timer is set to Chapter", () => {
+    const document = createReaderDocument({
+      id: "sleepy-chapters",
+      title: "Two chapters",
+      text: `# Opening\n${"A paragraph with enough words for a reading section. ".repeat(700)}\n\n# Ending\nFinal text.`,
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const crossing = sections.findIndex((section) => section.chapterId === document.chapters[1].id);
+    const onAutoAdvanceHoldChange = vi.fn();
+    const clock = clockAt(0);
+    const segment = createSegment({ endSec: 30, textEnd: sections[crossing - 1].end - sections[crossing - 1].start });
+    const props = {
+      text: getReaderSectionText(document.text, sections[crossing - 1]),
+      documents: [document],
+      activeDocument: document,
+      activeChapter: document.chapters[0],
+      activeSection: sections[crossing - 1],
+      previousSection: sections[crossing - 2] ?? null,
+      nextSection: sections[crossing],
+      isPlaying: true,
+      clock,
+      totalDuration: 30,
+      segments: [segment],
+      activeSegmentId: segment.id,
+      onAutoAdvanceHoldChange,
+    };
+    const view = renderReader(props);
+
+    fireEvent.click(screen.getByRole("button", { name: "Reading appearance" }));
+    fireEvent.click(screen.getByRole("button", { name: "Chapter" }));
+    expect(screen.getByRole("button", { name: "Sleep timer: End of chapter. Cancel" })).toBeInTheDocument();
+    expect(onAutoAdvanceHoldChange).toHaveBeenLastCalledWith(true);
+
+    // The section plays out: the timer has fired, yet the hold stays until
+    // the parent turns the page.
+    act(() => clock.set(30));
+    view.rerender(<AdvancedReaderPage {...view.props} {...props} isPlaying={false} />);
+    expect(screen.queryByRole("button", { name: /^Sleep timer/ })).toBeNull();
+    expect(onAutoAdvanceHoldChange).toHaveBeenLastCalledWith(true);
+    expect(view.props.onTogglePlay).not.toHaveBeenCalled();
+
+    view.rerender(
+      <AdvancedReaderPage
+        {...view.props}
+        {...props}
+        text={getReaderSectionText(document.text, sections[crossing])}
+        activeChapter={document.chapters[1]}
+        activeSection={sections[crossing]}
+        previousSection={sections[crossing - 1]}
+        nextSection={null}
+        isPlaying={false}
+        totalDuration={0}
+        segments={[]}
+        activeSegmentId={null}
+      />,
+    );
+    expect(onAutoAdvanceHoldChange).toHaveBeenLastCalledWith(false);
   });
 
   it("imports article URLs from the toolbar", async () => {

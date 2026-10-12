@@ -52,6 +52,17 @@ merged commit:
 The tag and GitHub Release are created only after those checks pass and a
 matching checked-in release-notes file is present.
 
+### Maintainer tools that need the network
+
+These stay out of CI because they call Hugging Face: `node scripts/pin-hf-assets.mjs --repo <repo> --revision <sha> --include <file> --name <NAME> --out src/workers/manifests/<model>.ts` generates a pinned manifest (size, SHA-256, licence per file) and `--check` verifies an existing one; `node scripts/pin-piper-voices.mjs` regenerates the Piper catalog (`--check` verifies it), following each voice's training lineage and failing closed on any non-permissive or unresolvable ancestor. `vite.pinHfAssets.test.ts`, `vite.pinPiperVoices.test.ts`, and the committed-manifest tests guard the committed output offline.
+
+### Known gaps before shipping the next-level batch
+
+- Run `electron/rustLocalBridge.test.ts` on an Apple Silicon Mac (see [local runtimes](./local-runtimes.md#verification)).
+- Verify in a signed, packaged build: Media Session / media keys, the microphone permission prompt, the save dialog for a large audiobook, and that the unbundled `phonemizer` asset loads.
+- Declare `phonemizer` in `package.json` (it is only present because `kokoro-js` depends on it).
+- Whisper auto-transcription of clone references is not available yet.
+
 ## Cut a release
 
 1. Set the same semantic version in `package.json` and `package-lock.json`.

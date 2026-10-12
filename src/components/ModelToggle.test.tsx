@@ -223,6 +223,7 @@ describe("ModelToggle", () => {
         onModelChange={() => {}}
         kokoroState={readyState}
         supertonicState={readyState}
+        visibleModels={["kokoro", "supertonic"]}
         unavailableModels={{ supertonic: "Unavailable in this environment" }}
         desktopModelOptions={[{
           key: "qwen3",
@@ -381,5 +382,52 @@ describe("ModelToggle", () => {
       scrollHeightSpy.mockRestore();
       Object.defineProperty(window, "innerHeight", { configurable: true, value: originalInnerHeight });
     }
+  });
+
+  it("lists Kitten, Paradee and Piper beside the other browser models with their own load state", () => {
+    const onModelChange = vi.fn();
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={onModelChange}
+        kokoroState={readyState}
+        supertonicState={readyState}
+        modelStates={{ kitten: readyState, piper: loadingState, paradee: errorState }}
+      />,
+    );
+
+    const menu = openPicker();
+    expect(within(menu).getAllByRole("menuitemradio").map((item) => item.getAttribute("data-testid"))).toEqual([
+      "model-option-kokoro",
+      "model-option-supertonic",
+      "model-option-kitten",
+      "model-option-paradee",
+      "model-option-piper",
+      "model-option-chatterbox",
+    ]);
+    expect(within(menu).getByTestId("model-option-kitten")).toHaveTextContent("Kitten TTS");
+    expect(within(menu).getByTestId("model-option-kitten")).toHaveTextContent("15M · Ready");
+    expect(within(menu).getByTestId("model-option-paradee")).toHaveTextContent("8M · Needs attention");
+    expect(within(menu).getByTestId("model-option-piper")).toHaveTextContent("VITS · 50% loaded");
+
+    fireEvent.click(within(menu).getByTestId("model-option-piper"));
+    expect(onModelChange).toHaveBeenCalledWith("piper");
+  });
+
+  it("shows a browser engine nobody has loaded yet as preparing, and the selected one as selected", () => {
+    render(
+      <ModelToggle
+        activeModel="paradee"
+        onModelChange={() => {}}
+        kokoroState={readyState}
+        supertonicState={readyState}
+        modelStates={{ paradee: readyState }}
+      />,
+    );
+
+    expect(screen.getByTestId("model-picker-trigger")).toHaveTextContent("Paradee");
+    const menu = openPicker();
+    expect(within(menu).getByTestId("model-option-paradee")).toHaveAttribute("aria-checked", "true");
+    expect(within(menu).getByTestId("model-option-piper")).toHaveTextContent("VITS · Preparing");
   });
 });

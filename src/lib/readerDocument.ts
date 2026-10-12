@@ -1,3 +1,4 @@
+import { MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE } from "../constants";
 import type { GenerationTuningSettings } from "../types";
 
 export type ReaderDocumentSourceType = "text" | "file" | "epub" | "url";
@@ -58,6 +59,98 @@ export interface ReaderNote {
   updatedAt: number;
 }
 
+export const READER_HIGHLIGHT_COLORS = ["yellow", "green", "blue", "pink", "purple"] as const;
+export type ReaderHighlightColor = (typeof READER_HIGHLIGHT_COLORS)[number];
+
+/** Long highlights keep only this much of their text as the re-anchoring quote. */
+export const READER_HIGHLIGHT_QUOTE_LIMIT = 2_000;
+
+export interface ReaderHighlight {
+  id: string;
+  /** Document offsets of the highlighted range, end exclusive. */
+  start: number;
+  end: number;
+  color: ReaderHighlightColor;
+  /**
+   * The highlighted text (capped) as it read when highlighted. While the book
+   * text at `start` still reads this way the range is anchored; otherwise it
+   * is looked up again, so an edit that moved the passage cannot leave the
+   * colour over different words.
+   */
+  quote: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Largest cover image kept in a record, as a base64 data URL. */
+export const READER_COVER_MAX_DATA_URL_CHARS = 384 * 1024;
+const READER_COVER_DATA_URL = /^data:image\/(?:jpeg|png|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+export interface ReaderDocumentCover {
+  /** A base64 `data:image/...` URL of a raster image. */
+  dataUrl: string;
+}
+
+export function isReaderDocumentCover(value: unknown): value is ReaderDocumentCover {
+  if (typeof value !== "object" || value === null) return false;
+  const { dataUrl } = value as Partial<ReaderDocumentCover>;
+  return typeof dataUrl === "string"
+    && dataUrl.length <= READER_COVER_MAX_DATA_URL_CHARS
+    && READER_COVER_DATA_URL.test(dataUrl);
+}
+
+/**
+ * How a book is listened to, remembered per book: the engine, voice, language,
+ * quality step and speed it was last played with. Opening the book restores
+ * them. Only the inputs the Reader can change are kept; an engine's own
+ * settings pages (Qwen3 profiles, for one) stay global.
+ */
+export interface ReaderListeningProfile {
+  /** A Reader engine id (`SurfaceEngineId`). Absent when only the speed was changed. */
+  engine?: string;
+  /** The voice of `engine`; only present with it. */
+  voice?: string;
+  /** Set for engines conditioned on a language. */
+  language?: string;
+  /** Set for engines with a quality step. */
+  quality?: number;
+  /** A speed alone is a profile too: it must not pin the engine and voice that happen to be global. */
+  playbackRate?: number;
+  updatedAt: number;
+}
+
+export function normalizeReaderListeningProfile(value: unknown): ReaderListeningProfile | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const profile = value as Partial<ReaderListeningProfile>;
+  if (typeof profile.updatedAt !== "number" || !Number.isFinite(profile.updatedAt)) return undefined;
+  const engine = typeof profile.engine === "string" && profile.engine.length > 0 && profile.engine.length <= 64
+    ? profile.engine
+    : undefined;
+  // A voice belongs to its engine.
+  const voice = engine !== undefined && typeof profile.voice === "string" && profile.voice.length <= 256
+    ? profile.voice
+    : undefined;
+  if (engine !== undefined && voice === undefined) return undefined;
+  const language = typeof profile.language === "string" && profile.language.length <= 32
+    ? profile.language
+    : undefined;
+  const quality = typeof profile.quality === "number" && Number.isFinite(profile.quality)
+    ? profile.quality
+    : undefined;
+  const playbackRate = typeof profile.playbackRate === "number" && Number.isFinite(profile.playbackRate)
+    ? Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, profile.playbackRate))
+    : undefined;
+  if (engine === undefined && playbackRate === undefined) return undefined;
+  return {
+    ...(engine === undefined ? {} : { engine }),
+    ...(voice === undefined ? {} : { voice }),
+    ...(language === undefined ? {} : { language }),
+    ...(quality === undefined ? {} : { quality }),
+    ...(playbackRate === undefined ? {} : { playbackRate }),
+    updatedAt: profile.updatedAt,
+  };
+}
+
 export interface ReaderDocumentRecord {
   id: string;
   title: string;
@@ -72,6 +165,12 @@ export interface ReaderDocumentRecord {
   progress: ReaderProgress;
   bookmarks: ReaderBookmark[];
   notes: ReaderNote[];
+  /** Absent on records saved before highlights existed. */
+  highlights?: ReaderHighlight[];
+  /** The book's cover, when its source had one. */
+  cover?: ReaderDocumentCover;
+  /** How the book was last listened to; absent until the listener changes something. */
+  listening?: ReaderListeningProfile;
   createdAt: number;
   updatedAt: number;
   lastOpenedAt: number;
@@ -88,6 +187,7 @@ export interface ReaderDocumentInput {
   sourceUrl?: string;
   text: string;
   chapters?: ReaderChapter[];
+  cover?: ReaderDocumentCover;
   now?: number;
 }
 
@@ -123,13 +223,7 @@ export const READER_SECTION_TARGET_CHARS = 8_000;
 export const READER_SECTION_MIN_CHARS = 4_000;
 export const READER_SECTION_MAX_CHARS = 12_000;
 
-export interface EstimatedWordRange {
-  word: string;
-  start: number;
-  end: number;
-  startSec: number;
-  endSec: number;
-}
+export { estimateWordRanges, type EstimatedWordRange } from "./text/wordTiming";
 
 function createId(prefix: string): string {
   const randomId = globalThis.crypto?.randomUUID?.()
@@ -316,16 +410,54 @@ interface ReaderTextChangeRange {
   nextChangeEnd: number;
 }
 
-function getReaderTextChangeRange(previousText: string, nextText: string): ReaderTextChangeRange {
-  let prefixLength = 0;
+/**
+ * Where an edit is already known to fall, e.g. the section a draft replaced.
+ * The texts must be identical before `start` and after the two ends; the
+ * character scan for the exact change then only covers the edited span. A
+ * hint that does not hold is ignored, so it can never skew an offset.
+ */
+export interface ReaderTextChangeHint {
+  start: number;
+  /** End of the replaced span in the previous text. */
+  previousEnd: number;
+  /** End of its replacement in the next text. */
+  nextEnd: number;
+}
+
+function isUsableChangeHint(previousText: string, nextText: string, hint: ReaderTextChangeHint): boolean {
+  return Number.isSafeInteger(hint.start)
+    && Number.isSafeInteger(hint.previousEnd)
+    && Number.isSafeInteger(hint.nextEnd)
+    && hint.start >= 0
+    && hint.start <= hint.previousEnd
+    && hint.previousEnd <= previousText.length
+    && hint.start <= hint.nextEnd
+    && hint.nextEnd <= nextText.length
+    && previousText.length - hint.previousEnd === nextText.length - hint.nextEnd
+    // Native comparisons confirm the claimed-equal ends far faster than the
+    // character scan they let the change search skip.
+    && previousText.slice(0, hint.start) === nextText.slice(0, hint.start)
+    && previousText.slice(hint.previousEnd) === nextText.slice(hint.nextEnd);
+}
+
+function getReaderTextChangeRange(
+  previousText: string,
+  nextText: string,
+  hint?: ReaderTextChangeHint,
+): ReaderTextChangeRange {
+  const trusted = hint && isUsableChangeHint(previousText, nextText, hint) ? hint : null;
   const sharedLimit = Math.min(previousText.length, nextText.length);
+  // Starting past the known-equal ends yields exactly what a full scan finds:
+  // both loops still extend as far as the texts keep matching.
+  let prefixLength = trusted?.start ?? 0;
   while (prefixLength < sharedLimit && previousText[prefixLength] === nextText[prefixLength]) {
     prefixLength += 1;
   }
 
-  let suffixLength = 0;
+  const suffixLimit = sharedLimit - prefixLength;
+  let suffixLength = trusted ? Math.min(previousText.length - trusted.previousEnd, suffixLimit) : 0;
   while (
-    suffixLength < sharedLimit - prefixLength
+    suffixLength < suffixLimit
     && previousText[previousText.length - suffixLength - 1] === nextText[nextText.length - suffixLength - 1]
   ) {
     suffixLength += 1;
@@ -338,13 +470,60 @@ function getReaderTextChangeRange(previousText: string, nextText: string): Reade
   };
 }
 
+/**
+ * The last text pair scanned. An edit commit rebases progress, every bookmark,
+ * note and highlight, and the chapter table against the same two texts, so
+ * remembering one scan turns a whole-book pass per offset into one pass per
+ * edit. It holds the two most recent texts until the next edit replaces them.
+ */
+let lastTextChange: { previousText: string; nextText: string; range: ReaderTextChangeRange } | null = null;
+
+function rememberedTextChangeRange(
+  previousText: string,
+  nextText: string,
+  hint?: ReaderTextChangeHint,
+): ReaderTextChangeRange {
+  if (lastTextChange?.previousText === previousText && lastTextChange.nextText === nextText) {
+    return lastTextChange.range;
+  }
+  const range = getReaderTextChangeRange(previousText, nextText, hint);
+  lastTextChange = { previousText, nextText, range };
+  return range;
+}
+
+function rebaseOffsetAcross(
+  { prefixLength, previousChangeEnd, nextChangeEnd }: ReaderTextChangeRange,
+  previousLength: number,
+  nextLength: number,
+  offset: number,
+): number {
+  const safeOffset = Math.max(0, Math.min(previousLength, offset));
+  if (safeOffset < prefixLength) return safeOffset;
+  if (safeOffset >= previousChangeEnd) return safeOffset + nextLength - previousLength;
+  return prefixLength + Math.min(safeOffset - prefixLength, nextChangeEnd - prefixLength);
+}
+
+/**
+ * Maps offsets in `previousText` onto `nextText`, finding the edit once for
+ * any number of offsets. A hint narrows that one scan to the edited span.
+ */
+export function createReaderOffsetRebaser(
+  previousText: string,
+  nextText: string,
+  hint?: ReaderTextChangeHint,
+): (offset: number) => number {
+  const range = rememberedTextChangeRange(previousText, nextText, hint);
+  return (offset) => rebaseOffsetAcross(range, previousText.length, nextText.length, offset);
+}
+
 /** Keep whole-book annotations anchored as text before them grows or shrinks. */
 export function rebaseReaderTextOffset(previousText: string, nextText: string, offset: number): number {
-  const { prefixLength, previousChangeEnd, nextChangeEnd } = getReaderTextChangeRange(previousText, nextText);
-  const safeOffset = Math.max(0, Math.min(previousText.length, offset));
-  if (safeOffset < prefixLength) return safeOffset;
-  if (safeOffset >= previousChangeEnd) return safeOffset + nextText.length - previousText.length;
-  return prefixLength + Math.min(safeOffset - prefixLength, nextChangeEnd - prefixLength);
+  return rebaseOffsetAcross(
+    rememberedTextChangeRange(previousText, nextText),
+    previousText.length,
+    nextText.length,
+    offset,
+  );
 }
 
 function nearestReaderSectionBoundary(text: string, start: number, end: number): number {
@@ -448,7 +627,7 @@ export function rebaseReaderChapters(
 ): ReaderChapter[] {
   if (chapters.length === 0) return structureTextChapters(nextText, documentTitle);
 
-  const { prefixLength, previousChangeEnd } = getReaderTextChangeRange(previousText, nextText);
+  const { prefixLength, previousChangeEnd } = rememberedTextChangeRange(previousText, nextText);
   const delta = nextText.length - previousText.length;
   const insertionOnly = previousChangeEnd === prefixLength;
   const moveBoundary = (offset: number): number => {
@@ -499,6 +678,7 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
     },
     bookmarks: [],
     notes: [],
+    ...(isReaderDocumentCover(input.cover) ? { cover: { dataUrl: input.cover.dataUrl } } : {}),
     createdAt: now,
     updatedAt: now,
     lastOpenedAt: now,
@@ -507,15 +687,17 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
 
 /** Add fields introduced by newer Reader versions without rewriting book text. */
 export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): ReaderDocumentRecord {
+  const { highlights, cover, listening, ...record } = document;
   const chapters = normalizeReaderChapters(document.text, document.chapters ?? [], document.title);
   const sections = buildReaderSections(document.text, chapters);
+  const listeningProfile = normalizeReaderListeningProfile(listening);
   const progressOffset = Math.max(0, Math.min(document.text.length, document.progress?.textOffset ?? 0));
   const progressChapter = chapterAtOffset(chapters, progressOffset);
   const progressSection = sections.find((section) => section.id === document.progress?.sectionId)
     ?? readerSectionAtOffset(sections, progressOffset);
 
   return {
-    ...document,
+    ...record,
     chapters,
     progress: {
       positionSec: Math.max(0, document.progress?.positionSec ?? 0),
@@ -536,6 +718,10 @@ export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): R
       chapterId: chapterAtOffset(chapters, note.textOffset)?.id ?? null,
       sectionId: readerSectionAtOffset(sections, note.textOffset)?.id ?? null,
     })),
+    // Records from before highlights existed stay without the field.
+    ...(Array.isArray(highlights) ? { highlights: normalizeReaderHighlights(document.text, highlights) } : {}),
+    ...(isReaderDocumentCover(cover) ? { cover } : {}),
+    ...(listeningProfile ? { listening: listeningProfile } : {}),
   };
 }
 
@@ -566,50 +752,6 @@ export function calculateReaderProgress(
   return 0;
 }
 
-/** Extra letter-equivalents of time for the pause that follows a word. */
-function trailingPauseWeight(word: string): number {
-  if (/[.!?…。？！]["'”’)\]]*$/u.test(word)) return 6;
-  if (/[,;:—–，；：]["'”’)\]]*$/u.test(word)) return 3;
-  return 0;
-}
-
-export function estimateWordRanges(
-  text: string,
-  textStart: number,
-  startSec: number,
-  endSec: number,
-): EstimatedWordRange[] {
-  const matches = [...text.matchAll(/\S+/g)];
-  if (matches.length === 0 || endSec <= startSec) return [];
-
-  // Speech time tracks letters, plus the pause a voice takes after a comma or
-  // a full stop. Without the pause weight the marker ran ahead of the voice
-  // after every sentence break inside a multi-sentence passage.
-  const weights = matches.map((match) => (
-    Math.max(1, match[0].replace(/[^\p{L}\p{N}]/gu, "").length) + trailingPauseWeight(match[0])
-  ));
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const duration = endSec - startSec;
-  let cursorSec = startSec;
-
-  return matches.map((match, index) => {
-    const word = match[0];
-    const relativeStart = match.index ?? 0;
-    const wordDuration = index === matches.length - 1
-      ? endSec - cursorSec
-      : duration * (weights[index] / totalWeight);
-    const range = {
-      word,
-      start: textStart + relativeStart,
-      end: textStart + relativeStart + word.length,
-      startSec: cursorSec,
-      endSec: index === matches.length - 1 ? endSec : cursorSec + wordDuration,
-    };
-    cursorSec = range.endSec;
-    return range;
-  });
-}
-
 export function createReaderBookmark(input: Omit<ReaderBookmark, "id" | "createdAt">): ReaderBookmark {
   return { ...input, id: createId("bookmark"), createdAt: Date.now() };
 }
@@ -619,35 +761,248 @@ export function createReaderNote(input: Omit<ReaderNote, "id" | "createdAt" | "u
   return { ...input, id: createId("note"), createdAt: now, updatedAt: now };
 }
 
-export function buildAudioSignature(parts: {
-  text: string;
-  model: string;
+export function isReaderHighlightColor(value: unknown): value is ReaderHighlightColor {
+  return typeof value === "string" && (READER_HIGHLIGHT_COLORS as readonly string[]).includes(value);
+}
+
+export interface ReaderHighlightInput {
+  start: number;
+  end: number;
+  color: ReaderHighlightColor;
+}
+
+/**
+ * A highlight over `text[start, end)`, trimmed to the words inside it, or null
+ * when the range holds nothing to highlight.
+ */
+export function createReaderHighlight(
+  text: string,
+  input: ReaderHighlightInput,
+  now = Date.now(),
+): ReaderHighlight | null {
+  if (!Number.isFinite(input.start) || !Number.isFinite(input.end) || !isReaderHighlightColor(input.color)) {
+    return null;
+  }
+  let start = Math.max(0, Math.min(text.length, Math.floor(input.start)));
+  let end = Math.max(start, Math.min(text.length, Math.floor(input.end)));
+  // A drag usually catches the space or line break around the words.
+  while (start < end && /\s/.test(text[start])) start += 1;
+  while (end > start && /\s/.test(text[end - 1])) end -= 1;
+  if (end <= start) return null;
+  return {
+    id: createId("highlight"),
+    start,
+    end,
+    color: input.color,
+    quote: text.slice(start, Math.min(end, start + READER_HIGHLIGHT_QUOTE_LIMIT)),
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+/** The highlighted text still sits exactly where the highlight says. */
+export function isReaderHighlightAnchored(text: string, highlight: ReaderHighlight): boolean {
+  return highlight.end > highlight.start
+    && highlight.end <= text.length
+    && highlight.quote.length > 0
+    && text.startsWith(highlight.quote, highlight.start);
+}
+
+/**
+ * Where a highlight's text sits in `text` now: in place when it is anchored,
+ * else the occurrence of its quote nearest to where it was, or null when its
+ * text is gone.
+ */
+export function resolveReaderHighlightRange(
+  text: string,
+  highlight: ReaderHighlight,
+): { start: number; end: number } | null {
+  if (isReaderHighlightAnchored(text, highlight)) return { start: highlight.start, end: highlight.end };
+  if (!highlight.quote) return null;
+  let found = -1;
+  let foundDistance = Infinity;
+  for (let index = text.indexOf(highlight.quote); index !== -1; index = text.indexOf(highlight.quote, index + 1)) {
+    const distance = Math.abs(index - highlight.start);
+    if (distance < foundDistance) {
+      found = index;
+      foundDistance = distance;
+    } else if (index > highlight.start) {
+      break;
+    }
+  }
+  if (found === -1) return null;
+  // A quote shorter than the limit is the whole highlighted text; only a
+  // truncated one leaves the stored range to say how far the highlight ran.
+  const length = highlight.quote.length < READER_HIGHLIGHT_QUOTE_LIMIT
+    ? highlight.quote.length
+    : Math.max(highlight.quote.length, highlight.end - highlight.start);
+  return { start: found, end: Math.min(text.length, found + length) };
+}
+
+function isStoredHighlight(value: unknown): value is ReaderHighlight {
+  if (typeof value !== "object" || value === null) return false;
+  const entry = value as Partial<ReaderHighlight>;
+  return typeof entry.id === "string" && entry.id.length > 0
+    && typeof entry.start === "number" && Number.isSafeInteger(entry.start) && entry.start >= 0
+    && typeof entry.end === "number" && Number.isSafeInteger(entry.end) && entry.end > entry.start
+    && isReaderHighlightColor(entry.color)
+    && typeof entry.quote === "string"
+    && Number.isFinite(entry.createdAt)
+    && Number.isFinite(entry.updatedAt);
+}
+
+/**
+ * Keeps well-formed stored highlights, in reading order and once per id, and
+ * re-anchors any whose text has moved. One whose text is gone keeps its record
+ * (and stays listed and exported) but no longer marks the page.
+ */
+function normalizeReaderHighlights(text: string, highlights: readonly unknown[]): ReaderHighlight[] {
+  const seenIds = new Set<string>();
+  return highlights
+    .filter(isStoredHighlight)
+    .filter((highlight) => {
+      if (seenIds.has(highlight.id)) return false;
+      seenIds.add(highlight.id);
+      return true;
+    })
+    .map((highlight) => {
+      const range = resolveReaderHighlightRange(text, highlight);
+      if (range) return range.start === highlight.start && range.end === highlight.end ? highlight : { ...highlight, ...range };
+      const start = Math.max(0, Math.min(text.length, Math.floor(highlight.start)));
+      return { ...highlight, start, end: Math.max(start, Math.min(text.length, Math.floor(highlight.end))) };
+    })
+    .sort((a, b) => a.start - b.start || a.end - b.end);
+}
+
+/**
+ * Carries highlights across a text edit. Anchored ones move with their words
+ * and take their quote from the edited text, so a fix inside a highlighted
+ * passage keeps the highlight, while one whose words were all deleted goes
+ * with them. Text typed right after a highlight stays outside it. Detached
+ * ones are left for their quote to find.
+ */
+export function rebaseReaderHighlights(
+  previousText: string,
+  nextText: string,
+  highlights: readonly ReaderHighlight[],
+  hint?: ReaderTextChangeHint,
+): ReaderHighlight[] {
+  if (highlights.length === 0) return [];
+  const range = rememberedTextChangeRange(previousText, nextText, hint);
+  const rebase = (offset: number) => rebaseOffsetAcross(range, previousText.length, nextText.length, offset);
+  const insertionAt = range.previousChangeEnd === range.prefixLength ? range.prefixLength : -1;
+  return highlights.flatMap((highlight) => {
+    if (!isReaderHighlightAnchored(previousText, highlight)) return [highlight];
+    const start = rebase(highlight.start);
+    const end = highlight.end === insertionAt ? highlight.end : rebase(highlight.end);
+    if (end <= start) return [];
+    return [{
+      ...highlight,
+      start,
+      end,
+      quote: nextText.slice(start, Math.min(end, start + READER_HIGHLIGHT_QUOTE_LIMIT)),
+    }];
+  });
+}
+
+/**
+ * Version 2 hashes only the inputs the selected engine reads (see
+ * `EngineDescriptor.signatureParts`). Older entries carry no version prefix and
+ * never compare equal to a v2 signature; the Reader recognises them by
+ * recomputing `buildLegacyAudioSignature` from the same inputs and upgrades a
+ * match to v2 instead of discarding hours of generated audio.
+ */
+export const READER_AUDIO_SIGNATURE_VERSION = 2;
+
+/**
+ * The tuning inputs that shape an engine's audio, already narrowed to the ones
+ * it reads. An omitted field is one the engine ignores, so changing it can
+ * never invalidate cached audio.
+ */
+export interface AudioSignatureTuning {
+  speed?: number;
+  sentenceSpeedVariance?: number;
+  quality?: number;
+  language?: string;
+  pauseOverridesSec?: GenerationTuningSettings["pauseOverridesSec"];
+  pronunciationRules?: GenerationTuningSettings["pronunciationRules"];
+  emphasisStrength?: number;
+  /** See `GenerationTuningSettings.speechFingerprint`. */
+  speechFingerprint?: string;
+}
+
+/** What the version 1 signature hashed: the whole Creator tuning and quality, for every engine. */
+export interface LegacyAudioSignatureParts {
   voice: string;
   quality: number;
-  tuning?: GenerationTuningSettings;
+  tuning: GenerationTuningSettings;
+}
+
+/**
+ * The version 1 signature (`<length>-<hash>`, no prefix), kept only to
+ * recognise audio cached before version 2 existed.
+ */
+export function buildLegacyAudioSignature(parts: LegacyAudioSignatureParts & {
+  text: string;
+  model: string;
 }): string {
   let hash = 2166136261;
-  const tuning = parts.tuning;
-  const tuningKey = tuning
-    ? JSON.stringify({
-        speed: tuning.speed,
-        quality: tuning.quality,
-        language: tuning.language ?? "en",
-        pauseOverridesSec: {
-          none: tuning.pauseOverridesSec?.none ?? null,
-          comma: tuning.pauseOverridesSec?.comma ?? null,
-          sentence: tuning.pauseOverridesSec?.sentence ?? null,
-          paragraph: tuning.pauseOverridesSec?.paragraph ?? null,
-        },
-        sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
-        pronunciationRules: tuning.pronunciationRules ?? [],
-        emphasisStrength: tuning.emphasisStrength ?? null,
-      })
-    : "";
+  const { tuning } = parts;
+  const tuningKey = JSON.stringify({
+    speed: tuning.speed,
+    quality: tuning.quality,
+    language: tuning.language ?? "en",
+    pauseOverridesSec: {
+      none: tuning.pauseOverridesSec?.none ?? null,
+      comma: tuning.pauseOverridesSec?.comma ?? null,
+      sentence: tuning.pauseOverridesSec?.sentence ?? null,
+      paragraph: tuning.pauseOverridesSec?.paragraph ?? null,
+    },
+    sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
+    pronunciationRules: tuning.pronunciationRules ?? [],
+    emphasisStrength: tuning.emphasisStrength ?? null,
+  });
   const value = `${parts.model}\u0000${parts.voice}\u0000${parts.quality}\u0000${tuningKey}\u0000${parts.text}`;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
   return `${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
+}
+
+export function buildAudioSignature(parts: {
+  text: string;
+  model: string;
+  voice: string;
+  tuning: AudioSignatureTuning;
+}): string {
+  let hash = 2166136261;
+  const { tuning } = parts;
+  // A fixed key order with null for anything absent keeps equal inputs equal
+  // regardless of how the caller assembled the object.
+  const tuningKey = JSON.stringify({
+    speed: tuning.speed ?? null,
+    sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
+    quality: tuning.quality ?? null,
+    language: tuning.language ?? null,
+    pauseOverridesSec: tuning.pauseOverridesSec
+      ? {
+          none: tuning.pauseOverridesSec.none ?? null,
+          comma: tuning.pauseOverridesSec.comma ?? null,
+          sentence: tuning.pauseOverridesSec.sentence ?? null,
+          paragraph: tuning.pauseOverridesSec.paragraph ?? null,
+        }
+      : null,
+    pronunciationRules: tuning.pronunciationRules?.map(({ from, to }) => ({ from, to })) ?? null,
+    emphasisStrength: tuning.emphasisStrength ?? null,
+    // Only named when the spoken-text pipeline changes something, so audio
+    // cached without it keeps its signature.
+    ...(tuning.speechFingerprint === undefined ? {} : { speechFingerprint: tuning.speechFingerprint }),
+  });
+  const value = `${parts.model}\u0000${parts.voice}\u0000${tuningKey}\u0000${parts.text}`;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `v${READER_AUDIO_SIGNATURE_VERSION}.${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
 }

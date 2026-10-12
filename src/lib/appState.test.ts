@@ -1,19 +1,29 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AUDIO8_DEFAULT_VOICE, CREATOR_PRESETS, MODELS, QUALITY_MAX, QUALITY_MIN } from "../constants";
+import { CREATOR_PRESETS, QUALITY_MAX, QUALITY_MIN } from "../constants";
+import { ENGINES } from "../models/registry";
 import {
   analyzePronunciationLexicon,
   DEFAULT_TEXT,
   getCreatorPresetDefaults,
   getInitialAppState,
   getInitialCreatorState,
+  getInitialEngineSettings,
   parsePronunciationRules,
   persistAppState,
   persistCreatorState,
+  persistEngineSettings,
 } from "./appState";
 
 const LEGACY_MODEL_STORAGE_KEY = "tts-app-model";
-const APP_STATE_STORAGE_KEY = "tts-app-state-v1";
-const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
+const LEGACY_APP_STATE_STORAGE_KEY = "tts-app-state-v1";
+const APP_STATE_STORAGE_KEY = "tts-app-state-v2";
+const ENGINE_SETTINGS_STORAGE_KEY = "tts-engine-settings-v1";
+const LEGACY_CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
+const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v2";
+
+const DEFAULT_ENGINE_SETTINGS = Object.fromEntries(
+  Object.values(ENGINES).map((engine) => [engine.id, engine.defaultSettings]),
+);
 
 describe("appState", () => {
   beforeEach(() => {
@@ -21,49 +31,22 @@ describe("appState", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns defaults and honors a valid legacy model when no v1 state exists", () => {
+  it("returns defaults and honors a valid legacy model when no saved state exists", () => {
     expect(getInitialAppState()).toEqual({
       model: "kokoro",
       text: DEFAULT_TEXT,
-      voicesByModel: {
-        kokoro: MODELS.kokoro.defaultVoice,
-        supertonic: MODELS.supertonic.defaultVoice,
-      },
       quality: 5,
-      audio8Voice: AUDIO8_DEFAULT_VOICE,
+      desktopModels: { studio: null, reader: null },
     });
+    expect(getInitialEngineSettings()).toEqual(DEFAULT_ENGINE_SETTINGS);
 
     localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, "supertonic");
 
     expect(getInitialAppState().model).toBe("supertonic");
   });
 
-  it("normalizes persisted app state and falls back from invalid values", () => {
-    localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, "supertonic");
-    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({
-      model: "invalid",
-      text: 42,
-      voicesByModel: {
-        kokoro: "  ",
-        supertonic: "Robot",
-      },
-      quality: QUALITY_MAX + 99,
-    }));
-
-    expect(getInitialAppState()).toEqual({
-      model: "supertonic",
-      text: DEFAULT_TEXT,
-      voicesByModel: {
-        kokoro: MODELS.kokoro.defaultVoice,
-        supertonic: MODELS.supertonic.defaultVoice,
-      },
-      quality: QUALITY_MAX,
-      audio8Voice: AUDIO8_DEFAULT_VOICE,
-    });
-  });
-
-  it("reads valid persisted app state and clamps low quality", () => {
-    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({
+  it("migrates the v1 app state, including its voices, until v2 is written", () => {
+    localStorage.setItem(LEGACY_APP_STATE_STORAGE_KEY, JSON.stringify({
       model: "supertonic",
       text: "Saved script",
       voicesByModel: {
@@ -77,30 +60,139 @@ describe("appState", () => {
     expect(getInitialAppState()).toEqual({
       model: "supertonic",
       text: "Saved script",
-      voicesByModel: {
-        kokoro: "custom_kokoro",
-        supertonic: "Male 2",
-      },
       quality: QUALITY_MIN,
-      audio8Voice: "iris",
+      desktopModels: { studio: null, reader: null },
+    });
+    expect(getInitialEngineSettings()).toMatchObject({
+      kokoro: { voice: "custom_kokoro" },
+      supertonic: { voice: "Male 2", language: "en" },
+      audio8: { voice: "iris", seed: null, temperature: null },
+      supertonic3: ENGINES.supertonic3.defaultSettings,
+      qwen3: ENGINES.qwen3.defaultSettings,
+    });
+
+    persistAppState({ model: "kokoro", text: "Newer script", quality: 7 });
+    persistEngineSettings({ kokoro: { voice: "bf_emma" } });
+
+    expect(getInitialAppState()).toMatchObject({ model: "kokoro", text: "Newer script", quality: 7 });
+    // Engines v2 has not stored yet still read their v1 voices.
+    expect(getInitialEngineSettings()).toMatchObject({
+      kokoro: { voice: "bf_emma" },
+      supertonic: { voice: "Male 2" },
+      audio8: { voice: "iris", seed: null, temperature: null },
     });
   });
 
-  it("falls back from an unknown persisted Audio8 voice", () => {
-    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({ audio8Voice: "not-a-voice" }));
+  it("normalizes persisted app state and falls back from invalid values", () => {
+    localStorage.setItem(LEGACY_MODEL_STORAGE_KEY, "supertonic");
+    localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify({
+      version: 2,
+      model: "invalid",
+      text: 42,
+      quality: QUALITY_MAX + 99,
+      desktopModels: { studio: "neutts", reader: 3 },
+    }));
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({
+      kokoro: { voice: "  " },
+      supertonic: { voice: "Robot", language: "xx" },
+      audio8: { voice: "not-a-voice" },
+      supertonic3: "M1",
+      qwen3: { temperature: 99, profileRepo: "../../etc" },
+      mystery: { voice: "ignored" },
+    }));
 
-    expect(getInitialAppState().audio8Voice).toBe(AUDIO8_DEFAULT_VOICE);
+    expect(getInitialAppState()).toEqual({
+      model: "supertonic",
+      text: DEFAULT_TEXT,
+      quality: QUALITY_MAX,
+      desktopModels: { studio: null, reader: null },
+    });
+    const settings = getInitialEngineSettings();
+    expect(settings).toMatchObject({
+      kokoro: ENGINES.kokoro.defaultSettings,
+      supertonic: ENGINES.supertonic.defaultSettings,
+      audio8: ENGINES.audio8.defaultSettings,
+      supertonic3: ENGINES.supertonic3.defaultSettings,
+      qwen3: { ...ENGINES.qwen3.defaultSettings, temperature: 2, profileRepo: null },
+    });
+    expect(settings).not.toHaveProperty("mystery");
+  });
+
+  it("round-trips each surface's desktop model and every engine's settings", () => {
+    persistAppState({
+      model: "supertonic",
+      text: "Saved",
+      quality: 4,
+      desktopModels: { studio: "qwen3", reader: "supertonic3" },
+    });
+    persistEngineSettings({
+      supertonic: { voice: "Male 3", language: "fr" },
+      supertonic3: { voice: "F4", language: "ja", seed: null },
+    });
+    persistEngineSettings({
+      qwen3: { ...ENGINES.qwen3.defaultSettings, speaker: "Ryan", seed: 42 },
+    });
+
+    expect(JSON.parse(localStorage.getItem(APP_STATE_STORAGE_KEY) ?? "{}")).toMatchObject({ version: 2 });
+    expect(getInitialAppState()).toEqual({
+      model: "supertonic",
+      text: "Saved",
+      quality: 4,
+      desktopModels: { studio: "qwen3", reader: "supertonic3" },
+    });
+    // The second write kept the engines the first one stored.
+    expect(getInitialEngineSettings()).toMatchObject({
+      supertonic: { voice: "Male 3", language: "fr" },
+      supertonic3: { voice: "F4", language: "ja", seed: null },
+      qwen3: { speaker: "Ryan", seed: 42 },
+    });
+  });
+
+  it("persists Kitten, Paradee and Piper settings with the other engines and rejects what they cannot speak", () => {
+    persistEngineSettings({
+      kitten: { voice: "Rosie" },
+      piper: { voice: "en_US-libritts-high#12" },
+    });
+    persistEngineSettings({ supertonic: { voice: "Male 3", language: "fr" } });
+
+    expect(getInitialEngineSettings()).toMatchObject({
+      kitten: { voice: "Rosie" },
+      paradee: ENGINES.paradee.defaultSettings,
+      piper: { voice: "en_US-libritts-high#12" },
+      supertonic: { voice: "Male 3", language: "fr" },
+    });
+
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({
+      kitten: { voice: "Robot" },
+      paradee: { voice: "af_bella" },
+      piper: { voice: "en_US-libritts-high#99999" },
+    }));
+    expect(getInitialEngineSettings()).toMatchObject({
+      kitten: ENGINES.kitten.defaultSettings,
+      paradee: ENGINES.paradee.defaultSettings,
+      piper: { voice: "en_US-libritts-high" },
+    });
+  });
+
+  it("restores the browser model a user last chose among the new engines", () => {
+    for (const model of ["kitten", "paradee", "piper"] as const) {
+      persistAppState({ model });
+      expect(getInitialAppState().model).toBe(model);
+    }
   });
 
   it("falls back to defaults when stored app JSON or localStorage access fails", () => {
     localStorage.setItem(APP_STATE_STORAGE_KEY, "{not json");
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, "[1, 2]");
     expect(getInitialAppState().model).toBe("kokoro");
+    expect(getInitialEngineSettings()).toEqual(DEFAULT_ENGINE_SETTINGS);
 
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("blocked");
     });
 
     expect(getInitialAppState().text).toBe(DEFAULT_TEXT);
+    expect(getInitialEngineSettings()).toEqual(DEFAULT_ENGINE_SETTINGS);
   });
 
   it("builds preset defaults, resolving custom from the default creator preset", () => {
@@ -111,7 +203,11 @@ describe("appState", () => {
       preset: "custom",
       speed: defaultPreset.speed,
       exportFormat: defaultPreset.exportFormat,
-      pronunciationLexicon: "",
+      dictionaries: [],
+      normalizeSpeech: false,
+      cleanupOnSpeak: false,
+      captionStyle: "readable",
+      loudnessPresetId: "streaming",
     });
 
     expect(getCreatorPresetDefaults("youtube-long")).toMatchObject({
@@ -122,16 +218,21 @@ describe("appState", () => {
 
   it("normalizes persisted creator state and clamps numeric ranges", () => {
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      version: 2,
       preset: "custom",
       speed: 99,
       pauseCommaSec: -1,
       pauseSentenceSec: 99,
       pauseParagraphSec: 0.5,
-      pronunciationLexicon: "GIF => jif",
-      exportFormat: "mp3",
+      normalizeSpeech: true,
+      cleanupOnSpeak: true,
+      exportFormat: "flac-24",
       exportSampleRate: 44100,
       exportBitrateKbps: 999,
       masteringEnabled: false,
+      loudnessPresetId: "acx",
+      exportPost: { trimSilence: true, headSec: 99, tailSec: 0.5, fadeInMs: -5, fadeOutMs: 9999 },
+      captionStyle: "passage",
     }));
 
     expect(getInitialCreatorState()).toEqual({
@@ -140,12 +241,35 @@ describe("appState", () => {
       pauseCommaSec: 0,
       pauseSentenceSec: 1.2,
       pauseParagraphSec: 0.5,
-      pronunciationLexicon: "GIF => jif",
-      exportFormat: "mp3",
+      dictionaries: [],
+      normalizeSpeech: true,
+      cleanupOnSpeak: true,
+      exportFormat: "flac-24",
       exportSampleRate: 44100,
       exportBitrateKbps: 320,
       masteringEnabled: false,
+      loudnessPresetId: "acx",
+      exportPost: { trimSilence: true, headSec: 10, tailSec: 0.5, fadeInMs: 0, fadeOutMs: 5000 },
+      captionStyle: "passage",
     });
+  });
+
+  it("keeps the dictionaries that validate and skips the rest", () => {
+    const valid = {
+      version: 2,
+      id: "brand",
+      name: "Brand",
+      enabled: false,
+      rules: [{ type: "alias", from: "GIF", to: "jif" }],
+    };
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      version: 2,
+      dictionaries: [valid, { id: 7 }, "nope"],
+    }));
+    expect(getInitialCreatorState().dictionaries).toEqual([valid]);
+
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({ version: 2, dictionaries: "bad" }));
+    expect(getInitialCreatorState().dictionaries).toEqual([]);
   });
 
   it("falls back from invalid creator state fields and malformed JSON", () => {
@@ -155,17 +279,57 @@ describe("appState", () => {
       pauseCommaSec: "none",
       pauseSentenceSec: null,
       pauseParagraphSec: undefined,
-      pronunciationLexicon: 123,
       exportFormat: "aac",
       exportSampleRate: 22050,
       exportBitrateKbps: "320",
       masteringEnabled: "yes",
+      normalizeSpeech: "yes",
+      cleanupOnSpeak: 1,
+      loudnessPresetId: "loud",
+      exportPost: "none",
+      captionStyle: "loud",
     }));
 
     expect(getInitialCreatorState()).toEqual(getCreatorPresetDefaults("youtube-shorts"));
 
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, "{not json");
     expect(getInitialCreatorState()).toEqual(getCreatorPresetDefaults("youtube-shorts"));
+  });
+
+  it("migrates the v1 creator state, turning its text lexicon into a dictionary", () => {
+    const v1 = JSON.stringify({
+      preset: "youtube-long",
+      speed: 1.1,
+      pronunciationLexicon: "route => root\nUS = you ess\nbad line",
+      exportFormat: "mp3",
+      exportBitrateKbps: 256,
+      masteringEnabled: false,
+    });
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, v1);
+
+    const migrated = getInitialCreatorState();
+    expect(migrated).toMatchObject({ preset: "youtube-long", speed: 1.1, exportFormat: "mp3", exportBitrateKbps: 256, masteringEnabled: false });
+    expect(migrated.dictionaries).toHaveLength(1);
+    expect(migrated.dictionaries[0]).toMatchObject({
+      id: "quick-rules",
+      name: "Quick rules",
+      enabled: true,
+      rules: [
+        { type: "alias", from: "route", to: "root", caseSensitive: false },
+        { type: "alias", from: "US", to: "you ess", caseSensitive: true },
+      ],
+    });
+    // Everything v1 could not store starts at its default, and v1 stays for a downgrade.
+    expect(migrated).toMatchObject({ normalizeSpeech: false, cleanupOnSpeak: false, captionStyle: "readable", loudnessPresetId: "streaming" });
+    expect(localStorage.getItem(LEGACY_CREATOR_STATE_STORAGE_KEY)).toBe(v1);
+
+    // Once v2 exists, it wins.
+    persistCreatorState({ preset: "custom", dictionaries: [] });
+    expect(getInitialCreatorState().preset).toBe("custom");
+
+    localStorage.clear();
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: 123 }));
+    expect(getInitialCreatorState().dictionaries).toEqual([]);
   });
 
   it("parses pronunciation rules from common separators and ignores comments", () => {
@@ -203,18 +367,47 @@ describe("appState", () => {
     });
   });
 
-  it("snaps persisted MP3 bitrates to values supported by the export control", () => {
+  it("snaps persisted MP3 bitrates to values the encoder supports", () => {
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
       preset: "custom",
-      exportBitrateKbps: 96,
+      exportBitrateKbps: 40,
     }));
-    expect(getInitialCreatorState().exportBitrateKbps).toBe(128);
+    expect(getInitialCreatorState().exportBitrateKbps).toBe(64);
+
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
+      preset: "custom",
+      exportBitrateKbps: 100,
+    }));
+    expect(getInitialCreatorState().exportBitrateKbps).toBe(96);
 
     localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({
       preset: "custom",
       exportBitrateKbps: 275,
     }));
     expect(getInitialCreatorState().exportBitrateKbps).toBe(256);
+  });
+
+  it("never fails to start over a version 1 lexicon that a dictionary cannot hold", () => {
+    const raw = JSON.stringify({
+      pronunciationLexicon: [`${"a".repeat(300)}=x`, `b=${"y".repeat(600)}`, "keep=this", "also=this"].join("\n"),
+    });
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, raw);
+
+    const state = getInitialCreatorState();
+    expect(state.dictionaries[0].rules.map((rule) => rule.type === "alias" && rule.from)).toEqual(["keep", "also"]);
+    expect(state.migrationNotice).toBe("2 of your 4 saved pronunciation rules were too long or too many for a dictionary and were left out. They are still stored unchanged.");
+    expect(localStorage.getItem(LEGACY_CREATOR_STATE_STORAGE_KEY)).toBe(raw);
+
+    const tooMany = Array.from({ length: 6000 }, (_, index) => `w${index}=v${index}`).join("\n");
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: tooMany }));
+    const big = getInitialCreatorState();
+    expect(big.dictionaries[0].rules).toHaveLength(5000);
+    expect(big.migrationNotice).toContain("1000 of your 6000 saved pronunciation rules were");
+
+    localStorage.setItem(LEGACY_CREATOR_STATE_STORAGE_KEY, JSON.stringify({ pronunciationLexicon: "one=\u0001bad" }));
+    const rejected = getInitialCreatorState();
+    expect(rejected.dictionaries).toEqual([]);
+    expect(rejected.migrationNotice).toContain("1 of your 1 saved pronunciation rule was");
   });
 
   it("persists app and creator state while tolerating storage failures", () => {
@@ -227,6 +420,7 @@ describe("appState", () => {
     });
     expect(localStorage.getItem(LEGACY_MODEL_STORAGE_KEY)).toBe("supertonic");
     expect(JSON.parse(localStorage.getItem(CREATOR_STATE_STORAGE_KEY) ?? "{}")).toMatchObject({
+      version: 2,
       preset: "custom",
       exportFormat: "mp3",
     });
@@ -236,6 +430,7 @@ describe("appState", () => {
     });
 
     expect(() => persistAppState({ model: "kokoro" })).not.toThrow();
+    expect(() => persistEngineSettings({ audio8: { voice: "iris", seed: null, temperature: null } })).not.toThrow();
     expect(() => persistCreatorState({ preset: "youtube-long" })).not.toThrow();
   });
 });

@@ -15,8 +15,10 @@ describe("DownloadProgress", () => {
   it("explains that reloads reuse the local cache", () => {
     render(
       <DownloadProgress
-        kokoroState={{ ...idleState, loading: true, downloadProgress: 42 }}
-        supertonicState={idleState}
+        states={{
+          kokoro: { ...idleState, loading: true, downloadProgress: 42 },
+          supertonic: idleState,
+        }}
       />,
     );
 
@@ -29,10 +31,7 @@ describe("DownloadProgress", () => {
 
   it("stays hidden when nothing is loading", () => {
     const { container } = render(
-      <DownloadProgress
-        kokoroState={idleState}
-        supertonicState={idleState}
-      />,
+      <DownloadProgress states={{ kokoro: idleState, supertonic: idleState }} />,
     );
 
     expect(container).toBeEmptyDOMElement();
@@ -41,8 +40,7 @@ describe("DownloadProgress", () => {
   it("renders a zero-width bar when progress is zero", () => {
     const { container } = render(
       <DownloadProgress
-        kokoroState={{ ...idleState, loading: true, downloadProgress: 0 }}
-        supertonicState={idleState}
+        states={{ kokoro: { ...idleState, loading: true, downloadProgress: 0 }, supertonic: idleState }}
       />,
     );
 
@@ -53,13 +51,31 @@ describe("DownloadProgress", () => {
   it("shows Electron-only Supertonic 3 preparation", () => {
     render(
       <DownloadProgress
-        kokoroState={idleState}
-        supertonicState={idleState}
-        supertonic3State={{ ...idleState, loading: true, downloadProgress: 25 }}
+        states={{
+          kokoro: idleState,
+          supertonic: idleState,
+          supertonic3: { ...idleState, loading: true, downloadProgress: 25 },
+        }}
       />,
     );
 
     expect(screen.getByText("Supertonic 3")).toBeInTheDocument();
     expect(screen.getByText("25%")).toBeInTheDocument();
+  });
+
+  it("names every preparing engine from the registry, in picker order, and keeps failures visible", () => {
+    render(
+      <DownloadProgress
+        states={{
+          supertonic3: { ...idleState, error: "Worker crashed" },
+          kokoro: { ...idleState, loading: true, downloadProgress: 60 },
+          supertonic: { ...idleState, ready: true, error: "stale" },
+        }}
+      />,
+    );
+
+    const names = screen.getAllByText(/^(Kokoro|Supertonic|Supertonic 3)$/).map((node) => node.textContent);
+    expect(names).toEqual(["Kokoro", "Supertonic 3"]);
+    expect(screen.getByText("Failed")).toBeInTheDocument();
   });
 });
