@@ -3,6 +3,7 @@ import { KITTEN_VOICES } from "../lib/kittenVoices";
 import { chunkKittenText, chunkParadeeText, chunkPiperText } from "../lib/phonemeModels";
 import { PIPER_DEFAULT_VOICE, PIPER_VOICES } from "../lib/piperVoices";
 import type { GenerationTuningSettings } from "../types";
+import type { AnyEngineDescriptor } from "./types";
 import { KITTEN_DOWNLOAD_BYTES, kittenEngine } from "./kitten";
 import { PARADEE_DOWNLOAD_BYTES, paradeeEngine } from "./paradee";
 import {
@@ -153,7 +154,7 @@ describe("Paradee", () => {
 
   it("previews with the worker's chunker, whatever the backend", () => {
     for (const backend of ["webgpu", "wasm", null] as const) {
-      expect(paradeeEngine.previewChunks(PREVIEW_TEXT, { settings: paradeeEngine.defaultSettings, backend, quality: 5 }))
+      expect((paradeeEngine as AnyEngineDescriptor).previewChunks(PREVIEW_TEXT, { settings: paradeeEngine.defaultSettings, backend, quality: 5 }))
         .toEqual(chunkParadeeText(PREVIEW_TEXT));
     }
   });
@@ -229,7 +230,7 @@ describe("Piper", () => {
 
   it("previews with the worker's chunker for every voice", () => {
     for (const voice of PIPER_VOICES) {
-      expect(piperEngine.previewChunks(PREVIEW_TEXT, { settings: { voice: voice.id }, backend: "wasm", quality: 5 }))
+      expect((piperEngine as AnyEngineDescriptor).previewChunks(PREVIEW_TEXT, { settings: { voice: voice.id }, backend: "wasm", quality: 5 }))
         .toEqual(chunkPiperText(PREVIEW_TEXT));
     }
   });

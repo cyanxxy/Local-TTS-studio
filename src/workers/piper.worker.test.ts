@@ -9,6 +9,7 @@ import type { PinnedAssetManifest } from "../lib/pinnedModelFetch";
 import type { PiperVoiceEntry } from "../lib/piperVoices";
 import type { StyleTtsOutMessage } from "../lib/styleTtsRuntime";
 import { piperEngine } from "../models/piper";
+import type { AnyEngineDescriptor } from "../models/types";
 import type { WorkerInMessage } from "../types";
 
 const PREVIEW_TEXT = [
@@ -212,7 +213,7 @@ describe("piper.worker", () => {
 
     await generate(worker, SINGLE, PREVIEW_TEXT);
 
-    const preview = piperEngine.previewChunks(PREVIEW_TEXT, { settings: { voice: SINGLE }, backend: "wasm", quality: 5 });
+    const preview = (piperEngine as AnyEngineDescriptor).previewChunks(PREVIEW_TEXT, { settings: { voice: SINGLE }, backend: "wasm", quality: 5 });
     expect(preview.length).toBeGreaterThan(1);
     expect(worker.ofType("AUDIO_CHUNK").map(({ text, textStart, textEnd }) => ({ text, start: textStart, end: textEnd })))
       .toEqual(preview.map(({ text, start, end }) => ({ text, start, end })));

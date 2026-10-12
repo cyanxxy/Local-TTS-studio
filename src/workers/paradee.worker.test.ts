@@ -8,6 +8,7 @@ import { pinnedAssetUrl } from "../lib/pinnedModelAssets";
 import type { PinnedAssetManifest } from "../lib/pinnedModelFetch";
 import type { StyleTtsOutMessage } from "../lib/styleTtsRuntime";
 import { paradeeEngine } from "../models/paradee";
+import type { AnyEngineDescriptor } from "../models/types";
 import type { WorkerInMessage } from "../types";
 
 function pinnedFile(content: string, path: string) {
@@ -152,7 +153,7 @@ describe("paradee.worker", () => {
     worker.send({ type: "GENERATE", generationId: "g1", text: PREVIEW_TEXT, voice: "heart", speed: 1, quality: 5 });
     await vi.waitFor(() => expect(worker.ofType("GENERATION_COMPLETE")).toHaveLength(1));
 
-    const preview = paradeeEngine.previewChunks(PREVIEW_TEXT, { settings: paradeeEngine.defaultSettings, backend: "wasm", quality: 5 });
+    const preview = (paradeeEngine as AnyEngineDescriptor).previewChunks(PREVIEW_TEXT, { settings: paradeeEngine.defaultSettings, backend: "wasm", quality: 5 });
     expect(preview.length).toBeGreaterThan(1);
     expect(worker.ofType("AUDIO_CHUNK").map(({ text, textStart, textEnd }) => ({ text, start: textStart, end: textEnd })))
       .toEqual(preview.map(({ text, start, end }) => ({ text, start, end })));
