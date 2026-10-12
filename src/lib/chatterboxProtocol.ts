@@ -2,9 +2,10 @@
  * Message contract for src/workers/chatterbox.worker.ts.
  *
  * It mirrors the shared WorkerInMessage/WorkerOutMessage shapes (LOAD,
- * GENERATE, CANCEL, LOAD_PROGRESS, AUDIO_CHUNK, GENERATION_COMPLETE, ERROR,
- * CANCELLED) and adds reference-voice messages. Voices are cloned from a clip
- * without a transcript, so GENERATE names a reference instead of a voice.
+ * GENERATE, ABORT, CANCEL, LOAD_PROGRESS, AUDIO_CHUNK, GENERATION_COMPLETE,
+ * ERROR, ABORTED, CANCELLED) and adds reference-voice messages. Voices are
+ * cloned from a clip without a transcript, so GENERATE names a reference
+ * instead of a voice.
  */
 import type {
   ChunkPauseKind,
@@ -42,6 +43,8 @@ export type ChatterboxWorkerInMessage =
       pronunciationRules?: PronunciationRule[];
       emphasisStrength?: number;
     } & Partial<ChatterboxSampling>)
+  /** Soft abort: same contract as the shared ABORT in src/types.ts, answered by ABORTED. */
+  | { type: "ABORT"; generationId?: string }
   | { type: "CANCEL" };
 
 export type ChatterboxErrorScope = WorkerErrorScope | "reference";
