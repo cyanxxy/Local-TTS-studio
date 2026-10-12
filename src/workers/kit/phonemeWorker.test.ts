@@ -3,7 +3,7 @@ import type { LoadProgress } from "./progress";
 import type { TextChunk } from "../../lib/chunking";
 import { ChunkTooLongError, type StyleTtsOutMessage } from "../../lib/styleTtsRuntime";
 import type { WorkerInMessage } from "../../types";
-import { splitChunkInHalf, startPhonemeWorker, type LoadedPhonemeModel, type PhonemeChunkAudio, type PhonemeEngine } from "./phonemeWorker";
+import { splitChunkInHalf, startPhonemeWorker, type LoadedPhonemeModel, type PhonemeChunkAudio, type PhonemeEngine, type PhonemeSynthesisContext } from "./phonemeWorker";
 import { createWorkerPort } from "./protocol";
 
 const SAMPLE_RATE = 10;
@@ -45,7 +45,7 @@ interface Harness {
 }
 
 function createHarness(
-  synthesize: (text: string, voice: string, speed: number) => Promise<PhonemeChunkAudio> =
+  synthesize: (text: string, voice: string, speed: number, context: PhonemeSynthesisContext) => Promise<PhonemeChunkAudio> =
     async (text) => ({ audio: new Float32Array(text.length).fill(0.5) }),
 ): Harness {
   const messages: StyleTtsOutMessage[] = [];
@@ -56,6 +56,7 @@ function createHarness(
     sampleRate: SAMPLE_RATE,
     planChunks: vi.fn(sentenceChunks),
     synthesize: vi.fn(synthesize),
+    pendingDownloadBytes: vi.fn((voice: string): Record<string, number> => (voice === "B" ? { "b.bin": 100 } : {})),
     dispose: vi.fn(async () => undefined),
   };
   const engine = {
@@ -191,7 +192,7 @@ describe("startPhonemeWorker generation", () => {
     await vi.waitFor(() => expect(harness.ofType("GENERATION_COMPLETE")).toHaveLength(1));
 
     // Speed is clamped to the app's stable range (SPEED_MAX = 1.15).
-    expect(harness.model.synthesize).toHaveBeenCalledWith("Read the A P I docs.", "B", 1.15);
+    expect(harness.model.synthesize).toHaveBeenCalledWith("Read the A P I docs.", "B", 1.15, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(harness.ofType("AUDIO_CHUNK")[0].text).toBe("Read the API docs.");
   });
 
@@ -348,6 +349,73 @@ describe("startPhonemeWorker generation", () => {
     expect(harness.engine.load).toHaveBeenCalledOnce();
     expect(harness.model.synthesize).toHaveBeenCalledTimes(2);
     expect(harness.ofType("AUDIO_CHUNK").map((chunk) => chunk.generationId)).toEqual(["g2"]);
+  });
+});
+
+describe("startPhonemeWorker voice downloads during GENERATE", () => {
+  it("reports a download made while synthesizing like a LOAD, ending at 100", async () => {
+    const harness = createHarness(async (text, voice, _speed, { progress }) => {
+      if (voice === "B") {
+        progress.update("b.bin", 40);
+        progress.update("b.bin", 100);
+        progress.complete("b.bin");
+      }
+      return { audio: new Float32Array(text.length) };
+    });
+    await loaded(harness);
+    const loadMessages = harness.ofType("LOAD_PROGRESS").length;
+
+    harness.send(generate("Hello.", { voice: "A" }));
+    await vi.waitFor(() => expect(harness.ofType("GENERATION_COMPLETE")).toHaveLength(1));
+    expect(harness.ofType("LOAD_PROGRESS")).toHaveLength(loadMessages);
+
+    harness.send(generate("Hello.", { voice: "B", generationId: "g2" }));
+    await vi.waitFor(() => expect(harness.ofType("GENERATION_COMPLETE")).toHaveLength(2));
+
+    expect(harness.model.pendingDownloadBytes).toHaveBeenCalledWith("B");
+    expect(harness.ofType("LOAD_PROGRESS").slice(loadMessages).map((message) => message.percent)).toEqual([40, 100]);
+  });
+
+  it("aborts the download when the generation is aborted, and posts ABORTED once it settles", async () => {
+    let signal: AbortSignal | undefined;
+    const harness = createHarness((_text, _voice, _speed, context) => {
+      signal = context.signal;
+      return new Promise((_resolve, reject) => {
+        context.signal.addEventListener("abort", () => reject(context.signal.reason), { once: true });
+      });
+    });
+    await loaded(harness);
+
+    harness.send(generate("Hello.", { voice: "B" }));
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    expect(signal!.aborted).toBe(false);
+    harness.send({ type: "ABORT", generationId: "g1" });
+
+    await vi.waitFor(() => expect(harness.ofType("ABORTED")).toEqual([{ type: "ABORTED", generationId: "g1" }]));
+    expect(signal!.aborted).toBe(true);
+    expect(harness.ofType("ERROR")).toHaveLength(0);
+    expect(harness.ofType("LOAD_PROGRESS").at(-1)?.percent).toBe(100);
+  });
+
+  it("aborts the download on CANCEL and when a newer GENERATE supersedes the generation", async () => {
+    const signals: AbortSignal[] = [];
+    const harness = createHarness((_text, _voice, _speed, context) => {
+      signals.push(context.signal);
+      return new Promise((_resolve, reject) => {
+        context.signal.addEventListener("abort", () => reject(context.signal.reason), { once: true });
+      });
+    });
+    await loaded(harness);
+
+    harness.send(generate("Hello.", { voice: "B" }));
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+    harness.send(generate("Again.", { voice: "B", generationId: "g2" }));
+    expect(signals[0].aborted).toBe(true);
+    await vi.waitFor(() => expect(signals).toHaveLength(2));
+    harness.send({ type: "CANCEL" });
+
+    expect(signals[1].aborted).toBe(true);
+    expect(harness.ofType("ERROR")).toHaveLength(0);
   });
 });
 

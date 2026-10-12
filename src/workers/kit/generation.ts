@@ -18,6 +18,8 @@ export interface GenerationTicket {
    * post: a superseded generation must post nothing more.
    */
   isCurrent(): boolean;
+  /** Aborted at the moment `isCurrent` turns false, to stop downloads the generation no longer needs. */
+  readonly signal: AbortSignal;
 }
 
 export interface GenerationController {
@@ -73,16 +75,30 @@ function runSettledCallback(callback: () => void): void {
 
 export function createGenerationController(): GenerationController {
   let epoch = 0;
+  const controllers = new Map<number, AbortController>();
+  /** Moves to the next epoch, which supersedes every generation of an earlier one. */
+  const advance = (): void => {
+    epoch += 1;
+    for (const [ticketEpoch, controller] of controllers) {
+      if (ticketEpoch < epoch) {
+        controllers.delete(ticketEpoch);
+        controller.abort();
+      }
+    }
+  };
   let tail: Promise<void> = Promise.resolve();
   // Unsettled generations in start order. Only the last one can be current.
   const pending: PendingGeneration[] = [];
 
   const run: GenerationController["run"] = (generationId, task) => {
-    epoch += 1;
+    advance();
     const ticketEpoch = epoch;
+    const controller = new AbortController();
+    controllers.set(ticketEpoch, controller);
     const ticket: GenerationTicket = {
       generationId,
       isCurrent: () => epoch === ticketEpoch,
+      signal: controller.signal,
     };
     const start = async (): Promise<void> => {
       // A generation superseded while it queued never touches the model.
@@ -100,6 +116,7 @@ export function createGenerationController(): GenerationController {
       .then(() => {
         // Part of the settle step itself, so the next generation, which is
         // chained on it, starts only after the abort callbacks have run.
+        controllers.delete(ticketEpoch);
         pending.splice(pending.indexOf(entry), 1);
         entry.onSettled.forEach(runSettledCallback);
       });
@@ -116,12 +133,12 @@ export function createGenerationController(): GenerationController {
           if (onSettled) runSettledCallback(onSettled);
         });
       }
-      if (target.epoch === epoch) epoch += 1;
+      if (target.epoch === epoch) advance();
       if (onSettled) target.onSettled.push(onSettled);
       return target.settled;
     },
     invalidate() {
-      epoch += 1;
+      advance();
     },
     idle() {
       return tail;

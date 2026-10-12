@@ -3,7 +3,8 @@
  * one onnxruntime-web WASM session at a time. A voice's graph (60-135 MB) and
  * config download the first time it is asked for, are verified against the
  * pinned catalog and cached; LOAD makes the preferred (or default) voice ready
- * and a GENERATE with another voice switches to it before synthesizing.
+ * and a GENERATE with another voice switches to it before synthesizing, reporting
+ * the download like LOAD and stopping it when the generation is superseded or aborted.
  *
  * WASM only: VITS runs faster than real time on a few CPU threads
  * (RTF 0.04-0.06 measured on 4 threads), and WebGPU has no kernels for part of
@@ -42,8 +43,8 @@ function voiceFiles(voice: PiperVoiceEntry): string[] {
 function createVoiceHost(phonemize: EspeakPhonemize) {
   let current: LoadedVoice | null = null;
 
-  async function open(voice: PiperVoiceEntry, progress?: LoadProgress): Promise<LoadedVoice> {
-    const fetchFile = (file: string) => fetchPinnedAsset(PIPER_CATALOG, file, { cacheName: PIPER_CACHE_NAME, label: LABEL, progress });
+  async function open(voice: PiperVoiceEntry, progress?: LoadProgress, signal?: AbortSignal): Promise<LoadedVoice> {
+    const fetchFile = (file: string) => fetchPinnedAsset(PIPER_CATALOG, file, { cacheName: PIPER_CACHE_NAME, label: LABEL, progress, signal });
     const [modelBuffer, configBuffer] = await Promise.all([fetchFile(voice.model), fetchFile(voice.config)]);
     const config = parsePiperConfig(configBuffer);
     let session: StyleTtsSession | null = null;
@@ -60,14 +61,19 @@ function createVoiceHost(phonemize: EspeakPhonemize) {
 
   return {
     /** The voice's runtime, opening it (and closing the previous voice) when it is not the current one. */
-    async use(voice: PiperVoiceEntry, progress?: LoadProgress): Promise<LoadedVoice> {
+    async use(voice: PiperVoiceEntry, progress?: LoadProgress, signal?: AbortSignal): Promise<LoadedVoice> {
       if (current?.id === voice.id) return current;
-      const opened = await open(voice, progress);
+      const opened = await open(voice, progress, signal);
+      if (signal?.aborted) {
+        await opened.runtime.dispose().catch(() => undefined);
+        throw signal.reason;
+      }
       const previous = current;
       current = opened;
       await previous?.runtime.dispose().catch(() => undefined);
       return opened;
     },
+    isCurrent: (voice: PiperVoiceEntry) => current?.id === voice.id,
     async dispose(): Promise<void> {
       const previous = current;
       current = null;
@@ -97,9 +103,13 @@ const engine: PhonemeEngine = {
       voices: PIPER_VOICES.map((voice) => voice.id),
       sampleRate: 22_050,
       planChunks: chunkPiperText,
-      async synthesize(text, voiceValue, speed) {
+      pendingDownloadBytes(voiceValue) {
+        const { voice } = resolvePiperVoice(voiceValue);
+        return voices.isCurrent(voice) ? {} : pinnedAssetSizes(PIPER_CATALOG, voiceFiles(voice));
+      },
+      async synthesize(text, voiceValue, speed, { progress, signal }) {
         const { voice, speaker } = resolvePiperVoice(voiceValue);
-        const loaded = await voices.use(voice);
+        const loaded = await voices.use(voice, progress, signal);
         const audio = await loaded.runtime.synthesize(text, resolvePiperSpeaker(loaded.config, speaker), speed);
         return { audio, sampleRate: loaded.runtime.sampleRate };
       },

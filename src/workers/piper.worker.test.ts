@@ -64,9 +64,11 @@ const phonemize: EspeakPhonemize = async (text) => [text.toLowerCase().replace(/
 interface Setup {
   serve?: Record<string, string>;
   caches?: unknown;
+  /** Files whose download never finishes by itself and only ends when its request is aborted. */
+  stall?: string[];
 }
 
-async function startWorker({ serve = {}, caches }: Setup = {}) {
+async function startWorker({ serve = {}, caches, stall = [] }: Setup = {}) {
   vi.resetModules();
   const messages: StyleTtsOutMessage[] = [];
   const scope = {
@@ -77,7 +79,15 @@ async function startWorker({ serve = {}, caches }: Setup = {}) {
   vi.stubGlobal("self", scope);
   vi.stubGlobal("caches", caches);
   const contentByUrl = new Map(FILES.map((file) => [fileUrl(file.path), file.content]));
-  const fetchMock = vi.fn(async (url: string) => new Response(serve[url] ?? contentByUrl.get(url) ?? "", { status: contentByUrl.has(url) ? 200 : 404 }));
+  const stalled = new Set(stall.map(fileUrl));
+  const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+    if (stalled.has(url)) {
+      await new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal!.reason), { once: true });
+      });
+    }
+    return new Response(serve[url] ?? contentByUrl.get(url) ?? "", { status: contentByUrl.has(url) ? 200 : 404 });
+  });
   vi.stubGlobal("fetch", fetchMock);
 
   const sessions: Array<{ providers: unknown; model: string; run: ReturnType<typeof vi.fn>; release: ReturnType<typeof vi.fn> }> = [];
@@ -202,6 +212,56 @@ describe("piper.worker", () => {
     // Warm-up on speaker 0, then the named speaker p3 (id 2) and the numeric speaker 1.
     expect(sids).toEqual([[0n], [2n], [1n]]);
     expect(worker.ofType("AUDIO_CHUNK").map((chunk) => chunk.generationId)).toEqual(["g1", "g2"]);
+  });
+
+  it("reports the download of a voice switched to inside GENERATE like a LOAD", async () => {
+    const worker = await startWorker();
+    await settledLoad(worker);
+    const loadMessages = worker.ofType("LOAD_PROGRESS").length;
+
+    await generate(worker, SINGLE);
+    expect(worker.ofType("LOAD_PROGRESS")).toHaveLength(loadMessages);
+    await generate(worker, MULTI, "Switch.", "g2");
+
+    const percents = worker.ofType("LOAD_PROGRESS").slice(loadMessages).map((message) => message.percent);
+    expect(percents.length).toBeGreaterThan(0);
+    expect(percents.at(-1)).toBe(100);
+    expect(percents).toEqual([...percents].sort((a, b) => a - b));
+    expect(worker.ofType("GENERATION_COMPLETE")).toHaveLength(2);
+  });
+
+  it("stops a voice download on ABORT, keeps the loaded voice and answers ABORTED", async () => {
+    const worker = await startWorker({ stall: [FILES[2].path] });
+    await settledLoad(worker);
+
+    worker.send({ type: "GENERATE", generationId: "g1", text: "Switch.", voice: MULTI, speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(fetchedPaths(worker)).toContain(FILES[2].path));
+    worker.send({ type: "ABORT", generationId: "g1" });
+
+    await vi.waitFor(() => expect(worker.ofType("ABORTED")).toEqual([{ type: "ABORTED", generationId: "g1" }]));
+    expect(worker.ofType("ERROR")).toHaveLength(0);
+    expect(worker.sessions).toHaveLength(1);
+    expect(worker.sessions[0].release).not.toHaveBeenCalled();
+    await generate(worker, SINGLE, "Still here.", "g2");
+    expect(worker.ofType("GENERATION_COMPLETE")).toEqual([{ type: "GENERATION_COMPLETE", generationId: "g2" }]);
+  });
+
+  it("stops a voice download when a newer GENERATE supersedes it, or on CANCEL", async () => {
+    const worker = await startWorker({ stall: [FILES[2].path] });
+    await settledLoad(worker);
+
+    worker.send({ type: "GENERATE", generationId: "g1", text: "Switch.", voice: MULTI, speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(fetchedPaths(worker)).toContain(FILES[2].path));
+    worker.send({ type: "GENERATE", generationId: "g2", text: "Stay.", voice: SINGLE, speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(worker.ofType("GENERATION_COMPLETE")).toEqual([{ type: "GENERATION_COMPLETE", generationId: "g2" }]));
+    expect(worker.ofType("ERROR")).toHaveLength(0);
+
+    worker.send({ type: "GENERATE", generationId: "g3", text: "Switch.", voice: MULTI, speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(worker.fetchMock.mock.calls.filter(([url]) => url === fileUrl(FILES[2].path))).toHaveLength(2));
+    worker.send({ type: "CANCEL" });
+    await vi.waitFor(() => expect(worker.ofType("CANCELLED")).toHaveLength(1));
+    expect(worker.ofType("ERROR")).toHaveLength(0);
+    expect(worker.sessions).toHaveLength(1);
   });
 
   it("falls back to the default voice for a voice id from another model", async () => {

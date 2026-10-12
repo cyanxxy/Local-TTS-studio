@@ -24,13 +24,27 @@ export interface PhonemeChunkAudio {
   sampleRate?: number;
 }
 
+/** What a chunk's synthesis may use to fetch files the loaded model did not need at LOAD. */
+export interface PhonemeSynthesisContext {
+  /** Reports downloads like LOAD does (LOAD_PROGRESS, 0 to 100). */
+  progress: LoadProgress;
+  /** Aborted when the generation is superseded, aborted or cancelled. */
+  signal: AbortSignal;
+}
+
 export interface LoadedPhonemeModel {
   backend: InferenceBackend;
   voices: string[];
   sampleRate: number;
   planChunks(text: string): TextChunk[];
   /** Throws ChunkTooLongError, before any inference, when the text needs too many tokens. */
-  synthesize(text: string, voice: string, speed: number): Promise<PhonemeChunkAudio>;
+  synthesize(text: string, voice: string, speed: number, context: PhonemeSynthesisContext): Promise<PhonemeChunkAudio>;
+  /**
+   * For models that download a voice on its first use: the pinned byte sizes
+   * of the files `synthesize` would download for `voice` right now (empty when
+   * it is the loaded one), so the download can report progress.
+   */
+  pendingDownloadBytes?(voice: string): Readonly<Record<string, number>>;
   dispose(): Promise<void>;
 }
 
@@ -139,15 +153,36 @@ export function startPhonemeWorker(engine: PhonemeEngine, options?: WorkerRuntim
     const variance = message.sentenceSpeedVariance ?? 0;
     let emitted = 0;
     let dynamicTotal = false;
+    // Created per chunk so a voice switch mid-generation reports its own download.
+    const downloadContext = (voice: string): { context: PhonemeSynthesisContext; finish(): void } => {
+      let lastPercent: number | null = null;
+      const progress = createLoadProgress({
+        report: (percent) => {
+          lastPercent = percent;
+          port.post({ type: "LOAD_PROGRESS", percent });
+        },
+        expectedBytes: loaded.pendingDownloadBytes?.(voice),
+      });
+      return {
+        context: { progress, signal: ticket.signal },
+        finish() {
+          progress.close();
+          if (lastPercent !== null && lastPercent < 100 && ticket.isCurrent()) port.post({ type: "LOAD_PROGRESS", percent: 100 });
+        },
+      };
+    };
     while (queue.length > 0) {
       if (!ticket.isCurrent()) return;
       const chunk = queue.shift()!;
       const tuned = tuneChunkText(chunk.text, pronunciationRules, emphasisStrength);
       const speed = resolveSentenceSpeed(message.speed, variance, chunk.text);
       let result: PhonemeChunkAudio;
+      const download = downloadContext(message.voice);
       try {
-        result = await loaded.synthesize(tuned, message.voice, speed);
+        result = await loaded.synthesize(tuned, message.voice, speed, download.context);
+        download.finish();
       } catch (error) {
+        download.finish();
         const halves = error instanceof ChunkTooLongError ? splitChunkInHalf(message.text, chunk) : null;
         if (!halves) throw error;
         queue.unshift(...halves);
