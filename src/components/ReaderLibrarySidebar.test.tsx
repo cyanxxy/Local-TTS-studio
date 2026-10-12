@@ -332,4 +332,41 @@ describe("ReaderLibrarySidebar", () => {
       expect(images[0]).toHaveAttribute("alt", "");
     });
   });
+
+  it("exports a single chapter's audio from the table of contents, when exporting is available", () => {
+    const book = createReaderDocument({
+      id: "export-book",
+      title: "Export book",
+      text: `# Opening\n${"Words to listen to. ".repeat(50)}\n\n# Ending\n${"More words to hear. ".repeat(50)}`,
+    });
+    const onExportChapter = vi.fn();
+    const props = {
+      open: true,
+      documents: [book],
+      activeDocument: book,
+      currentTextOffset: 0,
+      clock: new PlaybackClock(),
+      onClose: vi.fn(),
+      onOpenDocument: vi.fn(),
+      onNewDocument: vi.fn(),
+      onDeleteDocument: vi.fn(),
+      onUpdateMetadata: vi.fn(),
+      onJumpToOffset: vi.fn(),
+      onAddBookmark: vi.fn(),
+      onRemoveBookmark: vi.fn(),
+      onAddNote: vi.fn(),
+      onUpdateNote: vi.fn(),
+      onRemoveNote: vi.fn(),
+      tab: "contents" as const,
+      onTabChange: vi.fn(),
+    };
+    const { unmount } = render(<ReaderLibrarySidebar {...props} />);
+    expect(screen.queryByRole("button", { name: /Export audio for/ })).not.toBeInTheDocument();
+    unmount();
+
+    render(<ReaderLibrarySidebar {...props} onExportChapter={onExportChapter} />);
+    fireEvent.click(screen.getByRole("button", { name: "Export audio for Ending" }));
+    expect(onExportChapter).toHaveBeenCalledWith(book.chapters[1].id);
+    expect(props.onJumpToOffset).not.toHaveBeenCalled();
+  });
 });

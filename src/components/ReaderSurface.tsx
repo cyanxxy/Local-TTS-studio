@@ -64,6 +64,7 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
           previousSection={readerSession.previousSection}
           nextSection={readerSession.nextSection}
           nextPartStatus={nextPartStatus(reader.lookahead.status)}
+          audiobook={reader.audiobook}
           onNavigateToOffset={readerSession.navigateToOffset}
           onAutoAdvanceHoldChange={readerSession.setAutoAdvanceHold}
           viewPreferences={reader.viewPreferences}

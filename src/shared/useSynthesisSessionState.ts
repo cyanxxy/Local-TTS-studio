@@ -9,6 +9,7 @@ import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useDocumentImport } from "../hooks/useDocumentImport";
 import { useEngineOrchestrator } from "../hooks/useEngineOrchestrator";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
+import { useAudiobookExport } from "../hooks/useAudiobookExport";
 import { useGenerateAfterLookahead, type LookaheadControls } from "../hooks/useGenerateAfterLookahead";
 import { useReaderLookahead } from "../hooks/useReaderLookahead";
 import { useReaderListeningProfile, type SurfaceListeningProfile } from "../hooks/useReaderListeningProfile";
@@ -371,14 +372,25 @@ export function useSynthesisSessionState({
     tuning: readerTuning,
     signal,
   } as SynthesisRequest), [qwen3Settings, readerEngineId, readerSynthesize, readerTuning, surfaceEngineSettings]);
+  const readerSignaturePartsWhenSettled = readerListening.settled ? readerSignatureParts : null;
+  const audiobook = useAudiobookExport({
+    document: readerLibrary.activeDocument,
+    sections: readerSections.sections,
+    engineId: readerEngineId,
+    signatureParts: readerSignaturePartsWhenSettled,
+    renderSection: renderReaderSection,
+    library: readerLibrary,
+  });
+  const audiobookRunning = audiobook.state.status === "running";
   const readerLookahead = useReaderLookahead({
-    enabled: readerViewPreferences.prepareAhead,
+    // An export renders through the same queue; the look-ahead would only wait behind it.
+    enabled: readerViewPreferences.prepareAhead && !audiobookRunning,
     active: isReaderPage,
     document: readerLibrary.activeDocument,
     nextSection: readerSections.nextSection,
     nextSectionText: readerNextSectionText,
     engineId: readerEngineId,
-    signatureParts: readerListening.settled ? readerSignatureParts : null,
+    signatureParts: readerSignaturePartsWhenSettled,
     renderSection: renderReaderSection,
     engineBusy: readerRuntime.isGenerating,
     modelReady: readerRuntime.modelState.ready,
@@ -647,6 +659,7 @@ export function useSynthesisSessionState({
       jumpToSegment: handleJumpToSegment,
       retakeSegment: handleReaderRetakeSegment,
       lookahead: readerLookahead,
+      audiobook,
     },
     documents: {
       isImporting: isImportingDocument,
