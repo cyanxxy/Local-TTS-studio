@@ -22,11 +22,17 @@ import {
 import type { EngineSurface } from "../models/types";
 import type {
   CreatorPresetId,
-  ExportAudioFormat,
   ExportSampleRate,
   ModelType,
   PronunciationRule,
 } from "../types";
+import { LOUDNESS_PRESETS, type ExportFormat } from "./exportAudio";
+import {
+  MAX_DICTIONARIES_PER_FILE,
+  dictionaryFromLegacyRules,
+  validatePronunciationDictionary,
+  type PronunciationDictionary,
+} from "./pronunciation/dictionary";
 
 const LEGACY_MODEL_STORAGE_KEY = "tts-app-model";
 /** The v1 app state, which also held the Kokoro, Supertonic 2 and Audio8 voices. Read only to migrate. */
@@ -34,7 +40,12 @@ const LEGACY_APP_STATE_STORAGE_KEY = "tts-app-state-v1";
 const APP_STATE_STORAGE_KEY = "tts-app-state-v2";
 const APP_STATE_VERSION = 2;
 const ENGINE_SETTINGS_STORAGE_KEY = "tts-engine-settings-v1";
-const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
+/** The v1 creator state, which kept the lexicon as text. Read only to migrate. */
+const LEGACY_CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v1";
+const CREATOR_STATE_STORAGE_KEY = "tts-app-creator-v2";
+const CREATOR_STATE_VERSION = 2;
+/** The id of the dictionary the v1 lexicon becomes. */
+export const QUICK_RULES_DICTIONARY_ID = "quick-rules";
 
 export const DEFAULT_TEXT =
   "This text-to-speech system runs entirely in your browser, providing fast and private operation without sending any data to external servers.";
@@ -59,17 +70,16 @@ export interface InitialAppState {
 /** Every registered engine's persisted settings, keyed by engine. */
 export type PersistedEngineSettings = { [Id in EngineId]: EngineSettings<Id> };
 
-export interface PersistedCreatorState {
-  preset?: CreatorPresetId;
-  speed?: number;
-  pauseCommaSec?: number;
-  pauseSentenceSec?: number;
-  pauseParagraphSec?: number;
-  pronunciationLexicon?: string;
-  exportFormat?: ExportAudioFormat;
-  exportSampleRate?: ExportSampleRate;
-  exportBitrateKbps?: number;
-  masteringEnabled?: boolean;
+/** How caption files cut the script into cues. */
+export type CaptionStyle = "readable" | "short" | "passage";
+
+/** How the export trims, pads and fades the generated audio. All off leaves it as generated. */
+export interface ExportPostState {
+  trimSilence: boolean;
+  headSec: number;
+  tailSec: number;
+  fadeInMs: number;
+  fadeOutMs: number;
 }
 
 export interface CreatorState {
@@ -78,12 +88,25 @@ export interface CreatorState {
   pauseCommaSec: number;
   pauseSentenceSec: number;
   pauseParagraphSec: number;
-  pronunciationLexicon: string;
-  exportFormat: ExportAudioFormat;
+  dictionaries: PronunciationDictionary[];
+  /** Read numbers, dates and symbols as words before synthesis (English). */
+  normalizeSpeech: boolean;
+  /** Clean citations, URLs, emoji and Markdown out of the script before synthesis. */
+  cleanupOnSpeak: boolean;
+  exportFormat: ExportFormat;
   exportSampleRate: ExportSampleRate;
   exportBitrateKbps: number;
   masteringEnabled: boolean;
+  /** One of `LOUDNESS_PRESETS`. */
+  loudnessPresetId: string;
+  exportPost: ExportPostState;
+  captionStyle: CaptionStyle;
 }
+
+/** What is stored: every field optional, so a missing or invalid one falls back to the preset. */
+export type PersistedCreatorState = Partial<Omit<CreatorState, "exportPost">> & {
+  exportPost?: Partial<ExportPostState>;
+};
 
 export interface PronunciationLexiconIssue {
   line: number;
@@ -95,7 +118,11 @@ export interface PronunciationLexiconDiagnostics {
   issues: PronunciationLexiconIssue[];
 }
 
-const EXPORT_BITRATE_OPTIONS = [128, 192, 256, 320] as const;
+/** MP3 bitrates the encoder accepts (64 kbps floor); below 32 kHz it stops at 160. */
+export const EXPORT_BITRATE_OPTIONS = [64, 96, 128, 160, 192, 256, 320] as const;
+export const DEFAULT_LOUDNESS_PRESET_ID = "streaming";
+export const MAX_EXPORT_PADDING_SEC = 10;
+export const MAX_EXPORT_FADE_MS = 5000;
 
 function clampQuality(quality: number): number {
   return Math.max(QUALITY_MIN, Math.min(QUALITY_MAX, Math.round(quality)));
@@ -108,11 +135,21 @@ function isCreatorPresetId(value: unknown): value is CreatorPresetId {
     || value === "youtube-long";
 }
 
-function isExportAudioFormat(value: unknown): value is ExportAudioFormat {
+function isExportFormat(value: unknown): value is ExportFormat {
   return value === "wav-f32"
     || value === "wav-pcm24"
     || value === "wav-pcm16"
-    || value === "mp3";
+    || value === "mp3"
+    || value === "flac-16"
+    || value === "flac-24";
+}
+
+function isCaptionStyle(value: unknown): value is CaptionStyle {
+  return value === "readable" || value === "short" || value === "passage";
+}
+
+function isLoudnessPresetId(value: unknown): value is string {
+  return LOUDNESS_PRESETS.some((preset) => preset.id === value);
 }
 
 function isExportSampleRate(value: unknown): value is ExportSampleRate {
@@ -200,6 +237,14 @@ export function getInitialEngineSettings(): PersistedEngineSettings {
   return Object.fromEntries(entries) as PersistedEngineSettings;
 }
 
+export const DEFAULT_EXPORT_POST: Readonly<ExportPostState> = Object.freeze({
+  trimSilence: false,
+  headSec: 0,
+  tailSec: 0,
+  fadeInMs: 0,
+  fadeOutMs: 0,
+});
+
 export function getCreatorPresetDefaults(preset: CreatorPresetId): CreatorState {
   let resolvedPreset: Exclude<CreatorPresetId, "custom">;
   if (preset === "custom") {
@@ -214,59 +259,92 @@ export function getCreatorPresetDefaults(preset: CreatorPresetId): CreatorState 
     pauseCommaSec: selected.pauseCommaSec,
     pauseSentenceSec: selected.pauseSentenceSec,
     pauseParagraphSec: selected.pauseParagraphSec,
-    pronunciationLexicon: "",
+    dictionaries: [],
+    normalizeSpeech: false,
+    cleanupOnSpeak: false,
     exportFormat: selected.exportFormat,
     exportSampleRate: selected.exportSampleRate,
     exportBitrateKbps: selected.exportBitrateKbps,
     masteringEnabled: selected.masteringEnabled,
+    loudnessPresetId: DEFAULT_LOUDNESS_PRESET_ID,
+    exportPost: { ...DEFAULT_EXPORT_POST },
+    captionStyle: "readable",
   };
 }
 
-export function getInitialCreatorState(): CreatorState {
-  const defaults = getCreatorPresetDefaults(DEFAULT_CREATOR_PRESET);
+function finiteNumber(value: unknown, min: number, max: number, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) ? clamp(value, min, max) : fallback;
+}
 
-  try {
-    const stored = localStorage.getItem(CREATOR_STATE_STORAGE_KEY);
-    if (!stored) return defaults;
-
-    const parsed = JSON.parse(stored) as PersistedCreatorState;
-    const preset = isCreatorPresetId(parsed.preset) ? parsed.preset : defaults.preset;
-    const presetDefaults = getCreatorPresetDefaults(preset);
-
-    return {
-      preset,
-      speed: typeof parsed.speed === "number" && Number.isFinite(parsed.speed)
-        ? clamp(parsed.speed, SPEED_MIN, SPEED_MAX)
-        : presetDefaults.speed,
-      pauseCommaSec: typeof parsed.pauseCommaSec === "number" && Number.isFinite(parsed.pauseCommaSec)
-        ? clamp(parsed.pauseCommaSec, PAUSE_MIN, PAUSE_MAX)
-        : presetDefaults.pauseCommaSec,
-      pauseSentenceSec: typeof parsed.pauseSentenceSec === "number" && Number.isFinite(parsed.pauseSentenceSec)
-        ? clamp(parsed.pauseSentenceSec, PAUSE_MIN, PAUSE_MAX)
-        : presetDefaults.pauseSentenceSec,
-      pauseParagraphSec: typeof parsed.pauseParagraphSec === "number" && Number.isFinite(parsed.pauseParagraphSec)
-        ? clamp(parsed.pauseParagraphSec, PAUSE_MIN, PAUSE_MAX)
-        : presetDefaults.pauseParagraphSec,
-      pronunciationLexicon: typeof parsed.pronunciationLexicon === "string"
-        ? parsed.pronunciationLexicon
-        : presetDefaults.pronunciationLexicon,
-      exportFormat: isExportAudioFormat(parsed.exportFormat)
-        ? parsed.exportFormat
-        : presetDefaults.exportFormat,
-      exportSampleRate: isExportSampleRate(parsed.exportSampleRate)
-        ? parsed.exportSampleRate
-        : presetDefaults.exportSampleRate,
-      exportBitrateKbps: normalizeExportBitrate(
-        parsed.exportBitrateKbps,
-        presetDefaults.exportBitrateKbps,
-      ),
-      masteringEnabled: typeof parsed.masteringEnabled === "boolean"
-        ? parsed.masteringEnabled
-        : presetDefaults.masteringEnabled,
-    };
-  } catch {
-    return defaults;
+/** The dictionaries that validate; one bad entry never drops the others. */
+function parseDictionaries(value: unknown, fallback: PronunciationDictionary[]): PronunciationDictionary[] {
+  if (!Array.isArray(value)) return fallback;
+  const dictionaries: PronunciationDictionary[] = [];
+  for (const entry of value.slice(0, MAX_DICTIONARIES_PER_FILE)) {
+    try {
+      dictionaries.push(validatePronunciationDictionary(entry));
+    } catch { /* an invalid stored dictionary is skipped */ }
   }
+  return dictionaries;
+}
+
+function parseExportPost(value: unknown): ExportPostState {
+  const stored = asRecord(value);
+  return {
+    trimSilence: typeof stored.trimSilence === "boolean" ? stored.trimSilence : DEFAULT_EXPORT_POST.trimSilence,
+    headSec: finiteNumber(stored.headSec, 0, MAX_EXPORT_PADDING_SEC, DEFAULT_EXPORT_POST.headSec),
+    tailSec: finiteNumber(stored.tailSec, 0, MAX_EXPORT_PADDING_SEC, DEFAULT_EXPORT_POST.tailSec),
+    fadeInMs: finiteNumber(stored.fadeInMs, 0, MAX_EXPORT_FADE_MS, DEFAULT_EXPORT_POST.fadeInMs),
+    fadeOutMs: finiteNumber(stored.fadeOutMs, 0, MAX_EXPORT_FADE_MS, DEFAULT_EXPORT_POST.fadeOutMs),
+  };
+}
+
+/**
+ * Reads a stored creator record. `legacy` marks the v1 shape, whose lexicon
+ * was text: it becomes one dictionary of alias rules.
+ */
+function parseCreatorState(stored: Record<string, unknown>, legacy: boolean): CreatorState {
+  const preset = isCreatorPresetId(stored.preset) ? stored.preset : getCreatorPresetDefaults(DEFAULT_CREATOR_PRESET).preset;
+  const defaults = getCreatorPresetDefaults(preset);
+  let dictionaries = defaults.dictionaries;
+  if (legacy) {
+    const rules = typeof stored.pronunciationLexicon === "string"
+      ? parsePronunciationRules(stored.pronunciationLexicon)
+      : [];
+    if (rules.length > 0) dictionaries = [dictionaryFromLegacyRules(rules, { id: QUICK_RULES_DICTIONARY_ID })];
+  } else {
+    dictionaries = parseDictionaries(stored.dictionaries, dictionaries);
+  }
+
+  return {
+    preset,
+    speed: finiteNumber(stored.speed, SPEED_MIN, SPEED_MAX, defaults.speed),
+    pauseCommaSec: finiteNumber(stored.pauseCommaSec, PAUSE_MIN, PAUSE_MAX, defaults.pauseCommaSec),
+    pauseSentenceSec: finiteNumber(stored.pauseSentenceSec, PAUSE_MIN, PAUSE_MAX, defaults.pauseSentenceSec),
+    pauseParagraphSec: finiteNumber(stored.pauseParagraphSec, PAUSE_MIN, PAUSE_MAX, defaults.pauseParagraphSec),
+    dictionaries,
+    normalizeSpeech: typeof stored.normalizeSpeech === "boolean" ? stored.normalizeSpeech : defaults.normalizeSpeech,
+    cleanupOnSpeak: typeof stored.cleanupOnSpeak === "boolean" ? stored.cleanupOnSpeak : defaults.cleanupOnSpeak,
+    exportFormat: isExportFormat(stored.exportFormat) ? stored.exportFormat : defaults.exportFormat,
+    exportSampleRate: isExportSampleRate(stored.exportSampleRate) ? stored.exportSampleRate : defaults.exportSampleRate,
+    exportBitrateKbps: normalizeExportBitrate(stored.exportBitrateKbps, defaults.exportBitrateKbps),
+    masteringEnabled: typeof stored.masteringEnabled === "boolean" ? stored.masteringEnabled : defaults.masteringEnabled,
+    loudnessPresetId: isLoudnessPresetId(stored.loudnessPresetId) ? stored.loudnessPresetId : defaults.loudnessPresetId,
+    exportPost: parseExportPost(stored.exportPost),
+    captionStyle: isCaptionStyle(stored.captionStyle) ? stored.captionStyle : defaults.captionStyle,
+  };
+}
+
+/**
+ * The saved creator state. Before v2 is first written, the v1 record supplies
+ * what it had and its text lexicon becomes a dictionary; v1 is left in place so
+ * a downgrade still finds it.
+ */
+export function getInitialCreatorState(): CreatorState {
+  const current = readStoredRecord(CREATOR_STATE_STORAGE_KEY);
+  if (Object.keys(current).length > 0) return parseCreatorState(current, false);
+  const legacy = readStoredRecord(LEGACY_CREATOR_STATE_STORAGE_KEY);
+  return parseCreatorState(legacy, true);
 }
 
 export function parsePronunciationRules(lexicon: string): PronunciationRule[] {
@@ -316,6 +394,6 @@ export function persistEngineSettings(settings: Partial<PersistedEngineSettings>
 
 export function persistCreatorState(state: PersistedCreatorState): void {
   try {
-    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify(state));
+    localStorage.setItem(CREATOR_STATE_STORAGE_KEY, JSON.stringify({ version: CREATOR_STATE_VERSION, ...state }));
   } catch { /* localStorage unavailable */ }
 }

@@ -617,48 +617,77 @@ describe("useAudioPlayer", () => {
   });
 
   it("downloads audio and VTT/JSON captions, while empty downloads are no-ops", async () => {
-    const downloadAudioSpy = vi.spyOn(audioExportClientModule, "downloadAudioChunks").mockResolvedValue();
+    const exported = {
+      blob: new Blob(["audio"]),
+      extension: "flac",
+      report: { integratedLufs: -16 },
+      timings: [],
+      gainDb: 1,
+      limiterReductionDb: 0,
+    } as unknown as exportAudioModule.ExportResult;
+    const exportSpy = vi.spyOn(audioExportClientModule, "exportAudioChunks").mockResolvedValue(exported);
     const downloadBlobSpy = vi.spyOn(exportAudioModule, "downloadBlob").mockImplementation(() => {});
     const { result } = renderHook(() => useAudioPlayer());
 
     await act(async () => {
-      await result.current.download();
+      expect(await result.current.download()).toBeNull();
       result.current.downloadCaptions("vtt");
     });
-    expect(downloadAudioSpy).not.toHaveBeenCalled();
+    expect(exportSpy).not.toHaveBeenCalled();
     expect(downloadBlobSpy).not.toHaveBeenCalled();
 
+    const options = {
+      format: "flac-16",
+      sampleRate: "source",
+      bitrateKbps: 192,
+      mastering: { enabled: false, targetLufs: -16, truePeakDb: -1 },
+    } as const;
+    const request = { fileName: "Story-af_heart" };
     await act(async () => {
       await result.current.scheduleChunk(makeChunk("Caption text", 12, 12));
-      await result.current.download({
-        format: "wav-f32",
-        sampleRate: "source",
-        bitrateKbps: 192,
-        mastering: {
-          enabled: false,
-          targetLufs: -16,
-          truePeakDb: -1,
-        },
-      });
+      expect(await result.current.download(options, request)).toBe(exported);
       result.current.downloadCaptions("vtt");
       result.current.downloadCaptions("json");
     });
 
-    expect(downloadAudioSpy).toHaveBeenCalledWith([
-      { audio: expect.any(Float32Array), samplingRate: 12 },
-    ], {
-      format: "wav-f32",
-      sampleRate: "source",
-      bitrateKbps: 192,
-      mastering: {
-        enabled: false,
-        targetLufs: -16,
-        truePeakDb: -1,
-      },
+    expect(exportSpy).toHaveBeenCalledWith([
+      { audio: expect.any(Float32Array), samplingRate: 12, pauseAfterSec: undefined },
+    ], options, request);
+    expect(downloadBlobSpy).toHaveBeenCalledTimes(3);
+    expect(downloadBlobSpy.mock.calls[0]?.[0]).toBe(exported.blob);
+    expect(downloadBlobSpy.mock.calls[0]?.[1]).toBe("Story-af_heart.flac");
+    expect(downloadBlobSpy.mock.calls[1]?.[1]).toBe("tts-captions.vtt");
+    expect(downloadBlobSpy.mock.calls[2]?.[1]).toBe("tts-timestamps.json");
+
+    await act(async () => {
+      await result.current.download();
     });
-    expect(downloadBlobSpy).toHaveBeenCalledTimes(2);
-    expect(downloadBlobSpy.mock.calls[0]?.[1]).toBe("tts-captions.vtt");
-    expect(downloadBlobSpy.mock.calls[1]?.[1]).toBe("tts-timestamps.json");
+    expect(downloadBlobSpy.mock.calls[3]?.[1]).toBe("tts-audio.flac");
+  });
+
+  it("lays captions out in the chosen style", async () => {
+    const downloadBlobSpy = vi.spyOn(exportAudioModule, "downloadBlob").mockImplementation(() => {});
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk({
+        audio: new Float32Array(4),
+        samplingRate: 1,
+        text: "one two three four five six",
+        index: 1,
+        total: 1,
+        pauseAfterSec: 0,
+      });
+    });
+
+    const cues = async (style?: "readable" | "short" | "passage") => {
+      downloadBlobSpy.mockClear();
+      act(() => result.current.downloadCaptions("srt", style));
+      const [blob] = downloadBlobSpy.mock.calls[0] as [Blob];
+      return (await blob.text()).trim().split(/\n\n/).length;
+    };
+    expect(await cues()).toBe(1);
+    expect(await cues("passage")).toBe(1);
+    expect(await cues("short")).toBeGreaterThan(1);
   });
 
   it("stays stopped when AudioContext resume fails", async () => {

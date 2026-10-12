@@ -870,6 +870,8 @@ export interface AudioSignatureTuning {
   pauseOverridesSec?: GenerationTuningSettings["pauseOverridesSec"];
   pronunciationRules?: GenerationTuningSettings["pronunciationRules"];
   emphasisStrength?: number;
+  /** See `GenerationTuningSettings.speechFingerprint`. */
+  speechFingerprint?: string;
 }
 
 /** What the version 1 signature hashed: the whole Creator tuning and quality, for every engine. */
@@ -936,6 +938,9 @@ export function buildAudioSignature(parts: {
       : null,
     pronunciationRules: tuning.pronunciationRules?.map(({ from, to }) => ({ from, to })) ?? null,
     emphasisStrength: tuning.emphasisStrength ?? null,
+    // Only named when the spoken-text pipeline changes something, so audio
+    // cached without it keeps its signature.
+    ...(tuning.speechFingerprint === undefined ? {} : { speechFingerprint: tuning.speechFingerprint }),
   });
   const value = `${parts.model}\u0000${parts.voice}\u0000${tuningKey}\u0000${parts.text}`;
   for (let index = 0; index < value.length; index += 1) {

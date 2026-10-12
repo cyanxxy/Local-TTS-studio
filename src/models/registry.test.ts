@@ -311,6 +311,13 @@ describe("capability-aware signatures", () => {
     expect(signature(id, { ...TUNING, language: "ko" })).toEqual(base);
   });
 
+  it.each(SURFACE_ENGINE_IDS)("hashes what the speech pipeline does to the script for %s", (id) => {
+    const base = signature(id, TUNING);
+    const piped = signature(id, { ...TUNING, speechFingerprint: "rules:1" });
+    expect(piped).not.toEqual(base);
+    expect(signature(id, { ...TUNING, speechFingerprint: "rules:2" })).not.toEqual(piped);
+  });
+
   it("uses each engine's own language setting", () => {
     const korean = { ...SURFACE_SETTINGS, supertonic: { voice: "Female", language: "ko" } } as const;
     expect(surfaceEngineSignatureParts("supertonic", korean, { tuning: TUNING, quality: 5 }))

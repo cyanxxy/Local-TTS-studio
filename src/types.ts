@@ -39,6 +39,12 @@ export interface GenerationTuningSettings {
   sentenceSpeedVariance?: number;
   pronunciationRules?: PronunciationRule[];
   emphasisStrength?: number;
+  /**
+   * What the spoken-text pipeline does to the script (`describeSpeechPipeline`),
+   * so audio cached under other settings is not mistaken for this. Absent when
+   * the pipeline changes nothing.
+   */
+  speechFingerprint?: string;
 }
 
 /**

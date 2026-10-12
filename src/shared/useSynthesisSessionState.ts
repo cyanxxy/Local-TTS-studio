@@ -4,6 +4,7 @@ import { useAppEnvironment } from "../hooks/useAppEnvironment";
 import { useAppPreferences } from "../hooks/useAppPreferences";
 import { useAppRouting } from "../hooks/useAppRouting";
 import { useAppShortcuts } from "../hooks/useAppShortcuts";
+import { useAudioExport } from "../hooks/useAudioExport";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useDocumentImport } from "../hooks/useDocumentImport";
@@ -23,14 +24,20 @@ import {
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
 import { getUnsupportedModelMessage } from "../lib/browserSupport";
+import { buildExportFileName } from "../lib/audioExportClient";
+import { describeSpeechPipeline } from "../lib/speechPipeline";
+import { isSpeechNormalizationSupported } from "../lib/text/normalize";
 import {
   getEngine,
+  surfaceEnginePreviewChunks,
   surfaceEngineSignatureParts,
+  surfaceEngineVoiceLabel,
   type EngineSettings,
   type SurfaceEngineId,
 } from "../models/registry";
 import type { ModelType } from "../types";
 import type { CreatorEngineSupport } from "../components/CreatorToolsPanel";
+import { engineSpeechLanguage, resolveSpeechPipelineSettings } from "./speechPipelineRuntime";
 
 export interface SynthesisSessionOptions {
   enableDesktopRuntimes: boolean;
@@ -158,6 +165,7 @@ export function useSynthesisSessionState({
     text: synthesisText,
     engineSettings,
     generationSettings: creator.generationSettings,
+    speech: creator.speechSettings,
     player,
     setShowPlayer,
     beforeReaderAudioChange,
@@ -234,8 +242,17 @@ export function useSynthesisSessionState({
   const readerSignatureParts = useMemo(() => surfaceEngineSignatureParts(
     readerEngineId,
     surfaceEngineSettings,
-    { tuning: creator.generationSettings, quality },
-  ), [creator.generationSettings, quality, readerEngineId, surfaceEngineSettings]);
+    {
+      tuning: {
+        ...creator.generationSettings,
+        speechFingerprint: describeSpeechPipeline(resolveSpeechPipelineSettings(
+          creator.speechSettings,
+          engineSpeechLanguage(readerEngineId, surfaceEngineSettings),
+        )),
+      },
+      quality,
+    },
+  ), [creator.generationSettings, creator.speechSettings, quality, readerEngineId, surfaceEngineSettings]);
   const clearReaderErrors = useCallback(() => {
     setExportError(null);
     setImportError(null);
@@ -356,29 +373,47 @@ export function useSynthesisSessionState({
     readerRuntime.retryLoad();
   }, [readerRuntime]);
 
-  const handleDownloadAudio = useCallback(() => {
-    setExportError(null);
-    void downloadPlayerAudio(creator.exportOptions).catch((error: unknown) => {
-      setExportError(error instanceof Error ? error.message : String(error));
-    });
-  }, [creator.exportOptions, downloadPlayerAudio]);
+  const reportExportError = useCallback((message: string) => setExportError(message), []);
+  const exportFileName = useCallback(() => buildExportFileName({
+    title: isReaderPage ? readerLibrary.activeDocument?.title : undefined,
+    voice: surfaceEngineVoiceLabel(visibleEngineId ?? activeModel, surfaceEngineSettings),
+  }), [activeModel, isReaderPage, readerLibrary.activeDocument?.title, surfaceEngineSettings, visibleEngineId]);
+  const audioExport = useAudioExport({
+    download: downloadPlayerAudio,
+    options: creator.exportOptions,
+    getFileName: exportFileName,
+    onError: reportExportError,
+    onStart: clearExportError,
+  });
 
+  const captionStyle = creator.captionStyle;
   const handleDownloadCaptions = useCallback((format: "srt" | "vtt" | "json") => {
-    downloadPlayerCaptions(format);
-  }, [downloadPlayerCaptions]);
+    downloadPlayerCaptions(format, captionStyle);
+  }, [captionStyle, downloadPlayerCaptions]);
 
   const handleSkipBackward = useCallback(() => skipPlayback(-10), [skipPlayback]);
   const handleSkipForward = useCallback(() => skipPlayback(10), [skipPlayback]);
 
+  const studioBackend = studioRuntime.modelState.backend;
   const creatorEngineSupport = useMemo<CreatorEngineSupport>(() => {
     const { label, capabilities } = getEngine(studioEngineId);
+    const speechLanguage = engineSpeechLanguage(studioEngineId, surfaceEngineSettings);
     return {
       engineLabel: label,
       speed: capabilities.speed,
       pauses: capabilities.pauses,
-      pronunciationLexicon: capabilities.pronunciationLexicon,
+      speechLanguage,
+      normalization: isSpeechNormalizationSupported(speechLanguage),
+      // No engine reads IPA yet; a phoneme rule speaks its alias.
+      phonemes: false,
+      chunkScript: (script) => surfaceEnginePreviewChunks(
+        studioEngineId,
+        script,
+        surfaceEngineSettings,
+        { backend: studioBackend, quality },
+      ),
     };
-  }, [studioEngineId]);
+  }, [quality, studioBackend, studioEngineId, surfaceEngineSettings]);
 
   const isUsingWasmFallback = currentModelState.ready && currentModelState.backend === "wasm";
   const showWasmBadge = localInferenceSupported
@@ -455,8 +490,9 @@ export function useSynthesisSessionState({
       togglePlay,
       skipBackward: handleSkipBackward,
       skipForward: handleSkipForward,
-      downloadAudio: handleDownloadAudio,
+      downloadAudio: audioExport.start,
       downloadCaptions: handleDownloadCaptions,
+      audioExport,
     },
     creator,
     creatorEngineSupport,

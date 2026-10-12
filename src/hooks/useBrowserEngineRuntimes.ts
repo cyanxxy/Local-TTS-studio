@@ -31,6 +31,8 @@ interface Options {
   savedVoices: { readonly [Id in BrowserEngineId]: string };
   generationSettings: GenerationTuningSettings;
   player: UseAudioPlayerReturn;
+  /** See `UseGenerationControlOptions.retakeText`. */
+  retakeText?: (segment: { text: string; textStart?: number; textEnd?: number }) => string;
   setShowPlayer: (show: boolean) => void;
 }
 
@@ -80,6 +82,7 @@ export function useBrowserEngineRuntimes({
   savedVoices,
   generationSettings,
   player,
+  retakeText,
   setShowPlayer,
 }: Options): UseBrowserEngineRuntimesReturn {
   const loader = useModelLoader(activeModel, {
@@ -147,6 +150,7 @@ export function useBrowserEngineRuntimes({
     hardRestartModel,
     getWorker,
     player,
+    retakeText,
     setShowPlayer,
     text,
     tts,

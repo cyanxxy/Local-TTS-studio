@@ -22,6 +22,9 @@ export function audibleTuning(
     ...(capabilities.pronunciationLexicon
       ? { pronunciationRules: tuning.pronunciationRules, emphasisStrength: tuning.emphasisStrength }
       : {}),
+    // The spoken-text pipeline rewrites the script for every engine, whether or
+    // not the engine reads the lexicon itself.
+    ...(tuning.speechFingerprint === undefined ? {} : { speechFingerprint: tuning.speechFingerprint }),
     ...(capabilities.quality ? { quality } : {}),
     ...(capabilities.languages && language !== undefined ? { language } : {}),
   };

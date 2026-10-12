@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
-import type { AudioExportOptions, CaptionExportFormat } from "../types";
+import type { CaptionExportFormat } from "../types";
+import type { CaptionStyle } from "../lib/appState";
 import type { CachedReaderAudioChunk } from "../lib/readerDocument";
 import {
   AUDIO_PLAYER_RETAIN_BEHIND_SECONDS,
@@ -8,9 +9,9 @@ import {
   MIN_PLAYBACK_RATE,
 } from "../constants";
 import { PlaybackClock } from "../lib/playbackClock";
-import { buildCaptionJson, buildSrt, buildVtt } from "../lib/captions";
-import { downloadAudioChunks } from "../lib/audioExportClient";
-import { downloadBlob } from "../lib/exportAudio";
+import { buildCaptionJson, buildSrt, buildVtt, type CaptionBuildOptions } from "../lib/captions";
+import { exportAudioChunks, type AudioExportRequest } from "../lib/audioExportClient";
+import { downloadBlob, type ExportOptions, type ExportResult } from "../lib/exportAudio";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
 import {
   appendAudioSegment,
@@ -62,8 +63,13 @@ export interface UseAudioPlayerReturn {
   skip: (deltaSeconds: number) => void;
   jumpToSegment: (segmentId: string) => void;
   setPlaybackRate: (rate: number) => void;
-  download: (options?: AudioExportOptions) => Promise<void>;
-  downloadCaptions: (format: CaptionExportFormat) => void;
+  /**
+   * Renders the audio in the export worker and saves it. Resolves with the
+   * export's loudness report and timeline, or null when there was no audio.
+   * Rejects with an AbortError when `request.signal` aborts.
+   */
+  download: (options?: ExportOptions, request?: AudioExportRequest) => Promise<ExportResult | null>;
+  downloadCaptions: (format: CaptionExportFormat, style?: CaptionStyle) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
   getAudioChunkCount: () => number;
   /**
@@ -88,6 +94,13 @@ export interface UseAudioPlayerReturn {
   reset: () => void;
   stopAll: () => void;
 }
+
+/** Cue layouts for the caption styles. */
+const CAPTION_LAYOUTS: Record<CaptionStyle, CaptionBuildOptions["layout"]> = {
+  readable: {},
+  short: { maxWordsPerCue: 3 },
+  passage: false,
+};
 
 /** Background-safe cadence for extending the playback schedule. */
 const SCHEDULE_TOPUP_INTERVAL_MS = 1000;
@@ -731,29 +744,33 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     syncCurrentTime(live);
   }, [getLiveTimelineTime, replayFromOffset, syncCurrentTime]);
 
-  const download = useCallback(async (options?: AudioExportOptions) => {
-    if (allChunksRef.current.length === 0) return;
+  const download = useCallback(async (options?: ExportOptions, request: AudioExportRequest = {}) => {
+    if (allChunksRef.current.length === 0) return null;
 
-    await downloadAudioChunks(allChunksRef.current.map((chunk) => ({
+    const result = await exportAudioChunks(allChunksRef.current.map((chunk) => ({
       audio: chunk.audio,
       samplingRate: chunk.samplingRate,
-    })), options);
+      pauseAfterSec: chunk.pauseAfterSec,
+    })), options, request);
+    downloadBlob(result.blob, `${request.fileName || "tts-audio"}.${result.extension}`);
+    return result;
   }, []);
 
-  const downloadCaptions = useCallback((format: CaptionExportFormat) => {
+  const downloadCaptions = useCallback((format: CaptionExportFormat, style: CaptionStyle = "readable") => {
     if (allChunksRef.current.length === 0) return;
 
     const segments = buildCaptionSegments(allChunksRef.current);
 
     if (segments.length === 0) return;
 
+    const build: CaptionBuildOptions = { layout: CAPTION_LAYOUTS[style] };
     if (format === "srt") {
-      downloadBlob(new Blob([buildSrt(segments)], { type: "application/x-subrip" }), "tts-captions.srt");
+      downloadBlob(new Blob([buildSrt(segments, build)], { type: "application/x-subrip" }), "tts-captions.srt");
       return;
     }
 
     if (format === "vtt") {
-      downloadBlob(new Blob([buildVtt(segments)], { type: "text/vtt" }), "tts-captions.vtt");
+      downloadBlob(new Blob([buildVtt(segments, build)], { type: "text/vtt" }), "tts-captions.vtt");
       return;
     }
 

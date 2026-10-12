@@ -71,6 +71,8 @@ export interface SpeechPlan {
   identity: boolean;
   /** Maps a range of `spoken` to the smallest range of `source` covering it. */
   toSourceRange(range: TextRange): TextRange;
+  /** Maps a range of `source` to the range of `spoken` it became. */
+  toSpokenRange(range: TextRange): TextRange;
 }
 
 interface Piece {
@@ -84,6 +86,10 @@ interface Piece {
 const PARAGRAPH_BOUNDARY = "\n\n";
 
 function identityPlan(source: string, boundary: SpeechBreakBoundary): SpeechPlan {
+  const clampRange = (range: TextRange): TextRange => {
+    const start = Math.min(source.length, Math.max(0, range.start));
+    return { start, end: Math.min(source.length, Math.max(start, range.end)) };
+  };
   return {
     source,
     spoken: source,
@@ -91,10 +97,8 @@ function identityPlan(source: string, boundary: SpeechBreakBoundary): SpeechPlan
     breaks: [],
     leadingPauseSec: 0,
     identity: true,
-    toSourceRange: (range) => {
-      const start = Math.min(source.length, Math.max(0, range.start));
-      return { start, end: Math.min(source.length, Math.max(start, range.end)) };
-    },
+    toSourceRange: clampRange,
+    toSpokenRange: clampRange,
   };
 }
 
@@ -227,6 +231,24 @@ export function buildSpeechPlan(
     return { start, end: Math.max(start, end) };
   };
 
+  const toSpokenRange = (range: TextRange): TextRange => {
+    const first = pieces[0];
+    if (!first) return { start: 0, end: 0 };
+    let startPiece = first;
+    let endPiece = first;
+    for (const piece of pieces) {
+      if (piece.sourceStart <= range.start) startPiece = piece;
+      if (piece.sourceStart < range.end) endPiece = piece;
+    }
+    const localOffset = (piece: Piece, offset: number) => (
+      offset >= sourceEnd(piece)
+        ? piece.spokenEnd
+        : piece.spokenStart + piece.map.toOutputOffset(Math.max(0, offset - piece.sourceStart))
+    );
+    const start = localOffset(startPiece, range.start);
+    return { start, end: Math.max(start, localOffset(endPiece, range.end)) };
+  };
+
   return {
     source,
     spoken,
@@ -235,6 +257,7 @@ export function buildSpeechPlan(
     leadingPauseSec,
     identity: false,
     toSourceRange,
+    toSpokenRange,
   };
 }
 
@@ -242,7 +265,7 @@ export function buildSpeechPlan(
 export interface RemappableChunk {
   audio: Float32Array;
   samplingRate: number;
-  text: string;
+  text?: string;
   textStart?: number;
   textEnd?: number;
   pauseAfterSec?: number;

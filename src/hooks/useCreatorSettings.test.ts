@@ -1,20 +1,19 @@
 import { act, renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { CREATOR_PRESETS, DEFAULT_TARGET_LUFS, DEFAULT_TRUE_PEAK_DB } from "../constants";
-import type { CreatorState } from "../lib/appState";
+import { CREATOR_PRESETS } from "../constants";
+import { getCreatorPresetDefaults, type CreatorState } from "../lib/appState";
+import { createPronunciationDictionary } from "../lib/pronunciation/dictionary";
 import { useCreatorSettings } from "./useCreatorSettings";
 
+const QUICK_RULES = createPronunciationDictionary({
+  id: "quick",
+  name: "Quick rules",
+  rules: [{ type: "alias", from: "GIF", to: "jif" }],
+});
+
 const INITIAL_STATE: CreatorState = {
-  preset: "youtube-long",
-  speed: 0.98,
-  pauseCommaSec: 0.14,
-  pauseSentenceSec: 0.24,
-  pauseParagraphSec: 0.44,
-  pronunciationLexicon: "GIF => jif",
-  exportFormat: "wav-pcm24",
-  exportSampleRate: 48000,
-  exportBitrateKbps: 320,
-  masteringEnabled: true,
+  ...getCreatorPresetDefaults("youtube-long"),
+  dictionaries: [QUICK_RULES],
 };
 
 describe("useCreatorSettings", () => {
@@ -39,19 +38,41 @@ describe("useCreatorSettings", () => {
       },
       pronunciationRules: [{ from: "GIF", to: "jif" }],
     });
+    // Every new export option off: the options are the ones the export always took.
     expect(result.current.exportOptions).toEqual({
       format: "wav-pcm24",
       sampleRate: 48000,
       bitrateKbps: 320,
-      mastering: {
-        enabled: true,
-        targetLufs: DEFAULT_TARGET_LUFS,
-        truePeakDb: DEFAULT_TRUE_PEAK_DB,
-      },
+      mastering: { enabled: true, targetLufs: -14, truePeakDb: -1 },
     });
+    expect(result.current.speechSettings).toEqual({ dictionaries: [QUICK_RULES], normalize: false, cleanup: false });
   });
 
-  it("applies presets and marks manual changes as custom", () => {
+  it("builds mastering and post-processing options from the loudness preset and finishing options", () => {
+    const { result } = renderHook(() => useCreatorSettings({ initialState: INITIAL_STATE, quality: 5 }));
+
+    act(() => {
+      result.current.onLoudnessPresetChange("acx");
+      result.current.onExportFormatChange("flac-24");
+      result.current.onExportPostChange({ trimSilence: true, headSec: 0.5 });
+      result.current.onExportPostChange({ fadeOutMs: 200 });
+    });
+
+    expect(result.current.exportOptions).toMatchObject({
+      format: "flac-24",
+      mastering: { enabled: true, targetLufs: -20, truePeakDb: -3, measure: "rms" },
+      post: { trimSilence: true, headSec: 0.5, tailSec: 0, fadeInMs: 0, fadeOutMs: 200 },
+    });
+
+    act(() => {
+      result.current.onLoudnessPresetChange("not-a-preset");
+      result.current.onExportPostChange({ trimSilence: false, headSec: 0, fadeOutMs: 0 });
+    });
+    expect(result.current.exportOptions.mastering.targetLufs).toBe(-14);
+    expect(result.current.exportOptions).not.toHaveProperty("post");
+  });
+
+  it("applies presets and marks manual changes to preset fields as custom", () => {
     const { result } = renderHook(() => useCreatorSettings({ initialState: INITIAL_STATE, quality: 5 }));
 
     act(() => {
@@ -67,7 +88,6 @@ describe("useCreatorSettings", () => {
       result.current.onPauseCommaChange(0.2);
       result.current.onPauseSentenceChange(0.3);
       result.current.onPauseParagraphChange(0.4);
-      result.current.onPronunciationLexiconChange("SQL => sequel");
       result.current.onExportFormatChange("wav-pcm16");
       result.current.onExportSampleRateChange("source");
       result.current.onExportBitrateChange(192);
@@ -81,12 +101,38 @@ describe("useCreatorSettings", () => {
       pauseCommaSec: 0.2,
       pauseSentenceSec: 0.3,
       pauseParagraphSec: 0.4,
-      pronunciationLexicon: "SQL => sequel",
+      dictionaries: [QUICK_RULES],
       exportFormat: "wav-pcm16",
       exportSampleRate: "source",
       exportBitrateKbps: 192,
       masteringEnabled: false,
     });
+  });
+
+  it("leaves the preset alone for dictionary, text and finishing changes", () => {
+    const { result } = renderHook(() => useCreatorSettings({ initialState: getCreatorPresetDefaults("youtube-shorts"), quality: 5 }));
+    const dictionary = createPronunciationDictionary({ name: "Names", rules: [{ type: "alias", from: "Nguyen", to: "win" }] });
+
+    act(() => {
+      result.current.onDictionariesChange([dictionary]);
+      result.current.onNormalizeSpeechChange(true);
+      result.current.onCleanupOnSpeakChange(true);
+      result.current.onLoudnessPresetChange("podcast");
+      result.current.onExportPostChange({ fadeInMs: 10 });
+      result.current.onCaptionStyleChange("short");
+    });
+
+    expect(result.current.creatorPreset).toBe("youtube-shorts");
+    expect(result.current.generationSettings.pronunciationRules).toEqual([{ from: "Nguyen", to: "win" }]);
+    expect(result.current.persistedState).toMatchObject({
+      dictionaries: [dictionary],
+      normalizeSpeech: true,
+      cleanupOnSpeak: true,
+      loudnessPresetId: "podcast",
+      exportPost: { fadeInMs: 10 },
+      captionStyle: "short",
+    });
+    expect(result.current.speechSettings).toEqual({ dictionaries: [dictionary], normalize: true, cleanup: true });
   });
 
   it("does not reset values when selecting the custom preset directly", () => {
@@ -113,7 +159,7 @@ describe("useCreatorSettings", () => {
     expect(result.current.creatorPreset).toBe("custom");
     const setterNames = (Object.keys(initial) as Array<keyof typeof initial>)
       .filter((key) => typeof initial[key] === "function");
-    expect(setterNames).toHaveLength(10);
+    expect(setterNames).toHaveLength(15);
     for (const name of setterNames) expect(result.current[name], name).toBe(initial[name]);
   });
 });

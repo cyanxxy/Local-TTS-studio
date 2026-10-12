@@ -110,6 +110,23 @@ describe("buildSpeechPlan", () => {
     expect(source.slice(first.start, first.end)).toBe("GIF one.");
   });
 
+  it("maps written ranges to spoken ones and back", () => {
+    const source = 'GIF one.<break time="1s"/>Costs $5 today.';
+    const plan = buildSpeechPlan(source, { ...rules(["GIF", "jif"]), normalize: true });
+
+    expect(plan.spoken).toBe("jif one.\n\nCosts five dollars today.");
+    const first = plan.toSpokenRange({ start: 0, end: 8 });
+    expect(plan.spoken.slice(first.start, first.end)).toBe("jif one.");
+    const second = plan.toSpokenRange({ start: 26, end: source.length });
+    expect(plan.spoken.slice(second.start, second.end)).toBe("Costs five dollars today.");
+    // Past the end of the text and before the start of a piece.
+    expect(plan.toSpokenRange({ start: 8, end: 9 }).start).toBe(8);
+    expect(plan.toSpokenRange({ start: 0, end: 500 }).end).toBe(plan.spoken.length);
+    expect(buildSpeechPlan('<break time="1s"/>', INACTIVE_SPEECH_PIPELINE).toSpokenRange({ start: 0, end: 2 }))
+      .toEqual({ start: 0, end: 0 });
+    expect(buildSpeechPlan("abc", INACTIVE_SPEECH_PIPELINE).toSpokenRange({ start: 1, end: 2 })).toEqual({ start: 1, end: 2 });
+  });
+
   it("sums pauses around text that is spoken as nothing", () => {
     const source = '<break time="1s"/>Hi.<break time="2s"/><break time="3s"/>Bye.<break time="4s"/>';
     const plan = buildSpeechPlan(source, INACTIVE_SPEECH_PIPELINE);
