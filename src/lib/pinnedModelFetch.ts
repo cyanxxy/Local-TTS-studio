@@ -60,13 +60,13 @@ export function createRevisionPinnedFetch(
 }
 
 interface RevisionCache {
-  match(request: RequestInfo | URL): Promise<Response | undefined>;
-  put(request: RequestInfo | URL, response: Response): Promise<void>;
+  match(request: string | URL | Request): Promise<Response | undefined>;
+  put(request: string | URL | Request, response: Response): Promise<void>;
 }
 
 interface RevisionEntryCache extends RevisionCache {
   keys(): Promise<readonly Request[]>;
-  delete(request: RequestInfo | URL): Promise<boolean>;
+  delete(request: string | URL | Request): Promise<boolean>;
 }
 
 interface RevisionCacheStorage {

@@ -31,6 +31,42 @@ async function collect(iterable: AsyncIterable<SynthesisChunk>): Promise<Synthes
   return values;
 }
 
+describe("streamAudio8Synthesis sampling", () => {
+  const run = async (sampling?: { seed: number | null; temperature: number | null }) => {
+    const bridge = createBridge();
+    await collect(streamAudio8Synthesis(
+      bridge as unknown as Audio8Bridge,
+      { text: TEXT, voice: "clara", tuning: { speed: 1, quality: 5 }, sampling },
+      new AbortController().signal,
+    ));
+    return bridge.generate.mock.calls.map(([request]) => request);
+  };
+
+  it("steps a fixed seed per passage so the passages differ but a repeat is identical", async () => {
+    const requests = await run({ seed: 100, temperature: 0.4 });
+
+    expect(requests.length).toBeGreaterThan(1);
+    expect(requests.map((request) => request.seed)).toEqual(requests.map((_, index) => 100 + index));
+    expect(requests.every((request) => request.temperature === 0.4)).toBe(true);
+    expect((await run({ seed: 100, temperature: 0.4 })).map((request) => request.seed)).toEqual(requests.map((request) => request.seed));
+  });
+
+  it("wraps the stepped seed inside 32 bits", async () => {
+    const requests = await run({ seed: 0xffff_ffff, temperature: null });
+
+    expect(requests.map((request) => request.seed)).toEqual(requests.map((_, index) => index === 0 ? 0xffff_ffff : index - 1));
+  });
+
+  it("sends neither field when nothing is set, leaving the model's own sampling", async () => {
+    for (const sampling of [undefined, { seed: null, temperature: null }]) {
+      for (const request of await run(sampling)) {
+        expect(request).not.toHaveProperty("seed");
+        expect(request).not.toHaveProperty("temperature");
+      }
+    }
+  });
+});
+
 describe("streamAudio8Synthesis", () => {
   it("renders every passage in order with its pause appended, and names each request", async () => {
     const bridge = createBridge();

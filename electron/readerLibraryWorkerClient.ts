@@ -5,9 +5,11 @@ type ReaderLibraryOperation =
   | "listDocuments"
   | "getDocument"
   | "saveDocument"
+  | "saveProgress"
   | "deleteDocument"
   | "getActiveDocumentId"
   | "setActiveDocumentId"
+  | "getAudioSignature"
   | "deleteAudio";
 
 interface PendingRequest {

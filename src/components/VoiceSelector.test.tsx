@@ -73,4 +73,51 @@ describe("VoiceSelector", () => {
     expect(screen.queryByRole("menu", { name: "Select voice" })).not.toBeInTheDocument();
     expect(trigger).toHaveFocus();
   });
+
+  it("renders Kitten's eight voices with their gender and calls onVoiceChange", () => {
+    const onVoiceChange = vi.fn();
+    render(<VoiceSelector activeModel="kitten" voice="Bella" onVoiceChange={onVoiceChange} kokoroVoices={[]} />);
+
+    expect(screen.getAllByRole("button")).toHaveLength(8);
+    expect(screen.getByRole("button", { name: /Bella/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Bella/ })).toHaveTextContent("English · Female");
+    expect(screen.getByRole("button", { name: /Leo/ })).toHaveTextContent("English · Male");
+
+    fireEvent.click(screen.getByRole("button", { name: /Leo/ }));
+    expect(onVoiceChange).toHaveBeenCalledWith("Leo");
+  });
+
+  it("shows Paradee's single voice", () => {
+    render(<VoiceSelector activeModel="paradee" voice="heart" onVoiceChange={vi.fn()} kokoroVoices={[]} />);
+
+    expect(screen.getAllByRole("button")).toHaveLength(1);
+    expect(screen.getByRole("button", { name: /Heart/ })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("hands Piper to its voice browser, with the model's download progress", () => {
+    const onVoiceChange = vi.fn();
+    render(
+      <VoiceSelector
+        activeModel="piper"
+        voice="en_US-libritts-high#2"
+        onVoiceChange={onVoiceChange}
+        kokoroVoices={[]}
+        modelState={{ ready: true, loading: true, downloadProgress: 12, error: null, backend: "wasm" }}
+      />,
+    );
+
+    expect(screen.getByText("LibriTTS")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("12%");
+    fireEvent.click(screen.getByRole("button", { name: /Browse/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Kristin/ }));
+    expect(onVoiceChange).toHaveBeenCalledWith("en_US-kristin-medium");
+  });
+
+  it("hands Chatterbox to its reference voice controls", () => {
+    const onVoiceChange = vi.fn();
+    render(<VoiceSelector activeModel="chatterbox" voice="chatterbox-default" onVoiceChange={onVoiceChange} kokoroVoices={[]} />);
+
+    expect(screen.getByRole("button", { name: /Default voice/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Clone a voice from a WAV file/ })).toBeInTheDocument();
+  });
 });

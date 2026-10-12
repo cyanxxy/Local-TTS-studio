@@ -2,7 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getQwen3Profiles } from "../../electron/qwen3Profiles";
 import { libraryCatalogVoice, type CatalogVoice } from "../lib/voiceLibrary/catalog";
-import { getStagedReference, resetStagedReferences } from "../lib/voiceLibrary/stagedReference";
+import { getStagedReference, resetStagedReferences, stageReference } from "../lib/voiceLibrary/stagedReference";
 import type { ClonedVoiceRecord, DesignedVoiceRecord, PresetVoiceRecord } from "../lib/voiceLibrary/types";
 import { encodeWavPcm16 } from "../lib/wavCodec";
 import { useVoiceApplier, type VoiceApplierDeps } from "./useVoiceApplier";
@@ -53,6 +53,7 @@ function setup(overrides: Partial<VoiceApplierDeps> = {}, qwen: Partial<VoiceApp
     qwen3,
     library: { getVoiceAudio: vi.fn(async () => wav) },
     neuttsEnabled: true,
+    resolveChatterboxVoice: vi.fn(async () => "abc123~Me"),
     ...overrides,
   };
   const hook = renderHook((props: VoiceApplierDeps) => useVoiceApplier(props), { initialProps: deps });
@@ -154,12 +155,33 @@ describe("useVoiceApplier", () => {
     expect(disabled.deps.navigate).not.toHaveBeenCalled();
   });
 
-  it("stages a Chatterbox reference and says the engine is not available yet", async () => {
+  it("uses a saved Chatterbox clone through the engine's clip voice id and leaves nothing staged", async () => {
     const { deps, hook } = setup();
+    stageReference({ voiceId: "old", name: "x", target: "chatterbox", wavBase64: "", transcript: "", language: "English", durationSec: 5, sha256: "e".repeat(64) });
+    let result;
+    await act(async () => { result = await hook.result.current(entry(clone, "chatterbox"), "reader"); });
+    expect(result).toMatchObject({ ok: true });
+    expect(deps.resolveChatterboxVoice).toHaveBeenCalledWith(expect.objectContaining({ id: "c" }));
+    expect(deps.selectBrowserModel).toHaveBeenCalledWith("reader", "chatterbox");
+    expect(deps.patchVoice).toHaveBeenCalledWith("chatterbox", { voice: "abc123~Me" });
+    expect(deps.navigate).toHaveBeenCalledWith("reader");
+    expect(getStagedReference("chatterbox")).toBeNull();
+  });
+
+  it("explains a Chatterbox clone whose clip cannot be loaded", async () => {
+    const { deps, hook } = setup({ resolveChatterboxVoice: vi.fn(async () => { throw new Error("The reference clip for this voice is missing from the library."); }) });
     let result;
     await act(async () => { result = await hook.result.current(entry(clone, "chatterbox"), "studio"); });
-    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("Chatterbox") });
-    expect(getStagedReference("chatterbox")).toMatchObject({ voiceId: "c" });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("missing") });
     expect(deps.navigate).not.toHaveBeenCalled();
   });
+
+  it("applies the other browser engines' voices like Kokoro's", async () => {
+    const { deps, hook } = setup();
+    const piper: PresetVoiceRecord = { ...common, id: "p", name: "Piper voice", kind: "preset", preset: { engineId: "piper", voiceId: "en_US-amy#0", settings: {} } };
+    await act(async () => { await hook.result.current(entry(piper), "studio"); });
+    expect(deps.selectBrowserModel).toHaveBeenCalledWith("studio", "piper");
+    expect(deps.patchVoice).toHaveBeenCalledWith("piper", { voice: "en_US-amy#0" });
+  });
+
 });

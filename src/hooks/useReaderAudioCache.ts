@@ -5,6 +5,7 @@ import {
   createReaderAudioCacheKey,
   getCachedReaderAudioByteLength,
   type CachedReaderAudio,
+  type CachedReaderAudioChunk,
   type ReaderDocumentRecord,
   type ReaderSection,
 } from "../lib/readerDocument";
@@ -15,6 +16,37 @@ import type { UseReaderLibraryReturn } from "./useReaderLibrary";
 
 /** How long the Reader waits after its audio last changed before saving it. */
 export const READER_AUDIO_SAVE_DELAY_MS = 800;
+
+/**
+ * While a section is still streaming in, its audio is saved at most this often
+ * (each save writes everything streamed so far). A finished section is saved
+ * once it stops changing.
+ */
+export const READER_STREAMING_SAVE_INTERVAL_MS = 30_000;
+
+/** What the last save (or restore) left in storage for the active section. */
+interface SavedAudio {
+  cacheKey: string;
+  signature: string;
+  synthesisComplete: boolean;
+  /** The PCM buffers saved, by identity: unchanged audio is the same buffers. */
+  buffers: readonly ArrayBuffer[];
+}
+
+function isSavedAudio(
+  saved: SavedAudio | null,
+  cacheKey: string,
+  signature: string,
+  synthesisComplete: boolean,
+  chunks: readonly CachedReaderAudioChunk[],
+): boolean {
+  return saved !== null
+    && saved.cacheKey === cacheKey
+    && saved.signature === signature
+    && saved.synthesisComplete === synthesisComplete
+    && saved.buffers.length === chunks.length
+    && chunks.every((chunk, index) => chunk.audio === saved.buffers[index]);
+}
 
 /** What entering a section should do once its saved audio has been looked up. */
 export interface ReaderContinuation {
@@ -38,6 +70,14 @@ interface Options {
    * while one of them is still unknown.
    */
   signatureParts: EngineSignatureParts | null;
+  /** Plays restored audio at this speed instead of the one it was saved at. */
+  playbackRate?: number | null;
+  /**
+   * The book's remembered voice is not what the Reader speaks with yet (its
+   * engine is still being detected, or applied), so audio that does not match
+   * the signature of the fallback voice may be exactly the book's own.
+   */
+  keepMismatchedAudio?: boolean;
   library: Pick<UseReaderLibraryReturn, "loadAudio" | "saveAudio" | "clearAudio">;
   player: Pick<
     UseAudioPlayerReturn,
@@ -102,6 +142,8 @@ export function useReaderAudioCache({
   sectionText,
   engineId,
   signatureParts,
+  playbackRate,
+  keepMismatchedAudio,
   library,
   player,
   retireAllAudio,
@@ -146,6 +188,8 @@ export function useReaderAudioCache({
   const continuationRef = useRef<ReaderContinuation | null>(null);
   const restoreRequestRef = useRef<{ sectionId: string; currentTime?: number } | null>(null);
   const clearedForEditRef = useRef<string | null>(null);
+  const savedAudioRef = useRef<SavedAudio | null>(null);
+  const lastSaveAtRef = useRef(0);
 
   useEffect(() => {
     clearedForEditRef.current = null;
@@ -164,10 +208,23 @@ export function useReaderAudioCache({
     // Read at call time from the buffers just snapshotted: neither the
     // position nor the streamed duration is current in React state.
     const playback = getPlaybackSnapshot();
+    const cacheKey = createReaderAudioCacheKey(documentId, section.id);
+    // Audio storage already holds exactly this PCM (a restore, or a flush that
+    // follows a save with nothing streamed since): rewriting it would only
+    // churn the disk. The resume position is kept in the book's progress.
+    if (isSavedAudio(savedAudioRef.current, cacheKey, signature, playback.synthesisComplete, chunks)) return;
     const updatedAt = Math.max(Date.now(), saveVersionRef.current + 1);
     saveVersionRef.current = updatedAt;
+    lastSaveAtRef.current = Date.now();
+    const saved: SavedAudio = {
+      cacheKey,
+      signature,
+      synthesisComplete: playback.synthesisComplete,
+      buffers: chunks.map((chunk) => chunk.audio),
+    };
+    savedAudioRef.current = saved;
     void saveAudio({
-      cacheKey: createReaderAudioCacheKey(documentId, section.id),
+      cacheKey,
       documentId,
       chapterId: section.chapterId,
       sectionId: section.id,
@@ -179,7 +236,11 @@ export function useReaderAudioCache({
       totalDuration: playback.totalDuration,
       synthesisComplete: playback.synthesisComplete,
       updatedAt,
-    }).catch(reportError);
+    }).catch((cause: unknown) => {
+      // The write did not land, so the next flush must try again.
+      if (savedAudioRef.current === saved) savedAudioRef.current = null;
+      reportError(cause);
+    });
   }, [
     documentId,
     getAudioCacheSnapshot,
@@ -197,10 +258,16 @@ export function useReaderAudioCache({
   // record changes with every progress write, and the library's audio
   // functions change when its storage backend settles.)
   const enteredSection = useEffectEvent(() => ({ document, section }));
-  const currentSignature = useEffectEvent(() => ({ signature, legacySignature }));
+  const currentSignature = useEffectEvent(() => ({ signature, legacySignature, playbackRate, keepMismatchedAudio }));
   const upgradeSectionAudio = useEffectEvent((cache: CachedReaderAudio, upgradedSignature: string) => {
     const updatedAt = Math.max(Date.now(), saveVersionRef.current + 1);
     saveVersionRef.current = updatedAt;
+    savedAudioRef.current = {
+      cacheKey: cache.cacheKey,
+      signature: upgradedSignature,
+      synthesisComplete: cache.synthesisComplete === true,
+      buffers: cache.chunks.map((chunk) => chunk.audio),
+    };
     void saveAudio({ ...cache, signature: upgradedSignature, updatedAt }).catch(reportError);
   });
   const enterSection = useEffectEvent(() => {
@@ -219,6 +286,8 @@ export function useReaderAudioCache({
   useEffect(() => {
     const restoreVersion = ++restoreVersionRef.current;
     restorePendingRef.current = false;
+    savedAudioRef.current = null;
+    lastSaveAtRef.current = 0;
     const entered = enteredSection();
     const enteredDocument = entered.document;
     const enteredSectionValue = entered.section;
@@ -254,6 +323,12 @@ export function useReaderAudioCache({
         const latest = currentSignature();
         const isLegacyMatch = cache !== null && cache.signature === latest.legacySignature;
         if (cache && latest.signature && (cache.signature === latest.signature || isLegacyMatch)) {
+          savedAudioRef.current = {
+            cacheKey: cache.cacheKey,
+            signature: cache.signature,
+            synthesisComplete: cache.synthesisComplete === true,
+            buffers: cache.chunks.map((chunk) => chunk.audio),
+          };
           if (isLegacyMatch) upgradeSectionAudio(cache, latest.signature);
           const preferredTime = restoreRequest
             ? restoreRequest.currentTime ?? cache.currentTime
@@ -264,7 +339,7 @@ export function useReaderAudioCache({
           restoreAudioCache(cache.chunks, {
             // A saved 0 is meaningful (the user stopped or rewound).
             currentTime: Math.max(0, Math.min(maximumTime, preferredTime)),
-            playbackRate: cache.playbackRate,
+            playbackRate: latest.playbackRate ?? cache.playbackRate,
             synthesisComplete: cache.synthesisComplete === true,
           });
           showPlayer(cache.chunks.length > 0);
@@ -272,7 +347,7 @@ export function useReaderAudioCache({
             window.setTimeout(() => void togglePlay(), 0);
           }
         } else {
-          if (cache) void clearSectionAudio(enteredDocument.id, enteredSectionValue.id);
+          if (cache && !latest.keepMismatchedAudio) void clearSectionAudio(enteredDocument.id, enteredSectionValue.id);
           if (continuation?.autoGenerate) {
             window.setTimeout(() => generateEnteredSection(), 0);
           }
@@ -298,17 +373,22 @@ export function useReaderAudioCache({
     };
   }, [active, documentId, reportError, restoreAudioCache, sectionId, signatureKnown, togglePlay]);
 
-  // Saves the section's audio once it stops changing for a moment.
+  // Saves the section's audio: once a finished section stops changing, and at
+  // most every READER_STREAMING_SAVE_INTERVAL_MS while one is still streaming
+  // in (a save writes everything streamed so far, so saving at every gap
+  // between chunks would rewrite the section quadratically).
   useEffect(() => {
     if (!active || !documentId || !sectionId || segments.length === 0) return;
-    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(flush, READER_AUDIO_SAVE_DELAY_MS);
-    return () => {
-      if (saveTimerRef.current !== null) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
-    };
+    if (isSynthesisComplete) {
+      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = window.setTimeout(flush, READER_AUDIO_SAVE_DELAY_MS);
+    } else if (saveTimerRef.current === null) {
+      const sinceLastSave = Date.now() - lastSaveAtRef.current;
+      saveTimerRef.current = window.setTimeout(
+        flush,
+        Math.max(READER_AUDIO_SAVE_DELAY_MS, READER_STREAMING_SAVE_INTERVAL_MS - sinceLastSave),
+      );
+    }
   }, [
     active,
     documentId,
@@ -319,6 +399,16 @@ export function useReaderAudioCache({
     segments,
     isSynthesisComplete,
   ]);
+
+  // A pending save belongs to the flush that armed it. When the section or
+  // the inputs that sign its audio change, that save must not fire: the
+  // player may still hold audio the new signature would wrongly vouch for.
+  useEffect(() => () => {
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+  }, [active, flush]);
 
   const isRestorePending = useCallback(() => restorePendingRef.current, []);
   const requestRestore = useCallback((target: string, currentTime?: number) => {

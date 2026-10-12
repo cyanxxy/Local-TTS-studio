@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ComponentProps, ReactNode } from "react";
+import type { AudiobookExport } from "../hooks/useAudiobookExport";
 import { AdvancedReaderPage } from "./AdvancedReaderPage";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import type { GenerationStats, ModelState } from "../types";
@@ -12,6 +13,7 @@ import {
 import { DEFAULT_READER_VIEW_PREFERENCES } from "../lib/readerPreferences";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import { chunkTextForModelDetailed } from "../lib/chunking";
+import { chunkKittenText, chunkParadeeText, chunkPiperText } from "../lib/phonemeModels";
 import { PlaybackClock } from "../lib/playbackClock";
 import { estimateSegmentWords } from "./reader/readerSegments";
 import { READER_SHORTCUTS_DIALOG_ATTRIBUTE } from "./reader/readerShortcuts";
@@ -590,6 +592,64 @@ describe("AdvancedReaderPage", () => {
     expect(onViewPreferencesChange).toHaveBeenCalledWith({ columnWidth: "wide" });
     // Auto-advance defaults on, so toggling the checkbox opts out.
     expect(onViewPreferencesChange).toHaveBeenCalledWith({ autoAdvance: false });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Prepare the next part" }));
+    expect(onViewPreferencesChange).toHaveBeenCalledWith({ prepareAhead: false });
+  });
+
+  it("tells the listener when the next part is being prepared and when it is ready", () => {
+    const document = createReaderDocument({
+      id: "prepared-reader",
+      title: "Prepared Reader",
+      text: "A paragraph with enough words for a reading section. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const props = {
+      activeDocument: document,
+      activeChapter: document.chapters[0],
+      activeSection: sections[0],
+      nextSection: sections[1],
+      text: document.text.slice(sections[0].start, sections[0].end),
+    };
+    const idle = renderReader({ ...props, nextPartStatus: null });
+    expect(screen.queryByText(/Next part ready|Preparing next part/)).not.toBeInTheDocument();
+    idle.unmount();
+
+    const preparing = renderReader({ ...props, nextPartStatus: "preparing" });
+    expect(screen.getByText("Preparing next part")).toBeInTheDocument();
+    preparing.unmount();
+
+    renderReader({ ...props, nextPartStatus: "ready" });
+    expect(screen.getByText("Next part ready")).toBeInTheDocument();
+  });
+
+  it("offers audiobook export only where it is wired, and reports a failed one outside its menu", () => {
+    const document = createReaderDocument({
+      id: "audiobook-reader",
+      title: "Audiobook Reader",
+      text: "# One\n\nFirst. ".repeat(20) + "# Two\n\nSecond. ".repeat(20),
+    });
+    const withoutExport = renderReader({ activeDocument: document, activeChapter: document.chapters[0] });
+    expect(screen.queryByRole("button", { name: "Export audiobook" })).not.toBeInTheDocument();
+    withoutExport.unmount();
+
+    const audiobook: AudiobookExport = {
+      state: {
+        status: "failed",
+        progress: null,
+        error: "engine fell over",
+        result: null,
+        scope: { kind: "book" },
+        format: "mp3",
+      },
+      planFor: () => null,
+      start: vi.fn(),
+      cancel: vi.fn(),
+      dismiss: vi.fn(),
+    };
+    renderReader({ activeDocument: document, activeChapter: document.chapters[0], audiobook });
+    expect(screen.getByRole("button", { name: "Export audiobook" })).toBeInTheDocument();
+    expect(screen.getByText(/Audiobook export failed: engine fell over/)).toBeInTheDocument();
   });
 
   it("navigates between bounded reading sections without seeking stale audio", () => {
@@ -791,6 +851,37 @@ describe("AdvancedReaderPage", () => {
     expect(props.sectionPreviewCount).toBe(chunkTextForModelDetailed(text, "supertonic", {
       runtime: { backend: readyState.backend, quality: 5 },
     }).length);
+  });
+
+  it.each([
+    ["kitten", "webgpu", chunkKittenText],
+    ["paradee", "wasm", (text: string) => chunkParadeeText(text)],
+    ["piper", "wasm", (text: string) => chunkPiperText(text)],
+  ] as const)("previews %s sections with the chunker its worker uses", (model, backend, chunker) => {
+    const text = "A compact sentence for a long Reader section, with a clause or two to cut at. ".repeat(60);
+    const state: ModelState = { ...readyState, backend };
+    renderReader({
+      text,
+      activeModel: model,
+      modelStates: { [model]: state },
+      voice: model === "piper" ? "en_US-kristin-medium" : model === "kitten" ? "Luna" : "heart",
+    });
+
+    const props = audioPlayerMock.mock.lastCall?.[0] as { sectionPreviewCount?: number };
+    expect(props.sectionPreviewCount).toBe(chunker(text, backend).length);
+    expect(props.sectionPreviewCount).toBeGreaterThan(1);
+  });
+
+  it.each([
+    ["kitten", "Luna", "Luna", "Kitten TTS"],
+    ["paradee", "heart", "Heart", "Paradee"],
+    ["piper", "en_US-libritts-high#12", "LibriTTS · High · Speaker 12", "Piper"],
+  ] as const)("labels the voice button with %s's own voice and model names", (model, voice, voiceLabel, modelLabel) => {
+    renderReader({ activeModel: model, voice, modelStates: { [model]: readyState } });
+
+    const button = screen.getByRole("button", { name: "Voice settings" });
+    expect(button).toHaveTextContent(voiceLabel);
+    expect(button).toHaveTextContent(modelLabel);
   });
 
   it("keeps every Qwen preview section visible while audio is still streaming", () => {

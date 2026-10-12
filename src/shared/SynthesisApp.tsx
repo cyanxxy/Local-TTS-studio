@@ -8,6 +8,7 @@ import { LocalRuntimePages } from "../components/LocalRuntimePages";
 import { ReaderSurface } from "../components/ReaderSurface";
 import { StudioSurface } from "../components/StudioSurface";
 import { SurfaceErrorBoundary } from "../components/SurfaceErrorBoundary";
+import { getEngine } from "../models/registry";
 import { lazyWithRetry } from "./lazyWithRetry";
 import { SynthesisSessionProvider } from "./SynthesisSessionProvider";
 import { useSynthesisSession } from "./synthesisSessionContext";
@@ -94,9 +95,14 @@ function SynthesisShell({ enableDesktopRuntimes }: { enableDesktopRuntimes: bool
           <AppFooter
             // The badges name the runtimes this build ships, not the one that
             // happens to be selected, so Audio8 is listed on the same terms as
-            // Kokoro and Supertonic wherever it exists.
+            // the browser models wherever it exists.
             runtimeBadges={isStudioPage && localInferenceSupported && !browserSupport.message
-              ? ["Kokoro", "Supertonic", "WebGPU · CPU", ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : [])]
+              ? [
+                  // Supertonic 3 is the desktop build's Supertonic, so the name stays on both.
+                  ...new Set(["Kokoro", "Supertonic", ...browserSupport.supportedModels.map((model) => getEngine(model).label)]),
+                  "WebGPU · CPU",
+                  ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : []),
+                ]
               : null}
             note={(isStudioPage ? chrome.activeModelSupportMessage ?? browserSupport.message : null)
               ?? "More local models as compatible runtimes land."}

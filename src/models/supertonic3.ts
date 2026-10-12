@@ -1,6 +1,6 @@
 import { SUPERTONIC3_LANGUAGES, SUPERTONIC3_VOICES } from "../constants";
 import { chunkForSupertonicDetailed } from "../lib/chunking";
-import { asRecord, pickAllowed } from "./settings";
+import { asRecord, parseSeed, pickAllowed } from "./settings";
 import { audibleTuning } from "./signature";
 import { SUPERTONIC_QUALITY_RANGE } from "./supertonic";
 import type { EngineCapabilities, EngineDescriptor } from "./types";
@@ -37,6 +37,8 @@ export interface Supertonic3Settings {
   voice: string;
   /** One of `SUPERTONIC3_LANGUAGES`; `parseSettings` guarantees it. */
   language: string;
+  /** Unsigned 32-bit sampling seed, or null for a fresh one each time. */
+  seed: number | null;
 }
 
 const SUPERTONIC3_PARAMS = "99M";
@@ -50,7 +52,7 @@ const capabilities: EngineCapabilities = {
   voiceCloning: null,
   voiceDesign: false,
   instruct: false,
-  seed: false,
+  seed: true,
   expressionTags: ["<laugh>", "<breath>", "<sigh>"],
   retake: false,
   streamingGranularity: "chunk",
@@ -61,6 +63,7 @@ function parseSupertonic3Settings(raw: unknown): Supertonic3Settings {
   return {
     voice: pickAllowed(record.voice, SUPERTONIC3_VOICES, "M1"),
     language: pickAllowed(record.language, SUPERTONIC3_LANGUAGES, "en"),
+    seed: parseSeed(record.seed),
   };
 }
 
@@ -73,13 +76,14 @@ export const supertonic3Engine = {
   picker: "desktop",
   badge: "Electron",
   capabilities,
-  defaultSettings: { voice: "M1", language: "en" },
+  defaultSettings: { voice: "M1", language: "en", seed: null },
   parseSettings: parseSupertonic3Settings,
   voices: () => SUPERTONIC3_VOICES.map((id) => ({ id, label: id })),
   voiceLabel: (settings) => settings.voice,
   detail: (settings) => `${SUPERTONIC3_PARAMS} · ${settings.language.toUpperCase()} · ${settings.voice}`,
   signatureParts: ({ settings, tuning, quality }) => ({
-    voice: settings.voice,
+    // A fixed seed changes the audio; it joins the signature only when set.
+    voice: settings.seed === null ? settings.voice : `${settings.voice}#seed=${settings.seed}`,
     tuning: audibleTuning(capabilities, tuning, quality, settings.language),
     legacy: { voice: `${settings.voice}:${settings.language}`, quality, tuning: tuning },
   }),

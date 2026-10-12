@@ -8,6 +8,7 @@ import type * as KittenVoices from "../lib/kittenVoices";
 import { pinnedAssetUrl } from "../lib/pinnedModelAssets";
 import type { PinnedAssetManifest } from "../lib/pinnedModelFetch";
 import type { StyleTtsOutMessage } from "../lib/styleTtsRuntime";
+import { kittenEngine } from "../models/kitten";
 import type { InferenceBackend, WorkerInMessage } from "../types";
 
 function pinnedFile(content: string, path: string) {
@@ -26,6 +27,14 @@ const MANIFEST = {
   files: Object.fromEntries(Object.values(FILES).map((file) => [file.path, { byteLength: file.byteLength, sha256: file.sha256 }])),
 } satisfies PinnedAssetManifest;
 const fileUrl = (file: { path: string }) => pinnedAssetUrl(MANIFEST, file.path);
+
+const PREVIEW_TEXT = [
+  "Chapter One",
+  "",
+  "The first paragraph has a few sentences. It keeps going, with a comma here; and a clause there.",
+  "",
+  "A second paragraph follows after a blank line, long enough that every chunker has to make a decision about where to cut it into passages for synthesis. And a third sentence closes it out.",
+].join("\n");
 
 /** Lower-cased letters are valid Kitten symbols, so this stands in for eSpeak. */
 const phonemize: EspeakPhonemize = async (text) => [text.toLowerCase()];
@@ -187,6 +196,20 @@ describe("kitten.worker", () => {
     }
     const words = chunks.flatMap((chunk) => chunk.wordTimings ?? []).map((timing) => text.slice(timing.start, timing.end));
     expect(words).toEqual(["Hello", "there", "How", "are", "you"]);
+  });
+
+  it.each([false, true])("emits the passages the Kitten engine previews for the Reader (WebGPU: %s)", async (webgpu) => {
+    const worker = await startWorker({ webgpu });
+    await settledLoad(worker);
+    const backend = worker.ofType("READY")[0].backend!;
+
+    worker.send({ type: "GENERATE", generationId: "g1", text: PREVIEW_TEXT, voice: "Bella", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(worker.ofType("GENERATION_COMPLETE")).toHaveLength(1));
+
+    const preview = kittenEngine.previewChunks(PREVIEW_TEXT, { settings: kittenEngine.defaultSettings, backend, quality: 5 });
+    expect(preview.length).toBeGreaterThan(1);
+    expect(worker.ofType("AUDIO_CHUNK").map(({ text, textStart, textEnd }) => ({ text, start: textStart, end: textEnd })))
+      .toEqual(preview.map(({ text, start, end }) => ({ text, start, end })));
   });
 
   it("runs on WebGPU when it initializes and plans longer chunks there", async () => {

@@ -30,6 +30,8 @@ interface Options {
   /** The section's saved audio is still being looked up, so the empty player says nothing. */
   isRestorePending: () => boolean;
   updateProgress: UseReaderLibraryReturn["updateProgress"];
+  /** Writes the position at once; called when playback stops. */
+  flushProgress?: UseReaderLibraryReturn["flushProgress"];
   /** The reader turned on "continue to the next section". */
   autoAdvance: boolean;
   /** Turns to `next`; `continuation` is null when the page should turn without playing. */
@@ -59,6 +61,7 @@ export function useReaderProgress({
   isGenerating,
   isRestorePending,
   updateProgress,
+  flushProgress,
   autoAdvance,
   advance,
 }: Options): ReaderProgress {
@@ -128,6 +131,13 @@ export function useReaderProgress({
   useEffect(() => {
     recordProgress();
   }, [recordProgress, isPlaying]);
+
+  // A pause is where a listener is most likely to quit, so write the position
+  // now instead of waiting out the throttle.
+  const flushOnPause = useEffectEvent(() => flushProgress?.());
+  useEffect(() => {
+    if (!isPlaying) flushOnPause();
+  }, [isPlaying]);
 
   useEffect(() => {
     autoAdvancedSectionRef.current = null;

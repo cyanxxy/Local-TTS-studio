@@ -51,9 +51,13 @@ function context(overrides: Partial<PresetRequestContext> = {}): PresetRequestCo
       kokoro: { voice: "af_heart" },
       supertonic: { voice: "F1", language: "en" },
       audio8: { voice: "clara" },
+      kitten: { voice: "Bella" },
+      paradee: { voice: "heart" },
+      piper: { voice: "en_US-amy-medium" },
+      chatterbox: { voice: "default", temperature: 0.8, seed: null },
       supertonic3: { voice: "M1", language: "en" },
       qwen3,
-    } as SurfaceEngineSettings,
+    } as unknown as SurfaceEngineSettings,
     qwen3Profiles: profiles,
     qwen3Setup: setupOf(customVoice, base, design),
     loadVoiceAudio: vi.fn(async () => ({ wav: new Uint8Array([1, 2, 3]), transcript: "Said clip.", sha256: "f".repeat(64) })),
@@ -137,6 +141,28 @@ describe("buildPresetRequest", () => {
     const missingAudio = context({ loadVoiceAudio: async () => null });
     await expect(buildPresetRequest("Hi.", preset({ engineId: "qwen3", voiceId: "x", mode: "voiceClone", libraryVoiceId: "gone" }), missingAudio))
       .rejects.toBeInstanceOf(PresetRequestError);
+  });
+
+  it("builds requests for the newer browser engines", async () => {
+    const piper = await buildPresetRequest("Hi.", preset({ engineId: "piper", voiceId: "en_US-amy-medium#1" }), context());
+    expect(piper).toMatchObject({ engineId: "piper", request: { settings: { voice: "en_US-amy-medium#1" } } });
+    const kitten = await buildPresetRequest("Hi.", preset({ engineId: "kitten", voiceId: "Luna" }), context());
+    expect(kitten.request.settings).toEqual({ voice: "Luna" });
+  });
+
+  it("renders a saved Chatterbox clone with the engine's clip voice id and its own sampling settings", async () => {
+    const resolveChatterboxVoice = vi.fn(async () => "0123456789abcdef~Me");
+    const result = await buildPresetRequest(
+      "Hi.",
+      preset({ engineId: "chatterbox", voiceId: "library:c1", mode: "voiceClone", libraryVoiceId: "c1", settings: { seed: 5, extra: { temperature: 1.1 } } }),
+      context({ resolveChatterboxVoice }),
+    );
+    expect(resolveChatterboxVoice).toHaveBeenCalledWith("c1");
+    expect(result.request.settings).toEqual({ voice: "0123456789abcdef~Me", temperature: 1.1, seed: 5 });
+    const plain = await buildPresetRequest("Hi.", preset({ engineId: "chatterbox", voiceId: "default" }), context());
+    expect(plain.request.settings).toEqual({ voice: "default", temperature: 0.8, seed: null });
+    await expect(buildPresetRequest("Hi.", preset({ engineId: "chatterbox", voiceId: "x", libraryVoiceId: "c1" }), context()))
+      .rejects.toThrow(/aren't available/);
   });
 
   it("refuses engines without a surface runtime", async () => {

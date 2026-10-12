@@ -30,6 +30,10 @@ interface Options {
   /** The engine the Reader synthesizes with, and the inputs that shape its audio (null while unknown). */
   engineId: SurfaceEngineId;
   signatureParts: EngineSignatureParts | null;
+  /** The book's own playback speed, used instead of the one a section was saved at. */
+  playbackRate?: number | null;
+  /** Saved audio that fails the signature check is kept, not discarded; see `useReaderAudioCache`. */
+  keepMismatchedAudio?: boolean;
   /** The Reader engine is synthesizing. */
   isGenerating: boolean;
   /** Generates the active section with the Reader engine. */
@@ -52,6 +56,8 @@ export interface ReaderSession extends ReaderSections {
   audioSignature: string | null;
   /** Saves the active section's audio now; call before anything replaces it. */
   flushAudio: () => void;
+  /** Turns to `section` and plays it, generating it first when it has no saved audio. */
+  playSection: (section: ReaderSection) => void;
   /** Moves the reading position, turning to the section that holds it. */
   navigateToOffset: (textOffset: number, positionSec?: number) => void;
   startSectionEdit: () => void;
@@ -90,6 +96,8 @@ export function useReaderSession({
   player,
   engineId,
   signatureParts,
+  playbackRate,
+  keepMismatchedAudio,
   isGenerating,
   generate,
   autoAdvance,
@@ -113,6 +121,7 @@ export function useReaderSession({
     deleteDocument: deleteLibraryDocument,
     finalizeActiveTextEdit,
     openDocument: openLibraryDocument,
+    flushProgress,
     updateActiveText,
     updateProgress,
   } = library;
@@ -131,6 +140,8 @@ export function useReaderSession({
     sectionText: activeSectionText,
     engineId,
     signatureParts,
+    playbackRate,
+    keepMismatchedAudio,
     library,
     player,
     retireAllAudio,
@@ -165,6 +176,10 @@ export function useReaderSession({
     navigate(textOffset, positionSec);
   }, [navigate]);
 
+  const playSection = useCallback((target: ReaderSection) => {
+    navigate(target.start, 0, { autoPlay: true, autoGenerate: true });
+  }, [navigate]);
+
   const advance = useCallback((next: ReaderSection, continuation: ReaderAdvance | null) => {
     navigate(next.start, 0, continuation ?? undefined);
   }, [navigate]);
@@ -180,6 +195,7 @@ export function useReaderSession({
     isGenerating,
     isRestorePending,
     updateProgress,
+    flushProgress,
     autoAdvance,
     advance,
   });
@@ -258,6 +274,7 @@ export function useReaderSession({
     document,
     audioSignature: audioCache.signature,
     flushAudio: flush,
+    playSection,
     navigateToOffset,
     startSectionEdit,
     changeSectionText,
@@ -276,6 +293,7 @@ export function useReaderSession({
     navigateToOffset,
     newDocument,
     openDocument,
+    playSection,
     readerSections,
     setAutoAdvanceHold,
     startSectionEdit,

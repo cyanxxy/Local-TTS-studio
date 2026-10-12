@@ -137,11 +137,16 @@ interface ReaderLibraryBridge {
   listDocuments: () => Promise<unknown[]>;
   getDocument: (id: string) => Promise<unknown | null>;
   saveDocument: (document: unknown) => Promise<void>;
+  // Stores only the reading position. Optional so older preloads can omit it.
+  saveProgress?: (documentId: string, progress: unknown) => Promise<void>;
   deleteDocument: (id: string) => Promise<void>;
   getActiveDocumentId: () => Promise<string | null>;
   setActiveDocumentId: (id: string) => Promise<void>;
   saveAudio: (audio: unknown) => Promise<void>;
   getAudio: (documentId: string, sectionId: string) => Promise<unknown | null>;
+  // The signature of a section's complete cached audio, without its PCM.
+  // Optional so older preloads can omit it.
+  getAudioSignature?: (documentId: string, sectionId: string) => Promise<string | null>;
   deleteAudio: (documentId: string, sectionId?: string) => Promise<void>;
   // Quitting asks every window to write out its debounced Reader edits and
   // holds the shutdown until the listener's promise settles. Optional so test
@@ -231,6 +236,10 @@ interface Audio8Bridge {
     requestId: string;
     text: string;
     voice: string;
+    /** Unsigned 32-bit sampling seed; omitted for a fresh one. */
+    seed?: number;
+    /** Sampling temperature, 0.1 to 1; omitted for the model's own. */
+    temperature?: number;
   }) => Promise<Audio8GenerateResult>;
   cancel: (request: { requestId: string }) => Promise<{ cancelled: boolean }>;
   getCacheInfo: () => Promise<LocalTtsCacheInfo>;

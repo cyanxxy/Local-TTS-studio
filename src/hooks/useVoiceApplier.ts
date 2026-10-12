@@ -4,11 +4,11 @@ import type { Qwen3RuntimeSettings } from "../contexts/Qwen3RuntimeContext";
 import type { AppPage } from "../lib/appRouting";
 import type { CatalogVoice } from "../lib/voiceLibrary/catalog";
 import { isSurfaceEngine } from "../lib/voiceLibrary/presetRequest";
-import { bytesToBase64, stageReference } from "../lib/voiceLibrary/stagedReference";
+import { bytesToBase64, clearStagedReference, stageReference } from "../lib/voiceLibrary/stagedReference";
 import type { VoiceLibraryStore } from "../lib/voiceLibrary/store";
-import type { ClonedVoiceRecord } from "../lib/voiceLibrary/types";
+import type { ClonedVoiceRecord, VoiceRecord } from "../lib/voiceLibrary/types";
 import { decodeWav } from "../lib/wavCodec";
-import type { BrowserEngineId, DesktopInlineEngineId, SurfaceEngineId } from "../models/registry";
+import { isBrowserEngineId, type BrowserEngineId, type DesktopInlineEngineId, type SurfaceEngineId } from "../models/registry";
 import { QWEN3_ENGINE_SPEAKERS } from "../models/qwen3";
 
 export type ApplySurface = "studio" | "reader";
@@ -45,6 +45,8 @@ export interface VoiceApplierDeps {
   navigate: (page: AppPage) => void;
   qwen3: Qwen3Controls;
   library: Pick<VoiceLibraryStore, "getVoiceAudio">;
+  /** The engine voice id of a saved Chatterbox clone, registering its clip with the engine. */
+  resolveChatterboxVoice: (record: VoiceRecord) => Promise<string>;
   /** NeuTTS has a page only while the user has it switched on. */
   neuttsEnabled: boolean;
 }
@@ -55,7 +57,6 @@ interface PendingQwen3 {
   reference: { name: string; base64: string; signature: string; durationSec: number; transcript: string } | null;
 }
 
-const BROWSER_ENGINES: readonly string[] = ["kokoro", "supertonic"];
 const DESKTOP_ENGINES: readonly string[] = ["audio8", "supertonic3"];
 const SURFACE_NAME: Record<ApplySurface, string> = { studio: "Studio", reader: "the Reader" };
 
@@ -102,7 +103,7 @@ export function useVoiceApplier(deps: VoiceApplierDeps): (voice: CatalogVoice, s
     const where = SURFACE_NAME[surface];
     if (preset.settings.speed !== undefined) current.setSpeed(preset.settings.speed);
 
-    const cloneReference = async (target: "qwen3-base" | "neutts" | "chatterbox") => {
+    const cloneReference = async (target: "qwen3-base" | "neutts") => {
       if (record?.kind !== "cloned" && record?.kind !== "designed") return null;
       const role = record.kind === "cloned" ? "reference" : "sample";
       const wav = await current.library.getVoiceAudio(record.id, role);
@@ -128,9 +129,25 @@ export function useVoiceApplier(deps: VoiceApplierDeps): (voice: CatalogVoice, s
       };
     };
 
-    if (BROWSER_ENGINES.includes(preset.engineId) && isSurfaceEngine(preset.engineId)) {
-      current.selectBrowserModel(surface, preset.engineId as BrowserEngineId);
-      current.patchVoice(preset.engineId as "kokoro" | "supertonic", {
+    if (preset.engineId === "chatterbox" && record?.kind === "cloned") {
+      let voiceId: string;
+      try {
+        voiceId = await current.resolveChatterboxVoice(record);
+      } catch (error) {
+        return { ok: false, message: error instanceof Error ? error.message : "This voice's reference clip could not be loaded." };
+      }
+      const live = depsRef.current;
+      live.selectBrowserModel(surface, "chatterbox");
+      live.patchVoice("chatterbox", { voice: voiceId });
+      // The engine now has the clip through its resolver, so nothing stays staged.
+      clearStagedReference("chatterbox");
+      live.navigate(surface);
+      return { ok: true, message: `Using ${voice.name} in ${where}.` };
+    }
+
+    if (isBrowserEngineId(preset.engineId) && isSurfaceEngine(preset.engineId)) {
+      current.selectBrowserModel(surface, preset.engineId);
+      current.patchVoice(preset.engineId, {
         voice: preset.voiceId,
         ...(preset.settings.language ? { language: preset.settings.language } : {}),
       });
@@ -189,7 +206,7 @@ export function useVoiceApplier(deps: VoiceApplierDeps): (voice: CatalogVoice, s
       return { ok: true, message: `Using ${voice.name} in ${where}.` };
     }
 
-    if (preset.engineId === "neutts" || preset.engineId === "chatterbox") {
+    if (preset.engineId === "neutts") {
       const target = preset.engineId;
       const loaded = await cloneReference(target);
       if (!loaded || record?.kind !== "cloned") return { ok: false, message: "This voice's reference clip is missing from the library." };
@@ -203,9 +220,6 @@ export function useVoiceApplier(deps: VoiceApplierDeps): (voice: CatalogVoice, s
         durationSec: loaded.durationSec,
         sha256: loaded.signature,
       });
-      if (target === "chatterbox") {
-        return { ok: false, message: "Reference saved for Chatterbox, which isn't available in this build yet." };
-      }
       if (!depsRef.current.neuttsEnabled) {
         return { ok: false, message: "Turn on NeuTTS in Settings, then use this voice from its page." };
       }

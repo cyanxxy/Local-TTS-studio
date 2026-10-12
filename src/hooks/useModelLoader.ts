@@ -272,13 +272,18 @@ export function useModelLoader(
         dispatch({
           type: "state",
           model,
-          update: (state) => ({
-            ...state,
-            loading: true,
-            downloadProgress: clampPercent(message.percent),
-            error: null,
-            backend: null,
-          }),
+          // A loaded engine reports progress when a generation downloads a
+          // file the load did not need (Piper's next voice); the model stays
+          // ready and its backend unchanged while that runs.
+          update: (state) => state.ready
+            ? { ...state, loading: message.percent < 100, downloadProgress: clampPercent(message.percent) }
+            : {
+                ...state,
+                loading: true,
+                downloadProgress: clampPercent(message.percent),
+                error: null,
+                backend: null,
+              },
         });
         break;
       case "READY":

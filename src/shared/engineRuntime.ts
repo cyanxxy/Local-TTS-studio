@@ -1,6 +1,10 @@
 import type { ChunkPauseKind, GenerationStats, GenerationTuningSettings, ModelState } from "../types";
 import type { Audio8Settings } from "../models/audio8";
+import type { ChatterboxSettings } from "../models/chatterbox";
+import type { KittenSettings } from "../models/kitten";
 import type { KokoroSettings } from "../models/kokoro";
+import type { ParadeeSettings } from "../models/paradee";
+import type { PiperSettings } from "../models/piper";
 import type { Qwen3LiveSettings } from "../models/qwen3";
 import type { SurfaceEngineId } from "../models/registry";
 import type { SupertonicSettings } from "../models/supertonic";
@@ -30,6 +34,10 @@ export interface Qwen3SynthesisSettings extends Qwen3LiveSettings {
 export interface EngineSynthesisSettings {
   kokoro: KokoroSettings;
   supertonic: SupertonicSettings;
+  kitten: KittenSettings;
+  paradee: ParadeeSettings;
+  piper: PiperSettings;
+  chatterbox: ChatterboxSettings;
   audio8: Audio8Settings;
   supertonic3: Supertonic3Settings;
   qwen3: Qwen3SynthesisSettings;

@@ -65,7 +65,7 @@ describe("appState", () => {
     expect(getInitialEngineSettings()).toMatchObject({
       kokoro: { voice: "custom_kokoro" },
       supertonic: { voice: "Male 2", language: "en" },
-      audio8: { voice: "iris" },
+      audio8: { voice: "iris", seed: null, temperature: null },
       supertonic3: ENGINES.supertonic3.defaultSettings,
       qwen3: ENGINES.qwen3.defaultSettings,
     });
@@ -78,7 +78,7 @@ describe("appState", () => {
     expect(getInitialEngineSettings()).toMatchObject({
       kokoro: { voice: "bf_emma" },
       supertonic: { voice: "Male 2" },
-      audio8: { voice: "iris" },
+      audio8: { voice: "iris", seed: null, temperature: null },
     });
   });
 
@@ -97,7 +97,7 @@ describe("appState", () => {
       audio8: { voice: "not-a-voice" },
       supertonic3: "M1",
       qwen3: { temperature: 99, profileRepo: "../../etc" },
-      kitten: { voice: "ignored" },
+      mystery: { voice: "ignored" },
     }));
 
     expect(getInitialAppState()).toEqual({
@@ -114,7 +114,7 @@ describe("appState", () => {
       supertonic3: ENGINES.supertonic3.defaultSettings,
       qwen3: { ...ENGINES.qwen3.defaultSettings, temperature: 2, profileRepo: null },
     });
-    expect(settings).not.toHaveProperty("kitten");
+    expect(settings).not.toHaveProperty("mystery");
   });
 
   it("round-trips each surface's desktop model and every engine's settings", () => {
@@ -126,7 +126,7 @@ describe("appState", () => {
     });
     persistEngineSettings({
       supertonic: { voice: "Male 3", language: "fr" },
-      supertonic3: { voice: "F4", language: "ja" },
+      supertonic3: { voice: "F4", language: "ja", seed: null },
     });
     persistEngineSettings({
       qwen3: { ...ENGINES.qwen3.defaultSettings, speaker: "Ryan", seed: 42 },
@@ -142,9 +142,42 @@ describe("appState", () => {
     // The second write kept the engines the first one stored.
     expect(getInitialEngineSettings()).toMatchObject({
       supertonic: { voice: "Male 3", language: "fr" },
-      supertonic3: { voice: "F4", language: "ja" },
+      supertonic3: { voice: "F4", language: "ja", seed: null },
       qwen3: { speaker: "Ryan", seed: 42 },
     });
+  });
+
+  it("persists Kitten, Paradee and Piper settings with the other engines and rejects what they cannot speak", () => {
+    persistEngineSettings({
+      kitten: { voice: "Rosie" },
+      piper: { voice: "en_US-libritts-high#12" },
+    });
+    persistEngineSettings({ supertonic: { voice: "Male 3", language: "fr" } });
+
+    expect(getInitialEngineSettings()).toMatchObject({
+      kitten: { voice: "Rosie" },
+      paradee: ENGINES.paradee.defaultSettings,
+      piper: { voice: "en_US-libritts-high#12" },
+      supertonic: { voice: "Male 3", language: "fr" },
+    });
+
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({
+      kitten: { voice: "Robot" },
+      paradee: { voice: "af_bella" },
+      piper: { voice: "en_US-libritts-high#99999" },
+    }));
+    expect(getInitialEngineSettings()).toMatchObject({
+      kitten: ENGINES.kitten.defaultSettings,
+      paradee: ENGINES.paradee.defaultSettings,
+      piper: { voice: "en_US-libritts-high" },
+    });
+  });
+
+  it("restores the browser model a user last chose among the new engines", () => {
+    for (const model of ["kitten", "paradee", "piper"] as const) {
+      persistAppState({ model });
+      expect(getInitialAppState().model).toBe(model);
+    }
   });
 
   it("falls back to defaults when stored app JSON or localStorage access fails", () => {
@@ -294,7 +327,7 @@ describe("appState", () => {
     });
 
     expect(() => persistAppState({ model: "kokoro" })).not.toThrow();
-    expect(() => persistEngineSettings({ audio8: { voice: "iris" } })).not.toThrow();
+    expect(() => persistEngineSettings({ audio8: { voice: "iris", seed: null, temperature: null } })).not.toThrow();
     expect(() => persistCreatorState({ preset: "youtube-long" })).not.toThrow();
   });
 });

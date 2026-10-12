@@ -5,6 +5,7 @@ import {
   type GenerationAudioChunk,
   type GenerationHistoryEntry,
   type GenerationHistoryStore,
+  type GenerationHistoryUsage,
   type NewGenerationEntry,
   type ReusableGenerationSettings,
 } from "../lib/history/generationHistory";
@@ -13,6 +14,8 @@ import { useStoreSnapshot } from "./useStoreSnapshot";
 export interface UseGenerationHistoryReturn {
   /** Newest first. */
   entries: GenerationHistoryEntry[];
+  /** Entry count, audio bytes and favorites in use, against GENERATION_HISTORY_LIMITS. */
+  usage: GenerationHistoryUsage;
   loading: boolean;
   error: string | null;
   refresh: () => Promise<void>;
@@ -29,9 +32,14 @@ export interface UseGenerationHistoryReturn {
 }
 
 const EMPTY_ENTRIES: GenerationHistoryEntry[] = [];
+const EMPTY_USAGE: GenerationHistoryUsage = { entryCount: 0, totalBytes: 0, favoriteCount: 0 };
 
 function listEntries(store: GenerationHistoryStore): Promise<GenerationHistoryEntry[]> {
   return store.listEntries();
+}
+
+function readUsage(store: GenerationHistoryStore): Promise<GenerationHistoryUsage> {
+  return store.getUsage();
 }
 
 /** Live view of Generation History with its actions. */
@@ -40,8 +48,11 @@ export function useGenerationHistory(
 ): UseGenerationHistoryReturn {
   const { data: entries, loading, error, refresh } = useStoreSnapshot(store, listEntries, EMPTY_ENTRIES);
 
+  const { data: usage } = useStoreSnapshot(store, readUsage, EMPTY_USAGE);
+
   return useMemo(() => ({
     entries,
+    usage,
     loading,
     error,
     refresh,
@@ -56,5 +67,5 @@ export function useGenerationHistory(
     deleteEntry: (id) => store.deleteEntry(id),
     clear: (options) => store.clear(options),
     store,
-  }), [entries, error, loading, refresh, store]);
+  }), [entries, error, loading, refresh, store, usage]);
 }

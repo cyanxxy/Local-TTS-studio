@@ -29,6 +29,8 @@ export interface PresetRequestContext {
   qwen3Setup: LocalTtsQwen3Setup | null;
   /** The reference clip and transcript behind a cloned or designed library voice. */
   loadVoiceAudio: (libraryVoiceId: string) => Promise<LibraryVoiceAudio | null>;
+  /** The Chatterbox voice id of a saved Chatterbox clone, registering its clip with the engine. */
+  resolveChatterboxVoice?: (libraryVoiceId: string) => Promise<string>;
 }
 
 export interface PresetRequest {
@@ -155,6 +157,29 @@ export async function buildPresetRequest(
         engineId: "supertonic3",
         request: { ...common, settings: { voice: preset.voiceId, language: settings.language ?? live.supertonic3.language } },
       };
+    case "kitten":
+    case "paradee":
+    case "piper":
+      return { engineId: preset.engineId, request: { ...common, settings: { voice: preset.voiceId } } };
+    case "chatterbox": {
+      let voice = preset.voiceId;
+      if (preset.libraryVoiceId) {
+        if (!context.resolveChatterboxVoice) throw new PresetRequestError("Chatterbox clones aren't available here.");
+        voice = await context.resolveChatterboxVoice(preset.libraryVoiceId);
+      }
+      const temperature = settings.extra?.temperature;
+      return {
+        engineId: "chatterbox",
+        request: {
+          ...common,
+          settings: {
+            voice,
+            temperature: typeof temperature === "number" ? temperature : live.chatterbox.temperature,
+            seed: settings.seed ?? live.chatterbox.seed,
+          },
+        },
+      };
+    }
     case "qwen3":
       return { engineId: "qwen3", request: { ...common, settings: await qwen3Request(preset, context) } };
     default:

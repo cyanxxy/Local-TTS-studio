@@ -6,12 +6,15 @@ describe("Supertonic3InlineSettings", () => {
   it("exposes the published voice and language controls", () => {
     const onVoiceChange = vi.fn();
     const onLanguageChange = vi.fn();
+    const onSeedChange = vi.fn();
     render(
       <Supertonic3InlineSettings
         voice="M1"
         language="en"
         onVoiceChange={onVoiceChange}
         onLanguageChange={onLanguageChange}
+        seed={null}
+        onSeedChange={onSeedChange}
       />,
     );
 
@@ -19,6 +22,8 @@ describe("Supertonic3InlineSettings", () => {
     fireEvent.change(screen.getByLabelText("Supertonic 3 language"), { target: { value: "nl" } });
     expect(onVoiceChange).toHaveBeenCalledWith("F3");
     expect(onLanguageChange).toHaveBeenCalledWith("nl");
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "5" } });
+    expect(onSeedChange).toHaveBeenCalledWith(5);
     expect(screen.getByText(/expression tags/i)).toBeInTheDocument();
   });
 });

@@ -1,5 +1,6 @@
 import type { PresetSynthesize } from "../presetSynthesis";
 import type { EngineRuntimeMap, SynthesisRequest } from "../../shared/engineRuntime";
+import { chatterboxClipForVoice } from "./chatterboxLibrary";
 import { buildPresetRequest, type PresetRequestContext } from "./presetRequest";
 import type { VoiceLibraryStore } from "./store";
 
@@ -35,6 +36,11 @@ export function createPresetSynthesize(getDeps: () => PresetSynthesizeDeps): Pre
     const { engineId, request } = await buildPresetRequest(text, preset, {
       ...context,
       loadVoiceAudio: libraryVoiceAudioLoader(library),
+      resolveChatterboxVoice: async (id) => {
+        const record = await library.getVoice(id);
+        if (!record) throw new Error("This voice is no longer in the library.");
+        return (await chatterboxClipForVoice(library, record)).id;
+      },
     });
     signal.throwIfAborted();
     const runtime = runtimes[engineId] as { synthesize: (request: SynthesisRequest) => AsyncIterable<{ audio: Float32Array; samplingRate: number }> };

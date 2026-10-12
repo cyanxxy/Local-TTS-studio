@@ -1,9 +1,11 @@
-import { useCallback, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MIN_TEXT_LENGTH } from "../constants";
 import type { LocalBrowserSupport } from "../lib/browserSupport";
+import { ensureChatterboxReference } from "../lib/chatterboxClips";
+import { CHATTERBOX_DEFAULT_REFERENCE_ID } from "../lib/chatterboxProtocol";
 import { hasMinimumSynthesisText } from "../lib/textValidation";
 import { resolveKokoroVoice } from "../lib/voices";
-import { ENGINES, type BrowserEngineId } from "../models/registry";
+import { BROWSER_ENGINE_IDS, browserEngineWorkerFields, ENGINES, type BrowserEngineId } from "../models/registry";
 import type { EngineRuntime, SynthesisChunk, SynthesisRequest } from "../shared/engineRuntime";
 import type { SynthesisQueue } from "../shared/synthesisQueue";
 import type { ChunkPauseKind, GenerationStats, GenerationTuningSettings, ModelState } from "../types";
@@ -30,6 +32,8 @@ interface Options {
   /** Each engine's chosen voice; the surface generation speaks with the active one's. */
   savedVoices: { readonly [Id in BrowserEngineId]: string };
   generationSettings: GenerationTuningSettings;
+  /** GENERATE fields only the active engine's worker reads, from its settings (see `workerFields`). */
+  engineFields?: Readonly<Record<string, unknown>>;
   player: UseAudioPlayerReturn;
   setShowPlayer: (show: boolean) => void;
 }
@@ -63,11 +67,12 @@ const IDLE_STATS: GenerationStats = {
 const noop = () => undefined;
 
 /**
- * Kokoro and Supertonic 2 as engine runtimes. The two share one surface
- * generation path (the worker pool, `useTTS` and `useGenerationControl`), which
- * drives whichever is `activeModel`; the other engine's surface fields are idle
- * and its controls do nothing. Either engine can `synthesize` at any time: a
- * request loads its engine's worker on demand and holds it while it runs.
+ * The browser engines (Kokoro, Supertonic 2, Kitten, Paradee, Piper) as engine
+ * runtimes. They share one surface generation path (the worker pool, `useTTS`
+ * and `useGenerationControl`), which drives whichever is `activeModel`; every
+ * other engine's surface fields are idle and its controls do nothing. Any
+ * engine can `synthesize` at any time: a request loads its engine's worker on
+ * demand and holds it while it runs.
  */
 export function useBrowserEngineRuntimes({
   activeModel,
@@ -79,6 +84,7 @@ export function useBrowserEngineRuntimes({
   text,
   savedVoices,
   generationSettings,
+  engineFields,
   player,
   setShowPlayer,
 }: Options): UseBrowserEngineRuntimesReturn {
@@ -124,10 +130,11 @@ export function useBrowserEngineRuntimes({
     if (kokoroVoices.length === 0) return savedKokoroVoice;
     return resolveKokoroVoice(savedKokoroVoice, kokoroVoices) ?? savedKokoroVoice;
   }, [kokoroVoices, savedKokoroVoice]);
-  const supertonicVoice = savedVoices.supertonic;
+  // Only Kokoro's catalogue depends on what its model reported; every other
+  // engine's saved voice was validated against its own fixed catalogue.
   const voicesInUse = useMemo(
-    () => ({ kokoro: kokoroVoice, supertonic: supertonicVoice }),
-    [kokoroVoice, supertonicVoice],
+    () => ({ ...savedVoices, kokoro: kokoroVoice }),
+    [kokoroVoice, savedVoices],
   );
   const voice = voicesInUse[activeModel];
 
@@ -151,6 +158,7 @@ export function useBrowserEngineRuntimes({
     text,
     tts,
     voice,
+    engineFields,
   });
   const {
     cancelActiveGeneration,
@@ -166,9 +174,17 @@ export function useBrowserEngineRuntimes({
   // Only the active engine's queue ever meets the surface generation.
   const kokoroQueue = useSynthesisQueue(activeModel === "kokoro" && isGenerationBusy);
   const supertonicQueue = useSynthesisQueue(activeModel === "supertonic" && isGenerationBusy);
+  const kittenQueue = useSynthesisQueue(activeModel === "kitten" && isGenerationBusy);
+  const paradeeQueue = useSynthesisQueue(activeModel === "paradee" && isGenerationBusy);
+  const piperQueue = useSynthesisQueue(activeModel === "piper" && isGenerationBusy);
+  const chatterboxQueue = useSynthesisQueue(activeModel === "chatterbox" && isGenerationBusy);
   const queues: { readonly [Id in BrowserEngineId]: UseSynthesisQueueReturn } = {
     kokoro: kokoroQueue,
     supertonic: supertonicQueue,
+    kitten: kittenQueue,
+    paradee: paradeeQueue,
+    piper: piperQueue,
+    chatterbox: chatterboxQueue,
   };
   const activeQueue = queues[activeModel];
 
@@ -180,7 +196,36 @@ export function useBrowserEngineRuntimes({
   });
   const { retryActiveModelLoad } = cache;
 
-  const canGenerate = readyToGenerate && !activeQueue.busy && !isGenerationBusy;
+  // A cloned Chatterbox voice must reach the worker before it can speak with it.
+  const referenceId = activeModel === "chatterbox" && typeof engineFields?.referenceId === "string"
+    && engineFields.referenceId !== CHATTERBOX_DEFAULT_REFERENCE_ID
+    ? engineFields.referenceId
+    : null;
+  const chatterboxState = states.chatterbox;
+  const [syncedReference, setSyncedReference] = useState<{ id: string; state: ModelState } | null>(null);
+  const [referenceFailure, setReferenceFailure] = useState<{ id: string; message: string } | null>(null);
+  useEffect(() => {
+    const worker = referenceId === null || !chatterboxState.ready ? null : getWorker("chatterbox");
+    if (referenceId === null || !worker) return;
+    let current = true;
+    ensureChatterboxReference(worker, referenceId).then(
+      () => {
+        if (current) setSyncedReference({ id: referenceId, state: chatterboxState });
+      },
+      (error: unknown) => {
+        if (current) setReferenceFailure({ id: referenceId, message: error instanceof Error ? error.message : String(error) });
+      },
+    );
+    return () => {
+      current = false;
+    };
+  }, [chatterboxState, getWorker, referenceId]);
+  // Ready only for this worker: a replacement worker is a new model state.
+  const referenceReady = referenceId === null
+    || (syncedReference?.id === referenceId && syncedReference.state === chatterboxState);
+  const referenceError = referenceId !== null && referenceFailure?.id === referenceId ? referenceFailure.message : null;
+
+  const canGenerate = readyToGenerate && referenceReady && !activeQueue.busy && !isGenerationBusy;
   const { holdForeground } = activeQueue;
   const handleGenerate = useCallback(() => {
     if (!canGenerate) return;
@@ -204,6 +249,13 @@ export function useBrowserEngineRuntimes({
   ) => queue.enqueue((signal) => (async function* () {
     const held = await acquireWorker(model, signal);
     try {
+      const fields: Readonly<Record<string, unknown>> = {
+        ...browserEngineWorkerFields(model, request.settings),
+        ...(request.seed !== undefined && ENGINES[model].capabilities.seed ? { seed: request.seed } : {}),
+      };
+      if (model === "chatterbox" && typeof fields.referenceId === "string") {
+        await ensureChatterboxReference(held.worker, fields.referenceId);
+      }
       synthesisSeqRef.current += 1;
       const { label } = ENGINES[model];
       const settings: { voice: string; language?: string } = request.settings;
@@ -214,6 +266,7 @@ export function useBrowserEngineRuntimes({
           request.text,
           settings.voice,
           settings.language === undefined ? request.tuning : { ...request.tuning, language: settings.language },
+          fields,
         ),
         signal,
         lifetime: held.lifetime,
@@ -232,18 +285,39 @@ export function useBrowserEngineRuntimes({
 
   const kokoroQueueInstance = kokoroQueue.queue;
   const supertonicQueueInstance = supertonicQueue.queue;
-  const synthesizeKokoro = useCallback(
-    (request: SynthesisRequest<"kokoro">) => synthesizeWith("kokoro", kokoroQueueInstance, request),
-    [kokoroQueueInstance, synthesizeWith],
-  );
-  const synthesizeSupertonic = useCallback(
-    (request: SynthesisRequest<"supertonic">) => synthesizeWith("supertonic", supertonicQueueInstance, request),
-    [supertonicQueueInstance, synthesizeWith],
-  );
+  const kittenQueueInstance = kittenQueue.queue;
+  const paradeeQueueInstance = paradeeQueue.queue;
+  const piperQueueInstance = piperQueue.queue;
+  const chatterboxQueueInstance = chatterboxQueue.queue;
+  const synthesizers = useMemo(() => {
+    const queueInstances: { readonly [Id in BrowserEngineId]: SynthesisQueue<SynthesisChunk> } = {
+      kokoro: kokoroQueueInstance,
+      supertonic: supertonicQueueInstance,
+      kitten: kittenQueueInstance,
+      paradee: paradeeQueueInstance,
+      piper: piperQueueInstance,
+      chatterbox: chatterboxQueueInstance,
+    };
+    return Object.fromEntries(BROWSER_ENGINE_IDS.map((model) => [
+      model,
+      (request: SynthesisRequest<BrowserEngineId>) => synthesizeWith(
+        model,
+        queueInstances[model],
+        // The request carries the settings of the engine it is made on.
+        request as SynthesisRequest<typeof model>,
+      ),
+    ])) as { readonly [Id in BrowserEngineId]: EngineRuntime<Id>["synthesize"] };
+  }, [
+    chatterboxQueueInstance,
+    kittenQueueInstance,
+    kokoroQueueInstance,
+    paradeeQueueInstance,
+    piperQueueInstance,
+    supertonicQueueInstance,
+    synthesizeWith,
+  ]);
 
-  const kokoroState = states.kokoro;
-  const supertonicState = states.supertonic;
-  const surfaceError = tts.error ?? retakeError;
+  const surfaceError = tts.error ?? retakeError ?? referenceError;
   const runtimes = useMemo<BrowserEngineRuntimeMap>(() => {
     const surface = {
       canGenerate,
@@ -269,14 +343,14 @@ export function useBrowserEngineRuntimes({
       cancelActiveGeneration: noop,
       resetGeneratedAudio: noop,
     };
-    const fields = (model: BrowserEngineId, modelState: ModelState) => ({
+    // Each entry pairs an engine's id with its own state and synthesize, which
+    // the mapped type cannot see through a loop over the ids.
+    return Object.fromEntries(BROWSER_ENGINE_IDS.map((model) => [model, {
+      id: model,
       ...(model === activeModel ? surface : idle),
-      modelState,
-    });
-    return {
-      kokoro: { id: "kokoro", ...fields("kokoro", kokoroState), synthesize: synthesizeKokoro },
-      supertonic: { id: "supertonic", ...fields("supertonic", supertonicState), synthesize: synthesizeSupertonic },
-    };
+      modelState: states[model],
+      synthesize: synthesizers[model],
+    }])) as unknown as BrowserEngineRuntimeMap;
   }, [
     activeModel,
     canGenerate,
@@ -284,13 +358,11 @@ export function useBrowserEngineRuntimes({
     handleGenerate,
     handleStop,
     isGenerationBusy,
-    kokoroState,
     resetGeneratedAudio,
     retryActiveModelLoad,
-    supertonicState,
+    states,
     surfaceError,
-    synthesizeKokoro,
-    synthesizeSupertonic,
+    synthesizers,
     tts.generationProgress,
     tts.stats,
   ]);
