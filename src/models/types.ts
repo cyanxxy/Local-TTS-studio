@@ -1,6 +1,6 @@
 import type { GenerationTuningSettings, InferenceBackend } from "../types";
 import type { TextChunk } from "../lib/chunking";
-import type { AudioSignatureTuning } from "../lib/readerDocument";
+import type { AudioSignatureTuning, LegacyAudioSignatureParts } from "../lib/readerDocument";
 
 /**
  * Engine descriptors are metadata plus pure functions. They must stay safe for
@@ -103,6 +103,11 @@ export interface EngineSignatureContext<Live> {
 export interface EngineSignatureParts {
   readonly voice: string;
   readonly tuning: AudioSignatureTuning;
+  /**
+   * The inputs the version 1 signature hashed, so audio cached before version
+   * 2 can be recognised and upgraded rather than discarded.
+   */
+  readonly legacy: LegacyAudioSignatureParts;
 }
 
 export interface EnginePreviewContext<Live> {

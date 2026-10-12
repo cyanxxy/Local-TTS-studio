@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { estimateWordRanges as sharedEstimateWordRanges } from "./text/wordTiming";
 import {
   buildAudioSignature,
+  buildLegacyAudioSignature,
   buildReaderSections,
   calculateReaderProgress,
   chapterAtOffset,
@@ -66,6 +67,17 @@ describe("readerDocument", () => {
 
   it("uses the one shared word-timing estimator for Reader highlighting", () => {
     expect(estimateWordRanges).toBe(sharedEstimateWordRanges);
+  });
+
+  it("reproduces the signature earlier releases saved Reader audio under", () => {
+    // Computed with the version 1 buildAudioSignature before the format changed.
+    expect(buildLegacyAudioSignature({
+      text: "Hello there, world.",
+      model: "kokoro",
+      voice: "af_heart",
+      quality: 5,
+      tuning: { speed: 1.1, quality: 5, pauseOverridesSec: { comma: 0.2 }, pronunciationRules: [{ from: "a", to: "b" }] },
+    })).toBe("j-1ydujgi");
   });
 
   it("estimates weighted word timings while preserving source offsets", () => {

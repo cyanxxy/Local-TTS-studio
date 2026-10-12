@@ -20,7 +20,7 @@ import {
   SETUP_PAGE_ENGINE_IDS,
   engineDetail,
   enginePreviewChunks,
-  engineSignatureParts,
+  engineSignatureParts as engineSignaturePartsWithLegacy,
   engineVoiceLabel,
   getEngine,
   isBrowserEngineId,
@@ -29,7 +29,7 @@ import {
   parseEngineSettings,
   surfaceEngineDetail,
   surfaceEnginePreviewChunks,
-  surfaceEngineSignatureParts,
+  surfaceEngineSignatureParts as surfaceEngineSignaturePartsWithLegacy,
   surfaceEngineVoiceLabel,
   type BrowserEngineId,
   type DesktopInlineEngineId,
@@ -89,6 +89,19 @@ const PREVIEW_TEXT = [
   "",
   "A second paragraph follows after a blank line, long enough that every chunker has to make a decision about where to cut it into passages for synthesis.",
 ].join("\n");
+
+// The current signature identity, without the version 1 inputs kept beside it.
+function withoutLegacy<Parts extends { legacy: unknown }>(parts: Parts | null) {
+  if (!parts) return null;
+  const { legacy: _legacy, ...current } = parts;
+  return current;
+}
+const engineSignatureParts: (...args: Parameters<typeof engineSignaturePartsWithLegacy>) => ReturnType<typeof withoutLegacy> = (
+  ...args
+) => withoutLegacy(engineSignaturePartsWithLegacy(...args));
+const surfaceEngineSignatureParts: (
+  ...args: Parameters<typeof surfaceEngineSignaturePartsWithLegacy>
+) => ReturnType<typeof withoutLegacy> = (...args) => withoutLegacy(surfaceEngineSignaturePartsWithLegacy(...args));
 
 function signature(id: SurfaceEngineId, tuning: GenerationTuningSettings, quality = 5) {
   return surfaceEngineSignatureParts(id, SURFACE_SETTINGS, { tuning, quality });
@@ -352,6 +365,33 @@ describe("capability-aware signatures", () => {
     const reference = { referenceAudioSignature: "sha-1", referenceText: "Reference words." };
     expect(qwen({ ...reference, speaker: "Ryan" }, clone)).toEqual(qwen(reference, clone));
     expect(qwen({ ...reference, referenceAudioSignature: "sha-2" }, clone)).not.toEqual(qwen(reference, clone));
+  });
+
+  it("keeps the inputs the version 1 signature hashed so earlier Reader audio is recognised", () => {
+    const legacy = (id: SurfaceEngineId) => surfaceEngineSignaturePartsWithLegacy(
+      id,
+      SURFACE_SETTINGS,
+      { tuning: TUNING, quality: 7 },
+    )?.legacy;
+    // Every engine hashed the whole Creator tuning and the quality control.
+    expect(legacy("kokoro")).toEqual({ voice: SURFACE_SETTINGS.kokoro.voice, quality: 7, tuning: TUNING });
+    expect(legacy("supertonic")).toEqual({ voice: SURFACE_SETTINGS.supertonic.voice, quality: 7, tuning: TUNING });
+    // Audio8 ignored speed, so its version 1 signature pinned it to 1.
+    expect(legacy("audio8")).toEqual({
+      voice: SURFACE_SETTINGS.audio8.voice,
+      quality: 7,
+      tuning: { ...TUNING, speed: 1 },
+    });
+    const { voice, language } = SURFACE_SETTINGS.supertonic3;
+    expect(legacy("supertonic3")).toEqual({ voice: `${voice}:${language}`, quality: 7, tuning: TUNING });
+    // Qwen3 hashed instructions for every non-clone mode, and "" for no clone reference.
+    const qwen = engineSignaturePartsWithLegacy("qwen3", {
+      settings: { ...QWEN3_LIVE, instruct: "Whisper." },
+      tuning: TUNING,
+      quality: 7,
+    })?.legacy;
+    expect(qwen).toMatchObject({ quality: 7, tuning: TUNING });
+    expect(JSON.parse(qwen?.voice ?? "{}")).toMatchObject({ instruct: "Whisper.", referenceAudio: "", referenceText: null });
   });
 
   it("reports no Qwen3 signature until its model directory and clone reference are known", () => {

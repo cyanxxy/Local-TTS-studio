@@ -74,6 +74,7 @@ export const kokoroEngine = {
   signatureParts: ({ settings, tuning, quality }) => ({
     voice: settings.voice,
     tuning: audibleTuning(capabilities, tuning, quality),
+    legacy: { voice: settings.voice, quality, tuning: tuning },
   }),
   // kokoro.worker.ts generates exactly these units for its resolved backend.
   previewChunks: (text, { backend }) => (text.trim() ? chunkForKokoroDetailed(text, { backend }) : []),

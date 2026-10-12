@@ -84,6 +84,7 @@ export const supertonicEngine = {
   signatureParts: ({ settings, tuning, quality }) => ({
     voice: settings.voice,
     tuning: audibleTuning(capabilities, tuning, quality, settings.language),
+    legacy: { voice: settings.voice, quality, tuning: tuning },
   }),
   // supertonic.worker.ts chunks with its resolved backend and the request quality.
   previewChunks: (text, { backend, quality }) => chunkForSupertonicDetailed(text, {

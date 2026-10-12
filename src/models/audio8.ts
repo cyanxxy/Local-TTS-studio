@@ -74,6 +74,7 @@ export const audio8Engine = {
   signatureParts: ({ settings, tuning, quality }) => ({
     voice: settings.voice,
     tuning: audibleTuning(capabilities, tuning, quality),
+    legacy: { voice: settings.voice, quality, tuning: { ...tuning, speed: 1 } },
   }),
   previewChunks: (text) => chunkAudio8Text(text),
 } as const satisfies EngineDescriptor<Audio8Settings>;

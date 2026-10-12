@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef } from "react";
 import {
   buildAudioSignature,
+  buildLegacyAudioSignature,
   createReaderAudioCacheKey,
   getCachedReaderAudioByteLength,
+  type CachedReaderAudio,
   type ReaderDocumentRecord,
   type ReaderSection,
 } from "../lib/readerDocument";
@@ -89,7 +91,9 @@ export interface ReaderAudioCache {
  *
  * Saved audio is keyed by section and tagged with a signature of the section
  * text and the engine inputs that shaped it; a lookup that finds a stale
- * signature discards the entry rather than playing old speech.
+ * signature discards the entry rather than playing old speech. An entry saved
+ * under the version 1 signature scheme is accepted when its legacy signature
+ * still matches, and is re-saved under the current one.
  */
 export function useReaderAudioCache({
   active,
@@ -114,6 +118,13 @@ export function useReaderAudioCache({
   const signature = useMemo(() => (
     section && signatureParts
       ? buildAudioSignature({ text: sectionText, model: engineId, ...signatureParts })
+      : null
+  ), [engineId, section, sectionText, signatureParts]);
+
+  // What the same inputs hashed to before signature version 2.
+  const legacySignature = useMemo(() => (
+    section && signatureParts
+      ? buildLegacyAudioSignature({ text: sectionText, model: engineId, ...signatureParts.legacy })
       : null
   ), [engineId, section, sectionText, signatureParts]);
 
@@ -186,7 +197,12 @@ export function useReaderAudioCache({
   // record changes with every progress write, and the library's audio
   // functions change when its storage backend settles.)
   const enteredSection = useEffectEvent(() => ({ document, section }));
-  const currentSignature = useEffectEvent(() => signature);
+  const currentSignature = useEffectEvent(() => ({ signature, legacySignature }));
+  const upgradeSectionAudio = useEffectEvent((cache: CachedReaderAudio, upgradedSignature: string) => {
+    const updatedAt = Math.max(Date.now(), saveVersionRef.current + 1);
+    saveVersionRef.current = updatedAt;
+    void saveAudio({ ...cache, signature: upgradedSignature, updatedAt }).catch(reportError);
+  });
   const enterSection = useEffectEvent(() => {
     // Not forced: a forced cancel hard-restarts the browser model even when
     // nothing is generating, which reloaded Kokoro/Supertonic on every page
@@ -235,8 +251,10 @@ export function useReaderAudioCache({
           ? restoreRequestRef.current
           : null;
         // Read after the lookup: the inputs may have changed while it ran.
-        const latestSignature = currentSignature();
-        if (cache && latestSignature && cache.signature === latestSignature) {
+        const latest = currentSignature();
+        const isLegacyMatch = cache !== null && cache.signature === latest.legacySignature;
+        if (cache && latest.signature && (cache.signature === latest.signature || isLegacyMatch)) {
+          if (isLegacyMatch) upgradeSectionAudio(cache, latest.signature);
           const preferredTime = restoreRequest
             ? restoreRequest.currentTime ?? cache.currentTime
             : enteredDocument.progress.sectionId === enteredSectionValue.id

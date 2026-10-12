@@ -62,7 +62,11 @@ function setup(options: { loaded?: CachedReaderAudio | null; saveError?: Error }
       sections,
       player: player as unknown as UseAudioPlayerReturn,
       engineId: "kokoro",
-      signatureParts: { voice: "af_heart", tuning: {} },
+      signatureParts: {
+        voice: "af_heart",
+        tuning: {},
+        legacy: { voice: "af_heart", quality: 5, tuning: { speed: 1, quality: 5 } },
+      },
       isGenerating: false,
       autoAdvance: false,
       ...callbacks,

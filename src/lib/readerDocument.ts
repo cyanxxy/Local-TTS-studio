@@ -850,9 +850,10 @@ export function rebaseReaderHighlights(
 
 /**
  * Version 2 hashes only the inputs the selected engine reads (see
- * `EngineDescriptor.signatureParts`). Older entries carry no version prefix, so
- * after the upgrade they never compare equal: each one misses once and is
- * replaced, instead of being restored under a meaning it no longer has.
+ * `EngineDescriptor.signatureParts`). Older entries carry no version prefix and
+ * never compare equal to a v2 signature; the Reader recognises them by
+ * recomputing `buildLegacyAudioSignature` from the same inputs and upgrades a
+ * match to v2 instead of discarding hours of generated audio.
  */
 export const READER_AUDIO_SIGNATURE_VERSION = 2;
 
@@ -869,6 +870,45 @@ export interface AudioSignatureTuning {
   pauseOverridesSec?: GenerationTuningSettings["pauseOverridesSec"];
   pronunciationRules?: GenerationTuningSettings["pronunciationRules"];
   emphasisStrength?: number;
+}
+
+/** What the version 1 signature hashed: the whole Creator tuning and quality, for every engine. */
+export interface LegacyAudioSignatureParts {
+  voice: string;
+  quality: number;
+  tuning: GenerationTuningSettings;
+}
+
+/**
+ * The version 1 signature (`<length>-<hash>`, no prefix), kept only to
+ * recognise audio cached before version 2 existed.
+ */
+export function buildLegacyAudioSignature(parts: LegacyAudioSignatureParts & {
+  text: string;
+  model: string;
+}): string {
+  let hash = 2166136261;
+  const { tuning } = parts;
+  const tuningKey = JSON.stringify({
+    speed: tuning.speed,
+    quality: tuning.quality,
+    language: tuning.language ?? "en",
+    pauseOverridesSec: {
+      none: tuning.pauseOverridesSec?.none ?? null,
+      comma: tuning.pauseOverridesSec?.comma ?? null,
+      sentence: tuning.pauseOverridesSec?.sentence ?? null,
+      paragraph: tuning.pauseOverridesSec?.paragraph ?? null,
+    },
+    sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
+    pronunciationRules: tuning.pronunciationRules ?? [],
+    emphasisStrength: tuning.emphasisStrength ?? null,
+  });
+  const value = `${parts.model}\u0000${parts.voice}\u0000${parts.quality}\u0000${tuningKey}\u0000${parts.text}`;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
 }
 
 export function buildAudioSignature(parts: {

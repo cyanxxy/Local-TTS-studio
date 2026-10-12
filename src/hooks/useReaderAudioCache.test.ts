@@ -2,6 +2,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAudioSignature,
+  buildLegacyAudioSignature,
   buildReaderSections,
   createReaderAudioCacheKey,
   createReaderDocument,
@@ -16,7 +17,13 @@ const document = createReaderDocument({
   text: "A paragraph long enough to fill several sections. ".repeat(900),
 });
 const sections = buildReaderSections(document.text, document.chapters);
-const parts = { voice: "af_heart", tuning: {} };
+const legacy = { voice: "af_heart", quality: 5, tuning: { speed: 1.1, quality: 5 } };
+const parts = { voice: "af_heart", tuning: {}, legacy };
+const legacySignatureFor = (index: number) => buildLegacyAudioSignature({
+  text: document.text.slice(sections[index].start, sections[index].end),
+  model: "kokoro",
+  ...legacy,
+});
 const signatureFor = (index: number) => buildAudioSignature({
   text: document.text.slice(sections[index].start, sections[index].end),
   model: "kokoro",
@@ -142,6 +149,35 @@ describe("useReaderAudioCache", () => {
     await waitFor(() => expect(callbacks.generate).toHaveBeenCalledTimes(1));
     expect(library.clearAudio).toHaveBeenCalledWith(document.id, sections[0].id);
     expect(player.restoreAudioCache).not.toHaveBeenCalled();
+  });
+
+  it("reuses audio cached under the version 1 signature and re-saves it under the current one", async () => {
+    const saved = cachedAudio({ signature: legacySignatureFor(0), updatedAt: 5 });
+    const { library, player } = setup({ loaded: saved });
+
+    await waitFor(() => expect(player.restoreAudioCache).toHaveBeenCalledTimes(1));
+    expect(library.clearAudio).not.toHaveBeenCalled();
+    expect(library.saveAudio).toHaveBeenCalledTimes(1);
+    expect(library.saveAudio.mock.calls[0][0]).toMatchObject({
+      cacheKey: saved.cacheKey,
+      chunks: saved.chunks,
+      signature: signatureFor(0),
+    });
+    expect(library.saveAudio.mock.calls[0][0].updatedAt).toBeGreaterThan(5);
+  });
+
+  it("still discards version 1 audio whose settings differ", async () => {
+    const other = buildLegacyAudioSignature({
+      text: document.text.slice(sections[0].start, sections[0].end),
+      model: "kokoro",
+      ...legacy,
+      tuning: { speed: 1.4, quality: 5 },
+    });
+    const { library, player } = setup({ loaded: cachedAudio({ signature: other }) });
+
+    await waitFor(() => expect(library.clearAudio).toHaveBeenCalledTimes(1));
+    expect(player.restoreAudioCache).not.toHaveBeenCalled();
+    expect(library.saveAudio).not.toHaveBeenCalled();
   });
 
   it("generates an unsaved section when the navigation asked to continue", async () => {

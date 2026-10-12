@@ -210,7 +210,7 @@ export const qwen3Engine = {
   detail: (settings: Qwen3LiveSettings) => (
     `${settings.profile.parameters} ${modeLabel(settings, settings.speaker)} · ${settings.profile.provider === "mlx" ? "Apple MLX" : "LibTorch"}`
   ),
-  signatureParts: ({ settings }) => {
+  signatureParts: ({ settings, tuning, quality }) => {
     const modelPath = settings.modelPath.trim();
     const cloning = settings.profile.mode === "voiceClone";
     // Until the model directory and any clone reference are known, a signature
@@ -235,6 +235,25 @@ export const qwen3Engine = {
       }),
       // Creator tuning never reaches the bridge.
       tuning: {},
+      legacy: {
+        voice: JSON.stringify({
+          repo: settings.profile.repo,
+          revision: settings.profile.revision,
+          modelPath,
+          mode: settings.profile.mode,
+          speaker: settings.profile.mode === "customVoice" ? settings.speaker : null,
+          language: settings.language,
+          instruct: settings.profile.mode !== "voiceClone" ? settings.instruct : null,
+          temperature: settings.temperature,
+          topK: settings.topK,
+          maxNewTokens: settings.maxNewTokens,
+          seed: settings.seed,
+          referenceAudio: cloning ? settings.referenceAudioSignature : "",
+          referenceText: cloning ? settings.referenceText.trim() : null,
+        }),
+        quality,
+        tuning,
+      },
     };
   },
   // Every mode schedules the units re-split from each exact IPC request text.

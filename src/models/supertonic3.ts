@@ -81,6 +81,7 @@ export const supertonic3Engine = {
   signatureParts: ({ settings, tuning, quality }) => ({
     voice: settings.voice,
     tuning: audibleTuning(capabilities, tuning, quality, settings.language),
+    legacy: { voice: `${settings.voice}:${settings.language}`, quality, tuning: tuning },
   }),
   previewChunks: (text, { settings, backend, quality }) => chunkForSupertonicDetailed(text, {
     minCharacters: SUPERTONIC3_CHUNK_LIMITS.minCharacters,
