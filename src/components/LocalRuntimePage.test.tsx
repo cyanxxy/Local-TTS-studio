@@ -224,6 +224,22 @@ describe("LocalRuntimePage", () => {
     expect(screen.queryByText(/device map|dtype|attention|top-p|api_server|Candle/i)).not.toBeInTheDocument();
   });
 
+  it("starts from a clean page when the model changes", async () => {
+    const view = renderPage();
+    expect(await screen.findByText("Provider: mlx")).toBeInTheDocument();
+    // The next model's probe stays pending, so only a reset can clear the old facts.
+    probe.mockReturnValue(new Promise(() => undefined));
+
+    view.rerender(
+      <Qwen3RuntimeProvider>
+        <LocalRuntimePage {...props("neutts")} />
+      </Qwen3RuntimeProvider>,
+    );
+
+    expect(screen.queryByText("Provider: mlx")).not.toBeInTheDocument();
+    await waitFor(() => expect(probe).toHaveBeenLastCalledWith(expect.objectContaining({ model: "neutts" })));
+  });
+
   it("makes a dynamically resolved CPU fallback visible", async () => {
     probe.mockResolvedValueOnce({
       ready: true,

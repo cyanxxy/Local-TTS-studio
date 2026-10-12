@@ -132,7 +132,7 @@ function formatStartingGenerationStatus(model: LocalTtsModel, profileLabel: stri
   return `Starting Qwen3 ${profileLabel} with ${provider}.`;
 }
 
-export function LocalRuntimePage({
+function LocalRuntimePageBody({
   active = true,
   model,
   name,
@@ -342,23 +342,6 @@ export function LocalRuntimePage({
       }
     }
   }, [isCurrentPageVersion, model]);
-
-  useEffect(() => {
-    pageVersionRef.current += 1;
-    runtimeVersionRef.current += 1;
-    generationVersionRef.current += 1;
-    activeRequestIdRef.current = null;
-    activeProbeRequestIdRef.current = null;
-    activeRequestGenerationVersionRef.current = null;
-    setRuntime(null);
-    setRuntimeBusy(false);
-    setCacheInfo(null);
-    setCacheBusy(false);
-    setGenerationProgress(null);
-    setStatus(null);
-    setGenerateBusy(false);
-    clearGeneratedResult();
-  }, [clearGeneratedResult, model]);
 
   useEffect(() => {
     if (!electronAvailable) return;
@@ -1136,4 +1119,12 @@ export function LocalRuntimePage({
       />
     </div>
   );
+}
+
+/**
+ * A page's state belongs to the model it is showing, so switching models
+ * mounts a fresh page rather than resetting this one's state by hand.
+ */
+export function LocalRuntimePage(props: LocalRuntimePageProps) {
+  return <LocalRuntimePageBody key={props.model} {...props} />;
 }
