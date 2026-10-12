@@ -4,6 +4,25 @@ import { DEFAULT_APP_PREFERENCES } from "../lib/appPreferences";
 import { AppSettingsDialog } from "./AppSettingsDialog";
 
 describe("AppSettingsDialog", () => {
+  it("lists the model credits and licences in a Credits section", () => {
+    render(
+      <AppSettingsDialog
+        open
+        desktopModelsAvailable={false}
+        preferences={DEFAULT_APP_PREFERENCES}
+        onChange={vi.fn()}
+        onReset={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "Credits" })[0]);
+
+    expect(screen.getByRole("heading", { name: "Credits" })).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "Piper" })).toHaveTextContent("CC-BY-4.0");
+    expect(screen.getByRole("region", { name: "Kitten TTS" })).toHaveTextContent("Apache-2.0");
+  });
+
   it("edits appearance and optional model preferences", () => {
     const onChange = vi.fn();
     render(

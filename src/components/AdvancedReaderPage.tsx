@@ -8,10 +8,11 @@ import {
   type ReactNode,
 } from "react";
 import { Check, Maximize2, Minimize2, Pencil } from "lucide-react";
-import { MIN_TEXT_LENGTH, MODELS } from "../constants";
+import { MIN_TEXT_LENGTH } from "../constants";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
 import type { PlaybackClock } from "../lib/playbackClock";
+import { browserEnginePreviewChunks, browserEngineVoiceLabel, getEngine } from "../models/registry";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import {
   isReaderHighlightAnchored,
@@ -41,7 +42,7 @@ import { ReaderShortcutsDialog } from "./reader/ReaderShortcutsDialog";
 import { ReaderTextPane, type SectionHighlight } from "./reader/ReaderTextPane";
 import { ReaderToolbar } from "./reader/ReaderToolbar";
 import { ReaderVoiceMenu, type ReaderDesktopModelOption } from "./reader/ReaderVoiceMenu";
-import { chapterStepLabel, contentsButtonLabel, formatVoiceName } from "./reader/readerLabels";
+import { chapterStepLabel, contentsButtonLabel } from "./reader/readerLabels";
 import {
   offsetAtTime,
   paragraphStarts,
@@ -116,6 +117,8 @@ interface AdvancedReaderPageProps {
   desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
   supertonicState: ModelState;
+  /** The load state of the other browser engines (Kitten, Paradee, Piper). */
+  modelStates?: Partial<Record<ModelType, ModelState>>;
   visibleModels?: readonly ModelType[];
   unavailableModels?: Partial<Record<ModelType, string>>;
   kokoroVoices: string[];
@@ -218,6 +221,7 @@ export function AdvancedReaderPage({
   desktopModelSettings,
   kokoroState,
   supertonicState,
+  modelStates,
   visibleModels,
   unavailableModels,
   kokoroVoices,
@@ -267,13 +271,15 @@ export function AdvancedReaderPage({
 
   /* ── Runtime labels ───────────────────────────────────────── */
   const selectedDesktopModel = desktopModelOptions.find((option) => option.selected);
+  const browserModelState: ModelState = modelStates?.[activeModel]
+    ?? (activeModel === "supertonic" ? supertonicState : kokoroState);
   const activeModelState = selectedDesktopModel
     ? { ready: modelReady, error: modelError }
-    : activeModel === "kokoro" ? kokoroState : supertonicState;
-  const activeModelLabel = selectedDesktopModel?.label ?? MODELS[activeModel].label;
+    : browserModelState;
+  const activeModelLabel = selectedDesktopModel?.label ?? getEngine(activeModel).label;
   const activeVoiceLabel = selectedDesktopModel
     ? desktopVoiceLabel ?? selectedDesktopModel.label
-    : formatVoiceName(voice);
+    : browserEngineVoiceLabel(activeModel, voice);
 
   /* ── View state ───────────────────────────────────────────── */
   // Transient view state — a jump target that playback has not reached yet
@@ -321,17 +327,15 @@ export function AdvancedReaderPage({
   const { release: releaseFollow, scrollAfterSectionChange, scrollToLocalOffset } = autoFollow;
 
   /* ── Text and playback position ───────────────────────────── */
-  const runtimeBackend = activeModel === "kokoro" ? kokoroState.backend : supertonicState.backend;
+  const runtimeBackend = browserModelState.backend;
   const previewChunks = useMemo(
     () => selectedDesktopModel?.key === "qwen3"
       ? desktopQwenMode === "voiceClone"
         ? buildQwen3RequestSections(text)
         : buildQwen3TextUnits(text)
-      : chunkTextForModelDetailed(
-          text,
-          selectedDesktopModel?.key === "supertonic3" ? "supertonic" : activeModel,
-          { runtime: { backend: runtimeBackend, quality } },
-        ),
+      : selectedDesktopModel?.key === "supertonic3"
+      ? chunkTextForModelDetailed(text, "supertonic", { runtime: { backend: runtimeBackend, quality } })
+      : browserEnginePreviewChunks(activeModel, text, { backend: runtimeBackend, quality }),
     [activeModel, desktopQwenMode, quality, runtimeBackend, selectedDesktopModel?.key, text],
   );
   const textBlocks = useMemo(() => splitTextBlocks(text), [text]);
@@ -668,6 +672,8 @@ export function AdvancedReaderPage({
             desktopModelSettings={desktopModelSettings}
             kokoroState={kokoroState}
             supertonicState={supertonicState}
+            modelStates={modelStates}
+            browserModelState={browserModelState}
             visibleModels={visibleModels}
             unavailableModels={unavailableModels}
             kokoroVoices={kokoroVoices}

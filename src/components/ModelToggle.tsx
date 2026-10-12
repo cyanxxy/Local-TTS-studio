@@ -9,6 +9,8 @@ interface ModelToggleProps {
   onModelChange: (model: ModelType) => void;
   kokoroState: ModelState;
   supertonicState: ModelState;
+  /** The load state of every other browser engine (Kitten, Paradee, Piper); one that is missing reads as not yet loaded. */
+  modelStates?: Partial<Record<ModelType, ModelState>>;
   visibleModels?: readonly ModelType[];
   unavailableModels?: Partial<Record<ModelType, string>>;
   desktopModelOptions?: ModelToggleDesktopOption[];
@@ -40,6 +42,14 @@ interface MenuPosition {
   width: number;
   maxHeight: number;
 }
+
+const NOT_LOADED: ModelState = {
+  ready: false,
+  loading: false,
+  downloadProgress: 0,
+  error: null,
+  backend: null,
+};
 
 const EMPTY_DESKTOP_MODEL_OPTIONS: ModelToggleDesktopOption[] = [];
 
@@ -84,6 +94,7 @@ export function ModelToggle({
   onModelChange,
   kokoroState,
   supertonicState,
+  modelStates,
   visibleModels = BROWSER_ENGINE_IDS,
   unavailableModels,
   desktopModelOptions = EMPTY_DESKTOP_MODEL_OPTIONS,
@@ -99,7 +110,8 @@ export function ModelToggle({
   const hasSelectedDesktopModel = desktopModelOptions.some((option) => option.selected);
 
   const choices = useMemo<ModelChoice[]>(() => {
-    const browserStates: Record<ModelType, ModelState> = {
+    const browserStates: Partial<Record<ModelType, ModelState>> = {
+      ...modelStates,
       kokoro: kokoroState,
       supertonic: supertonicState,
     };
@@ -108,7 +120,7 @@ export function ModelToggle({
         .filter((id) => visibleModels.includes(id))
         .map((id) => {
           const engine = getEngine(id);
-          const state = browserStates[id];
+          const state = browserStates[id] ?? NOT_LOADED;
           return {
             id,
             label: engine.label,
@@ -128,7 +140,7 @@ export function ModelToggle({
         onSelect: option.onSelect,
       })),
     ];
-  }, [activeModel, desktopModelOptions, hasSelectedDesktopModel, kokoroState, onModelChange, supertonicState, unavailableModels, visibleModels]);
+  }, [activeModel, desktopModelOptions, hasSelectedDesktopModel, kokoroState, modelStates, onModelChange, supertonicState, unavailableModels, visibleModels]);
 
   const selected = choices.find((choice) => choice.selected) ?? choices[0];
 

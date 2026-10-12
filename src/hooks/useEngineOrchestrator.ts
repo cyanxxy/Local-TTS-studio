@@ -6,7 +6,11 @@ import {
   type LocalBrowserSupport,
 } from "../lib/browserSupport";
 import type { InitialAppState } from "../lib/appState";
+import type { Audio8Settings } from "../models/audio8";
+import type { ChatterboxSettings } from "../models/chatterbox";
+import type { Supertonic3Settings } from "../models/supertonic3";
 import {
+  browserEngineWorkerFields,
   isBrowserEngineId,
   type BrowserEngineId,
   type DesktopInlineEngineId,
@@ -29,8 +33,12 @@ export type Surface = "studio" | "reader";
 export interface OrchestratedEngineSettings {
   kokoro: { voice: string };
   supertonic: { voice: string; language: string };
-  audio8: { voice: string };
-  supertonic3: { voice: string; language: string };
+  kitten: { voice: string };
+  paradee: { voice: string };
+  piper: { voice: string };
+  chatterbox: ChatterboxSettings;
+  audio8: Audio8Settings;
+  supertonic3: Supertonic3Settings;
 }
 
 interface Options {
@@ -61,8 +69,10 @@ interface Options {
 }
 
 export interface UseEngineOrchestratorReturn {
-  /** The browser engine both surfaces fall back to. */
+  /** The browser engine both surfaces fall back to: the chosen one while this device can run it. */
   activeModel: BrowserEngineId;
+  /** The browser engine the user chose, runnable or not; this is what to persist. */
+  chosenModel: BrowserEngineId;
   /** Each surface's effective desktop engine: its saved choice while that engine is available. */
   desktopModels: Readonly<Record<Surface, DesktopInlineEngineId | null>>;
   /** Each surface's saved desktop engine, available or not, for persistence. */
@@ -128,11 +138,13 @@ export function useEngineOrchestrator({
     qwen3: qwen3Settings.available,
   }), [desktopRuntimesAvailable, qwen3Settings.available, supertonic3Available]);
 
-  const [activeModel, setActiveModel] = useState<BrowserEngineId>(() => (
-    isModelSupportedInBrowser(initialState.model, browserSupport)
-      ? initialState.model
-      : getDefaultSupportedModel(browserSupport)
-  ));
+  // The browser model the user chose, kept even while it cannot run (WebGPU
+  // missing, say) so it returns on a later launch. The model that actually
+  // runs is derived from what the device supports now.
+  const [chosenModel, setChosenModel] = useState<BrowserEngineId>(initialState.model);
+  const activeModel = isModelSupportedInBrowser(chosenModel, browserSupport)
+    ? chosenModel
+    : getDefaultSupportedModel(browserSupport);
   // The desktop engine each surface last chose, persisted across launches. A
   // surface uses it only while that engine is available and otherwise runs the
   // browser model, without forgetting the choice for when it returns.
@@ -157,12 +169,42 @@ export function useEngineOrchestrator({
   const visibleEngineId: SurfaceEngineId | null = surface === null ? null : engineIds[surface];
   const selects = (engine: SurfaceEngineId) => studioEngineId === engine || readerEngineId === engine;
 
-  const { kokoro: kokoroSettings, supertonic: supertonicSettings } = engineSettings;
-  // Warms the Supertonic 2 worker with the voice it will speak first.
-  const preferredBrowserVoices = useMemo(() => ({ supertonic: supertonicSettings.voice }), [supertonicSettings.voice]);
+  const {
+    kokoro: kokoroSettings,
+    supertonic: supertonicSettings,
+    kitten: kittenSettings,
+    paradee: paradeeSettings,
+    piper: piperSettings,
+    chatterbox: chatterboxSettings,
+  } = engineSettings;
+  // Warms the Supertonic 2 worker, and downloads the Piper voice, the user
+  // will speak first.
+  const preferredBrowserVoices = useMemo(
+    () => ({ supertonic: supertonicSettings.voice, piper: piperSettings.voice }),
+    [piperSettings.voice, supertonicSettings.voice],
+  );
   const savedBrowserVoices = useMemo(
-    () => ({ kokoro: kokoroSettings.voice, supertonic: supertonicSettings.voice }),
-    [kokoroSettings.voice, supertonicSettings.voice],
+    () => ({
+      kokoro: kokoroSettings.voice,
+      supertonic: supertonicSettings.voice,
+      kitten: kittenSettings.voice,
+      paradee: paradeeSettings.voice,
+      piper: piperSettings.voice,
+      chatterbox: chatterboxSettings.voice,
+    }),
+    [
+      kittenSettings.voice,
+      chatterboxSettings.voice,
+      kokoroSettings.voice,
+      paradeeSettings.voice,
+      piperSettings.voice,
+      supertonicSettings.voice,
+    ],
+  );
+  // What only the shared browser model's worker reads (Chatterbox's reference voice and sampling).
+  const browserEngineFields = useMemo(
+    () => browserEngineWorkerFields(activeModel, engineSettings[activeModel]),
+    [activeModel, engineSettings],
   );
   const browser = useBrowserEngineRuntimes({
     activeModel,
@@ -178,6 +220,7 @@ export function useEngineOrchestrator({
     text,
     savedVoices: savedBrowserVoices,
     generationSettings,
+    engineFields: browserEngineFields,
     player,
     setShowPlayer,
   });
@@ -197,14 +240,21 @@ export function useEngineOrchestrator({
     text,
     voice: engineSettings.supertonic3.voice,
     language: engineSettings.supertonic3.language,
+    seed: engineSettings.supertonic3.seed,
     generationSettings,
     player,
     setShowPlayer,
   });
+  const { seed: audio8Seed, temperature: audio8Temperature } = engineSettings.audio8;
+  const audio8Sampling = useMemo(
+    () => ({ seed: audio8Seed, temperature: audio8Temperature }),
+    [audio8Seed, audio8Temperature],
+  );
   const audio8 = useAudio8Runtime({
     active: visibleEngineId === "audio8",
     text,
     voice: engineSettings.audio8.voice,
+    sampling: audio8Sampling,
     generationSettings,
     player,
     setShowPlayer,
@@ -243,7 +293,7 @@ export function useEngineOrchestrator({
     retireAllAudio();
     setChosenDesktopModels((current) => ({ ...current, [target]: null }));
     if (model !== activeModel) {
-      setActiveModel(model);
+      setChosenModel(model);
       loadModel(model);
     }
     onEngineChange();
@@ -272,10 +322,14 @@ export function useEngineOrchestrator({
   const surfaceEngineSettings = useMemo<SurfaceEngineSettings>(() => ({
     kokoro: { voice: voicesInUse.kokoro },
     supertonic: { voice: voicesInUse.supertonic, language: supertonicSettings.language },
+    kitten: { voice: voicesInUse.kitten },
+    paradee: { voice: voicesInUse.paradee },
+    piper: { voice: voicesInUse.piper },
+    chatterbox: { ...chatterboxSettings, voice: voicesInUse.chatterbox },
     audio8: engineSettings.audio8,
     supertonic3: engineSettings.supertonic3,
     qwen3: qwen3Settings,
-  }), [engineSettings.audio8, engineSettings.supertonic3, qwen3Settings, supertonicSettings.language, voicesInUse]);
+  }), [chatterboxSettings, engineSettings.audio8, engineSettings.supertonic3, qwen3Settings, supertonicSettings.language, voicesInUse]);
 
   const desktopModelOptions = useMemo(() => {
     const optionsFor = (target: Surface) => describeDesktopModelOptions(
@@ -312,6 +366,7 @@ export function useEngineOrchestrator({
 
   return {
     activeModel,
+    chosenModel,
     desktopModels,
     chosenDesktopModels,
     engineIds,

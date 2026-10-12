@@ -75,8 +75,12 @@ const QWEN3_LIVE: Qwen3LiveSettings = {
 const SURFACE_SETTINGS: SurfaceEngineSettings = {
   kokoro: { voice: "af_heart" },
   supertonic: { voice: "Female", language: "en" },
-  audio8: { voice: "clara" },
-  supertonic3: { voice: "M1", language: "en" },
+  kitten: { voice: "Bella" },
+  paradee: { voice: "heart" },
+  piper: { voice: "en_US-kristin-medium" },
+  chatterbox: { voice: "chatterbox-default", temperature: 0.8, seed: null },
+  audio8: { voice: "clara", seed: null, temperature: null },
+  supertonic3: { voice: "M1", language: "en", seed: null },
   qwen3: QWEN3_LIVE,
 };
 
@@ -108,7 +112,9 @@ function signature(id: SurfaceEngineId, tuning: GenerationTuningSettings, qualit
 describe("engine registry", () => {
   it("registers every engine once under its own id", () => {
     expect(new Set(ENGINE_IDS).size).toBe(ENGINE_IDS.length);
-    expect(ENGINE_IDS).toEqual(["kokoro", "supertonic", "audio8", "supertonic3", "neutts", "qwen3"]);
+    expect(ENGINE_IDS).toEqual([
+      "kokoro", "supertonic", "kitten", "paradee", "piper", "chatterbox", "audio8", "supertonic3", "neutts", "qwen3",
+    ]);
     for (const id of ENGINE_IDS) {
       expect(ENGINES[id].id).toBe(id);
       expect(getEngine(id)).toBe(ENGINES[id]);
@@ -119,23 +125,26 @@ describe("engine registry", () => {
   });
 
   it("derives the engine id unions from the descriptors", () => {
-    expectTypeOf<EngineId>().toEqualTypeOf<"kokoro" | "supertonic" | "audio8" | "supertonic3" | "qwen3" | "neutts">();
-    expectTypeOf<BrowserEngineId>().toEqualTypeOf<"kokoro" | "supertonic">();
+    expectTypeOf<EngineId>().toEqualTypeOf<
+      "kokoro" | "supertonic" | "kitten" | "paradee" | "piper" | "chatterbox" | "audio8" | "supertonic3" | "qwen3" | "neutts"
+    >();
+    expectTypeOf<BrowserEngineId>().toEqualTypeOf<"kokoro" | "supertonic" | "kitten" | "paradee" | "piper" | "chatterbox">();
     expectTypeOf<DesktopInlineEngineId>().toEqualTypeOf<"audio8" | "supertonic3" | "qwen3">();
     expectTypeOf<SetupPageEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
     expectTypeOf<RustBridgeEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
     expectTypeOf<ModelType>().toEqualTypeOf<BrowserEngineId>();
-    expectTypeOf<EngineSettings<"supertonic3">>().toEqualTypeOf<{ voice: string; language: string }>();
+    expectTypeOf<EngineSettings<"supertonic3">>().toEqualTypeOf<{ voice: string; language: string; seed: number | null }>();
     expectTypeOf<EngineLiveSettings<"qwen3">>().toEqualTypeOf<Qwen3LiveSettings>();
 
-    expect(BROWSER_ENGINE_IDS).toEqual(["kokoro", "supertonic"]);
+    expect(BROWSER_ENGINE_IDS).toEqual(["kokoro", "supertonic", "kitten", "paradee", "piper", "chatterbox"]);
     expect(DESKTOP_INLINE_ENGINE_IDS).toEqual(["audio8", "supertonic3", "qwen3"]);
     expect(SETUP_PAGE_ENGINE_IDS).toEqual(["neutts", "qwen3"]);
   });
 
   it("narrows unknown values to registered ids", () => {
     expect(isEngineId("neutts")).toBe(true);
-    expect(isEngineId("kitten")).toBe(false);
+    expect(isEngineId("kitten")).toBe(true);
+    expect(isEngineId("whisper")).toBe(false);
     expect(isEngineId(7)).toBe(false);
     expect(isBrowserEngineId("supertonic")).toBe(true);
     expect(isBrowserEngineId("audio8")).toBe(false);
@@ -148,7 +157,8 @@ describe("engine registry", () => {
     for (const engine of ENGINE_REGISTRY) {
       if (engine.picker === "browser") {
         expect(engine.runtime, engine.id).toBe("browser-worker");
-        expect(engine.targets, engine.id).toContain("web");
+        // WebGPU-only engines ship to the desktop build alone.
+        expect(engine.targets.length, engine.id).toBeGreaterThan(0);
       } else if (engine.picker === "desktop") {
         expect(engine.targets, engine.id).toEqual(["desktop"]);
         expect(engine.badge?.length, engine.id).toBeGreaterThan(0);
@@ -183,10 +193,10 @@ describe("engine settings", () => {
       .toEqual({ voice: "Male 3", language: "en" });
     expect(supertonicEngine.parseSettings({ voice: "Robot", language: "fr" }))
       .toEqual({ voice: "Female", language: "fr" });
-    expect(supertonic3Engine.parseSettings({ voice: "F4", language: "ja" })).toEqual({ voice: "F4", language: "ja" });
-    expect(supertonic3Engine.parseSettings({ voice: "F9", language: "ja" })).toEqual({ voice: "M1", language: "ja" });
-    expect(audio8Engine.parseSettings({ voice: "sophie" })).toEqual({ voice: "sophie" });
-    expect(audio8Engine.parseSettings({ voice: "nobody" })).toEqual({ voice: "clara" });
+    expect(supertonic3Engine.parseSettings({ voice: "F4", language: "ja" })).toEqual({ voice: "F4", language: "ja", seed: null });
+    expect(supertonic3Engine.parseSettings({ voice: "F9", language: "ja" })).toEqual({ voice: "M1", language: "ja", seed: null });
+    expect(audio8Engine.parseSettings({ voice: "sophie" })).toEqual({ voice: "sophie", seed: null, temperature: null });
+    expect(audio8Engine.parseSettings({ voice: "nobody" })).toEqual({ voice: "clara", seed: null, temperature: null });
     expect(neuttsEngine.parseSettings({ modelRepo: "neuphonic/neutts-air-q8-gguf" }))
       .toEqual({ modelRepo: "neuphonic/neutts-air-q8-gguf" });
     expect(neuttsEngine.parseSettings({ modelRepo: "neuphonic/neutts-nano-q8-gguf" }))
@@ -268,7 +278,7 @@ describe("engine voices and labels", () => {
     expect(surfaceEngineDetail("supertonic", SURFACE_SETTINGS)).toBe("300M · EN · Female");
     expect(engineDetail("neutts", neuttsEngine.defaultSettings)).toBe("English · neutts-nano · Q4 GGUF");
 
-    expect(surfaceEngineVoiceLabel("audio8", { ...SURFACE_SETTINGS, audio8: { voice: "sophie" } })).toBe("Sophie");
+    expect(surfaceEngineVoiceLabel("audio8", { ...SURFACE_SETTINGS, audio8: { voice: "sophie", seed: null, temperature: null } })).toBe("Sophie");
     expect(surfaceEngineVoiceLabel("qwen3", SURFACE_SETTINGS)).toBe("Uncle Fu");
     expect(engineVoiceLabel("qwen3", { ...QWEN3_LIVE, profile: { ...QWEN3_LIVE.profile, mode: "voiceClone" } }))
       .toBe("Voice clone");
@@ -315,7 +325,7 @@ describe("capability-aware signatures", () => {
     const korean = { ...SURFACE_SETTINGS, supertonic: { voice: "Female", language: "ko" } } as const;
     expect(surfaceEngineSignatureParts("supertonic", korean, { tuning: TUNING, quality: 5 }))
       .not.toEqual(signature("supertonic", TUNING));
-    const japanese = { ...SURFACE_SETTINGS, supertonic3: { voice: "M1", language: "ja" } } as const;
+    const japanese = { ...SURFACE_SETTINGS, supertonic3: { voice: "M1", language: "ja", seed: null } } as const;
     expect(surfaceEngineSignatureParts("supertonic3", japanese, { tuning: TUNING, quality: 5 }))
       .not.toEqual(signature("supertonic3", TUNING));
     expect(engineSignatureParts("qwen3", { settings: { ...QWEN3_LIVE, language: "German" }, tuning: TUNING, quality: 5 }))
@@ -325,7 +335,7 @@ describe("capability-aware signatures", () => {
   it("keeps the voice and the Qwen3 configuration in the signature", () => {
     expect(surfaceEngineSignatureParts("kokoro", { ...SURFACE_SETTINGS, kokoro: { voice: "af_bella" } }, { tuning: TUNING, quality: 5 }))
       .not.toEqual(signature("kokoro", TUNING));
-    expect(surfaceEngineSignatureParts("audio8", { ...SURFACE_SETTINGS, audio8: { voice: "iris" } }, { tuning: TUNING, quality: 5 }))
+    expect(surfaceEngineSignatureParts("audio8", { ...SURFACE_SETTINGS, audio8: { voice: "iris", seed: null, temperature: null } }, { tuning: TUNING, quality: 5 }))
       .not.toEqual(signature("audio8", TUNING));
     const qwen = (patch: Partial<Qwen3LiveSettings>) => engineSignatureParts("qwen3", {
       settings: { ...QWEN3_LIVE, ...patch },
@@ -431,7 +441,7 @@ describe("preview chunkers", () => {
           }));
       }
     }
-    const japanese = { ...SURFACE_SETTINGS, supertonic3: { voice: "M1", language: "ja" } } as const;
+    const japanese = { ...SURFACE_SETTINGS, supertonic3: { voice: "M1", language: "ja", seed: null } } as const;
     expect(surfaceEnginePreviewChunks("supertonic3", PREVIEW_TEXT, japanese, { backend: "wasm", quality: 5 }))
       .toEqual(chunkForSupertonicDetailed(PREVIEW_TEXT, {
         minCharacters: 30,

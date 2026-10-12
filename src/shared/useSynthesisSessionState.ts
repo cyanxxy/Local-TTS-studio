@@ -28,8 +28,9 @@ import {
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
 import { getReaderSectionText } from "../lib/readerDocument";
-import { getUnsupportedModelMessage, isModelSupportedInBrowser } from "../lib/browserSupport";
+import { getUnsupportedModelMessage, getWebGPUUnavailableModelMessages, isModelSupportedInBrowser, withoutUnavailableModels } from "../lib/browserSupport";
 import {
+  engineIsWasmOnly,
   getEngine,
   isBrowserEngineId,
   surfaceEngineSignatureParts,
@@ -67,6 +68,21 @@ export function useSynthesisSessionState({
   const environment = useAppEnvironment(enableDesktopRuntimes);
   const { desktopRuntimesAvailable, browserSupport, debugProfiling, webgpuStatus } = environment;
   const localInferenceSupported = browserSupport.isSupported;
+  // Why each browser model cannot run on this device. A model that needs WebGPU
+  // is ruled out once WebGPU is known to be missing, so no surface selects it
+  // and no worker is started for it.
+  const webgpuUnavailableModels = useMemo(
+    () => getWebGPUUnavailableModelMessages(webgpuStatus === null ? null : webgpuStatus.available),
+    [webgpuStatus],
+  );
+  const unavailableModels = useMemo(
+    () => ({ ...browserSupport.unsupportedModelMessages, ...webgpuUnavailableModels }),
+    [browserSupport.unsupportedModelMessages, webgpuUnavailableModels],
+  );
+  const runnableBrowserSupport = useMemo(
+    () => withoutUnavailableModels(browserSupport, unavailableModels),
+    [browserSupport, unavailableModels],
+  );
   const { preferences, updatePreferences, resetPreferences } = useAppPreferences();
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const qwen3Settings = useQwen3Runtime();
@@ -84,8 +100,8 @@ export function useSynthesisSessionState({
 
   const [text, setText] = useState(initialState.text);
   const [engineSettings, setEngineSettings] = useState<AppEngineSettings>(() => {
-    const { kokoro, supertonic, audio8, supertonic3 } = getInitialEngineSettings();
-    return { kokoro, supertonic, audio8, supertonic3 };
+    const { kokoro, supertonic, kitten, paradee, piper, chatterbox, audio8, supertonic3 } = getInitialEngineSettings();
+    return { kokoro, supertonic, kitten, paradee, piper, chatterbox, audio8, supertonic3 };
   });
   const [quality, setQuality] = useState(initialState.quality);
   const [showPlayer, setShowPlayer] = useState(false);
@@ -143,6 +159,7 @@ export function useSynthesisSessionState({
   const clearExportError = useCallback(() => setExportError(null), []);
   const {
     activeModel,
+    chosenModel,
     desktopModels: { studio: studioDesktopModel, reader: readerDesktopModel },
     chosenDesktopModels,
     engineIds: { studio: studioEngineId, reader: readerEngineId },
@@ -162,7 +179,7 @@ export function useSynthesisSessionState({
     desktopRuntimesAvailable,
     createSupertonic3Worker,
     enableDesktopRuntimes,
-    browserSupport,
+    browserSupport: runnableBrowserSupport,
     debugProfiling,
     initialState,
     text: synthesisText,
@@ -189,9 +206,9 @@ export function useSynthesisSessionState({
   const { setPlaybackRate } = player;
   const isListeningEngineUsable = useCallback((engine: SurfaceEngineId) => (
     isBrowserEngineId(engine)
-      ? isModelSupportedInBrowser(engine, browserSupport)
+      ? isModelSupportedInBrowser(engine, runnableBrowserSupport)
       : desktopEngineAvailability[engine]
-  ), [browserSupport, desktopEngineAvailability]);
+  ), [desktopEngineAvailability, runnableBrowserSupport]);
   // A book's remembered voice, quality and speed belong to the Reader. The
   // values Studio had are set aside the first time the Reader changes them and
   // put back when Studio is shown again or a book without a profile is opened.
@@ -215,6 +232,10 @@ export function useSynthesisSessionState({
       switch (engine) {
         case "kokoro":
         case "audio8":
+        case "kitten":
+        case "paradee":
+        case "piper":
+        case "chatterbox":
           patchEngineSettings(engine, { voice: profile.voice });
           break;
         case "supertonic":
@@ -225,6 +246,10 @@ export function useSynthesisSessionState({
           break;
         case "qwen3":
           break;
+        default: {
+          const unhandled: never = engine;
+          throw new Error(`Listening profile has no apply rule for ${String(unhandled)}`);
+        }
       }
       if (profile.quality !== undefined && getEngine(engine).capabilities.quality) setQuality(profile.quality);
     }
@@ -267,7 +292,7 @@ export function useSynthesisSessionState({
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       const persisted: PersistedAppState = {
-        model: activeModel,
+        model: chosenModel,
         text,
         quality: studioGlobals?.quality ?? quality,
         desktopModels: chosenDesktopModels,
@@ -277,7 +302,7 @@ export function useSynthesisSessionState({
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeModel, chosenDesktopModels, engineSettings, quality, studioGlobals, text]);
+  }, [chosenDesktopModels, chosenModel, engineSettings, quality, studioGlobals, text]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -479,6 +504,15 @@ export function useSynthesisSessionState({
     if (readerEngineHas("audio8")) rememberListening({ voice: nextVoice });
   }, [audio8Voice, changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening]);
 
+  // Seed and temperature shape the audio, so they save-then-clear like the voice.
+  const handleAudio8SamplingChange = useCallback((patch: Partial<Pick<AppEngineSettings["audio8"], "seed" | "temperature">>) => {
+    changeEngineInput("audio8", () => patchEngineSettings("audio8", patch));
+  }, [changeEngineInput, patchEngineSettings]);
+
+  const handleSupertonic3SeedChange = useCallback((seed: number | null) => {
+    changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { seed }));
+  }, [changeEngineInput, patchEngineSettings]);
+
   const handleSupertonic3VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === supertonic3Voice) return;
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { voice: nextVoice }));
@@ -498,6 +532,12 @@ export function useSynthesisSessionState({
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { language: nextLanguage }));
     if (readerEngineHas("supertonic3")) rememberListening({ language: nextLanguage });
   }, [changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, supertonic3Language]);
+
+  // Temperature and seed shape Chatterbox's audio, so they go through the same
+  // save-then-clear path as its voice.
+  const handleChatterboxChange = useCallback((patch: Partial<Pick<AppEngineSettings["chatterbox"], "temperature" | "seed">>) => {
+    changeEngineInput("chatterbox", () => patchEngineSettings("chatterbox", patch));
+  }, [changeEngineInput, patchEngineSettings]);
 
   const handleQualityChange = useCallback((nextQuality: number) => {
     if (nextQuality === quality) return;
@@ -573,13 +613,17 @@ export function useSynthesisSessionState({
     && visibleEngineId !== null
     && visibleEngineId !== "qwen3"
     && visibleEngineId !== "audio8"
+    // Paradee and Piper run on the CPU by design; there is no GPU path to miss.
+    && !engineIsWasmOnly(visibleEngineId)
     && ((webgpuStatus !== null && !webgpuStatus.available)
       || (visibleEngineId === "supertonic3" ? runtimes.supertonic3.modelState.backend === "wasm" : isUsingWasmFallback));
   const webgpuModeNote = showWasmBadge
     ? webgpuStatus?.message ?? null
     : null;
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
-  const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
+  // A chosen model the device cannot run explains itself while another runs in its place.
+  const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport)
+    ?? (webgpuUnavailableModels[chosenModel] ?? null);
 
   const handleTogglePlayback = useCallback(() => void togglePlay(), [togglePlay]);
   useAppShortcuts({
@@ -663,10 +707,17 @@ export function useSynthesisSessionState({
       changeVoice: handleVoiceChange,
       audio8Voice,
       changeAudio8Voice: handleAudio8VoiceChange,
+      audio8Settings: engineSettings.audio8,
+      changeAudio8Sampling: handleAudio8SamplingChange,
+      unavailableModels,
+      chatterbox: engineSettings.chatterbox,
+      changeChatterbox: handleChatterboxChange,
       supertonicLanguage,
       changeSupertonicLanguage: handleSupertonicLanguageChange,
       supertonic3Voice,
       supertonic3Language,
+      supertonic3Seed: engineSettings.supertonic3.seed,
+      changeSupertonic3Seed: handleSupertonic3SeedChange,
       changeSupertonic3Voice: handleSupertonic3VoiceChange,
       changeSupertonic3Language: handleSupertonic3LanguageChange,
     },

@@ -1,6 +1,6 @@
 import { AUDIO8_DEFAULT_VOICE, AUDIO8_VOICES } from "../constants";
 import { chunkWithConstraintsDetailed, type TextChunk } from "../lib/chunking";
-import { asRecord, pickAllowed } from "./settings";
+import { asRecord, clampFinite, parseSeed, pickAllowed } from "./settings";
 import { audibleTuning } from "./signature";
 import type { EngineCapabilities, EngineDescriptor } from "./types";
 
@@ -9,7 +9,14 @@ export type Audio8VoiceId = typeof AUDIO8_VOICES[number]["id"];
 export interface Audio8Settings {
   /** One of the `AUDIO8_VOICES` ids; `parseSettings` guarantees it. */
   voice: string;
+  /** Unsigned 32-bit sampling seed, or null for a fresh one each time. */
+  seed: number | null;
+  /** Sampling temperature, or null for the model's own. */
+  temperature: number | null;
 }
+
+/** The temperatures `audio8:generate` accepts. */
+export const AUDIO8_TEMPERATURE_RANGE = { min: 0.1, max: 1, step: 0.05 } as const;
 
 // Audio8 re-prefills the voice-reference prompt before every chunk emits its
 // first token, so small chunks pay that fixed cost over and over; large ones
@@ -40,7 +47,7 @@ function audio8VoiceName(voice: string): string {
 }
 
 const capabilities: EngineCapabilities = {
-  // Audio8 speaks at its model-native rate; the seeded sampler is fixed.
+  // Audio8 speaks at its model-native rate.
   speed: false,
   pauses: true,
   pronunciationLexicon: true,
@@ -49,7 +56,7 @@ const capabilities: EngineCapabilities = {
   voiceCloning: null,
   voiceDesign: false,
   instruct: false,
-  seed: false,
+  seed: true,
   expressionTags: [],
   retake: false,
   streamingGranularity: "chunk",
@@ -64,15 +71,27 @@ export const audio8Engine = {
   picker: "desktop",
   badge: "Local",
   capabilities,
-  defaultSettings: { voice: AUDIO8_DEFAULT_VOICE },
-  parseSettings: (raw: unknown): Audio8Settings => ({
-    voice: pickAllowed(asRecord(raw).voice, AUDIO8_VOICE_IDS, AUDIO8_DEFAULT_VOICE),
-  }),
+  defaultSettings: { voice: AUDIO8_DEFAULT_VOICE, seed: null, temperature: null },
+  parseSettings: (raw: unknown): Audio8Settings => {
+    const record = asRecord(raw);
+    const temperature = record.temperature;
+    return {
+      voice: pickAllowed(record.voice, AUDIO8_VOICE_IDS, AUDIO8_DEFAULT_VOICE),
+      seed: parseSeed(record.seed),
+      temperature: typeof temperature === "number" && Number.isFinite(temperature)
+        ? clampFinite(temperature, AUDIO8_TEMPERATURE_RANGE.min, AUDIO8_TEMPERATURE_RANGE.max, AUDIO8_TEMPERATURE_RANGE.max)
+        : null,
+    };
+  },
   voices: () => AUDIO8_VOICES.map(({ id, name, detail }) => ({ id, label: name, detail })),
   voiceLabel: (settings) => audio8VoiceName(settings.voice),
   detail: (settings) => `${AUDIO8_PARAMS} · ONNX INT4 · ${audio8VoiceName(settings.voice)}`,
   signatureParts: ({ settings, tuning, quality }) => ({
-    voice: settings.voice,
+    // Sampling joins the signature only when set, so audio cached before
+    // these controls existed stays valid.
+    voice: settings.seed === null && settings.temperature === null
+      ? settings.voice
+      : JSON.stringify({ voice: settings.voice, seed: settings.seed, temperature: settings.temperature }),
     tuning: audibleTuning(capabilities, tuning, quality),
     legacy: { voice: settings.voice, quality, tuning: { ...tuning, speed: 1 } },
   }),

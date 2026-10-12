@@ -51,7 +51,8 @@ import {
   normalizeChatterboxPunctuation,
   renderChatterboxText,
 } from "../lib/chatterboxTags";
-import { chunkWithConstraintsDetailed, type TextChunk } from "../lib/chunking";
+import type { TextChunk } from "../lib/chunking";
+import { planChatterboxChunks } from "../lib/phonemeModels";
 import { configureTransformersOnnxRuntime } from "../lib/onnxRuntime";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "../lib/onnxWasmAssets";
 import { tuneChunkText } from "../lib/textTuning";
@@ -66,9 +67,6 @@ import { createWorkerRuntime, type GenerateMessage, type LoadMessage } from "./k
 const DOWNLOAD_PROGRESS_MAX = 90;
 const WARMUP_PROGRESS_PERCENT = 95;
 const MAX_CACHED_REFERENCES = 16;
-// Smaller chunks reach first audio sooner; the decoder runs once per chunk.
-const CHUNK_MIN_CHARACTERS = 60;
-const CHUNK_MAX_CHARACTERS = 260;
 const WARMUP_TEXT = "Hello.";
 const WARMUP_MAX_NEW_TOKENS = 8;
 // Golden-ratio offset so a retry never replays the seed that ran away.
@@ -316,10 +314,7 @@ function renderChunks(message: ChatterboxGenerateMessage): { chunks: RenderedChu
   const emphasis = message.emphasisStrength ?? 0;
   const removedTags: string[] = [];
   const chunks: RenderedChunk[] = [];
-  for (const chunk of chunkWithConstraintsDetailed(message.text, {
-    minCharacters: CHUNK_MIN_CHARACTERS,
-    maxCharacters: CHUNK_MAX_CHARACTERS,
-  })) {
+  for (const chunk of planChatterboxChunks(message.text)) {
     const rendered = renderChatterboxText(chunk.text, (speech) => tuneChunkText(speech, rules, emphasis));
     removedTags.push(...rendered.removedTags);
     // A chunk made only of unsupported directions has nothing to perform.

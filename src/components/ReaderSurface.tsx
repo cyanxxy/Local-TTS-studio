@@ -31,7 +31,8 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
   const { documents, engines, environment, player, reader, routing } = session;
   const { library, runtime, session: readerSession } = reader;
   const { browserSupport } = environment;
-  const { kokoro: kokoroState, supertonic: supertonicState } = engines.browser.states;
+  const { states: browserStates } = engines.browser;
+  const { kokoro: kokoroState, supertonic: supertonicState } = browserStates;
   const readerEngine = getEngine(reader.engineId);
   useReaderMediaSession({
     active: routing.isReaderPage,
@@ -99,8 +100,9 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
           desktopModelSettings={renderSurfaceEngineSettings(session, reader.desktopModel)}
           kokoroState={kokoroState}
           supertonicState={supertonicState}
+          modelStates={browserStates}
           visibleModels={browserSupport.supportedModels}
-          unavailableModels={browserSupport.unsupportedModelMessages}
+          unavailableModels={engines.unavailableModels}
           kokoroVoices={engines.kokoroVoices}
           voice={engines.voice}
           onVoiceChange={engines.changeVoice}

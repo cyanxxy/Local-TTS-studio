@@ -18,3 +18,11 @@ export function clampFinite(value: unknown, min: number, max: number, fallback: 
     ? Math.max(min, Math.min(max, value))
     : fallback;
 }
+
+/** The largest sampling seed any engine accepts (unsigned 32-bit). */
+export const MAX_SEED = 0xffff_ffff;
+
+/** A stored sampling seed (an unsigned 32-bit integer), or null for a fresh one each time. */
+export function parseSeed(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_SEED ? value : null;
+}

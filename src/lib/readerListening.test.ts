@@ -9,6 +9,10 @@ const settings = {
   audio8: { voice: "alloy" },
   supertonic3: { voice: "M1", language: "fr" },
   qwen3: {},
+  kitten: { voice: "Bella" },
+  paradee: { voice: "af_heart" },
+  piper: { voice: "en_US-libritts-high#12" },
+  chatterbox: { voice: "default" },
 } as unknown as SurfaceEngineSettings;
 
 describe("buildListeningProfile", () => {
@@ -31,6 +35,19 @@ describe("buildListeningProfile", () => {
       playbackRate: 1,
       updatedAt: 9,
     });
+  });
+});
+
+describe("buildListeningProfile for the added engines", () => {
+  it("captures the voice of Kitten, Paradee, Piper and Chatterbox", () => {
+    for (const [engine, voice] of [
+      ["kitten", "Bella"],
+      ["paradee", "af_heart"],
+      ["piper", "en_US-libritts-high#12"],
+      ["chatterbox", "default"],
+    ] as const) {
+      expect(buildListeningProfile(engine, settings, 5, 1, 9)).toMatchObject({ engine, voice });
+    }
   });
 });
 

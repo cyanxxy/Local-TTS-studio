@@ -18,13 +18,19 @@ export function workerEventMessage(event: Event, fallback: string): string {
   return fallback;
 }
 
-/** The worker GENERATE fields for `text` spoken with `voice` and the Creator tuning. */
+/**
+ * The worker GENERATE fields for `text` spoken with `voice` and the Creator
+ * tuning. `engineFields` carries what only one engine's worker reads, such as
+ * Chatterbox's reference voice and sampling.
+ */
 export function workerGenerateRequest(
   text: string,
   voice: string,
   tuning: GenerationTuningSettings,
+  engineFields?: Readonly<Record<string, unknown>>,
 ): WorkerGenerateRequest {
   return {
+    ...engineFields,
     text,
     voice,
     language: tuning.language,

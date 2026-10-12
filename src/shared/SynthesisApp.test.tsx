@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import WebApp from "../apps/web/WebApp";
@@ -6,7 +6,7 @@ import { SynthesisApp } from "./SynthesisApp";
 import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelLoader } from "../hooks/useModelLoader";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
-import type { ModelState } from "../types";
+import type { ModelState, ModelType } from "../types";
 import { getDefaultQwen3Profile, type Qwen3Profile } from "../../electron/qwen3Profiles";
 import { ENGINES, engineSignatureParts, type DesktopInlineEngineId } from "../models/registry";
 import type { PersistedEngineSettings } from "../lib/appState";
@@ -91,9 +91,9 @@ const mock = vi.hoisted(() => {
     },
     readerError: null as Error | null,
     modelLoader: {
-      states: { kokoro: readyState, supertonic: readyState },
+      states: { kokoro: readyState, supertonic: readyState } as Partial<Record<ModelType, ModelState>>,
       getWorker: vi.fn(() => null),
-      voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] as string[] },
+      voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] as string[] } as Partial<Record<ModelType, string[]>>,
       getWorkerLease: vi.fn(() => null),
       acquireWorker: vi.fn(),
       hardRestartModel: vi.fn(),
@@ -327,9 +327,16 @@ vi.mock("../lib/appState", () => ({
 
 vi.mock("../lib/browserSupport", () => ({
   getLocalBrowserSupport: () => mock.browserSupport,
-  getDefaultSupportedModel: () => mock.browserSupport.supportedModels[0],
+  getDefaultSupportedModel: (support: { supportedModels: readonly string[] }) => support.supportedModels[0],
   getUnsupportedModelMessage: (model: string) => mock.browserSupport.unsupportedModelMessages[model] ?? null,
-  isModelSupportedInBrowser: (model: string) => mock.browserSupport.supportedModels.includes(model),
+  isModelSupportedInBrowser: (model: string, support: { supportedModels: readonly string[] }) => support.supportedModels.includes(model),
+  withoutUnavailableModels: (
+    support: { supportedModels: readonly string[] },
+    unavailable: Record<string, string>,
+  ) => ({ ...support, supportedModels: support.supportedModels.filter((model) => !(model in unavailable)) }),
+  getWebGPUUnavailableModelMessages: (available: boolean | null) => (
+    available === false ? { chatterbox: "Chatterbox Turbo needs WebGPU, which this device does not provide." } : {}
+  ),
 }));
 
 vi.mock("../lib/webgpu", () => ({
@@ -653,6 +660,10 @@ function resetMockState() {
   mock.initialEngineSettings = {
     kokoro: ENGINES.kokoro.defaultSettings,
     supertonic: { ...ENGINES.supertonic.defaultSettings, voice: "Female" },
+    kitten: ENGINES.kitten.defaultSettings,
+    paradee: ENGINES.paradee.defaultSettings,
+    piper: ENGINES.piper.defaultSettings,
+    chatterbox: ENGINES.chatterbox.defaultSettings,
     audio8: ENGINES.audio8.defaultSettings,
     supertonic3: ENGINES.supertonic3.defaultSettings,
     neutts: ENGINES.neutts.defaultSettings,
@@ -1137,7 +1148,7 @@ describe("SynthesisApp", () => {
   });
 
   it("restores and persists the selected Audio8 voice", async () => {
-    mock.initialEngineSettings = { ...mock.initialEngineSettings, audio8: { voice: "iris" } };
+    mock.initialEngineSettings = { ...mock.initialEngineSettings, audio8: { voice: "iris", seed: null, temperature: null } };
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
       configurable: true,
@@ -1147,7 +1158,7 @@ describe("SynthesisApp", () => {
 
     expect(screen.getByRole("button", { name: /IrisEnglish/i })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ audio8: { voice: "iris" } }),
+      expect.objectContaining({ audio8: { voice: "iris", seed: null, temperature: null } }),
     ));
   });
 
@@ -1213,7 +1224,7 @@ describe("SynthesisApp", () => {
     mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "supertonic3", reader: null } };
     mock.initialEngineSettings = {
       ...mock.initialEngineSettings,
-      supertonic3: { voice: "F2", language: "ja" },
+      supertonic3: { voice: "F2", language: "ja", seed: null },
     };
     const worker = {
       addEventListener: vi.fn(),
@@ -1227,10 +1238,43 @@ describe("SynthesisApp", () => {
     expect(screen.getByLabelText("Supertonic 3 language")).toHaveValue("ja");
     fireEvent.change(screen.getByLabelText("Supertonic 3 language"), { target: { value: "de" } });
     await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ supertonic3: { voice: "F2", language: "de" } }),
+      expect.objectContaining({ supertonic3: { voice: "F2", language: "de", seed: null } }),
     ));
     // Qwen3's settings are persisted by its own provider, never by Studio.
     expect(mock.persistEngineSettings.mock.calls.every(([settings]) => !("qwen3" in settings))).toBe(true);
+  });
+
+  it("saves a Supertonic 3 seed with its other settings", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "supertonic3", reader: null } };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />);
+
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "314" } });
+
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ supertonic3: expect.objectContaining({ seed: 314 }) }),
+    ));
+  });
+
+  it("saves Audio8's temperature and seed with its voice", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "audio8", reader: null } };
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.change(screen.getByLabelText(/Variation/), { target: { value: "0.4" } });
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "8" } });
+
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ audio8: { voice: "clara", seed: 8, temperature: 0.4 } }),
+    ));
   });
 
   it("shows the Audio8 cache row and clears it from the inline settings", async () => {
@@ -1395,6 +1439,74 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
     expect(screen.getByText("Audio8 · Native CPU")).toBeInTheDocument();
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
+  });
+
+  it("shows Chatterbox's own settings in Studio and saves a change to them", async () => {
+    mock.browserSupport = { ...mock.browserSupport, supportedModels: ["kokoro", "chatterbox"] };
+    mock.initialAppState = { ...mock.initialAppState, model: "chatterbox" };
+    mock.getWebGPUStatus.mockResolvedValue({ available: true, reason: null, message: null });
+    mock.modelLoader = {
+      ...mock.modelLoader,
+      states: { kokoro: mock.readyState, supertonic: mock.readyState, chatterbox: mock.readyState },
+      voices: { kokoro: [], supertonic: [], chatterbox: ["chatterbox-default"] },
+    };
+    render(<WebApp />);
+
+    const temperature = await screen.findByLabelText(/Variation/);
+    expect(temperature).toHaveValue("0.8");
+    fireEvent.change(temperature, { target: { value: "1.25" } });
+    expect(screen.getByLabelText(/Variation/)).toHaveValue("1.25");
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "12" } });
+    expect(screen.getByLabelText("Seed")).toHaveValue(12);
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+
+    // A tag lands at the end of the script, after a space.
+    const script = (screen.getByRole("textbox", { name: "script" }) as HTMLTextAreaElement).value;
+    fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue(`${script} [laugh]`);
+    fireEvent.click(screen.getByRole("button", { name: "Add [sigh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue(`${script} [laugh] [sigh]`);
+
+    // Into an empty script, or one that already ends in a space, no extra space is added.
+    fireEvent.change(screen.getByRole("textbox", { name: "script" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add [sigh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("[sigh]");
+    fireEvent.change(screen.getByRole("textbox", { name: "script" }), { target: { value: "Hello " } });
+    fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("Hello [laugh]");
+  });
+
+  it("runs the default model when the saved Chatterbox cannot run without WebGPU, and keeps the saved choice", async () => {
+    mock.browserSupport = { ...mock.browserSupport, supportedModels: ["kokoro", "chatterbox"] };
+    mock.initialAppState = { ...mock.initialAppState, model: "chatterbox" };
+    mock.getWebGPUStatus.mockResolvedValue({ available: false, reason: null, message: "No GPU available" });
+    mock.modelLoader = {
+      ...mock.modelLoader,
+      states: { kokoro: mock.readyState, supertonic: mock.readyState, chatterbox: mock.readyState },
+    };
+    render(<WebApp />);
+
+    await waitFor(() => expect(screen.getByText("No GPU available")).toBeInTheDocument());
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalled());
+
+    // Kokoro runs in its place, so Chatterbox's own controls are absent...
+    expect(screen.queryByLabelText(/Variation/)).not.toBeInTheDocument();
+    expect(mock.modelLoader.loadModel).not.toHaveBeenCalledWith("chatterbox");
+    // ...but the saved choice survives for a later launch.
+    expect(mock.persistAppState.mock.calls.every(([state]) => state.model === "chatterbox")).toBe(true);
+  });
+
+  it("names every browser model the build ships in the footer", () => {
+    mock.browserSupport = {
+      ...mock.browserSupport,
+      supportedModels: ["kokoro", "kitten", "paradee", "piper"],
+    };
+    render(<WebApp />);
+
+    const footer = screen.getByRole("contentinfo");
+    for (const label of ["Kokoro", "Supertonic", "Kitten TTS", "Paradee", "Piper"]) {
+      expect(within(footer).getByText(label)).toBeInTheDocument();
+    }
   });
 
   it("hides the desktop runtimes when the web build runs inside Electron", async () => {

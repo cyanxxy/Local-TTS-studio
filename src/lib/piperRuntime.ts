@@ -15,7 +15,7 @@
  * en_US-kristin-medium graph), so batched rows cannot be trimmed reliably.
  */
 import * as ort from "onnxruntime-web";
-import { chunkWithConstraintsDetailed, type TextChunk } from "./chunking";
+import { chunkPiperText, PIPER_MAX_CHUNK_CHARACTERS } from "./phonemeModels";
 import { phonemizeKeepingPunctuation, type EspeakPhonemize } from "./espeakPhonemizer";
 import { isEnglishEspeakVoice } from "./piperVoices";
 import { disposeOutputs, finiteWaveform, type StyleTtsSession } from "./styleTtsRuntime";
@@ -23,17 +23,11 @@ import { disposeOutputs, finiteWaveform, type StyleTtsSession } from "./styleTts
 const BOS = "^";
 const EOS = "$";
 const PAD = "_";
-/** The longest sentence-sized chunk Piper reads well; longer ones are split by the chunker. */
-export const PIPER_MAX_CHUNK_CHARACTERS = 250;
+export { chunkPiperText, PIPER_MAX_CHUNK_CHARACTERS };
 /** Piper scales every utterance's peak to full scale; this keeps the same loudness without clipping. */
 const PEAK_LEVEL = 0.95;
 /** Piper's own floor, so near-silent output is not amplified into noise. */
 const MIN_PEAK = 0.01;
-
-/** Plan a GENERATE text into chunks; the Reader preview must use this same function. */
-export function chunkPiperText(text: string): TextChunk[] {
-  return chunkWithConstraintsDetailed(text, { minCharacters: 40, maxCharacters: PIPER_MAX_CHUNK_CHARACTERS });
-}
 
 export interface PiperVoiceConfig {
   sampleRate: number;

@@ -10,7 +10,7 @@
  * There is no style input and no duration output.
  */
 import * as ort from "onnxruntime-web";
-import { chunkWithConstraintsDetailed, type TextChunk } from "./chunking";
+import { chunkParadeeText, PARADEE_CACHE_NAME } from "./phonemeModels";
 import { phonemizeKeepingPunctuation, spellOutCurrency, type EspeakPhonemize } from "./espeakPhonemizer";
 import {
   ChunkTooLongError,
@@ -23,15 +23,9 @@ import {
   type StyleTtsSession,
 } from "./styleTtsRuntime";
 
+export { chunkParadeeText, PARADEE_CACHE_NAME };
 export const PARADEE_SAMPLE_RATE = STYLE_TTS_SAMPLE_RATE;
-/** Cache Storage for the pinned files; "transformers" keeps it inside the app's clear-cache contract. */
-export const PARADEE_CACHE_NAME = "transformers-cache-paradee-v1";
 export const PARADEE_VOICE = "heart";
-
-/** Plan a GENERATE text into chunks; the Reader preview must use this same function. */
-export function chunkParadeeText(text: string): TextChunk[] {
-  return chunkWithConstraintsDetailed(text, { minCharacters: 40, maxCharacters: 280 });
-}
 
 function splitNumber(value: string): string {
   if (value.includes(".")) return value;

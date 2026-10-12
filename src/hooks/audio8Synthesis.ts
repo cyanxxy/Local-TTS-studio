@@ -22,6 +22,8 @@ export interface Audio8SynthesisInput {
   text: string;
   voice: string;
   tuning: GenerationTuningSettings;
+  /** Sampling for the whole request; a seed is stepped per passage so passages differ but repeat. */
+  sampling?: { seed: number | null; temperature: number | null };
 }
 
 /** Hears which bridge request renders which passage, e.g. to route its progress events. */
@@ -38,7 +40,7 @@ export type Audio8RequestObserver = (requestId: string, passageIndex: number, pa
  */
 export async function* streamAudio8Synthesis(
   bridge: Audio8Bridge,
-  { text, voice, tuning }: Audio8SynthesisInput,
+  { text, voice, tuning, sampling }: Audio8SynthesisInput,
   signal: AbortSignal,
   onRequest?: Audio8RequestObserver,
 ): AsyncGenerator<SynthesisChunk, void, undefined> {
@@ -55,7 +57,13 @@ export async function* streamAudio8Synthesis(
     let result: Awaited<ReturnType<Audio8Bridge["generate"]>>;
     try {
       const tuned = tuneChunkText(passage.text, tuning.pronunciationRules ?? [], tuning.emphasisStrength ?? 0);
-      result = await abortable(bridge.generate({ requestId, text: tuned, voice }), signal);
+      result = await abortable(bridge.generate({
+        requestId,
+        text: tuned,
+        voice,
+        ...(sampling?.seed != null ? { seed: (sampling.seed + index) >>> 0 } : {}),
+        ...(sampling?.temperature != null ? { temperature: sampling.temperature } : {}),
+      }), signal);
     } catch (error) {
       if (signal.aborted) throw signal.reason;
       throw new Error(audio8ErrorMessage(error));

@@ -70,7 +70,7 @@ function renderRuntimes(savedKokoroVoice = "af_heart") {
     retain: true,
     browserSupport: SUPPORT,
     text: "Enough text for the surface to speak.",
-    savedVoices: { kokoro: savedKokoroVoice, supertonic: "Female" },
+    savedVoices: { kokoro: savedKokoroVoice, supertonic: "Female", kitten: "Bella", paradee: "heart", piper: "en_US-kristin-medium", chatterbox: "chatterbox-default" },
     generationSettings: { speed: 1, quality: 5 },
     player,
     setShowPlayer,
@@ -115,7 +115,7 @@ describe("useBrowserEngineRuntimes", () => {
     expect(result.current.voicesInUse.kokoro).toBe("af_retired");
 
     await waitFor(() => expect(result.current.voices.kokoro).toEqual(["af_heart", "af_bella"]));
-    expect(result.current.voicesInUse).toEqual({ kokoro: "af_heart", supertonic: "Female" });
+    expect(result.current.voicesInUse).toMatchObject({ kokoro: "af_heart", supertonic: "Female" });
   });
 
   it("refuses to start a generation or a retake while a request renders on the same worker", async () => {

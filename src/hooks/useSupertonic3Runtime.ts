@@ -20,6 +20,8 @@ interface Options {
   text: string;
   voice: string;
   language: string;
+  /** Sampling seed for the surface generation, or null for a fresh one each time. */
+  seed?: number | null;
   generationSettings: GenerationTuningSettings;
   player: UseAudioPlayerReturn;
   setShowPlayer: (show: boolean) => void;
@@ -34,6 +36,11 @@ const INITIAL_STATE: ModelState = {
 };
 
 const SUPERTONIC3_IDLE_EVICT_MS = 15_000;
+/** The GENERATE field that fixes the sampling seed, when there is one. */
+function seedFields(seed: number | null | undefined): Readonly<Record<string, unknown>> | undefined {
+  return seed == null ? undefined : { seed };
+}
+
 const UNAVAILABLE = "Supertonic 3 is not available in this build.";
 
 /** A loaded worker held for one synthesize request. */
@@ -51,6 +58,7 @@ export function useSupertonic3Runtime({
   text,
   voice,
   language,
+  seed,
   generationSettings,
   player,
   setShowPlayer,
@@ -280,7 +288,7 @@ export function useSupertonic3Runtime({
     beginStream();
     streamStartedRef.current = true;
     setShowPlayer(true);
-    generateTts(text, "supertonic3", voice, { ...generationSettings, language });
+    generateTts(text, "supertonic3", voice, { ...generationSettings, language }, seedFields(seed));
   }, [
     beginStream,
     canGenerate,
@@ -289,6 +297,7 @@ export function useSupertonic3Runtime({
     holdForeground,
     language,
     resetPlayer,
+    seed,
     setShowPlayer,
     text,
     voice,
@@ -403,7 +412,7 @@ export function useSupertonic3Runtime({
           request: workerGenerateRequest(request.text, request.settings.voice, {
             ...request.tuning,
             language: request.settings.language,
-          }),
+          }, seedFields(request.seed ?? request.settings.seed)),
           signal,
           lifetime: hold.lifetime,
           // The hold is released as the request unwinds.

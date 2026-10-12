@@ -67,8 +67,12 @@ const BROWSER_SUPPORT: LocalBrowserSupport = {
 const ENGINE_SETTINGS = {
   kokoro: { voice: "af_heart" },
   supertonic: { voice: "Female", language: "en" },
-  audio8: { voice: "clara" },
-  supertonic3: { voice: "M1", language: "en" },
+  kitten: { voice: "Bella" },
+  paradee: { voice: "heart" },
+  piper: { voice: "en_US-kristin-medium" },
+  chatterbox: { voice: "chatterbox-default", temperature: 0.8, seed: null },
+  audio8: { voice: "clara", seed: null, temperature: null },
+  supertonic3: { voice: "M1", language: "en", seed: null },
 };
 
 function renderOrchestrator(

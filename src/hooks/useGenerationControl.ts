@@ -17,6 +17,8 @@ interface UseGenerationControlOptions {
   text: string;
   tts: Pick<UseTTSReturn, "abort" | "cancel" | "generate" | "isGenerating">;
   voice: string;
+  /** GENERATE fields only the active engine's worker reads. */
+  engineFields?: Readonly<Record<string, unknown>>;
 }
 
 interface UseGenerationControlReturn {
@@ -50,6 +52,7 @@ export function useGenerationControl({
   text,
   tts,
   voice,
+  engineFields,
 }: UseGenerationControlOptions): UseGenerationControlReturn {
   const [isRetakingSegment, setIsRetakingSegment] = useState(false);
   const [retakeError, setRetakeError] = useState<string | null>(null);
@@ -125,7 +128,7 @@ export function useGenerationControl({
     resetPlayer();
     beginStream();
     setShowPlayer(true);
-    generateTts(text, activeModel, voice, generationSettings);
+    generateTts(text, activeModel, voice, generationSettings, engineFields);
   }, [
     activeModel,
     beginStream,
@@ -136,6 +139,7 @@ export function useGenerationControl({
     isGenerationBusy,
     resetPlayer,
     setShowPlayer,
+    engineFields,
     text,
     voice,
   ]);
@@ -165,7 +169,7 @@ export function useGenerationControl({
     retakeRef.current = retake;
     setIsRetakingSegment(true);
     retake.detach = observeWorkerGeneration(worker, generationId, {
-      ...workerGenerateRequest(segment.text, voice, generationSettings),
+      ...workerGenerateRequest(segment.text, voice, generationSettings, engineFields),
       finalPauseSec: segment.pauseAfterSec,
     }, {
       onChunk: (chunk) => {
@@ -199,6 +203,7 @@ export function useGenerationControl({
     activeModel,
     clearRetakeListener,
     generationSettings,
+    engineFields,
     isGenerationBusy,
     replaceSegment,
     segments,

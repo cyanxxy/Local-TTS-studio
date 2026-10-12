@@ -25,6 +25,10 @@ export function engineVoiceSelection(
   switch (engine) {
     case "kokoro":
     case "audio8":
+    case "kitten":
+    case "paradee":
+    case "piper":
+    case "chatterbox":
       return { voice: settings[engine].voice };
     case "supertonic":
     case "supertonic3":

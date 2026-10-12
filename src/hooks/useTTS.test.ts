@@ -47,8 +47,8 @@ const SETTINGS: GenerationTuningSettings = {
 
 
 /** A `getWorker` over per-engine worker refs, read at call time. */
-function workerLookup(refs: Record<ModelType, { current: Worker | null }>) {
-  return (model: ModelType) => refs[model].current;
+function workerLookup(refs: Partial<Record<ModelType, { current: Worker | null }>>) {
+  return (model: ModelType) => refs[model]?.current ?? null;
 }
 
 describe("useTTS", () => {
