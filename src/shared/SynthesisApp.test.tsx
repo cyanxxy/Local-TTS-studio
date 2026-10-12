@@ -999,6 +999,39 @@ describe("SynthesisApp", () => {
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps Studio's unsaved audio across a visit to the Reader and restores it on return", async () => {
+    const studioChunks = [{
+      audio: new Float32Array([0.3, 0.4]).buffer,
+      samplingRate: 24_000,
+      text: "Studio line.",
+      index: 0,
+      total: 1,
+    }];
+    mock.player.getAudioCacheSnapshot.mockReturnValue(studioChunks);
+    mock.playerClock.set(2.5);
+    mock.player.getPlaybackSnapshot.mockReturnValue({ playbackRate: 1.5, totalDuration: 4, synthesisComplete: true });
+    const book = createReaderDocument({ id: "keeper-book", text: "A book to read after Studio." });
+    mock.readerLibrary.documents = [book];
+    mock.readerLibrary.activeDocument = book;
+    const view = render(<WebApp />);
+
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<WebApp />);
+    await screen.findByTestId("reader-text-value");
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    // The Reader emptied the player; what it holds now is not Studio's.
+    mock.player.getAudioCacheSnapshot.mockReturnValue([]);
+    mock.player.restoreAudioCache.mockClear();
+
+    mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+    view.rerender(<WebApp />);
+    await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(studioChunks, {
+      currentTime: 2.5,
+      playbackRate: 1.5,
+      synthesisComplete: true,
+    }));
+  });
+
   describe("per-book listening profile", () => {
     const readerRoute = () => {
       mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
