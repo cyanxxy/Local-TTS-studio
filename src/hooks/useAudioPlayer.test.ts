@@ -665,6 +665,19 @@ describe("useAudioPlayer", () => {
     expect(downloadBlobSpy.mock.calls[3]?.[1]).toBe("tts-audio.flac");
   });
 
+  it("reports the sample rate of the audio it holds", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    expect(result.current.getSourceSampleRate()).toBeNull();
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 24, 24));
+    });
+    expect(result.current.getSourceSampleRate()).toBe(24);
+
+    act(() => result.current.reset());
+    expect(result.current.getSourceSampleRate()).toBeNull();
+  });
+
   it("lays captions out in the chosen style", async () => {
     const downloadBlobSpy = vi.spyOn(exportAudioModule, "downloadBlob").mockImplementation(() => {});
     const { result } = renderHook(() => useAudioPlayer());
