@@ -44,6 +44,26 @@ export interface WebSocketAudioChunk {
   audio: ArrayBuffer;
 }
 
+/** The `type` of the frame that reports the silence after a finished text unit. */
+export const UNIT_GAP_MESSAGE_TYPE = "unit_gap";
+/** The fields of a `unit_gap` frame besides `type`; electron/localTtsProtocolParity.test.ts holds them to the Rust frame. */
+export const UNIT_GAP_FIELDS = ["requestId", "sampleRate", "textUnitIndex", "textUnitTotal", "silenceSamples"] as const;
+
+/**
+ * Silence the bridge inserts after a text unit's last audio chunk. It is
+ * declared on its own frame so no chunk has to wait for its successor to learn
+ * whether it is the unit's last. `afterChunkIndex` is the stream position the
+ * validator assigned: the gap belongs after the audio chunk with that index.
+ */
+export interface WebSocketUnitGap {
+  requestId: string;
+  afterChunkIndex: number;
+  sampleRate: number;
+  silenceSamples: number;
+  textUnitIndex: number;
+  textUnitTotal: number;
+}
+
 // Metadata for a chunk whose binary frame has not arrived yet. Audio is always
 // little-endian Float32: the bridge never negotiates another encoding, and
 // exports (wav-f32, wav-pcm24) need the full precision end to end.
@@ -215,6 +235,34 @@ export function parseAudioChunkMetadata(parsed: Record<string, unknown>, request
     silenceAfterSamples,
     ...textUnitMetadata,
   };
+}
+
+/** Validates a `unit_gap` frame on its own; stream-level rules live in AudioStreamValidator. */
+export function parseUnitGapMetadata(
+  parsed: Record<string, unknown>,
+  requestId: string,
+): Omit<WebSocketUnitGap, "afterChunkIndex"> {
+  const field = (name: string): number => {
+    const value = parsed[name];
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`WebSocket bridge returned invalid unit gap \`${name}\`.`);
+    }
+    return value;
+  };
+  const sampleRate = field("sampleRate");
+  const silenceSamples = field("silenceSamples");
+  const textUnitIndex = field("textUnitIndex");
+  const textUnitTotal = field("textUnitTotal");
+  if (sampleRate < MIN_AUDIO_SAMPLE_RATE || sampleRate > MAX_AUDIO_SAMPLE_RATE) {
+    throw new Error("WebSocket bridge returned a unit gap with an invalid sample rate.");
+  }
+  if (silenceSamples <= 0 || silenceSamples > MAX_AUDIO_SILENCE_SAMPLES) {
+    throw new Error("WebSocket bridge returned a unit gap with invalid silence.");
+  }
+  if (textUnitTotal <= 0 || textUnitTotal > MAX_REQUEST_AUDIO_CHUNKS || textUnitIndex >= textUnitTotal) {
+    throw new Error("WebSocket bridge returned invalid text-unit metadata.");
+  }
+  return { requestId, sampleRate, silenceSamples, textUnitIndex, textUnitTotal };
 }
 
 /** The audio summary of a successful generation result. */

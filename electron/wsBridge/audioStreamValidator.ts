@@ -1,8 +1,10 @@
 import {
   parseAudioChunkMetadata,
   parseResultAudioMetadata,
+  parseUnitGapMetadata,
   type AudioChunkMetadata,
   type WebSocketAudioChunk,
+  type WebSocketUnitGap,
 } from "./protocol";
 
 export interface AudioStreamLimits {
@@ -18,7 +20,9 @@ const UNEXPECTED_COMMAND_AUDIO = "WebSocket bridge returned unexpected audio for
  * The per-request rules of the audio stream: each `audio_chunk` frame is
  * followed by exactly its binary frame, indexes run 0, 1, 2… without gaps, the
  * sample rate and any declared total never change, the request stays under its
- * audio budget, and the final result agrees with what was streamed. Every
+ * audio budget (declared inter-unit silence included), a `unit_gap` frame
+ * follows a finished chunk of its own text unit at most once per unit, and the
+ * final result agrees with what was streamed. Every
  * method throws an Error whose message is the protocol failure to report.
  */
 export class AudioStreamValidator {
@@ -30,6 +34,9 @@ export class AudioStreamValidator {
   #declaredTotal: number | null = null;
   #sampleRate: number | null = null;
   #outputSamples = 0;
+  // The text unit of the last accepted chunk, and the last unit a gap closed.
+  #lastUnit: { index: number; total: number } | null = null;
+  #lastGapUnit = -1;
 
   constructor(requestId: string, expectAudio: boolean, limits: AudioStreamLimits) {
     this.#requestId = requestId;
@@ -79,6 +86,44 @@ export class AudioStreamValidator {
     this.#pending = metadata;
   }
 
+  /**
+   * Accepts a `unit_gap` frame. It is a complete frame (no binary part), so
+   * the bridge must not be mid-chunk, and it closes a text unit whose audio
+   * has already arrived. Its silence counts against the request's audio budget
+   * exactly like trailing silence on a chunk, and the one-gap-per-unit rule
+   * keeps the number of gap frames within the text-unit limit.
+   */
+  acceptGap(parsed: Record<string, unknown>): WebSocketUnitGap {
+    if (!this.#expectAudio) throw new Error(UNEXPECTED_COMMAND_AUDIO);
+    if (this.#pending) {
+      throw new Error("WebSocket bridge returned a unit gap before the pending binary frame.");
+    }
+    const gap = parseUnitGapMetadata(parsed, this.#requestId);
+    if (this.#sampleRate === null || this.#lastUnit === null) {
+      throw new Error("WebSocket bridge returned a unit gap before audio for a text unit.");
+    }
+    if (gap.sampleRate !== this.#sampleRate) {
+      throw new Error("WebSocket bridge changed the audio sample rate mid-stream.");
+    }
+    if (gap.textUnitIndex !== this.#lastUnit.index || gap.textUnitTotal !== this.#lastUnit.total) {
+      throw new Error("WebSocket bridge returned a unit gap for a text unit other than the last streamed one.");
+    }
+    if (gap.textUnitIndex + 1 >= gap.textUnitTotal) {
+      throw new Error("WebSocket bridge returned a unit gap after the final text unit.");
+    }
+    if (gap.textUnitIndex <= this.#lastGapUnit) {
+      throw new Error("WebSocket bridge returned a duplicate unit gap.");
+    }
+    if (gap.silenceSamples > this.#limits.maxRequestAudioSamples - this.#outputSamples) {
+      throw new Error(
+        `WebSocket bridge audio exceeded the ${this.#limits.maxRequestAudioBytes}-byte request limit.`,
+      );
+    }
+    this.#lastGapUnit = gap.textUnitIndex;
+    this.#outputSamples += gap.silenceSamples;
+    return { ...gap, afterChunkIndex: this.#nextIndex - 1 };
+  }
+
   /** Pairs a binary frame with its metadata and returns the finished chunk. */
   acceptBinary(audio: ArrayBuffer): WebSocketAudioChunk {
     if (!this.#expectAudio) throw new Error(UNEXPECTED_COMMAND_AUDIO);
@@ -91,6 +136,9 @@ export class AudioStreamValidator {
       throw new Error("WebSocket bridge returned an audio binary frame with an unexpected byte length.");
     }
     this.#nextIndex += 1;
+    this.#lastUnit = metadata.textUnitIndex !== undefined && metadata.textUnitTotal !== undefined
+      ? { index: metadata.textUnitIndex, total: metadata.textUnitTotal }
+      : null;
     this.#outputSamples += metadata.sampleCount + metadata.silenceAfterSamples;
     return { ...metadata, audio };
   }

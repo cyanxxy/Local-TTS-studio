@@ -1353,6 +1353,142 @@ describe("createWebSocketBridgeWorkerPool", () => {
     servers[0].close();
   });
 
+  describe("unit gaps", () => {
+    function sendUnitChunk(server: FakeWebSocketServer, requestId: unknown, index: number, unit: number) {
+      server.sendJson({
+        type: "audio_chunk",
+        requestId,
+        index,
+        total: 0,
+        sampleRate: 24_000,
+        sampleCount: 2,
+        silenceAfterSamples: 0,
+        textUnitIndex: unit,
+        textUnitTotal: 2,
+      });
+      server.sendBinary(Buffer.alloc(2 * Float32Array.BYTES_PER_ELEMENT));
+    }
+
+    function sendGap(server: FakeWebSocketServer, requestId: unknown, overrides: Record<string, unknown> = {}) {
+      server.sendJson({
+        type: "unit_gap",
+        requestId,
+        sampleRate: 24_000,
+        textUnitIndex: 0,
+        textUnitTotal: 2,
+        silenceSamples: 4_800,
+        ...overrides,
+      });
+    }
+
+    function finish(server: FakeWebSocketServer, requestId: unknown, audioChunkCount: number) {
+      server.sendJson({
+        type: "result",
+        requestId,
+        ok: true,
+        result: { audioChunkCount, sampleRate: 24_000, modelRepo: "R", durationSec: 1, elapsedSec: 1, phaseTimingsSec: {} },
+      });
+    }
+
+    it("delivers a gap in stream order between the chunks it separates and keeps it out of the chunk count", async () => {
+      const { pool } = makePool((message, server) => {
+        sendUnitChunk(server, message.requestId, 0, 0);
+        sendGap(server, message.requestId);
+        sendUnitChunk(server, message.requestId, 1, 1);
+        finish(server, message.requestId, 2);
+      });
+      const events: string[] = [];
+      const gaps: unknown[] = [];
+
+      await pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "two units" },
+        spawnConfig: SPAWN_CONFIG,
+        onAudioChunk: (chunk) => events.push(`chunk ${chunk.index}`),
+        onAudioGap: (gap) => {
+          events.push("gap");
+          gaps.push(gap);
+        },
+      });
+
+      expect(events).toEqual(["chunk 0", "gap", "chunk 1"]);
+      expect(gaps).toEqual([{
+        requestId: "r1",
+        afterChunkIndex: 0,
+        sampleRate: 24_000,
+        silenceSamples: 4_800,
+        textUnitIndex: 0,
+        textUnitTotal: 2,
+      }]);
+    });
+
+    it("accepts a gap even when nobody listens for it", async () => {
+      const { pool } = makePool((message, server) => {
+        sendUnitChunk(server, message.requestId, 0, 0);
+        sendGap(server, message.requestId);
+        finish(server, message.requestId, 1);
+      });
+      await expect(pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "unheard" },
+        spawnConfig: SPAWN_CONFIG,
+      })).resolves.toBeDefined();
+    });
+
+    it("fails the request and stops the worker when a gap breaks the stream rules", async () => {
+      const { pool, children, servers } = makePool((message, server) => {
+        sendUnitChunk(server, message.requestId, 0, 0);
+        sendGap(server, message.requestId, { textUnitIndex: 1 });
+      });
+      await expect(pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "bad gap" },
+        spawnConfig: SPAWN_CONFIG,
+      })).rejects.toThrow(/text unit other than the last/);
+      expect(children[0].killed).toBe(true);
+      servers[0].close();
+    });
+
+    it("counts a gap's silence against the request byte limit", async () => {
+      const children: FakeChild[] = [];
+      const servers: FakeWebSocketServer[] = [];
+      const spawn = vi.fn((_model: TestModel, config: WebSocketWorkerSpawnRuntimeConfig) => {
+        const child = new FakeChild();
+        const server = new FakeWebSocketServer(
+          config.host,
+          config.port,
+          `/${config.authToken}`,
+          (port) => child.emitStdout(`__PORT__${port}\n`),
+          (message, connectedServer) => {
+            sendUnitChunk(connectedServer, message.requestId, 0, 0);
+            sendGap(connectedServer, message.requestId);
+          },
+        );
+        child.onKill = () => server.close();
+        children.push(child);
+        servers.push(server);
+        return child as unknown as ChildProcessWithoutNullStreams;
+      });
+      const pool = createWebSocketBridgeWorkerPool<TestModel>({
+        spawn,
+        idleEvictMs: 60_000,
+        connectTimeoutMs: 5_000,
+        // Room for the 2-sample chunk but not for 4,800 samples of silence.
+        maxRequestAudioBytes: 64,
+      });
+      await expect(pool.run("qwen3", {
+        ...RUN_DEFAULTS,
+        requestId: "r1",
+        payload: { text: "long silence" },
+        spawnConfig: SPAWN_CONFIG,
+      })).rejects.toThrow(/64-byte request limit/);
+      servers[0].close();
+    });
+  });
+
   it("rejects audio that exceeds the cumulative request byte limit", async () => {
     const children: FakeChild[] = [];
     const servers: FakeWebSocketServer[] = [];

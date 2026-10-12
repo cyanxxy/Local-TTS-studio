@@ -16,7 +16,7 @@ use super::runtime::{Qwen3Runtime, VoiceCloneReference, VoiceCloneRequest};
 use super::streaming::{AudioSink, CustomVoiceRequest, GenerationSummary, VoiceDesignRequest};
 use super::target::resolved_runtime_target;
 use crate::protocol::{
-    GenerationOutput, MAX_AUDIO_CHUNK_SAMPLES, StreamedAudioSummary, round_secs,
+    GenerationOutput, MAX_AUDIO_CHUNK_SAMPLES, StreamedAudioSummary, round_secs, unit_gap_frame,
 };
 use crate::ws::{Backend, WebSocketConnection};
 
@@ -199,11 +199,9 @@ impl AudioSink for WebSocketQwenSink<'_> {
         sample_rate: u32,
         index: usize,
         total: usize,
-        silence_after_samples: usize,
     ) -> Result<()> {
         self.bail_if_cancelled()?;
-        for (part_index, chunk) in samples.chunks(MAX_AUDIO_CHUNK_SAMPLES).enumerate() {
-            let is_last_part = (part_index + 1) * MAX_AUDIO_CHUNK_SAMPLES >= samples.len();
+        for chunk in samples.chunks(MAX_AUDIO_CHUNK_SAMPLES) {
             let mut metadata = json!({
                 "type": "audio_chunk",
                 "requestId": self.request_id,
@@ -214,7 +212,9 @@ impl AudioSink for WebSocketQwenSink<'_> {
                 "total": 0,
                 "sampleRate": sample_rate,
                 "sampleCount": chunk.len(),
-                "silenceAfterSamples": if is_last_part { silence_after_samples } else { 0 },
+                // Inter-unit silence travels as a `unit_gap` frame instead, so
+                // no chunk waits on the one after it.
+                "silenceAfterSamples": 0,
             });
             if total > 0 {
                 metadata["textUnitIndex"] = json!(index);
@@ -224,6 +224,23 @@ impl AudioSink for WebSocketQwenSink<'_> {
             self.audio_chunk_count = self.audio_chunk_count.saturating_add(1);
         }
         Ok(())
+    }
+
+    fn unit_gap(
+        &mut self,
+        sample_rate: u32,
+        index: usize,
+        total: usize,
+        silence_samples: usize,
+    ) -> Result<()> {
+        self.bail_if_cancelled()?;
+        self.connection.send_json(&unit_gap_frame(
+            self.request_id,
+            sample_rate,
+            index,
+            total,
+            silence_samples,
+        ))
     }
 }
 

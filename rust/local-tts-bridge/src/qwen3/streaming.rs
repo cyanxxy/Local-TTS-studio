@@ -113,22 +113,32 @@ pub trait AudioSink {
         sample_rate: u32,
         index: usize,
         total: usize,
-        silence_after_samples: usize,
+    ) -> Result<()>;
+
+    /// A text unit ended and `silence_samples` of silence follow its audio.
+    /// Sent after the unit's last chunk, never after the request's last unit,
+    /// and only when the gap is not empty.
+    fn unit_gap(
+        &mut self,
+        sample_rate: u32,
+        index: usize,
+        total: usize,
+        silence_samples: usize,
     ) -> Result<()>;
 }
 
 /// Forwards streamed chunks to the sink, one text unit at a time.
 ///
-/// Each chunk is held back until the next one arrives. The client applies a
-/// chunk's `silence_after_samples` *after* that chunk, so the unit's trailing
-/// gap has to ride on its final chunk — which is only identifiable once the
-/// unit ends. Deferring by one is what lets a streamed unit keep the same
-/// inter-unit spacing the one-chunk-per-unit path produced.
+/// Every chunk is forwarded the moment the engine decodes it, so the first
+/// audible chunk of a request never waits for a second decode batch. The
+/// inter-unit gap cannot ride on a unit's final chunk (it is only identifiable
+/// once the unit ends), so the unit's end is reported as its own `unit_gap`
+/// event instead.
 struct StreamingUnitSink<'a> {
     sink: &'a mut dyn AudioSink,
     unit_index: usize,
     unit_total: usize,
-    pending: Option<Vec<f32>>,
+    unit_samples: usize,
     sample_rate: Option<u32>,
     sample_count: usize,
     chunk_count: usize,
@@ -141,7 +151,7 @@ impl<'a> StreamingUnitSink<'a> {
             sink,
             unit_index: 0,
             unit_total,
-            pending: None,
+            unit_samples: 0,
             sample_rate: None,
             sample_count: 0,
             chunk_count: 0,
@@ -151,6 +161,7 @@ impl<'a> StreamingUnitSink<'a> {
 
     fn begin_unit(&mut self, unit_index: usize) {
         self.unit_index = unit_index;
+        self.unit_samples = 0;
     }
 
     /// Callback for the engine. `false` stops generation for this unit.
@@ -178,13 +189,14 @@ impl<'a> StreamingUnitSink<'a> {
             ),
             None => self.sample_rate = Some(sample_rate),
         }
-        // The engine's buffer is only lent for this call, and the chunk waits
-        // here until the next one arrives.
-        if let Some(previous) = self.pending.replace(samples.to_vec()) {
-            // Not the last chunk of this unit after all, so no trailing gap.
-            self.emit(previous, 0)?;
-        }
-        Ok(())
+        self.unit_samples = self.unit_samples.saturating_add(samples.len());
+        self.sample_count = self.sample_count.saturating_add(samples.len());
+        self.chunk_count = self.chunk_count.saturating_add(1);
+        // Keep passing the text-unit index/count: the client turns these into
+        // textUnitIndex/textUnitTotal and maps chunks back to sentences with
+        // them. Passing 0 here would collapse that mapping.
+        self.sink
+            .audio_chunk(samples, sample_rate, self.unit_index, self.unit_total)
     }
 
     /// Take any error the sink raised while streaming. The engine reports a
@@ -194,12 +206,11 @@ impl<'a> StreamingUnitSink<'a> {
         self.error.take()
     }
 
-    /// Flush the unit's final chunk, carrying the inter-unit gap.
+    /// Close the unit and report the inter-unit gap that follows it.
     ///
-    /// Callers must only reach this once the unit generated successfully; a
-    /// pending chunk left over from a failed unit must never be emitted.
-    fn end_unit(&mut self, silence_after_samples: usize) -> Result<()> {
-        let Some(last) = self.pending.take() else {
+    /// Callers must only reach this once the unit generated successfully.
+    fn end_unit(&mut self, silence_samples: usize) -> Result<()> {
+        if self.unit_samples == 0 {
             // Silently skipping would drop a sentence from the output with no
             // signal. The buffered path failed here too (it rejected an empty
             // buffer), so this keeps that contract.
@@ -208,26 +219,16 @@ impl<'a> StreamingUnitSink<'a> {
                 self.unit_index + 1,
                 self.unit_total
             );
-        };
-        self.emit(last, silence_after_samples)
-    }
-
-    fn emit(&mut self, samples: Vec<f32>, silence_after_samples: usize) -> Result<()> {
-        let sample_rate = self.sample_rate.unwrap_or_default();
-        self.sample_count = self
-            .sample_count
-            .saturating_add(samples.len())
-            .saturating_add(silence_after_samples);
-        self.chunk_count = self.chunk_count.saturating_add(1);
-        // Keep passing the text-unit index/count: the client turns these into
-        // textUnitIndex/textUnitTotal and maps chunks back to sentences with
-        // them. Passing 0 here would collapse that mapping.
-        self.sink.audio_chunk(
-            &samples,
-            sample_rate,
+        }
+        if silence_samples == 0 {
+            return Ok(());
+        }
+        self.sample_count = self.sample_count.saturating_add(silence_samples);
+        self.sink.unit_gap(
+            self.sample_rate.unwrap_or_default(),
             self.unit_index,
             self.unit_total,
-            silence_after_samples,
+            silence_samples,
         )
     }
 }
@@ -321,8 +322,8 @@ pub fn generate_voice_clone_units(
 }
 
 /// Streams every mode the same way: split into bounded units, budget each
-/// unit, stream its chunks, and carry the inter-unit gap on each unit's final
-/// chunk. `generate_unit` is the only mode-specific step.
+/// unit, stream its chunks as they decode, and report the inter-unit gap when a
+/// unit ends. `generate_unit` is the only mode-specific step.
 fn generate_units(
     mode_label: &str,
     text: &str,
@@ -354,8 +355,8 @@ fn generate_units(
         });
         // A sink failure stops the engine by returning false, which the engine
         // reports as a clean Ok — so check the stored cause first. Then let the
-        // engine's own error through before flushing, so a failed unit never
-        // emits a trailing chunk and gap on its way out.
+        // engine's own error through before closing the unit, so a failed unit
+        // never reports a gap on its way out.
         if let Some(error) = streaming.take_error() {
             return Err(error);
         }
@@ -464,17 +465,61 @@ mod tests {
                 controls,
             });
             // Two chunks per unit, the first carrying a non-finite sample, so
-            // the tests cover both raw pass-through and the deferred flush
-            // that places the inter-unit gap on a unit's final chunk.
+            // the tests cover both raw pass-through and unit-end
+            // gap event that follows the last of them.
             on_audio(&[f32::NAN, 0.5], 24_000);
             on_audio(&[0.75], 24_000);
             Ok(())
         }
     }
 
+    #[derive(Debug, Clone, PartialEq)]
+    enum Event {
+        Chunk {
+            samples: Vec<f32>,
+            sample_rate: u32,
+            index: usize,
+            total: usize,
+        },
+        Gap {
+            sample_rate: u32,
+            index: usize,
+            total: usize,
+            silence: usize,
+        },
+    }
+
     #[derive(Debug, Default)]
     struct RecordingSink {
-        chunks: Vec<(Vec<f32>, u32, usize, usize, usize)>,
+        events: Vec<Event>,
+    }
+
+    impl RecordingSink {
+        fn chunks(&self) -> Vec<(&[f32], usize, usize)> {
+            self.events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Chunk {
+                        samples,
+                        index,
+                        total,
+                        ..
+                    } => Some((samples.as_slice(), *index, *total)),
+                    Event::Gap { .. } => None,
+                })
+                .collect()
+        }
+
+        /// The (unit index, silence) of every gap, in arrival order.
+        fn gaps(&self) -> Vec<(usize, usize)> {
+            self.events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::Gap { index, silence, .. } => Some((*index, *silence)),
+                    Event::Chunk { .. } => None,
+                })
+                .collect()
+        }
     }
 
     impl AudioSink for RecordingSink {
@@ -488,15 +533,29 @@ mod tests {
             sample_rate: u32,
             index: usize,
             total: usize,
-            silence_after_samples: usize,
         ) -> Result<()> {
-            self.chunks.push((
-                samples.to_vec(),
+            self.events.push(Event::Chunk {
+                samples: samples.to_vec(),
                 sample_rate,
                 index,
                 total,
-                silence_after_samples,
-            ));
+            });
+            Ok(())
+        }
+
+        fn unit_gap(
+            &mut self,
+            sample_rate: u32,
+            index: usize,
+            total: usize,
+            silence: usize,
+        ) -> Result<()> {
+            self.events.push(Event::Gap {
+                sample_rate,
+                index,
+                total,
+                silence,
+            });
             Ok(())
         }
     }
@@ -552,16 +611,17 @@ mod tests {
                     MAX_TEXT_UNIT_GENERATION_TOKENS,
                 )
         }));
-        // Each unit streams two chunks now, so the chunk count tracks emitted
+        // Each unit streams two chunks, so the chunk count tracks emitted
         // audio rather than text units.
         let units = engine.calls.len();
-        assert_eq!(sink.chunks.len(), units * 2);
-        assert_eq!(summary.audio_chunk_count, sink.chunks.len());
+        let chunks = sink.chunks();
+        assert_eq!(chunks.len(), units * 2);
+        assert_eq!(summary.audio_chunk_count, chunks.len());
         assert_eq!(summary.sample_rate, 24_000);
         // Chunks reach the sink unchanged and unnormalized; the transport
         // scrubs the non-finite sample while encoding it.
         assert!(
-            sink.chunks
+            chunks
                 .iter()
                 .enumerate()
                 .all(|(position, chunk)| if position % 2 == 0 {
@@ -572,28 +632,94 @@ mod tests {
         );
         // Every chunk still carries its text-unit index and count, so the
         // client can map streamed audio back to sentences.
-        assert!(sink.chunks.iter().all(|chunk| chunk.3 == units));
+        assert!(chunks.iter().all(|chunk| chunk.2 == units));
         assert!(
-            sink.chunks
+            chunks
                 .iter()
                 .enumerate()
-                .all(|(position, chunk)| chunk.2 == position / 2)
+                .all(|(position, chunk)| chunk.1 == position / 2)
         );
-        // The inter-unit gap rides on the LAST chunk of each unit and never on
-        // the final unit — the property the deferred flush exists to preserve.
-        for (position, chunk) in sink.chunks.iter().enumerate() {
-            let is_unit_end = position % 2 == 1;
-            let is_final_unit = position / 2 + 1 == units;
-            let expected = if is_unit_end && !is_final_unit {
-                4_800
-            } else {
-                0
-            };
-            assert_eq!(chunk.4, expected, "silence at chunk {position}");
+        // The inter-unit gap is its own event after each unit's last chunk and
+        // never follows the final unit.
+        let expected_gaps: Vec<(usize, usize)> = (0..units - 1).map(|unit| (unit, 4_800)).collect();
+        assert_eq!(sink.gaps(), expected_gaps);
+        for (position, event) in sink.events.iter().enumerate() {
+            if let Event::Gap { index, total, .. } = event {
+                assert_eq!(*total, units);
+                assert!(
+                    matches!(&sink.events[position - 1], Event::Chunk { index: previous, .. } if previous == index),
+                    "gap {index} must directly follow that unit's last chunk"
+                );
+            }
         }
         // Total duration must be unchanged by streaming: real samples plus one
         // gap per boundary.
         assert_eq!(summary.sample_count, units * 3 + (units - 1) * 4_800);
+    }
+
+    #[test]
+    fn the_first_chunk_of_a_request_is_forwarded_without_waiting_for_the_next() {
+        // The sink used to hold every chunk until its successor arrived, which
+        // delayed first audio by a whole decode batch.
+        struct ObservingEngine<'s> {
+            seen_after_first: &'s std::cell::Cell<Option<usize>>,
+            events: &'s std::cell::RefCell<Vec<usize>>,
+        }
+        impl CustomVoiceEngine for ObservingEngine<'_> {
+            fn generate_custom_voice_streaming(
+                &mut self,
+                _text: &str,
+                _speaker: &str,
+                _language: &str,
+                _instruct: &str,
+                _controls: GenerationControls,
+                on_audio: StreamedAudio<'_>,
+            ) -> Result<()> {
+                on_audio(&[0.5], 24_000);
+                self.seen_after_first.set(Some(self.events.borrow().len()));
+                on_audio(&[0.25], 24_000);
+                Ok(())
+            }
+        }
+        struct CountingSink<'s>(&'s std::cell::RefCell<Vec<usize>>);
+        impl AudioSink for CountingSink<'_> {
+            fn progress(&mut self, _phase: &str, _message: &str) -> Result<()> {
+                Ok(())
+            }
+            fn audio_chunk(&mut self, samples: &[f32], _: u32, _: usize, _: usize) -> Result<()> {
+                self.0.borrow_mut().push(samples.len());
+                Ok(())
+            }
+            fn unit_gap(&mut self, _: u32, _: usize, _: usize, _: usize) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let seen = std::cell::Cell::new(None);
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut engine = ObservingEngine {
+            seen_after_first: &seen,
+            events: &events,
+        };
+        let mut sink = CountingSink(&events);
+        generate_custom_voice_units(
+            &mut engine,
+            &CustomVoiceRequest {
+                text: "A single spoken sentence.",
+                speaker: "Uncle_Fu",
+                language: "English",
+                instruct: "",
+                controls: GenerationControls::new(0.8, 40, 512),
+            },
+            &mut sink,
+            &mut no_cleanup,
+        )
+        .unwrap();
+        assert_eq!(
+            seen.get(),
+            Some(1),
+            "first chunk must reach the sink at once"
+        );
     }
 
     #[test]
@@ -634,14 +760,14 @@ mod tests {
             error.to_string().contains("produced no audio for section"),
             "unexpected error: {error}"
         );
-        assert!(sink.chunks.is_empty());
+        assert!(sink.events.is_empty());
     }
 
     #[test]
-    fn a_failing_unit_does_not_emit_its_pending_chunk() {
-        // The engine fails after already streaming audio. The buffered chunk
-        // and its inter-unit gap must not reach the sink, and the engine's own
-        // message must survive with the section that produced it.
+    fn a_failing_unit_reports_no_gap() {
+        // The engine fails after already streaming audio. That audio has gone
+        // out, but the failed unit's inter-unit gap must not follow it, and the
+        // engine's own message must survive with the section that produced it.
         struct FailingEngine;
         impl CustomVoiceEngine for FailingEngine {
             fn generate_custom_voice_streaming(
@@ -658,13 +784,14 @@ mod tests {
             }
         }
 
+        let text = format!("First sentence. {}", "你".repeat(450));
         let mut sink = RecordingSink::default();
         let mut engine = FailingEngine;
         let mut cleanup_count = 0usize;
         let error = generate_custom_voice_units(
             &mut engine,
             &CustomVoiceRequest {
-                text: "A single spoken sentence.",
+                text: &text,
                 speaker: "Uncle_Fu",
                 language: "English",
                 instruct: "",
@@ -677,7 +804,8 @@ mod tests {
         let rendered = format!("{error:#}");
         assert!(rendered.contains("token budget exhausted"), "{rendered}");
         assert!(rendered.contains("section 1 of"), "{rendered}");
-        assert!(sink.chunks.is_empty());
+        assert_eq!(sink.chunks().len(), 1);
+        assert!(sink.gaps().is_empty());
         // The failed unit still released its inference scratch memory.
         assert_eq!(cleanup_count, 1);
     }
@@ -685,8 +813,7 @@ mod tests {
     #[test]
     fn streamed_units_drop_empty_chunks_and_keep_one_gap_per_boundary() {
         // A chunk shorter than the vocoder's lookahead decodes to no samples.
-        // It must not reach the sink, must not be counted, and must not be
-        // mistaken for the unit's final chunk and so swallow the gap.
+        // It must not reach the sink or be counted.
         struct SparseEngine;
         impl CustomVoiceEngine for SparseEngine {
             fn generate_custom_voice_streaming(
@@ -722,18 +849,17 @@ mod tests {
         )
         .unwrap();
 
-        let units = sink.chunks.last().unwrap().3;
+        let chunks = sink.chunks();
+        let units = chunks.last().unwrap().2;
         assert!(units >= 2, "expected the text to split into units");
         // One real chunk per unit; the empty one never reached the sink.
-        assert_eq!(sink.chunks.len(), units);
+        assert_eq!(chunks.len(), units);
         assert_eq!(summary.audio_chunk_count, units);
-        assert!(sink.chunks.iter().all(|chunk| chunk.0 == [0.5]));
-        // The gap still lands on each non-final unit despite the trailing
-        // empty chunk.
-        for (index, chunk) in sink.chunks.iter().enumerate() {
-            let expected = if index + 1 == units { 0 } else { 4_800 };
-            assert_eq!(chunk.4, expected, "silence at unit {index}");
-        }
+        assert!(chunks.iter().all(|chunk| chunk.0 == [0.5]));
+        // Every boundary still gets exactly one gap despite the trailing empty
+        // chunk, and the final unit gets none.
+        let expected_gaps: Vec<(usize, usize)> = (0..units - 1).map(|unit| (unit, 4_800)).collect();
+        assert_eq!(sink.gaps(), expected_gaps);
     }
 
     #[test]
@@ -769,21 +895,16 @@ mod tests {
             call.controls
                 == controls.effective_for_text(&call.text, "auto", MAX_TEXT_UNIT_GENERATION_TOKENS)
         }));
-        assert_eq!(sink.chunks.len(), units * 2);
+        let chunks = sink.chunks();
+        assert_eq!(chunks.len(), units * 2);
         assert_eq!(summary.audio_chunk_count, units * 2);
         assert!(!summary.reference_truncated);
-        assert!(sink.chunks.iter().all(|chunk| chunk.3 == units));
-        for (position, chunk) in sink.chunks.iter().enumerate() {
-            assert_eq!(chunk.2, position / 2);
-            let is_unit_end = position % 2 == 1;
-            let is_final_unit = position / 2 + 1 == units;
-            let expected = if is_unit_end && !is_final_unit {
-                4_800
-            } else {
-                0
-            };
-            assert_eq!(chunk.4, expected, "silence at chunk {position}");
+        assert!(chunks.iter().all(|chunk| chunk.2 == units));
+        for (position, chunk) in chunks.iter().enumerate() {
+            assert_eq!(chunk.1, position / 2);
         }
+        let expected_gaps: Vec<(usize, usize)> = (0..units - 1).map(|unit| (unit, 4_800)).collect();
+        assert_eq!(sink.gaps(), expected_gaps);
     }
 
     #[test]
