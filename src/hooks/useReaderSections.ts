@@ -29,7 +29,8 @@ export interface ReaderSections {
  * Every memo is keyed on the fields it reads, never on the record: a progress
  * write replaces the record about once a second during playback but keeps its
  * text and chapter references, so the sections (and their identities) survive
- * until the text or the chapter structure actually changes.
+ * until the text or the chapter structure actually changes. The result keeps
+ * its identity for as long as its fields do.
  */
 export function useReaderSections(document: ReaderDocumentRecord | null): ReaderSections {
   const text = document?.text;
@@ -54,14 +55,16 @@ export function useReaderSections(document: ReaderDocumentRecord | null): Reader
       ?? chapterAtOffset(chapters, activeSection.start);
   }, [activeSection, chapters]);
 
-  const activeSectionIndex = activeSection ? sections.indexOf(activeSection) : -1;
-  return {
-    sections,
-    activeSection,
-    activeSectionIndex,
-    activeChapter,
-    previousSection: activeSectionIndex > 0 ? sections[activeSectionIndex - 1] : null,
-    nextSection: activeSectionIndex >= 0 ? sections[activeSectionIndex + 1] ?? null : null,
-    activeSectionText: text === undefined ? "" : getReaderSectionText(text, activeSection),
-  };
+  return useMemo(() => {
+    const activeSectionIndex = activeSection ? sections.indexOf(activeSection) : -1;
+    return {
+      sections,
+      activeSection,
+      activeSectionIndex,
+      activeChapter,
+      previousSection: activeSectionIndex > 0 ? sections[activeSectionIndex - 1] : null,
+      nextSection: activeSectionIndex >= 0 ? sections[activeSectionIndex + 1] ?? null : null,
+      activeSectionText: text === undefined ? "" : getReaderSectionText(text, activeSection),
+    };
+  }, [activeChapter, activeSection, sections, text]);
 }
