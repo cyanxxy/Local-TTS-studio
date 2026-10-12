@@ -1,11 +1,12 @@
 import { ENGINES, SETUP_PAGE_ENGINE_IDS, type SetupPageEngineId } from "../models/registry";
 
-/** Studio, the Reader, and one desktop page per engine that has a setup page. */
-export type AppPage = "studio" | "reader" | SetupPageEngineId;
+/** Studio, the Reader, the desktop Voice Library, and one desktop page per engine that has a setup page. */
+export type AppPage = "studio" | "reader" | "voices" | SetupPageEngineId;
 
 export const PAGE_TABS: Array<{ key: AppPage; label: string }> = [
   { key: "studio", label: "Studio" },
   { key: "reader", label: "Reader" },
+  { key: "voices", label: "Voices" },
   ...SETUP_PAGE_ENGINE_IDS.map((id) => ({ key: id, label: ENGINES[id].setupPage.tabLabel })),
 ];
 
@@ -48,6 +49,7 @@ export function getPageFromPath(pathname: string, showDesktopTabs: boolean, rout
   const normalized = stripRouteBasePath(pathname, routeBasePath);
   if (normalized === PAGE_PATH.reader) return "reader";
   if (normalized === PAGE_PATH.studio) return "studio";
+  if (showDesktopTabs && normalized === PAGE_PATH.voices) return "voices";
   const setupPage = showDesktopTabs
     ? SETUP_PAGE_ENGINE_IDS.find((id) => PAGE_PATH[id] === normalized)
     : undefined;

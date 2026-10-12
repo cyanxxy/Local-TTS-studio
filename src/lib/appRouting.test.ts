@@ -27,8 +27,8 @@ describe("appRouting", () => {
   });
 
   it("gives every engine setup page a desktop route and tab", () => {
-    expect(PAGE_TABS.map((tab) => tab.key)).toEqual(["studio", "reader", ...SETUP_PAGE_ENGINE_IDS]);
-    expect(PAGE_TABS.map((tab) => tab.label)).toEqual(["Studio", "Reader", "NeuTTS Nano", "Qwen3-TTS"]);
+    expect(PAGE_TABS.map((tab) => tab.key)).toEqual(["studio", "reader", "voices", ...SETUP_PAGE_ENGINE_IDS]);
+    expect(PAGE_TABS.map((tab) => tab.label)).toEqual(["Studio", "Reader", "Voices", "NeuTTS Nano", "Qwen3-TTS"]);
     for (const page of SETUP_PAGE_ENGINE_IDS) {
       expect(PAGE_PATH[page]).toBe(`/${page}`);
       expect(getPageFromPath(PAGE_PATH[page], true)).toBe(page);
@@ -37,6 +37,16 @@ describe("appRouting", () => {
     }
     expect(isSetupPage("studio")).toBe(false);
     expect(isSetupPage("reader")).toBe(false);
+  });
+
+  it("routes the Voice Library on desktop only", () => {
+    expect(PAGE_PATH.voices).toBe("/voices");
+    expect(getPageFromPath("/voices", true)).toBe("voices");
+    expect(getPageFromPath("/voices", false)).toBe("studio");
+    expect(getCanonicalPagePath("/voices/", true)).toBe("/voices");
+    expect(getCanonicalPagePath("/voices", false)).toBe(PAGE_PATH.studio);
+    expect(getPageFromPath("/desktop/voices", true, "/desktop")).toBe("voices");
+    expect(isSetupPage("voices")).toBe(false);
   });
 
   it("scopes desktop routes under a base path", () => {
