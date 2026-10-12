@@ -329,6 +329,8 @@ Model downloads are immutable. Each approved profile names an exact Hugging Face
 
 Long inputs are handled for you — Studio and Reader divide longer inline Qwen jobs into ordered, sentence-aware requests while keeping them as one continuous playback timeline.
 
+Audio streams as it is decoded: each batch of Qwen codes is sent to the player the moment it exists, the pause between sentences travels as its own small message, and audio output starts warming up when you press Generate. A Qwen3 model you have selected stays loaded for up to 30 idle minutes, so going back to Generate after editing text does not pay for a cold start.
+
 See [desktop local runtimes](./docs/local-runtimes.md) for the WebSocket protocol, capability token, exact request limits, validation rules, and packaging contents.
 
 ---

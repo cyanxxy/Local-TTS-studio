@@ -4,6 +4,8 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.9.0] - 2026-10-12
+
 ### Added
 
 - Voices (desktop): one searchable library of every engine's voices and your
