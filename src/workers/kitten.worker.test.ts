@@ -5,28 +5,27 @@ import type * as Ort from "onnxruntime-web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EspeakPhonemize } from "../lib/espeakPhonemizer";
 import type * as KittenVoices from "../lib/kittenVoices";
-import { pinnedModelFileUrl, type PinnedModelFile } from "../lib/manifests/types";
+import { pinnedAssetUrl } from "../lib/pinnedModelAssets";
+import type { PinnedAssetManifest } from "../lib/pinnedModelFetch";
 import type { StyleTtsOutMessage } from "../lib/styleTtsRuntime";
 import type { InferenceBackend, WorkerInMessage } from "../types";
 
-function pinnedFile(content: string, repo: string, path: string): PinnedModelFile & { content: string } {
+function pinnedFile(content: string, path: string) {
   const bytes = new TextEncoder().encode(content);
-  return {
-    repo,
-    revision: "0123456789abcdef0123456789abcdef01234567",
-    path,
-    byteLength: bytes.byteLength,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-    license: "apache-2.0",
-    content,
-  };
+  return { path, content, byteLength: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
 const FILES = {
-  KITTEN_NANO_FP32_MODEL: pinnedFile("fp32 graph bytes", "test/kitten-fp32", "kitten.onnx"),
-  KITTEN_VOICES_FILE: pinnedFile("voices archive", "test/kitten-fp32", "voices.npz"),
-  KITTEN_CONFIG_FILE: pinnedFile("{\"config\":true}", "test/kitten-fp32", "config.json"),
+  KITTEN_NANO_FP32_MODEL: pinnedFile("fp32 graph bytes", "kitten_tts_nano_v0_8.onnx"),
+  KITTEN_VOICES_FILE: pinnedFile("voices archive", "voices.npz"),
+  KITTEN_CONFIG_FILE: pinnedFile("{\"config\":true}", "config.json"),
 };
+const MANIFEST = {
+  repo: "test/kitten-fp32",
+  revision: "0123456789abcdef0123456789abcdef01234567",
+  files: Object.fromEntries(Object.values(FILES).map((file) => [file.path, { byteLength: file.byteLength, sha256: file.sha256 }])),
+} satisfies PinnedAssetManifest;
+const fileUrl = (file: { path: string }) => pinnedAssetUrl(MANIFEST, file.path);
 
 /** Lower-cased letters are valid Kitten symbols, so this stands in for eSpeak. */
 const phonemize: EspeakPhonemize = async (text) => [text.toLowerCase()];
@@ -55,7 +54,7 @@ async function startWorker({ webgpu = false, plans = {}, serve = {}, caches }: S
   };
   vi.stubGlobal("self", scope);
   vi.stubGlobal("caches", caches);
-  const contentByUrl = new Map(Object.values(FILES).map((file) => [pinnedModelFileUrl(file), file.content]));
+  const contentByUrl = new Map(Object.values(FILES).map((file) => [fileUrl(file), file.content]));
   const fetchMock = vi.fn(async (url: string) => new Response(serve[url] ?? contentByUrl.get(url) ?? "", { status: contentByUrl.has(url) ? 200 : 404 }));
   vi.stubGlobal("fetch", fetchMock);
 
@@ -82,15 +81,17 @@ async function startWorker({ webgpu = false, plans = {}, serve = {}, caches }: S
     });
     return { ...actual, env: ortEnv, InferenceSession: { create } };
   });
-  vi.doMock("virtual:phonemizer-assets", () => ({ PHONEMIZER_MODULE_URL: "/assets/phonemizer.js" }));
   const loadEspeakPhonemizer = vi.fn(async () => phonemize);
   vi.doMock("../lib/espeakPhonemizer", async (importOriginal) => ({
     ...await importOriginal<typeof import("../lib/espeakPhonemizer")>(),
     loadEspeakPhonemizer,
   }));
-  vi.doMock("../lib/onnxWasmAssets", () => ({ TRANSFORMERS_ONNX_WASM_ASSETS: { asyncify: { mjs: "/ort.mjs", wasm: "/ort.wasm" } } }));
+  vi.doMock("../lib/onnxWasmAssets", () => ({
+    TRANSFORMERS_ONNX_WASM_ASSETS: { asyncify: { mjs: "/ort.mjs", wasm: "/ort.wasm" } },
+    PHONEMIZER_MODULE_URL: "/assets/phonemizer.js",
+  }));
   vi.doMock("../lib/webgpu", () => ({ canInitializeWebGPU: async () => webgpu }));
-  vi.doMock("../lib/manifests/kitten", () => FILES);
+  vi.doMock("./manifests/kitten", () => ({ KITTEN_ASSETS: MANIFEST }));
   // Real npz/config parsing has its own tests; here the worker only has to hand them the verified bytes.
   const parsed = { voices: [] as string[], config: [] as string[] };
   vi.doMock("../lib/kittenVoices", async (importOriginal) => {
@@ -155,7 +156,7 @@ describe("kitten.worker", () => {
       FILES.KITTEN_CONFIG_FILE,
       FILES.KITTEN_NANO_FP32_MODEL,
       FILES.KITTEN_VOICES_FILE,
-    ].map(pinnedModelFileUrl).sort());
+    ].map(fileUrl).sort());
     expect(worker.parsed).toEqual({ voices: ["voices archive"], config: ["{\"config\":true}"] });
     expect(worker.loadEspeakPhonemizer).toHaveBeenCalledWith("/assets/phonemizer.js");
     expect(worker.sessions.map(({ backend, model }) => ({ backend, model }))).toEqual([{ backend: "wasm", model: "fp32 graph bytes" }]);
@@ -231,7 +232,7 @@ describe("kitten.worker", () => {
   });
 
   it("refuses files that fail digest verification before creating a session", async () => {
-    const worker = await startWorker({ serve: { [pinnedModelFileUrl(FILES.KITTEN_VOICES_FILE)]: "voices ARCHIVE" } });
+    const worker = await startWorker({ serve: { [fileUrl(FILES.KITTEN_VOICES_FILE)]: "voices ARCHIVE" } });
 
     await settledLoad(worker);
 

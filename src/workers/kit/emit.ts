@@ -55,6 +55,15 @@ export function appendSilence(audio: Float32Array, pauseSec: number, samplingRat
   return output;
 }
 
+/** A spoken word's source range and where it sits in its chunk's audio (before the trailing pause). */
+export interface WordTiming {
+  /** Offsets into the GENERATE text, like textStart/textEnd. */
+  start: number;
+  end: number;
+  startSec: number;
+  endSec: number;
+}
+
 export interface AudioChunkEmission {
   generationId: string | undefined;
   /** Speech only; the pause is appended here. */
@@ -70,6 +79,8 @@ export interface AudioChunkEmission {
   pauseKind: ChunkPauseKind;
   /** Resolved pause rendered as trailing silence and reported as pauseAfterSec. */
   pauseSec: number;
+  /** Exact word timings, for models with a duration output; omitted when absent. */
+  wordTimings?: readonly WordTiming[];
 }
 
 export function emitAudioChunk(port: WorkerPort, chunk: AudioChunkEmission): void {
@@ -85,5 +96,7 @@ export function emitAudioChunk(port: WorkerPort, chunk: AudioChunkEmission): voi
     textEnd: chunk.textEnd,
     pauseAfterSec: chunk.pauseSec,
     pauseKind: chunk.pauseKind,
+    // Conditional spread: WorkerOutMessage has no wordTimings field yet.
+    ...(chunk.wordTimings ? { wordTimings: chunk.wordTimings } : {}),
   });
 }

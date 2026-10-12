@@ -6,6 +6,7 @@
  */
 import * as ort from "onnxruntime-web";
 import type { InferenceBackend, WorkerOutMessage } from "../types";
+import type { WordTiming } from "../workers/kit/emit";
 import { getSafeWasmThreadCount } from "./onnxRuntime";
 import { TRANSFORMERS_ONNX_WASM_ASSETS } from "./onnxWasmAssets";
 
@@ -14,14 +15,7 @@ export const STYLE_TTS_SAMPLE_RATE = 24_000;
 export const STYLE_TTS_MAX_INPUT_TOKENS = 512;
 const MAX_WASM_THREADS = 4;
 
-/** A spoken word's source range and where it sits in its chunk's audio (before the trailing pause). */
-export interface WordTiming {
-  /** Offsets into the GENERATE text, like textStart/textEnd. */
-  start: number;
-  end: number;
-  startSec: number;
-  endSec: number;
-}
+export type { WordTiming };
 
 /** AUDIO_CHUNK plus the optional exact word timings that models with a duration output provide. */
 export type StyleTtsAudioChunkMessage = Extract<WorkerOutMessage, { type: "AUDIO_CHUNK" }> & {

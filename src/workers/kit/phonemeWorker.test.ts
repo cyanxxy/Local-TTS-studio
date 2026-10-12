@@ -1,14 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { WorkerInMessage } from "../types";
-import type { TextChunk } from "./chunking";
-import { ChunkTooLongError, type StyleTtsOutMessage } from "./styleTtsRuntime";
-import {
-  splitChunkInHalf,
-  startStyleTtsWorker,
-  type LoadedStyleTtsModel,
-  type StyleTtsChunkAudio,
-  type StyleTtsEngine,
-} from "./styleTtsWorkerHost";
+import type { LoadProgress } from "./progress";
+import type { TextChunk } from "../../lib/chunking";
+import { ChunkTooLongError, type StyleTtsOutMessage } from "../../lib/styleTtsRuntime";
+import type { WorkerInMessage } from "../../types";
+import { splitChunkInHalf, startPhonemeWorker, type LoadedPhonemeModel, type PhonemeChunkAudio, type PhonemeEngine } from "./phonemeWorker";
+import { createWorkerPort } from "./protocol";
 
 const SAMPLE_RATE = 10;
 
@@ -43,13 +39,13 @@ interface Harness {
   transfers: Array<Transferable[] | undefined>;
   close: ReturnType<typeof vi.fn>;
   send(message: WorkerInMessage): void;
-  engine: StyleTtsEngine & { load: ReturnType<typeof vi.fn>; clearCache: ReturnType<typeof vi.fn> };
-  model: LoadedStyleTtsModel & { synthesize: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> };
+  engine: PhonemeEngine & { load: ReturnType<typeof vi.fn>; clearCache: ReturnType<typeof vi.fn> };
+  model: LoadedPhonemeModel & { synthesize: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> };
   ofType<T extends StyleTtsOutMessage["type"]>(type: T): Array<Extract<StyleTtsOutMessage, { type: T }>>;
 }
 
 function createHarness(
-  synthesize: (text: string, voice: string, speed: number) => Promise<StyleTtsChunkAudio> =
+  synthesize: (text: string, voice: string, speed: number) => Promise<PhonemeChunkAudio> =
     async (text) => ({ audio: new Float32Array(text.length).fill(0.5) }),
 ): Harness {
   const messages: StyleTtsOutMessage[] = [];
@@ -64,28 +60,27 @@ function createHarness(
   };
   const engine = {
     label: "Test TTS",
-    load: vi.fn(async (onProgress: (fraction: number) => void) => {
-      onProgress(0.5);
-      onProgress(0.501);
-      onProgress(1);
+    expectedBytes: { "model.bin": 100 },
+    load: vi.fn(async (progress: LoadProgress) => {
+      progress.update("model.bin", 50);
+      progress.complete("model.bin");
       return model;
     }),
     clearCache: vi.fn(async () => undefined),
   };
-  const scope = {
-    onmessage: null as ((event: MessageEvent<WorkerInMessage>) => void) | null,
+  const target = {
     postMessage: (message: unknown, options?: StructuredSerializeOptions) => {
       messages.push(message as StyleTtsOutMessage);
       transfers.push(options?.transfer);
     },
-    close: vi.fn(),
   };
-  startStyleTtsWorker(engine, scope);
+  const close = vi.fn();
+  const runtime = startPhonemeWorker(engine, { port: createWorkerPort(target), close });
   return {
     messages,
     transfers,
-    close: scope.close,
-    send: (message) => scope.onmessage?.({ data: message } as MessageEvent<WorkerInMessage>),
+    close,
+    send: (message) => runtime.handleMessage(message),
     engine,
     model,
     ofType: (type) => messages.filter((message) => message.type === type) as never,
@@ -101,15 +96,15 @@ function generate(text: string, extra: Partial<Extract<WorkerInMessage, { type: 
   return { type: "GENERATE", generationId: "g1", text, voice: "A", speed: 1, quality: 5, ...extra };
 }
 
-describe("startStyleTtsWorker loading", () => {
-  it("reports throttled progress, then READY with the voices and backend, and reuses the loaded model", async () => {
+describe("startPhonemeWorker loading", () => {
+  it("reports byte-weighted progress, then READY with the voices and backend, and reuses the loaded model", async () => {
     const harness = createHarness();
 
     await loaded(harness);
     harness.send({ type: "LOAD" });
     await vi.waitFor(() => expect(harness.ofType("READY")).toHaveLength(2));
 
-    expect(harness.ofType("LOAD_PROGRESS").map((message) => message.percent)).toEqual([0, 50, 99, 100]);
+    expect(harness.ofType("LOAD_PROGRESS").map((message) => message.percent)).toEqual([0, 49.5, 99, 100]);
     expect(harness.ofType("READY")[0]).toEqual({ type: "READY", voices: ["A", "B"], backend: "wasm" });
     expect(harness.engine.load).toHaveBeenCalledOnce();
   });
@@ -124,7 +119,7 @@ describe("startStyleTtsWorker loading", () => {
   });
 
   it("drops the model and its cache on a forced reload, after the inference in flight", async () => {
-    const pending = deferred<StyleTtsChunkAudio>();
+    const pending = deferred<PhonemeChunkAudio>();
     const harness = createHarness(() => pending.promise);
     await loaded(harness);
 
@@ -146,7 +141,7 @@ describe("startStyleTtsWorker loading", () => {
   });
 });
 
-describe("startStyleTtsWorker generation", () => {
+describe("startPhonemeWorker generation", () => {
   it("streams chunks with exact offsets, rendered pauses and transferred PCM", async () => {
     const harness = createHarness();
     await loaded(harness);
@@ -254,7 +249,7 @@ describe("startStyleTtsWorker generation", () => {
   });
 
   it("lets a new GENERATE supersede the running one without overlapping inference", async () => {
-    const first = deferred<StyleTtsChunkAudio>();
+    const first = deferred<PhonemeChunkAudio>();
     let running = 0;
     let maxRunning = 0;
     const harness = createHarness(async (text) => {
@@ -284,7 +279,7 @@ describe("startStyleTtsWorker generation", () => {
   });
 
   it("posts nothing, not even its error, for a superseded generation", async () => {
-    const first = deferred<StyleTtsChunkAudio>();
+    const first = deferred<PhonemeChunkAudio>();
     const harness = createHarness((text) => (text === "Old." ? first.promise : Promise.resolve({ audio: new Float32Array(1) })));
     await loaded(harness);
 
@@ -298,7 +293,7 @@ describe("startStyleTtsWorker generation", () => {
   });
 
   it("closes on CANCEL and posts nothing more for the generation in flight", async () => {
-    const pending = deferred<StyleTtsChunkAudio>();
+    const pending = deferred<PhonemeChunkAudio>();
     const harness = createHarness(() => pending.promise);
     await loaded(harness);
 
@@ -312,6 +307,27 @@ describe("startStyleTtsWorker generation", () => {
     expect(harness.close).toHaveBeenCalledOnce();
     expect(harness.ofType("AUDIO_CHUNK")).toHaveLength(0);
     expect(harness.ofType("GENERATION_COMPLETE")).toHaveLength(0);
+  });
+
+  it("soft-aborts a generation without closing the worker or dropping the model", async () => {
+    const pending = deferred<PhonemeChunkAudio>();
+    const harness = createHarness((text) => (text === "Old." ? pending.promise : Promise.resolve({ audio: new Float32Array(1) })));
+    await loaded(harness);
+
+    harness.send(generate("Old. Older."));
+    await vi.waitFor(() => expect(harness.model.synthesize).toHaveBeenCalledOnce());
+    harness.send({ type: "ABORT", generationId: "g1" });
+    expect(harness.ofType("ABORTED")).toHaveLength(0);
+    pending.resolve({ audio: new Float32Array(1) });
+    await vi.waitFor(() => expect(harness.ofType("ABORTED")).toEqual([{ type: "ABORTED", generationId: "g1" }]));
+    harness.send(generate("Again.", { generationId: "g2" }));
+    await vi.waitFor(() => expect(harness.ofType("GENERATION_COMPLETE")).toHaveLength(1));
+
+    expect(harness.close).not.toHaveBeenCalled();
+    expect(harness.model.dispose).not.toHaveBeenCalled();
+    expect(harness.engine.load).toHaveBeenCalledOnce();
+    expect(harness.model.synthesize).toHaveBeenCalledTimes(2);
+    expect(harness.ofType("AUDIO_CHUNK").map((chunk) => chunk.generationId)).toEqual(["g2"]);
   });
 });
 

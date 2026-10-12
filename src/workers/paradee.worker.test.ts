@@ -4,21 +4,14 @@ import { createHash } from "node:crypto";
 import type * as Ort from "onnxruntime-web";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { EspeakPhonemize } from "../lib/espeakPhonemizer";
-import { pinnedModelFileUrl, type PinnedModelFile } from "../lib/manifests/types";
+import { pinnedAssetUrl } from "../lib/pinnedModelAssets";
+import type { PinnedAssetManifest } from "../lib/pinnedModelFetch";
 import type { StyleTtsOutMessage } from "../lib/styleTtsRuntime";
 import type { WorkerInMessage } from "../types";
 
-function pinnedFile(content: string, path: string): PinnedModelFile & { content: string } {
+function pinnedFile(content: string, path: string) {
   const bytes = new TextEncoder().encode(content);
-  return {
-    repo: "test/paradee",
-    revision: "0123456789abcdef0123456789abcdef01234567",
-    path,
-    byteLength: bytes.byteLength,
-    sha256: createHash("sha256").update(bytes).digest("hex"),
-    license: "apache-2.0",
-    content,
-  };
+  return { path, content, byteLength: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
 
 const VOCAB = { ",": 3, ".": 4, "!": 5, "?": 6, " ": 16, ...Object.fromEntries(Array.from("abcdefghijklmnopqrstuvwxyz", (letter, index) => [letter, 43 + index])) };
@@ -26,6 +19,12 @@ const FILES = {
   PARADEE_INT8_MODEL: pinnedFile("paradee graph", "onnx/paradee_int8.onnx"),
   PARADEE_CONFIG_FILE: pinnedFile(JSON.stringify({ sample_rate: 24_000, vocab: VOCAB }), "config.json"),
 };
+const MANIFEST = {
+  repo: "test/paradee",
+  revision: "0123456789abcdef0123456789abcdef01234567",
+  files: Object.fromEntries(Object.values(FILES).map((file) => [file.path, { byteLength: file.byteLength, sha256: file.sha256 }])),
+} satisfies PinnedAssetManifest;
+const fileUrl = (file: { path: string }) => pinnedAssetUrl(MANIFEST, file.path);
 
 /** Lower-cased letters are in the test vocabulary, so this stands in for eSpeak. */
 const phonemize: EspeakPhonemize = async (text) => [text.toLowerCase()];
@@ -46,7 +45,7 @@ async function startWorker({ serve = {}, createError, runError }: Setup = {}) {
   };
   vi.stubGlobal("self", scope);
   vi.stubGlobal("caches", undefined);
-  const contentByUrl = new Map(Object.values(FILES).map((file) => [pinnedModelFileUrl(file), file.content]));
+  const contentByUrl = new Map(Object.values(FILES).map((file) => [fileUrl(file), file.content]));
   const fetchMock = vi.fn(async (url: string) => new Response(serve[url] ?? contentByUrl.get(url) ?? "", { status: contentByUrl.has(url) ? 200 : 404 }));
   vi.stubGlobal("fetch", fetchMock);
 
@@ -66,15 +65,17 @@ async function startWorker({ serve = {}, createError, runError }: Setup = {}) {
     });
     return { ...actual, env: { wasm: {} }, InferenceSession: { create } };
   });
-  vi.doMock("virtual:phonemizer-assets", () => ({ PHONEMIZER_MODULE_URL: "/assets/phonemizer.js" }));
   vi.doMock("../lib/espeakPhonemizer", async (importOriginal) => ({
     ...await importOriginal<typeof import("../lib/espeakPhonemizer")>(),
     loadEspeakPhonemizer: vi.fn(async () => phonemize),
   }));
-  vi.doMock("../lib/onnxWasmAssets", () => ({ TRANSFORMERS_ONNX_WASM_ASSETS: { asyncify: { mjs: "/ort.mjs", wasm: "/ort.wasm" } } }));
+  vi.doMock("../lib/onnxWasmAssets", () => ({
+    TRANSFORMERS_ONNX_WASM_ASSETS: { asyncify: { mjs: "/ort.mjs", wasm: "/ort.wasm" } },
+    PHONEMIZER_MODULE_URL: "/assets/phonemizer.js",
+  }));
   const canInitializeWebGPU = vi.fn(async () => true);
   vi.doMock("../lib/webgpu", () => ({ canInitializeWebGPU }));
-  vi.doMock("../lib/manifests/paradee", () => FILES);
+  vi.doMock("./manifests/paradee", () => ({ PARADEE_ASSETS: MANIFEST }));
 
   await import("./paradee.worker");
   return {
@@ -108,7 +109,7 @@ describe("paradee.worker", () => {
     await settledLoad(worker);
 
     expect(worker.ofType("READY")).toEqual([{ type: "READY", voices: ["heart"], backend: "wasm" }]);
-    expect(worker.fetchMock.mock.calls.map(([url]) => url).sort()).toEqual(Object.values(FILES).map(pinnedModelFileUrl).sort());
+    expect(worker.fetchMock.mock.calls.map(([url]) => url).sort()).toEqual(Object.values(FILES).map(fileUrl).sort());
     expect(worker.sessions.map(({ providers, model }) => ({ providers, model }))).toEqual([{ providers: ["wasm"], model: "paradee graph" }]);
     expect(worker.sessions[0].run).toHaveBeenCalledOnce();
     expect(worker.canInitializeWebGPU).not.toHaveBeenCalled();
@@ -136,7 +137,7 @@ describe("paradee.worker", () => {
   });
 
   it("refuses a model that fails digest verification", async () => {
-    const worker = await startWorker({ serve: { [pinnedModelFileUrl(FILES.PARADEE_INT8_MODEL)]: "paradee GRAPH" } });
+    const worker = await startWorker({ serve: { [fileUrl(FILES.PARADEE_INT8_MODEL)]: "paradee GRAPH" } });
 
     await settledLoad(worker);
 
