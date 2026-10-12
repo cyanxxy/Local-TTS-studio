@@ -160,8 +160,25 @@ describe("useStudioTakes", () => {
     expect(result.current.stacks).toEqual({});
   });
 
-  it("explains when an engine has neither seed nor speed control", () => {
+  it("offers seeded takes for Audio8 now that it accepts a seed", () => {
     const { result } = setup({ engineId: "audio8" });
-    expect(result.current.unavailableReason).toMatch(/no seed or speed/);
+    expect(result.current.unavailableReason).toBeNull();
+  });
+
+  it("explains when an engine has neither seed nor speed control", async () => {
+    const registry = await import("../models/registry");
+    const realGetEngine = registry.getEngine;
+    const audio8 = realGetEngine("audio8");
+    const spy = vi.spyOn(registry, "getEngine").mockImplementation(((id: Parameters<typeof realGetEngine>[0]) => (
+      id === "audio8"
+        ? { ...audio8, capabilities: { ...audio8.capabilities, seed: false, speed: false } }
+        : realGetEngine(id)
+    )) as typeof realGetEngine);
+    try {
+      const { result } = setup({ engineId: "audio8" });
+      expect(result.current.unavailableReason).toMatch(/no seed or speed/);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
