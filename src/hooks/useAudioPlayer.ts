@@ -91,6 +91,9 @@ export interface UseAudioPlayerReturn {
 
 /** Background-safe cadence for extending the playback schedule. */
 const SCHEDULE_TOPUP_INTERVAL_MS = 1000;
+// How far ahead of the context clock the first chunk of a stream is scheduled.
+const MIN_START_LEAD_SECONDS = 0.012;
+const COLD_START_LEAD_SECONDS = 0.05;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
@@ -601,7 +604,10 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     }
 
     if (nextPlayTimeRef.current === 0) {
-      nextPlayTimeRef.current = ctx.currentTime + 0.05;
+      // A running device needs only its own output latency of lead. One still
+      // starting up keeps a margin so the first samples are not clipped.
+      const startLead = ctx.state === "running" ? Math.max(MIN_START_LEAD_SECONDS, ctx.baseLatency ?? 0) : COLD_START_LEAD_SECONDS;
+      nextPlayTimeRef.current = ctx.currentTime + startLead;
       timelineAnchorRef.current = currentTimeRef.current;
       contextAnchorRef.current = nextPlayTimeRef.current;
     }
@@ -949,10 +955,26 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     updateActiveSegment,
   ]);
 
+  // Starts the output device before the first chunk exists, so its start-up
+  // (slowest on Bluetooth) overlaps inference instead of following it. Failure
+  // is left for the first chunk to report: it retries the resume itself.
+  const prepareOutput = useCallback(async () => {
+    if (typeof AudioContext === "undefined") return;
+    try {
+      const ctx = getContext();
+      if (ctx.state === "suspended") await ctx.resume();
+    } catch {
+      // Nothing is playing yet; scheduleChunk surfaces a blocked output.
+    }
+  }, [getContext]);
+
   const beginStream = useCallback(() => {
     streamCompleteRef.current = false;
     commitSynthesisComplete(false);
-  }, [commitSynthesisComplete]);
+    // A stream the listener paused stays paused; only one that will autoplay
+    // needs the device running.
+    if (autoPlayOnChunkRef.current) void prepareOutput();
+  }, [commitSynthesisComplete, prepareOutput]);
 
   const endStream = useCallback((options: { completed?: boolean } = {}) => {
     streamCompleteRef.current = true;
