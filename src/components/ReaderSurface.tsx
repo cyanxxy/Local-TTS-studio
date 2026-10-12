@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { useReaderMediaSession } from "../hooks/useReaderMediaSession";
+import type { ReaderLookaheadStatus } from "../hooks/useReaderLookahead";
 import { getEngine, surfaceEngineVoiceLabel } from "../models/registry";
 import { lazyWithRetry } from "../shared/lazyWithRetry";
 import { useSynthesisSession } from "../shared/synthesisSessionContext";
@@ -12,6 +13,11 @@ import { renderSurfaceEngineSettings } from "./surfaceEngineSettings";
 // costs only the Reader, never Studio's state.
 const AdvancedReaderPage = lazyWithRetry(() => import("./AdvancedReaderPage")
   .then((module) => module.AdvancedReaderPage));
+
+function nextPartStatus(status: ReaderLookaheadStatus): "preparing" | "ready" | null {
+  if (status === "ready") return "ready";
+  return status === "rendering" ? "preparing" : null;
+}
 
 interface ReaderSurfaceProps {
   immersive: boolean;
@@ -57,6 +63,7 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
           activeSection={readerSession.activeSection}
           previousSection={readerSession.previousSection}
           nextSection={readerSession.nextSection}
+          nextPartStatus={nextPartStatus(reader.lookahead.status)}
           onNavigateToOffset={readerSession.navigateToOffset}
           onAutoAdvanceHoldChange={readerSession.setAutoAdvanceHold}
           viewPreferences={reader.viewPreferences}
@@ -121,7 +128,7 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
           onSkipForward={player.skipForward}
           onDownload={player.downloadAudio}
           isRetaking={readerEngine.capabilities.retake && engines.browser.isRetakingSegment}
-          onRetakeSegment={engines.browser.handleRetakeSegment}
+          onRetakeSegment={reader.retakeSegment}
           canRetakeSegments={readerEngine.capabilities.retake}
           onJumpToSegment={reader.jumpToSegment}
           generationError={runtime.error}

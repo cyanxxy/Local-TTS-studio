@@ -31,6 +31,9 @@ interface ReaderSettingRecord {
 
 interface ReaderAudioMetadata {
   cacheKey: string;
+  /** Absent on entries saved before the signature was kept here. */
+  signature?: string;
+  synthesisComplete?: boolean;
   documentId: string;
   chapterId: string;
   sectionId: string;
@@ -399,6 +402,8 @@ async function saveIndexedDbCachedReaderAudio(audio: CachedReaderAudio): Promise
       audioStore.put(normalized);
       transaction.objectStore(CHAPTER_AUDIO_META_STORE).put({
         cacheKey,
+        signature: normalized.signature,
+        synthesisComplete: normalized.synthesisComplete === true,
         documentId: normalized.documentId,
         chapterId: normalized.chapterId,
         sectionId: normalized.sectionId,
@@ -594,6 +599,33 @@ export async function getCachedReaderAudio(
   const bridge = getDesktopReaderLibraryBridge();
   if (!bridge) return getIndexedDbCachedReaderAudio(documentId, sectionId);
   return normalizeCachedReaderAudio(await bridge.getAudio(documentId, sectionId));
+}
+
+/**
+ * The signature a section's complete cached audio was saved under, or null
+ * when there is none, without loading the audio. An entry that predates the
+ * metadata signature is read in full once.
+ */
+export async function getCachedReaderAudioSignature(
+  documentId: string,
+  sectionId: string,
+): Promise<string | null> {
+  const bridge = getDesktopReaderLibraryBridge();
+  if (bridge) {
+    if (bridge.getAudioSignature) return bridge.getAudioSignature(documentId, sectionId);
+    const audio = normalizeCachedReaderAudio(await bridge.getAudio(documentId, sectionId));
+    return audio?.synthesisComplete === true ? audio.signature : null;
+  }
+  const cacheKey = createReaderAudioCacheKey(documentId, sectionId);
+  const metadata = await withStore(
+    CHAPTER_AUDIO_META_STORE,
+    "readonly",
+    (store) => store.get(cacheKey),
+  ) as ReaderAudioMetadata | undefined;
+  if (!metadata) return null;
+  if (metadata.signature !== undefined) return metadata.synthesisComplete === true ? metadata.signature : null;
+  const audio = await getIndexedDbCachedReaderAudio(documentId, sectionId);
+  return audio?.synthesisComplete === true ? audio.signature : null;
 }
 
 export async function deleteCachedReaderAudio(documentId: string, sectionId?: string): Promise<void> {

@@ -33,6 +33,7 @@ import {
   deleteReaderDocument,
   getActiveReaderDocumentId,
   getCachedReaderAudio,
+  getCachedReaderAudioSignature,
   isReaderLibrarySupported,
   isReaderLibraryShutdownError,
   listReaderDocuments,
@@ -98,6 +99,8 @@ export interface UseReaderLibraryReturn {
   removeHighlight: (highlightId: string) => void;
   saveAudio: (audio: CachedReaderAudio) => Promise<void>;
   loadAudio: (documentId: string, sectionId: string) => Promise<CachedReaderAudio | null>;
+  /** Whether a finished section is already saved under `signature`; reads no PCM from storage. */
+  hasAudio: (documentId: string, sectionId: string, signature: string) => Promise<boolean>;
   clearAudio: (documentId: string, sectionId?: string) => Promise<void>;
 }
 
@@ -719,6 +722,13 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     return audio ? rememberReaderAudio(memoryAudioRef.current, audio) : null;
   }, [persistent]);
 
+  const hasAudio = useCallback(async (documentId: string, sectionId: string, signature: string) => {
+    const memory = memoryAudioRef.current.get(createReaderAudioCacheKey(documentId, sectionId));
+    if (memory) return memory.synthesisComplete === true && memory.signature === signature;
+    if (!persistent) return false;
+    return (await getCachedReaderAudioSignature(documentId, sectionId)) === signature;
+  }, [persistent]);
+
   const clearAudio = useCallback(async (documentId: string, sectionId?: string) => {
     if (sectionId) {
       memoryAudioRef.current.delete(createReaderAudioCacheKey(documentId, sectionId));
@@ -755,6 +765,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     removeHighlight,
     saveAudio,
     loadAudio,
+    hasAudio,
     clearAudio,
   }), [
     activeDocument,
@@ -767,6 +778,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     documents,
     error,
     finalizeActiveTextEdit,
+    hasAudio,
     loadAudio,
     loading,
     openDocument,

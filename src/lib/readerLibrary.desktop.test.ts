@@ -11,6 +11,7 @@ import {
   clearReaderLibraryForTests,
   getActiveReaderDocumentId,
   getCachedReaderAudio,
+  getCachedReaderAudioSignature,
   isReaderLibrarySupported,
   isReaderLibraryShutdownError,
   listReaderDocuments,
@@ -390,6 +391,21 @@ describe("isReaderLibraryShutdownError", () => {
       const document = createReaderDocument({ id: "book", text: "Text" });
       await saveReaderProgress("book", progress, document);
       expect(bridge.saveDocument).toHaveBeenCalledWith(document);
+    });
+  });
+
+  describe("audio signatures", () => {
+    it("asks the bridge for the signature alone", async () => {
+      const getAudioSignature = vi.fn(async () => "sig");
+      const bridge = installDesktopBridge({ getAudioSignature });
+      expect(await getCachedReaderAudioSignature("book", "section")).toBe("sig");
+      expect(getAudioSignature).toHaveBeenCalledWith("book", "section");
+      expect(bridge.getAudio).not.toHaveBeenCalled();
+    });
+
+    it("falls back to the audio itself through a bridge that predates the channel", async () => {
+      installDesktopBridge({ getAudio: vi.fn(async () => null) });
+      expect(await getCachedReaderAudioSignature("book", "section")).toBeNull();
     });
   });
 });

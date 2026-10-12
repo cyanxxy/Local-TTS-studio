@@ -75,6 +75,8 @@ interface AdvancedReaderPageProps {
   activeSection?: ReaderSection | null;
   previousSection?: ReaderSection | null;
   nextSection?: ReaderSection | null;
+  /** Whether the next part's audio is being prepared in the background, or is ready. */
+  nextPartStatus?: "preparing" | "ready" | null;
   onNavigateToOffset?: (offset: number, positionSec?: number) => void;
   viewPreferences?: ReaderViewPreferences;
   onViewPreferencesChange?: (patch: Partial<ReaderViewPreferences>) => void;
@@ -183,6 +185,7 @@ export function AdvancedReaderPage({
   activeSection = null,
   previousSection = null,
   nextSection = null,
+  nextPartStatus = null,
   onNavigateToOffset,
   viewPreferences = DEFAULT_READER_VIEW_PREFERENCES,
   onViewPreferencesChange,
@@ -747,6 +750,7 @@ export function AdvancedReaderPage({
             totalDuration={totalDuration}
             sleepTimerLabel={sleepTimer.label}
             onCancelSleepTimer={cancelSleepTimer}
+            nextPartStatus={nextPartStatus}
           />
         )}
 

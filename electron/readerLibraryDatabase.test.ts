@@ -113,6 +113,18 @@ describe("ReaderLibraryDatabase", () => {
     });
   });
 
+  describe("audio signatures", () => {
+    it("reads the signature of complete cached audio without its PCM", () => {
+      database.saveAudio({ ...createAudio("doc", "section-1", 100), synthesisComplete: true });
+      database.saveAudio(createAudio("doc", "section-2", 100));
+
+      expect(database.getAudioSignature("doc", "section-1")).toBe("signature-100");
+      // A partial section, or none at all, has nothing worth skipping a render for.
+      expect(database.getAudioSignature("doc", "section-2")).toBeNull();
+      expect(database.getAudioSignature("doc", "missing")).toBeNull();
+    });
+  });
+
   describe("reading progress", () => {
     const progress = (updatedAt: number, textOffset = 10) => ({
       positionSec: 4,

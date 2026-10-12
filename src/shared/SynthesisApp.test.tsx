@@ -255,6 +255,7 @@ const mock = vi.hoisted(() => {
       removeNote: vi.fn(),
       saveAudio: vi.fn(async () => undefined),
       loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+      hasAudio: vi.fn(async () => false),
       clearAudio: vi.fn(async () => undefined),
     },
   };
@@ -780,6 +781,7 @@ function resetMockState() {
     removeNote: vi.fn(),
     saveAudio: vi.fn(async () => undefined),
     loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+    hasAudio: vi.fn(async () => false),
     clearAudio: vi.fn(async () => undefined),
   };
   mock.localTts.probe.mockResolvedValue({

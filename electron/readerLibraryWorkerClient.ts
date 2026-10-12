@@ -9,6 +9,7 @@ type ReaderLibraryOperation =
   | "deleteDocument"
   | "getActiveDocumentId"
   | "setActiveDocumentId"
+  | "getAudioSignature"
   | "deleteAudio";
 
 interface PendingRequest {

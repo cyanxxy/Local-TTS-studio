@@ -14,6 +14,7 @@ export const IPC_INVOKE_CHANNELS = [
   "reader-library:delete-document",
   "reader-library:get-active-document-id",
   "reader-library:set-active-document-id",
+  "reader-library:get-audio-signature",
   "reader-library:delete-audio",
   "document:import",
   "document:import-url",

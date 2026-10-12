@@ -144,6 +144,9 @@ interface ReaderLibraryBridge {
   setActiveDocumentId: (id: string) => Promise<void>;
   saveAudio: (audio: unknown) => Promise<void>;
   getAudio: (documentId: string, sectionId: string) => Promise<unknown | null>;
+  // The signature of a section's complete cached audio, without its PCM.
+  // Optional so older preloads can omit it.
+  getAudioSignature?: (documentId: string, sectionId: string) => Promise<string | null>;
   deleteAudio: (documentId: string, sectionId?: string) => Promise<void>;
   // Quitting asks every window to write out its debounced Reader edits and
   // holds the shutdown until the listener's promise settles. Optional so test

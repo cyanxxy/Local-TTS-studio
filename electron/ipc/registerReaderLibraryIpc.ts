@@ -186,6 +186,11 @@ export function registerReaderLibraryIpc(
     acknowledge();
   });
 
+  ipc.handle("reader-library:get-audio-signature", (_event, request) => {
+    if (!isRecord(request)) throw new TypeError("Invalid Reader audio signature request.");
+    return getReaderLibraryWorker().request("getAudioSignature", [request.documentId, request.sectionId]);
+  });
+
   ipc.handle("reader-library:delete-audio", (_event, request) => {
     if (!isRecord(request)) throw new TypeError("Invalid Reader library audio deletion request.");
     return getReaderLibraryWorker().request("deleteAudio", [request.documentId, request.sectionId]);

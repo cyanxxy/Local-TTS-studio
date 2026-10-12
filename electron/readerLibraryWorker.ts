@@ -9,6 +9,7 @@ type ReaderLibraryOperation =
   | "deleteDocument"
   | "getActiveDocumentId"
   | "setActiveDocumentId"
+  | "getAudioSignature"
   | "deleteAudio";
 
 interface WorkerRequest {
@@ -151,6 +152,8 @@ function handleRequest(request: WorkerRequest): unknown {
       return database.getActiveDocumentId();
     case "setActiveDocumentId":
       return database.setActiveDocumentId(request.args[0]);
+    case "getAudioSignature":
+      return database.getAudioSignature(request.args[0], request.args[1]);
     case "deleteAudio":
       invalidatePendingSaves(request.args[0], request.args[1]);
       return database.deleteAudio(request.args[0], request.args[1]);

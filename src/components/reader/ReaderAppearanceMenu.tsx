@@ -128,6 +128,11 @@ export const ReaderAppearanceMenu = memo(function ReaderAppearanceMenu({
               checked={viewPreferences.autoAdvance}
               onChange={(autoAdvance) => onViewPreferencesChange?.({ autoAdvance })}
             />
+            <SwitchRow
+              label="Prepare the next part"
+              checked={viewPreferences.prepareAhead}
+              onChange={(prepareAhead) => onViewPreferencesChange?.({ prepareAhead })}
+            />
             <button
               type="button"
               onClick={() => {

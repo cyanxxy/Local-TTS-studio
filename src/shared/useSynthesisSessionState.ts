@@ -9,6 +9,8 @@ import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useDocumentImport } from "../hooks/useDocumentImport";
 import { useEngineOrchestrator } from "../hooks/useEngineOrchestrator";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
+import { useGenerateAfterLookahead, type LookaheadControls } from "../hooks/useGenerateAfterLookahead";
+import { useReaderLookahead } from "../hooks/useReaderLookahead";
 import { useReaderListeningProfile, type SurfaceListeningProfile } from "../hooks/useReaderListeningProfile";
 import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderSession } from "../hooks/useReaderSession";
@@ -24,6 +26,7 @@ import {
   type PersistedAppState,
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
+import { getReaderSectionText } from "../lib/readerDocument";
 import { getUnsupportedModelMessage, isModelSupportedInBrowser } from "../lib/browserSupport";
 import {
   getEngine,
@@ -34,6 +37,7 @@ import {
 } from "../models/registry";
 import type { ModelType } from "../types";
 import type { CreatorEngineSupport } from "../components/CreatorToolsPanel";
+import type { SynthesisChunk, SynthesisRequest } from "./engineRuntime";
 
 export interface SynthesisSessionOptions {
   enableDesktopRuntimes: boolean;
@@ -298,10 +302,21 @@ export function useSynthesisSessionState({
     text,
   ]);
 
+  // A look-ahead render holds the engine's queue, so a generate asked for
+  // while one runs first yields the engine and then waits for it to free up.
+  const lookaheadControlsRef = useRef<LookaheadControls>({
+    preempt: () => undefined,
+    isBusy: () => false,
+  });
+  const { requestGenerate: requestReaderGenerate, cancelPending: cancelPendingReaderGenerate } = useGenerateAfterLookahead({
+    controls: lookaheadControlsRef,
+    canGenerate: readerRuntime.canGenerate,
+    startGenerate: readerRuntime.handleGenerate,
+  });
   const handleReaderGenerate = useCallback(() => {
     setExportError(null);
-    readerRuntime.handleGenerate();
-  }, [readerRuntime]);
+    requestReaderGenerate();
+  }, [requestReaderGenerate]);
 
   // The inputs that shape the Reader engine's audio — only those it reads, so
   // a control the engine ignores never discards its cached sections. Null
@@ -342,6 +357,44 @@ export function useSynthesisSessionState({
     clearErrors: clearReaderErrors,
     onError: reportReaderError,
   });
+  const readerNextSectionText = useMemo(() => (
+    readerLibrary.activeDocument && readerSections.nextSection
+      ? getReaderSectionText(readerLibrary.activeDocument.text, readerSections.nextSection)
+      : ""
+  ), [readerLibrary.activeDocument, readerSections.nextSection]);
+  const readerTuning = creator.generationSettings;
+  const readerSynthesize = readerRuntime.synthesize as (request: SynthesisRequest) => AsyncIterable<SynthesisChunk>;
+  const renderReaderSection = useCallback((text: string, signal: AbortSignal) => readerSynthesize({
+    text,
+    // Qwen3's settings live in its provider, which also holds the clone reference.
+    settings: readerEngineId === "qwen3" ? qwen3Settings : surfaceEngineSettings[readerEngineId],
+    tuning: readerTuning,
+    signal,
+  } as SynthesisRequest), [qwen3Settings, readerEngineId, readerSynthesize, readerTuning, surfaceEngineSettings]);
+  const readerLookahead = useReaderLookahead({
+    enabled: readerViewPreferences.prepareAhead,
+    active: isReaderPage,
+    document: readerLibrary.activeDocument,
+    nextSection: readerSections.nextSection,
+    nextSectionText: readerNextSectionText,
+    engineId: readerEngineId,
+    signatureParts: readerListening.settled ? readerSignatureParts : null,
+    renderSection: renderReaderSection,
+    engineBusy: readerRuntime.isGenerating,
+    modelReady: readerRuntime.modelState.ready,
+    currentSectionPlaying: player.isPlaying && player.isSynthesisComplete && player.segments.length > 0,
+    isRetaking: browser.isRetakingSegment,
+    library: readerLibrary,
+    onFailure: (cause) => console.warn("Could not prepare the next part:", cause),
+  });
+  const { preempt: preemptLookahead, isBusy: isLookaheadBusy } = readerLookahead;
+  useEffect(() => {
+    lookaheadControlsRef.current = { preempt: preemptLookahead, isBusy: isLookaheadBusy };
+  }, [isLookaheadBusy, preemptLookahead]);
+  const handleReaderRetakeSegment = useCallback((...args: Parameters<typeof browser.handleRetakeSegment>) => {
+    preemptLookahead();
+    browser.handleRetakeSegment(...args);
+  }, [browser, preemptLookahead]);
   const { flushAudio: flushReaderAudio } = readerSession;
   useEffect(() => {
     flushReaderAudioRef.current = flushReaderAudio;
@@ -433,8 +486,9 @@ export function useSynthesisSessionState({
   }, [studioRuntime]);
 
   const handleReaderStop = useCallback(() => {
+    cancelPendingReaderGenerate();
     readerRuntime.handleStop();
-  }, [readerRuntime]);
+  }, [cancelPendingReaderGenerate, readerRuntime]);
 
   const handleReaderRetryLoad = useCallback(() => {
     readerRuntime.retryLoad();
@@ -591,6 +645,8 @@ export function useSynthesisSessionState({
       stop: handleReaderStop,
       retryLoad: handleReaderRetryLoad,
       jumpToSegment: handleJumpToSegment,
+      retakeSegment: handleReaderRetakeSegment,
+      lookahead: readerLookahead,
     },
     documents: {
       isImporting: isImportingDocument,

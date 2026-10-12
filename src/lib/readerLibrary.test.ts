@@ -12,6 +12,7 @@ import {
   deleteReaderDocument,
   getActiveReaderDocumentId,
   getCachedReaderAudio,
+  getCachedReaderAudioSignature,
   getReaderDocument,
   listReaderDocuments,
   saveReaderProgress,
@@ -321,6 +322,36 @@ describe("readerLibrary", () => {
     expect(stores).toContain("chapter-audio-meta");
     expect(stores).not.toContain("chapter-audio");
     expect((await getCachedReaderAudio(document.id, section.id))?.updatedAt).toBe(200);
+  });
+
+  it("reads a complete section's signature from the metadata, and nothing for a partial one", async () => {
+    const document = createReaderDocument({ id: "signatures", text: "Signature lookups." });
+    const [section] = buildReaderSections(document.text, document.chapters);
+    const cache = (synthesisComplete: boolean): CachedReaderAudio => ({
+      cacheKey: createReaderAudioCacheKey(document.id, section.id),
+      documentId: document.id,
+      chapterId: section.chapterId,
+      sectionId: section.id,
+      signature: "the-signature",
+      chunks: [{ audio: new Float32Array([1]).buffer, samplingRate: 24_000, text: "t", index: 0, total: 1 }],
+      byteLength: 4,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      synthesisComplete,
+      updatedAt: 10,
+    });
+    expect(await getCachedReaderAudioSignature(document.id, section.id)).toBeNull();
+
+    await saveCachedReaderAudio(cache(false));
+    expect(await getCachedReaderAudioSignature(document.id, section.id)).toBeNull();
+
+    await saveCachedReaderAudio({ ...cache(true), updatedAt: 20 });
+    const get = vi.spyOn(IDBObjectStore.prototype, "get");
+    expect(await getCachedReaderAudioSignature(document.id, section.id)).toBe("the-signature");
+    const stores = get.mock.contexts.map((store) => (store as { name: string }).name);
+    get.mockRestore();
+    expect(stores).toEqual(["chapter-audio-meta"]);
   });
 
   it("skips a corrupt document record without hiding healthy books", async () => {

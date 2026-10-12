@@ -531,6 +531,32 @@ export class ReaderLibraryDatabase {
     }, "DEFERRED");
   }
 
+  /**
+   * The signature a section's cached audio was saved under, or null without
+   * an entry. Reads only the entry's header, never its PCM, so callers can ask
+   * whether audio is already cached without streaming it.
+   */
+  getAudioSignature(documentIdValue: unknown, sectionIdValue: unknown): string | null {
+    const documentId = requiredString(documentIdValue, "Reader audio documentId", 512);
+    const sectionId = requiredString(sectionIdValue, "Reader audio sectionId", 512);
+    const row = this.#database.prepare(`
+      SELECT record_json
+      FROM reader_audio
+      WHERE document_id = ? AND section_id = ?
+    `).get(documentId, sectionId) as AudioRow | undefined;
+    if (!row) return null;
+    try {
+      const { signature, synthesisComplete } = JSON.parse(row.record_json) as {
+        signature?: unknown;
+        synthesisComplete?: unknown;
+      };
+      // A partial section is not audio worth skipping a render for.
+      return typeof signature === "string" && synthesisComplete === true ? signature : null;
+    } catch {
+      return null;
+    }
+  }
+
   deleteAudio(documentIdValue: unknown, sectionIdValue?: unknown): void {
     const documentId = requiredString(documentIdValue, "Reader audio documentId", 512);
     if (sectionIdValue === undefined) {

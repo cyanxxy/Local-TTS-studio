@@ -417,6 +417,9 @@ contextBridge.exposeInMainWorld("electron", {
     setActiveDocumentId: (id: string) => ipcRenderer.invoke("reader-library:set-active-document-id", { id }),
     saveAudio: saveReaderAudio,
     getAudio: getReaderAudio,
+    getAudioSignature: (documentId: string, sectionId: string) => (
+      ipcRenderer.invoke("reader-library:get-audio-signature", { documentId, sectionId })
+    ),
     deleteAudio: (documentId: string, sectionId?: string) => (
       ipcRenderer.invoke("reader-library:delete-audio", { documentId, sectionId })
     ),

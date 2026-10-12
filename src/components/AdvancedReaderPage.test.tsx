@@ -590,6 +590,35 @@ describe("AdvancedReaderPage", () => {
     expect(onViewPreferencesChange).toHaveBeenCalledWith({ columnWidth: "wide" });
     // Auto-advance defaults on, so toggling the checkbox opts out.
     expect(onViewPreferencesChange).toHaveBeenCalledWith({ autoAdvance: false });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Prepare the next part" }));
+    expect(onViewPreferencesChange).toHaveBeenCalledWith({ prepareAhead: false });
+  });
+
+  it("tells the listener when the next part is being prepared and when it is ready", () => {
+    const document = createReaderDocument({
+      id: "prepared-reader",
+      title: "Prepared Reader",
+      text: "A paragraph with enough words for a reading section. ".repeat(700),
+    });
+    const sections = buildReaderSections(document.text, document.chapters);
+    const props = {
+      activeDocument: document,
+      activeChapter: document.chapters[0],
+      activeSection: sections[0],
+      nextSection: sections[1],
+      text: document.text.slice(sections[0].start, sections[0].end),
+    };
+    const idle = renderReader({ ...props, nextPartStatus: null });
+    expect(screen.queryByText(/Next part ready|Preparing next part/)).not.toBeInTheDocument();
+    idle.unmount();
+
+    const preparing = renderReader({ ...props, nextPartStatus: "preparing" });
+    expect(screen.getByText("Preparing next part")).toBeInTheDocument();
+    preparing.unmount();
+
+    renderReader({ ...props, nextPartStatus: "ready" });
+    expect(screen.getByText("Next part ready")).toBeInTheDocument();
   });
 
   it("navigates between bounded reading sections without seeking stale audio", () => {
