@@ -56,6 +56,8 @@ describe("pin-hf-assets arguments", () => {
       "--include", "onnx/*",
       "--include", "voice_styles/*",
       "--exclude", "*.md",
+      "--license", "apache-2.0",
+      "--license=mit",
       "--sha256",
       "--check",
       "--out", "manifest.json",
@@ -64,6 +66,7 @@ describe("pin-hf-assets arguments", () => {
       revision: REVISION,
       include: ["onnx/*", "voice_styles/*"],
       exclude: ["*.md"],
+      licenses: ["apache-2.0", "mit"],
       name: "PINNED_ASSETS",
       out: "manifest.json",
       check: true,
@@ -140,6 +143,20 @@ describe("pin-hf-assets manifests", () => {
     await expect(buildManifest(revisionInfo(), options, tampered)).rejects.toThrow(/different size or git blob id/);
   });
 
+  it("records the card license only when it is on the --license allow-list", async () => {
+    const options = { ...baseOptions(), licenses: ["apache-2.0", "mit"] };
+    const licensed = { ...revisionInfo(), cardData: { license: "mit" } };
+
+    expect(await buildManifest(licensed, options)).toMatchObject({ repo: "Example/tts", revision: REVISION, license: "mit" });
+    expect(Object.keys(await buildManifest(licensed, options))).toEqual(["repo", "revision", "license", "files"]);
+    // Without --license nothing is checked or recorded.
+    expect(await buildManifest(licensed, baseOptions())).not.toHaveProperty("license");
+    await expect(buildManifest({ ...revisionInfo(), cardData: { license: "cc-by-nc-4.0" } }, options))
+      .rejects.toThrow('Example/tts is licensed "cc-by-nc-4.0", which is not one of --license apache-2.0, mit.');
+    await expect(buildManifest(revisionInfo(), options)).rejects.toThrow("is licensed null");
+    expect(regenerateCommand(options)).toContain('--include "onnx/*" --license apache-2.0 --license mit --name EXAMPLE_ASSETS');
+  });
+
   it("rejects responses for another commit, empty selections, and inconsistent metadata", async () => {
     await expect(buildManifest({ ...revisionInfo(), sha: "f".repeat(40) }, baseOptions()))
       .rejects.toThrow(/resolved .* to f{40}/);
@@ -198,6 +215,7 @@ describe("pin-hf-assets manifests", () => {
     };
 
     expect(diffManifests(previous, previous)).toEqual([]);
+    expect(diffManifests(previous, { ...previous, license: "mit" })).toEqual(["license: undefined -> mit"]);
     expect(diffManifests(previous, next)).toEqual([
       `revision: ${REVISION} -> ${"f".repeat(40)}`,
       "removed a.json",
@@ -207,7 +225,9 @@ describe("pin-hf-assets manifests", () => {
   });
 
   it.each([
+    "src/workers/manifests/kitten.ts",
     "src/workers/manifests/kokoro.ts",
+    "src/workers/manifests/paradee.ts",
     "src/workers/manifests/supertonic3.ts",
   ])("keeps the committed %s identical to what its regenerate command renders", (path) => {
     const text = readFileSync(path, "utf8");

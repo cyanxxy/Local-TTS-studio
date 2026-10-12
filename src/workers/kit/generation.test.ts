@@ -59,6 +59,32 @@ describe("createGenerationController", () => {
     expect(first.state.ticket?.isCurrent()).toBe(false);
   });
 
+  it("aborts a ticket's signal when it is superseded, aborted or invalidated, and not before", async () => {
+    const generations = createGenerationController();
+    const first = blockingTask();
+    void generations.run("a", first.task);
+    expect(first.state.ticket?.signal.aborted).toBe(false);
+
+    const second = blockingTask();
+    void generations.run("b", second.task);
+    expect(first.state.ticket?.signal.aborted).toBe(true);
+    first.release();
+    await flushPromises();
+    expect(second.state.ticket?.signal.aborted).toBe(false);
+
+    void generations.abort("b");
+    expect(second.state.ticket?.signal.aborted).toBe(true);
+    second.release();
+
+    const third = blockingTask();
+    void generations.run("c", third.task);
+    await flushPromises();
+    expect(third.state.ticket?.signal.aborted).toBe(false);
+    generations.invalidate();
+    expect(third.state.ticket?.signal.aborted).toBe(true);
+    third.release();
+  });
+
   it("never runs a generation that was superseded while it waited", async () => {
     const generations = createGenerationController();
     const first = blockingTask();

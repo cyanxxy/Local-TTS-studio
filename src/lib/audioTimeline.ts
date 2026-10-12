@@ -1,4 +1,5 @@
 import type { ChunkPauseKind } from "../types";
+import type { CaptionSegment } from "./captions";
 
 export interface AudioChunkData {
   audio: Float32Array;
@@ -32,11 +33,7 @@ export interface AudioSegment {
   pauseKind?: ChunkPauseKind;
 }
 
-export interface CaptionSegment {
-  startSec: number;
-  endSec: number;
-  text: string;
-}
+export type { CaptionSegment } from "./captions";
 
 export function getChunkDuration(chunk: Pick<AudioChunkData, "audio" | "samplingRate">): number {
   return chunk.audio.length / chunk.samplingRate;
