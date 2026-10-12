@@ -335,7 +335,7 @@ describe("useEngineOrchestrator", () => {
         audio: new Float32Array(10), samplingRate: 100, text: "GIF files are small.", index: 1, total: 2, textStart: 0, textEnd: 20,
       });
 
-      const forwarded = scheduleChunk.mock.calls.map(([chunk]) => (chunk as { text: string }).text);
+      const forwarded = scheduleChunk.mock.calls.map((call) => (call as unknown as [{ text: string }])[0].text);
       // The running generation still maps through its own plan; the next one maps through the new text.
       expect(forwarded).toEqual(["GIF files are small.", "GIF files are small."]);
     });
