@@ -150,7 +150,11 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const [referenceAudioDurationSec, setReferenceAudioDurationSec] = useState<number | null>(null);
   const [referenceText, setReferenceText] = useState("");
   const [setup, setSetup] = useState<LocalTtsQwen3Setup | null>(null);
-  const [setupBusy, setSetupBusy] = useState(false);
+  // A refresh the user asked for. The first read of a profile's inventory is
+  // not stored here: it is pending until `setupLoadedRepo` names the profile,
+  // so starting it writes no state from the effect that starts it.
+  const [setupRefreshing, setSetupRefreshing] = useState(false);
+  const [setupLoadedRepo, setSetupLoadedRepo] = useState<string | null>(null);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<LocalTtsQwen3DownloadProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -163,6 +167,8 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const modelPathOverridesRef = useRef(new Map<string, ModelPathSelection>());
 
   const available = !!window.electron?.localTts && profiles.length > 0;
+  const setupBusy = setupRefreshing
+    || (available && !!window.electron?.localTts?.getQwen3Setup && setupLoadedRepo !== profile.repo);
   const profileSetup = useMemo(
     () => setup?.profiles.find((candidate) => candidate.repo === profile.repo) ?? null,
     [profile.repo, setup],
@@ -190,27 +196,45 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     setReadiness(entry.readiness);
   }, []);
 
-  const refreshSetup = useCallback(async () => {
+  const fetchSetup = useCallback((): Promise<void> => {
     const bridge = window.electron?.localTts;
-    if (!bridge?.getQwen3Setup) return;
+    if (!bridge?.getQwen3Setup) return Promise.resolve();
     const version = ++setupVersionRef.current;
-    setSetupBusy(true);
-    setError(null);
-    try {
-      const nextSetup = await bridge.getQwen3Setup({ modelRepo: profile.repo });
-      if (!mountedRef.current || version !== setupVersionRef.current) return;
-      setSetup(nextSetup);
-      applyProfileSetup(profile, nextSetup);
-    } catch (nextError) {
-      if (mountedRef.current && version === setupVersionRef.current) setError(errorMessage(nextError));
-    } finally {
-      if (mountedRef.current && version === setupVersionRef.current) setSetupBusy(false);
-    }
+    const isCurrent = () => mountedRef.current && version === setupVersionRef.current;
+    return bridge.getQwen3Setup({ modelRepo: profile.repo })
+      .then((nextSetup) => {
+        if (!isCurrent()) return;
+        setSetup(nextSetup);
+        applyProfileSetup(profile, nextSetup);
+      })
+      .catch((nextError: unknown) => {
+        if (isCurrent()) setError(errorMessage(nextError));
+      })
+      .finally(() => {
+        if (!isCurrent()) return;
+        setSetupRefreshing(false);
+        setSetupLoadedRepo(profile.repo);
+      });
   }, [applyProfileSetup, profile]);
 
+  const refreshSetup = useCallback(async () => {
+    if (!window.electron?.localTts?.getQwen3Setup) return;
+    setSetupRefreshing(true);
+    setError(null);
+    await fetchSetup();
+  }, [fetchSetup]);
+
+  // A later operation on the profile (a path, a download) answers what a
+  // pending read would have: its result is no longer awaited.
+  const supersedeSetup = useCallback(() => {
+    setupVersionRef.current += 1;
+    setSetupRefreshing(false);
+    setSetupLoadedRepo(profile.repo);
+  }, [profile.repo]);
+
   useEffect(() => {
-    if (available) void refreshSetup();
-  }, [available, refreshSetup]);
+    if (available) void fetchSetup();
+  }, [available, fetchSetup]);
 
   useEffect(() => {
     if (!available) return;
@@ -244,7 +268,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     const next = getQwen3Profile(repo);
     if (!next || !profiles.some((candidate) => candidate.repo === repo)) return;
     setupVersionRef.current += 1;
-    setSetupBusy(false);
+    setSetupRefreshing(false);
     modelPathOperationVersionRef.current += 1;
     downloadVersionRef.current += 1;
     setDownloadBusy(false);
@@ -263,8 +287,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   }, [profiles, setup]);
 
   const setModelPath = useCallback((nextPath: string) => {
-    setupVersionRef.current += 1;
-    setSetupBusy(false);
+    supersedeSetup();
     modelPathOperationVersionRef.current += 1;
     setModelPathState(nextPath);
     const bundledPath = setup?.profiles.find((candidate) => candidate.repo === profile.repo)?.modelDir;
@@ -274,15 +297,14 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     if (nextPath.trim() === bundledPath) modelPathOverridesRef.current.delete(profile.repo);
     else modelPathOverridesRef.current.set(profile.repo, { path: nextPath, readiness: nextReadiness });
     setReadiness(nextReadiness);
-  }, [profile.repo, profileSetup?.readiness, setup]);
+  }, [profile.repo, profileSetup?.readiness, setup, supersedeSetup]);
 
   const downloadModel = useCallback(async () => {
     const bridge = window.electron?.localTts;
     if (!bridge?.downloadQwen3Model) return;
     const operationVersion = ++modelPathOperationVersionRef.current;
     const downloadVersion = ++downloadVersionRef.current;
-    setupVersionRef.current += 1;
-    setSetupBusy(false);
+    supersedeSetup();
     setDownloadBusy(true);
     setDownloadProgress(null);
     setError(null);
@@ -306,14 +328,13 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
         setDownloadBusy(false);
       }
     }
-  }, [profile.repo, refreshSetup]);
+  }, [profile.repo, refreshSetup, supersedeSetup]);
 
   const chooseModelPath = useCallback(async () => {
     const bridge = window.electron?.localTts;
     if (!bridge?.chooseQwen3ModelDir) return;
     const operationVersion = ++modelPathOperationVersionRef.current;
-    setupVersionRef.current += 1;
-    setSetupBusy(false);
+    supersedeSetup();
     try {
       const result = await bridge.chooseQwen3ModelDir({ modelRepo: profile.repo });
       if (
@@ -335,7 +356,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
         setError(errorMessage(nextError));
       }
     }
-  }, [profile.repo, setup]);
+  }, [profile.repo, setup, supersedeSetup]);
 
   const setSpeaker = useCallback((nextSpeaker: string) => {
     if (QWEN3_SPEAKERS.includes(nextSpeaker as typeof QWEN3_SPEAKERS[number])) setSpeakerState(nextSpeaker);

@@ -61,7 +61,7 @@ function setup(overrides: {
       if (overrides.loadError) throw overrides.loadError;
       return overrides.loaded ?? null;
     }),
-    saveAudio: vi.fn(async (_audio: CachedReaderAudio) => undefined),
+    saveAudio: vi.fn<(audio: CachedReaderAudio) => Promise<void>>(async () => undefined),
     clearAudio: vi.fn(async () => undefined),
   };
   const player = {

@@ -1021,3 +1021,89 @@ describe("useQwen3LocalRuntime settings changes", () => {
     expect(cancel).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("useQwen3LocalRuntime runtime probe", () => {
+  function install(probe: ReturnType<typeof vi.fn>) {
+    const settings = runtimeSettings();
+    vi.mocked(useQwen3Runtime).mockReturnValue(settings as never);
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe,
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate: vi.fn(),
+        cancel: vi.fn().mockResolvedValue({ cancelled: true }),
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn(() => () => undefined),
+      },
+    } as never;
+    return settings;
+  }
+
+  function render(enabled: boolean) {
+    const { player } = audioPlayer();
+    return renderHook((props: { enabled: boolean }) => useQwen3LocalRuntime({
+      enabled: props.enabled,
+      text: "Probe me.",
+      player,
+      setShowPlayer: vi.fn(),
+    }), { initialProps: { enabled } });
+  }
+
+  it("probes once when enabled, loading until the probe settles, and leaves the model inventory to the provider", async () => {
+    let finishProbe!: (value: unknown) => void;
+    const probe = vi.fn(() => new Promise((resolve) => { finishProbe = resolve; }));
+    const settings = install(probe);
+
+    const { result } = render(true);
+    expect(result.current.modelState.loading).toBe(true);
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    await act(async () => finishProbe({ ready: true, message: "ready", runtime: "rust" }));
+    await waitFor(() => expect(result.current.modelState.loading).toBe(false));
+    expect(result.current.modelState.ready).toBe(true);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(settings.refreshSetup).not.toHaveBeenCalled();
+  });
+
+  it("probes nothing and loads nothing while disabled", () => {
+    const probe = vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" });
+    install(probe);
+    const { result } = render(false);
+    expect(probe).not.toHaveBeenCalled();
+    expect(result.current.modelState.loading).toBe(false);
+  });
+
+  it("surfaces a probe that reports an unready runtime or fails, and retries both reads on request", async () => {
+    const probe = vi.fn()
+      .mockResolvedValueOnce({ ready: false, message: "No GPU", runtime: "rust" })
+      .mockRejectedValueOnce(new Error("bridge down"));
+    const settings = install(probe);
+
+    const { result } = render(true);
+    await waitFor(() => expect(result.current.modelState.error).toBe("No GPU"));
+
+    act(() => result.current.retryLoad());
+    expect(result.current.modelState.loading).toBe(true);
+    await waitFor(() => expect(result.current.modelState.error).toBe("bridge down"));
+    expect(result.current.modelState.loading).toBe(false);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(settings.refreshSetup).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops an in-flight probe when disabled and probes again when re-enabled", async () => {
+    const probe = vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" });
+    install(probe);
+    const { result, rerender } = render(true);
+    await waitFor(() => expect(result.current.modelState.ready).toBe(true));
+
+    rerender({ enabled: false });
+    expect(result.current.modelState.loading).toBe(false);
+    rerender({ enabled: true });
+    expect(result.current.modelState.loading).toBe(true);
+    await waitFor(() => expect(result.current.modelState.loading).toBe(false));
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+});

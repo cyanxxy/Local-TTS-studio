@@ -99,7 +99,12 @@ export function useQwen3LocalRuntime({
   const settings = useQwen3Runtime();
   const refreshSetup = settings.refreshSetup;
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
-  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  // A probe the user asked for again. The first probe after enabling is not
+  // stored here: it is pending until `probeSettled`, so the effect that starts
+  // it writes no state.
+  const [probeRefreshing, setProbeRefreshing] = useState(false);
+  const [probeSettled, setProbeSettled] = useState(false);
+  const [wasEnabled, setWasEnabled] = useState(enabled);
   const [generateBusy, setGenerateBusy] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
   const [, setProgress] = useState<LocalTtsProgressEvent | null>(null);
@@ -295,38 +300,58 @@ export function useQwen3LocalRuntime({
     releaseStalePlayerAudio();
   }, [appliedAudibleSettings, cancelActiveGeneration, cancelPendingAudioDelivery]);
 
-  const runProbe = useCallback(async () => {
-    if (!enabled || !bridge) return;
+  const fetchProbe = useCallback((): Promise<void> => {
+    if (!enabled || !bridge) return Promise.resolve();
     const version = ++runtimeVersionRef.current;
     const id = requestId("probe");
     activeProbeRef.current = id;
-    setRuntimeBusy(true);
-    setError(null);
-    try {
-      const next = await bridge.probe({ model: LOCAL_MODEL, requestId: id });
-      if (!mountedRef.current || runtimeVersionRef.current !== version || activeProbeRef.current !== id) return;
-      setRuntime(next);
-      if (!next.ready) setError(next.message);
-    } catch (nextError) {
-      if (!mountedRef.current || runtimeVersionRef.current !== version || activeProbeRef.current !== id) return;
-      setRuntime(null);
-      setError(message(nextError));
-    } finally {
-      if (mountedRef.current && runtimeVersionRef.current === version && activeProbeRef.current === id) {
+    const isCurrent = () => (
+      mountedRef.current && runtimeVersionRef.current === version && activeProbeRef.current === id
+    );
+    return bridge.probe({ model: LOCAL_MODEL, requestId: id })
+      .then((next) => {
+        if (!isCurrent()) return;
+        setRuntime(next);
+        setError(next.ready ? null : next.message);
+      })
+      .catch((nextError: unknown) => {
+        if (!isCurrent()) return;
+        setRuntime(null);
+        setError(message(nextError));
+      })
+      .finally(() => {
+        if (!isCurrent()) return;
         activeProbeRef.current = null;
-        setRuntimeBusy(false);
-      }
-    }
+        setProbeRefreshing(false);
+        setProbeSettled(true);
+      });
   }, [bridge, enabled]);
 
   const retryLoad = useCallback(() => {
     if (!enabled) return;
-    void Promise.allSettled([runProbe(), refreshSetup()]);
-  }, [enabled, refreshSetup, runProbe]);
+    if (bridge) setProbeRefreshing(true);
+    setError(null);
+    void Promise.allSettled([fetchProbe(), refreshSetup()]);
+  }, [bridge, enabled, fetchProbe, refreshSetup]);
 
+  // Turning the runtime off drops what an unfinished run left in state.
+  if (wasEnabled !== enabled) {
+    setWasEnabled(enabled);
+    if (!enabled) {
+      setProbeRefreshing(false);
+      setProbeSettled(false);
+      setGenerateBusy(false);
+      setGenerationProgress(0);
+      setProgress(null);
+    }
+  }
+  const runtimeBusy = probeRefreshing || (enabled && !!bridge && !probeSettled);
+
+  // The provider reads the model inventory itself, so enabling only probes the
+  // runtime; `retryLoad` is the explicit way to read both again.
   useEffect(() => {
     if (enabled) {
-      retryLoad();
+      void fetchProbe();
       return;
     }
     runtimeVersionRef.current += 1;
@@ -338,11 +363,7 @@ export function useQwen3LocalRuntime({
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
     activeProbeRef.current = null;
-    setRuntimeBusy(false);
-    setGenerateBusy(false);
-    setGenerationProgress(0);
-    setProgress(null);
-  }, [cancelActiveGeneration, cancelPendingAudioDelivery, enabled, retryLoad]);
+  }, [cancelActiveGeneration, cancelPendingAudioDelivery, enabled, fetchProbe]);
 
   useEffect(() => {
     if (!electronAvailable || generateBusy || !bridge?.warm) return;

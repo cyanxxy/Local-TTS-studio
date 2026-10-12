@@ -427,4 +427,37 @@ describe("Qwen3RuntimeProvider", () => {
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(`${BASE_REPO}|/models/base`));
     expect(screen.getByRole("status")).not.toHaveTextContent("/downloaded/old-custom");
   });
+
+  it("reports the inventory read as busy until it lands, once per profile, and reads again only on request", async () => {
+    let finish!: (setup: ReturnType<typeof setupResult>) => void;
+    const getQwen3Setup = vi.fn().mockReturnValueOnce(new Promise((resolve) => { finish = resolve; }));
+    getQwen3Setup.mockResolvedValue(setupResult());
+    window.electron = {
+      isElectron: true, platform: "darwin", arch: "arm64",
+      localTts: { getQwen3Setup },
+    } as never;
+    function BusyConsumer() {
+      const state = useQwen3Runtime();
+      return <>
+        <output>{`busy=${state.setupBusy}|${state.modelPath}`}</output>
+        <button onClick={() => void state.refreshSetup()}>refresh</button>
+        <button onClick={() => state.setProfileRepo(BASE_REPO)}>base</button>
+      </>;
+    }
+    render(<Qwen3RuntimeProvider><BusyConsumer /></Qwen3RuntimeProvider>);
+
+    expect(screen.getByRole("status")).toHaveTextContent("busy=true");
+    await act(async () => finish(setupResult()));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("busy=false|/models/custom"));
+    expect(getQwen3Setup).toHaveBeenCalledTimes(1);
+
+    // Switching profile reads the inventory for the new profile.
+    await act(async () => { fireEvent.click(screen.getByText("base")); });
+    await waitFor(() => expect(getQwen3Setup).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("busy=false|/models/base"));
+
+    await act(async () => { fireEvent.click(screen.getByText("refresh")); });
+    expect(getQwen3Setup).toHaveBeenCalledTimes(3);
+    expect(screen.getByRole("status")).toHaveTextContent("busy=false");
+  });
 });
