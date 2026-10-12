@@ -176,14 +176,22 @@ describe("useReaderSession", () => {
   });
 
   it("saves the audio before creating or opening a document and reports an open that fails", async () => {
-    const { result, library, callbacks } = setup();
+    const { result, library, callbacks, player } = setup();
     await waitFor(() => expect(library.loadAudio).toHaveBeenCalled());
 
     act(() => result.current.newDocument());
     expect(library.saveAudio).toHaveBeenCalledTimes(1);
     expect(library.createDocument).toHaveBeenCalledWith(expect.objectContaining({ title: "Untitled document" }));
 
+    // Audio already saved is not written again by the next replacement...
     library.openDocument.mockRejectedValueOnce(new Error("gone"));
+    act(() => result.current.openDocument("other"));
+    expect(library.saveAudio).toHaveBeenCalledTimes(1);
+
+    // ...but audio that changed since is.
+    player.getAudioCacheSnapshot.mockReturnValue([
+      { audio: new Float32Array([0.3]).buffer, samplingRate: 24_000, text: "y", index: 0, total: 1 },
+    ]);
     act(() => result.current.openDocument("other"));
     expect(library.saveAudio).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(callbacks.onError).toHaveBeenCalledWith("gone"));

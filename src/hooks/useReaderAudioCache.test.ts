@@ -10,7 +10,11 @@ import {
   type CachedReaderAudioChunk,
 } from "../lib/readerDocument";
 import type { AudioSegment as ReaderSegment } from "../lib/audioTimeline";
-import { READER_AUDIO_SAVE_DELAY_MS, useReaderAudioCache } from "./useReaderAudioCache";
+import {
+  READER_AUDIO_SAVE_DELAY_MS,
+  READER_STREAMING_SAVE_INTERVAL_MS,
+  useReaderAudioCache,
+} from "./useReaderAudioCache";
 
 const document = createReaderDocument({
   id: "cache-book",
@@ -87,7 +91,7 @@ function setup(overrides: {
     onSectionEnter: vi.fn(),
     reportError: vi.fn(),
   };
-  const view = renderHook((props: { signatureParts: typeof parts | null; segments: ReaderSegment[] }) => (
+  const view = renderHook((props: { signatureParts: typeof parts | null; segments: ReaderSegment[]; complete?: boolean }) => (
     useReaderAudioCache({
       active: overrides.active ?? true,
       document,
@@ -96,7 +100,7 @@ function setup(overrides: {
       engineId: "kokoro",
       signatureParts: props.signatureParts,
       library,
-      player: { ...player, segments: props.segments },
+      player: { ...player, segments: props.segments, isSynthesisComplete: props.complete ?? false },
       ...callbacks,
     })
   ), {
@@ -218,8 +222,11 @@ describe("useReaderAudioCache", () => {
   });
 
   it("flushes the player's audio under the section's signature with increasing timestamps", () => {
-    const { result, library } = setup();
+    const { result, library, player } = setup();
     act(() => result.current.flush());
+    // More audio streamed in between the two flushes.
+    const more = { ...chunk, audio: new Float32Array([0.2]).buffer, index: 1 };
+    player.getAudioCacheSnapshot.mockReturnValue([chunk, more]);
     act(() => result.current.flush());
 
     expect(library.saveAudio).toHaveBeenCalledTimes(2);
@@ -257,16 +264,73 @@ describe("useReaderAudioCache", () => {
     await waitFor(() => expect(callbacks.reportError).toHaveBeenCalledWith(new Error("quota")));
   });
 
-  it("saves the audio once it stops changing", () => {
+  it("saves a finished section once it stops changing", () => {
     vi.useFakeTimers();
-    const { rerender, library } = setup({ segments: [segment("a")] });
+    const { rerender, library, player } = setup({ segments: [segment("a")] });
+    player.getPlaybackSnapshot.mockReturnValue({ playbackRate: 1, totalDuration: 9, synthesisComplete: true });
+    const finished = (segments: ReaderSegment[]) => ({ signatureParts: parts, segments, complete: true });
+    rerender(finished([segment("a")]));
     act(() => vi.advanceTimersByTime(READER_AUDIO_SAVE_DELAY_MS - 1));
     // A new segment restarts the quiet period.
-    rerender({ signatureParts: parts, segments: [segment("a"), segment("b")] });
+    rerender(finished([segment("a"), segment("b")]));
     act(() => vi.advanceTimersByTime(READER_AUDIO_SAVE_DELAY_MS - 1));
     expect(library.saveAudio).not.toHaveBeenCalled();
     act(() => vi.advanceTimersByTime(1));
     expect(library.saveAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves a streaming section at most once per interval however many chunk gaps there are", () => {
+    vi.useFakeTimers();
+    const { rerender, library, player } = setup({ segments: [segment("a")] });
+    // The first partial save lands after the quiet period.
+    act(() => vi.advanceTimersByTime(READER_AUDIO_SAVE_DELAY_MS));
+    expect(library.saveAudio).toHaveBeenCalledTimes(1);
+
+    // Chunks keep arriving with gaps longer than the quiet period.
+    for (let count = 2; count <= 12; count += 1) {
+      player.getAudioCacheSnapshot.mockReturnValue(
+        Array.from({ length: count }, (_, index) => ({ ...chunk, audio: new Float32Array([index]).buffer, index })),
+      );
+      rerender({ signatureParts: parts, segments: Array.from({ length: count }, (_, i) => segment(`s${i}`)) });
+      act(() => vi.advanceTimersByTime(READER_AUDIO_SAVE_DELAY_MS * 2));
+    }
+    expect(library.saveAudio).toHaveBeenCalledTimes(1);
+
+    act(() => vi.advanceTimersByTime(READER_STREAMING_SAVE_INTERVAL_MS));
+    expect(library.saveAudio).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not rewrite audio that a restore just put in the player", async () => {
+    vi.useFakeTimers();
+    const saved = cachedAudio();
+    const { library, player, rerender, result } = setup({ loaded: saved });
+    player.getAudioCacheSnapshot.mockReturnValue(saved.chunks);
+    player.getPlaybackSnapshot.mockReturnValue({ playbackRate: 1.25, totalDuration: 8, synthesisComplete: true });
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(player.restoreAudioCache).toHaveBeenCalledTimes(1);
+
+    // Restoring publishes segments, which used to schedule a full rewrite.
+    rerender({ signatureParts: parts, segments: [segment("a")], complete: true });
+    act(() => vi.advanceTimersByTime(READER_AUDIO_SAVE_DELAY_MS * 3));
+    act(() => result.current.flush());
+    expect(library.saveAudio).not.toHaveBeenCalled();
+
+    // Anything streamed or retaken since is a change and is saved.
+    player.getAudioCacheSnapshot.mockReturnValue([{ ...saved.chunks[0], audio: new Float32Array([0.5, 0.5]).buffer }]);
+    act(() => result.current.flush());
+    expect(library.saveAudio).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves again after a write fails and skips an unchanged repeat after one lands", async () => {
+    const { result, library } = setup();
+    library.saveAudio.mockRejectedValueOnce(new Error("quota"));
+    act(() => result.current.flush());
+    await waitFor(() => expect(library.saveAudio).toHaveBeenCalledTimes(1));
+    await act(async () => { await Promise.resolve(); });
+    act(() => result.current.flush());
+    expect(library.saveAudio).toHaveBeenCalledTimes(2);
+    act(() => result.current.flush());
+    expect(library.saveAudio).toHaveBeenCalledTimes(2);
   });
 
   it("cancels the pending save when it flushes", () => {
