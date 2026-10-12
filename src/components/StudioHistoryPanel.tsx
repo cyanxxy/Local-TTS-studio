@@ -1,5 +1,5 @@
-import { useId, useState } from "react";
-import { ChevronDown, Download, History, Play, RotateCcw, Star, Trash2 } from "lucide-react";
+import { useId, useRef, useState } from "react";
+import { ChevronDown, Download, History, Play, RotateCcw, Star, Trash2, X } from "lucide-react";
 import { formatClock } from "../lib/formatClock";
 import {
   GENERATION_HISTORY_LIMITS,
@@ -54,23 +54,31 @@ export function StudioHistoryPanel({
   const [open, setOpen] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
   const panelId = useId();
   const limits = GENERATION_HISTORY_LIMITS;
   const bytesShare = Math.min(100, Math.round((usage.totalBytes / limits.maxTotalBytes) * 100));
   const hasUnfavorited = entries.some((entry) => !entry.favorite);
 
-  const run = async (action: () => Promise<unknown>) => {
+  const run = async (action: () => Promise<unknown>, options: { refocus?: boolean } = {}) => {
     setActionError(null);
     try {
       await action();
     } catch (cause) {
       setActionError(errorText(cause));
     }
+    // The control that was used is gone after a delete or clear.
+    if (options.refocus) toggleRef.current?.focus();
   };
+
+  const shownError = error ?? actionError;
+  const visibleError = shownError && shownError !== dismissedError ? shownError : null;
 
   return (
     <div className="glass rounded-[20px] overflow-hidden">
       <button
+        ref={toggleRef}
         type="button"
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
@@ -81,6 +89,7 @@ export function StudioHistoryPanel({
           <History size={14} aria-hidden="true" />
           Generation History
           {usage.entryCount > 0 && <span className="font-mono text-xs text-text-muted">{usage.entryCount}</span>}
+          {visibleError && <span className="rounded-full bg-danger px-1.5 text-xs font-semibold text-white" aria-hidden="true">!</span>}
         </span>
         <ChevronDown
           size={14}
@@ -88,6 +97,20 @@ export function StudioHistoryPanel({
           className={`text-text-muted transition-transform duration-200 ${open ? "rotate-180" : ""}`}
         />
       </button>
+
+      {visibleError && (
+        <div role="alert" className="mx-4 mb-3 flex items-start gap-3 rounded-lg border border-danger/30 bg-danger-light px-3 py-2 text-xs text-danger">
+          <p className="min-w-0 flex-1 break-words">{visibleError}</p>
+          <button
+            type="button"
+            aria-label="Dismiss history error"
+            onClick={() => setDismissedError(visibleError)}
+            className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full hover:bg-danger/10"
+          >
+            <X size={12} aria-hidden="true" />
+          </button>
+        </div>
+      )}
 
       {open && (
         <div id={panelId} className="animate-fade-up border-t border-black/5 px-4 pb-4 pt-3">
@@ -116,7 +139,7 @@ export function StudioHistoryPanel({
                   className="rounded-full bg-danger px-3 py-1 font-semibold text-white"
                   onClick={() => {
                     setConfirmingClear(false);
-                    void run(() => onClear({ keepFavorites: true }));
+                    void run(() => onClear({ keepFavorites: true }), { refocus: true });
                   }}
                 >
                   Confirm
@@ -136,12 +159,6 @@ export function StudioHistoryPanel({
               </button>
             )}
           </div>
-
-          {(error ?? actionError) && (
-            <p role="alert" className="mt-3 rounded-lg border border-danger/30 bg-danger-light px-3 py-2 text-xs text-danger">
-              {error ?? actionError}
-            </p>
-          )}
 
           {entries.length === 0 ? (
             <p className="mt-4 text-xs text-text-muted">
@@ -198,7 +215,7 @@ export function StudioHistoryPanel({
                     type="button"
                     className={ICON_BUTTON}
                     aria-label={`Delete "${entry.title}"`}
-                    onClick={() => void run(() => onDelete(entry.id))}
+                    onClick={() => void run(() => onDelete(entry.id), { refocus: true })}
                   >
                     <Trash2 size={14} aria-hidden="true" />
                   </button>

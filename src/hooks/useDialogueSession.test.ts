@@ -23,8 +23,8 @@ function tone(sampleRate: number, seconds: number): AsyncIterable<{ audio: Float
   })();
 }
 
-function setup(synthesize: PresetSynthesize, initialSource = SCRIPT) {
-  return renderHook(() => useDialogueSession({ synthesize, exportOptions: EXPORT_OPTIONS, voicePool: POOL, initialSource }));
+function setup(synthesize: PresetSynthesize, initialSource = SCRIPT, storageKey: string | null = null) {
+  return renderHook(() => useDialogueSession({ synthesize, exportOptions: EXPORT_OPTIONS, voicePool: POOL, initialSource, storageKey }));
 }
 
 describe("useDialogueSession", () => {
@@ -159,6 +159,49 @@ describe("useDialogueSession", () => {
 
     await act(async () => { await result.current.regenerateTurn(9); });
     expect(result.current.error).toMatch(/no longer in the script/);
+  });
+
+  it("keeps the script and manual casting across remounts", () => {
+    window.localStorage.clear();
+    const first = setup(() => tone(10, 1), "", "test:dialogue");
+    act(() => first.result.current.setSource(SCRIPT));
+    act(() => first.result.current.castSpeaker("ben", { engineId: "audio8", voiceId: "narrator", settings: {} }));
+    first.unmount();
+
+    const second = setup(() => tone(10, 1), "", "test:dialogue");
+    expect(second.result.current.source).toBe(SCRIPT);
+    expect(second.result.current.casting.ben.engineId).toBe("audio8");
+    act(() => second.result.current.autoCast());
+    second.unmount();
+    expect(setup(() => tone(10, 1), "", "test:dialogue").result.current.casting.ben.engineId).toBe("supertonic3");
+    window.localStorage.setItem("test:dialogue", "{not json");
+    expect(setup(() => tone(10, 1), "fresh", "test:dialogue").result.current.source).toBe("fresh");
+    window.localStorage.clear();
+  });
+
+  it("reports out-of-range pauses and stitches only once the render has finished", async () => {
+    const { result } = setup(() => tone(10, 1));
+    act(() => result.current.setGaps({ speakerChangeGapSec: 9 }));
+    expect(result.current.gapProblem).toMatch(/between speakers must be between 0 and 5/);
+    expect(result.current.plan).toBeNull();
+    act(() => result.current.setGaps({ speakerChangeGapSec: 0.3, sameSpeakerGapSec: -1 }));
+    expect(result.current.gapProblem).toMatch(/within a speaker/);
+    act(() => result.current.setGaps({ sameSpeakerGapSec: 0.2 }));
+    expect(result.current.gapProblem).toBeNull();
+
+    let release: () => void = () => undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const slow = setup((text) => (text === "Hi Anna." ? (async function* () {
+      await gate;
+      yield { audio: new Float32Array(10), samplingRate: 10 };
+    })() : tone(10, 1)));
+    let rendering: Promise<void> = Promise.resolve();
+    act(() => { rendering = slow.result.current.render(); });
+    await waitFor(() => expect(slow.result.current.turns.size).toBe(1));
+    expect(slow.result.current.stitched).toBeNull();
+    release();
+    await act(async () => { await rendering; });
+    expect(slow.result.current.stitched?.cues).toHaveLength(2);
   });
 
   it("will not render without a complete plan", async () => {

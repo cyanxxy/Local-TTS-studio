@@ -149,6 +149,17 @@ describe("useStudioTakes", () => {
     expect(result.current.stacks).toEqual({});
   });
 
+  it("drops stacks when the same text is generated again", async () => {
+    const { result, harness, rerender } = setup();
+    harness.setSynthesize(() => oneChunk(0.2));
+    await act(async () => { await result.current.renderVariations(WHOLE_SCRIPT_TARGET, 1); });
+    expect(Object.keys(result.current.stacks)).toHaveLength(1);
+
+    harness.state.isGenerating = true;
+    rerender();
+    expect(result.current.stacks).toEqual({});
+  });
+
   it("explains when an engine has neither seed nor speed control", () => {
     const { result } = setup({ engineId: "audio8" });
     expect(result.current.unavailableReason).toMatch(/no seed or speed/);

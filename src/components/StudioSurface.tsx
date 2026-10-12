@@ -62,7 +62,12 @@ export function StudioSurface() {
         ))}
       </div>
 
-      {mode === "dialogue" ? <DialogueStudio /> : (
+      {/* Kept mounted so the script, casting and a running render survive switching modes. */}
+      <div hidden={mode !== "dialogue"}>
+        <DialogueStudio />
+      </div>
+
+      {mode === "single" && (
       <div className="mt-4 surface rounded-[24px]">
         <div className="grid grid-cols-1 md:grid-cols-5">
           {/* Left: text input */}

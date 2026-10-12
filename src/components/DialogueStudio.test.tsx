@@ -30,6 +30,7 @@ function makeDialogue(source: string, overrides: Partial<UseDialogueSessionRetur
     castSpeaker: vi.fn(),
     autoCast: vi.fn(),
     gaps: { speakerChangeGapSec: 0.35, sameSpeakerGapSec: 0.2 },
+    gapProblem: null,
     setGaps: vi.fn(),
     plan: script.turns.length ? planDialogueRender(script, casting) : null,
     status: "idle",
@@ -147,6 +148,16 @@ describe("DialogueStudioView", () => {
     view(makeDialogue(SCRIPT, { status: "cancelled", turns }));
     expect(screen.getByText(/Cancelled after 1 of 2 lines/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Render line 2" })).toBeInTheDocument();
+  });
+
+  it("explains out-of-range pauses and announces render status to screen readers", () => {
+    const { unmount } = view(makeDialogue(SCRIPT, { plan: null, gapProblem: "The pause between speakers must be between 0 and 5 seconds." }));
+    expect(screen.getByRole("alert")).toHaveTextContent(/between 0 and 5 seconds/);
+    expect(screen.getByLabelText("Between speakers")).toHaveAttribute("aria-invalid", "true");
+    unmount();
+
+    view(makeDialogue(SCRIPT, { status: "rendering", progress: { position: 2, total: 2 } }));
+    expect(screen.getByRole("status")).toHaveTextContent("Rendering line 2 of 2.");
   });
 
   it("shows a render error", () => {

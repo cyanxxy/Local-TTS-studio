@@ -970,6 +970,10 @@ describe("SynthesisApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Single voice" }));
     expect(screen.getByRole("textbox", { name: "script" })).toBeInTheDocument();
+
+    // The dialogue session stays alive while hidden.
+    fireEvent.click(screen.getByRole("button", { name: "Dialogue" }));
+    expect(await screen.findByRole("textbox", { name: "Dialogue script" })).toHaveValue("Anna: Hello there.\nBen: Hi Anna.");
   });
 
   it("supports Audio8 local generation in both Studio and Reader", async () => {

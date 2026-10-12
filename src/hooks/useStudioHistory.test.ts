@@ -94,6 +94,41 @@ describe("useStudioHistory", () => {
     expect(result.current.history.entries.map((entry) => entry.text)).toEqual(["Saved earlier."]);
   });
 
+  it("saves the text and voice the generation started with, not later edits", async () => {
+    const { harness, result, rerender } = setup();
+    await waitFor(() => expect(result.current.history.loading).toBe(false));
+
+    harness.state.isGenerating = true;
+    rerender();
+    harness.state.text = "Edited while it was generating.";
+    harness.state.isGenerating = false;
+    harness.state.isSynthesisComplete = true;
+    rerender();
+
+    await waitFor(() => expect(result.current.history.entries).toHaveLength(1));
+    expect(result.current.history.entries[0].text).toBe("Hello from the studio.");
+  });
+
+  it("drops a pending reuse whose engine never became active", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { harness, result, rerender } = setup({ engineId: "supertonic" });
+      await waitFor(() => expect(result.current.history.loading).toBe(false));
+      const saved = await result.current.history.saveGeneration({
+        text: "Kokoro script.", engineId: "kokoro", voice: { engineId: "kokoro", voiceId: "bm_george", settings: {} }, chunks: [pcmChunk(100)],
+      });
+      await act(async () => { await result.current.studio.reuse(saved.id); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+
+      harness.state.engineId = "kokoro";
+      rerender();
+      expect(harness.calls.changeText).not.toHaveBeenCalled();
+      expect(harness.calls.changeVoice).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("replays stored audio into the player and starts it", async () => {
     const { harness, result } = setup();
     await waitFor(() => expect(result.current.history.loading).toBe(false));

@@ -24,6 +24,22 @@ function entry(id: string, overrides: Partial<GenerationHistoryEntry> = {}): Gen
   };
 }
 
+function baseProps(overrides: Partial<React.ComponentProps<typeof StudioHistoryPanel>> = {}): React.ComponentProps<typeof StudioHistoryPanel> {
+  return {
+    entries: [entry("a")],
+    usage: { entryCount: 1, totalBytes: 0, favoriteCount: 0 },
+    loading: false,
+    error: null,
+    onReplay: vi.fn(),
+    onDownload: vi.fn(),
+    onReuse: vi.fn(),
+    onSetFavorite: vi.fn(async () => undefined),
+    onDelete: vi.fn(async () => undefined),
+    onClear: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
+
 function setup(overrides: Partial<React.ComponentProps<typeof StudioHistoryPanel>> = {}) {
   const props: React.ComponentProps<typeof StudioHistoryPanel> = {
     entries: [entry("a"), entry("b", { favorite: true, seed: 42, engineId: "qwen3" })],
@@ -101,5 +117,24 @@ describe("StudioHistoryPanel", () => {
     setup({ entries: [], error: "Storage is blocked." });
     expect(screen.getByText(/Generations you finish in Studio are kept here/)).toBeInTheDocument();
     expect(screen.getByRole("alert")).toHaveTextContent("Storage is blocked.");
+  });
+
+  it("shows errors while the panel is collapsed, flags the toggle and lets the user dismiss them", () => {
+    render(<StudioHistoryPanel {...baseProps()} error="Could not save to history: quota exceeded." />);
+    expect(screen.getByRole("alert")).toHaveTextContent("quota exceeded");
+    expect(screen.queryByTestId("history-usage")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss history error" }));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("returns focus to the panel header after a delete or a clear", async () => {
+    setup();
+    const toggle = screen.getByRole("button", { name: /Generation History/ });
+    fireEvent.click(screen.getByRole("button", { name: 'Delete "Title a"' }));
+    await waitFor(() => expect(toggle).toHaveFocus());
+    toggle.blur();
+    fireEvent.click(screen.getByRole("button", { name: "Clear history" }));
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    await waitFor(() => expect(toggle).toHaveFocus());
   });
 });

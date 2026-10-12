@@ -27,6 +27,9 @@ export interface UseStudioHistoryReturn {
   reuse: (id: string) => Promise<void>;
 }
 
+/** How long a reuse waits for its engine to become active. */
+const REUSE_ENGINE_SWITCH_TIMEOUT_MS = 5000;
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -52,6 +55,24 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
     latest.current = { session, base, qwen3, saveGeneration };
   });
 
+  // What the generation was started with; edits made while it runs are not
+  // what the audio says.
+  const startRef = useRef<{ text: string; engineId: SurfaceEngineId; voice: ReturnType<typeof presetFromSelection> } | null>(null);
+  const isGenerating = studio.runtime.isGenerating;
+  const wasGeneratingRef = useRef(isGenerating);
+  useEffect(() => {
+    const was = wasGeneratingRef.current;
+    wasGeneratingRef.current = isGenerating;
+    if (!isGenerating || was) return;
+    const current = latest.current;
+    const engineId = current.session.studio.engineId;
+    startRef.current = {
+      text: current.session.studio.text,
+      engineId,
+      voice: presetFromSelection(engineId, current.base),
+    };
+  }, [isGenerating]);
+
   // Capture: a generation that completes in the shared player is saved once.
   const wasCompleteRef = useRef(playerState.isSynthesisComplete);
   const restoredEpochRef = useRef<number | null>(null);
@@ -64,11 +85,14 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
     const chunks = getAudioCacheSnapshot();
     const current = latest.current;
     const { studio: studioNow } = current.session;
-    if (chunks.length === 0 || studioNow.text.trim().length === 0) return;
-    const engineId = studioNow.engineId;
-    const voice = presetFromSelection(engineId, current.base);
+    const started = startRef.current;
+    startRef.current = null;
+    const text = started?.text ?? studioNow.text;
+    if (chunks.length === 0 || text.trim().length === 0) return;
+    const engineId = started?.engineId ?? studioNow.engineId;
+    const voice = started?.voice ?? presetFromSelection(engineId, current.base);
     current.saveGeneration({
-      text: studioNow.text,
+      text,
       engineId,
       voice,
       settings: voice.settings as HistorySettings,
@@ -163,6 +187,15 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
     applyReusableRef.current(pending);
   }, [pendingEngineId]);
 
+  // A pending reuse that never sees its engine become active must not fire on
+  // a later, unrelated engine pick.
+  const expireReuseLater = useCallback((reusable: ReusableGenerationSettings) => {
+    pendingReuseRef.current = reusable;
+    window.setTimeout(() => {
+      if (pendingReuseRef.current === reusable) pendingReuseRef.current = null;
+    }, REUSE_ENGINE_SWITCH_TIMEOUT_MS);
+  }, []);
+
   const reuse = useCallback(async (id: string) => {
     setError(null);
     try {
@@ -178,7 +211,7 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
         return;
       }
       if (isBrowserEngineId(reusable.engineId)) {
-        pendingReuseRef.current = reusable;
+        expireReuseLater(reusable);
         current.studio.changeModel(reusable.engineId);
       } else if (isDesktopInlineEngineId(reusable.engineId)) {
         const option = current.engines.desktopModelOptions.studio.find((entry) => entry.key === reusable.engineId);
@@ -186,7 +219,7 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
           setError(`${getEngine(reusable.engineId).label} is not available on this device.`);
           return;
         }
-        pendingReuseRef.current = reusable;
+        expireReuseLater(reusable);
         option.onSelect();
       } else {
         setError("This generation used an engine that is not available.");
@@ -194,7 +227,7 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
     } catch (cause) {
       setError(errorMessage(cause));
     }
-  }, [applyReusable, reuseSettings]);
+  }, [applyReusable, expireReuseLater, reuseSettings]);
 
   return { error, clearError: () => setError(null), replay, download, reuse };
 }

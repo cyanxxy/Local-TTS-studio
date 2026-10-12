@@ -101,7 +101,12 @@ export function useStudioTakes(session: SynthesisSession): UseStudioTakesReturn 
   const [seenText, setSeenText] = useState(studio.text);
   const hasAudio = player.state.totalDuration > 0;
   const [hadAudio, setHadAudio] = useState(hasAudio);
-  if (seenText !== studio.text || (hadAudio && !hasAudio)) {
+  // A new generation of the same text makes new segments, so old stacks go too.
+  const isGenerating = studio.runtime.isGenerating;
+  const [wasGenerating, setWasGenerating] = useState(isGenerating);
+  const generationStarted = isGenerating && !wasGenerating;
+  if (wasGenerating !== isGenerating) setWasGenerating(isGenerating);
+  if (seenText !== studio.text || (hadAudio && !hasAudio) || generationStarted) {
     setSeenText(studio.text);
     resetTakes();
     setApplied({});

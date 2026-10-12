@@ -42,8 +42,21 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
     dialogue.castSpeaker(speakerKey, preset);
   };
 
+  const statusMessage = rendering && dialogue.progress
+    ? `Rendering line ${dialogue.progress.position} of ${dialogue.progress.total}.`
+    : dialogue.regeneratingTurn !== null
+      ? `Regenerating line ${dialogue.regeneratingTurn + 1}.`
+      : dialogue.status === "done"
+        ? `Dialogue rendered: ${renderedCount} lines.`
+        : dialogue.status === "cancelled"
+          ? `Render cancelled after ${renderedCount} of ${total} lines.`
+          : dialogue.status === "error"
+            ? "Dialogue render failed."
+            : "";
+
   return (
     <div className="mt-6 surface rounded-[24px]">
+      <p role="status" aria-live="polite" className="sr-only">{statusMessage}</p>
       <div className="grid grid-cols-1 md:grid-cols-5">
         <div className="flex min-h-[320px] flex-col border-border/40 p-4 sm:p-6 md:col-span-3 md:border-r">
           <label htmlFor={scriptId} className="mb-3 text-sm font-semibold text-text-secondary">Dialogue script</label>
@@ -141,6 +154,7 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
                 max={5}
                 step={0.05}
                 className={`${SELECT_CLASS} mt-1`}
+                aria-invalid={dialogue.gapProblem !== null}
                 value={dialogue.gaps.speakerChangeGapSec}
                 onChange={(event) => dialogue.setGaps({ speakerChangeGapSec: Number(event.target.value) })}
               />
@@ -153,11 +167,13 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
                 max={5}
                 step={0.05}
                 className={`${SELECT_CLASS} mt-1`}
+                aria-invalid={dialogue.gapProblem !== null}
                 value={dialogue.gaps.sameSpeakerGapSec}
                 onChange={(event) => dialogue.setGaps({ sameSpeakerGapSec: Number(event.target.value) })}
               />
             </label>
           </section>
+          {dialogue.gapProblem && <p role="alert" className="-mt-3 text-xs text-danger">{dialogue.gapProblem}</p>}
 
           <div className="flex flex-col gap-2">
             {rendering ? (
@@ -175,7 +191,7 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
                 Render dialogue
               </button>
             )}
-            {dialogue.plan === null && dialogue.uncastSpeakers.length > 0 && (
+            {dialogue.plan === null && dialogue.gapProblem === null && dialogue.uncastSpeakers.length > 0 && (
               <p className="text-xs text-text-muted">Choose a voice for {dialogue.uncastSpeakers.map((speaker) => speaker.name).join(", ")}.</p>
             )}
             {rendering && dialogue.progress && (

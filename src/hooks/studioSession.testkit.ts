@@ -38,6 +38,7 @@ export interface StudioHarnessState {
   text: string;
   engineId: SurfaceEngineId;
   isSynthesisComplete: boolean;
+  isGenerating: boolean;
   totalDuration: number;
   segments: AudioSegment[];
   activeSegmentId: string | null;
@@ -52,6 +53,7 @@ export function createStudioHarness(initial: Partial<StudioHarnessState> = {}) {
     text: "Hello from the studio.",
     engineId: "kokoro",
     isSynthesisComplete: false,
+    isGenerating: false,
     totalDuration: 0,
     segments: [],
     activeSegmentId: null,
@@ -114,7 +116,7 @@ export function createStudioHarness(initial: Partial<StudioHarnessState> = {}) {
             togglePlay: calls.togglePlay,
           },
         },
-        studio: { text: state.text, engineId: state.engineId, changeText: calls.changeText, changeModel: calls.changeModel },
+        studio: { text: state.text, engineId: state.engineId, runtime: { isGenerating: state.isGenerating }, changeText: calls.changeText, changeModel: calls.changeModel },
         engines: {
           surfaceEngineSettings: FAKE_SETTINGS,
           runtimes: new Proxy({}, { get: () => runtime }),

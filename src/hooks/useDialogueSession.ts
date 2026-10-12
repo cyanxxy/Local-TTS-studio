@@ -5,6 +5,7 @@ import { downloadBlob } from "../lib/exportAudio";
 import {
   autoCastSpeakers,
   findUncastSpeakers,
+  MAX_DIALOGUE_GAP_SEC,
   planDialogueRender,
   type DialogueCasting,
   type DialogueGapOptions,
@@ -39,6 +40,8 @@ export interface DialogueSessionOptions {
    */
   voicePool: readonly VoicePreset[];
   initialSource?: string;
+  /** Where the script and manual casting persist; null keeps them in memory only. */
+  storageKey?: string | null;
 }
 
 export interface DialogueProgress {
@@ -60,6 +63,8 @@ export interface UseDialogueSessionReturn {
   /** Forget manual voice choices and cast every speaker from the pool again. */
   autoCast: () => void;
   gaps: Required<DialogueGapOptions>;
+  /** Why the pause settings cannot be used, or null. */
+  gapProblem: string | null;
   setGaps: (gaps: Partial<Required<DialogueGapOptions>>) => void;
   plan: DialogueRenderPlan | null;
   status: DialogueRenderStatus;
@@ -82,7 +87,44 @@ export interface UseDialogueSessionReturn {
 }
 
 const DEFAULT_GAPS: Required<DialogueGapOptions> = { speakerChangeGapSec: 0.35, sameSpeakerGapSec: 0.2 };
+export const DIALOGUE_STORAGE_KEY = "open-tts:dialogue-session";
 const EXPORT_FILE_NAME = "open-tts-dialogue";
+
+interface PersistedDialogue {
+  source: string;
+  overrides: Record<string, VoicePreset>;
+}
+
+function readPersisted(key: string | null): PersistedDialogue | null {
+  if (!key) return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    const value = raw ? JSON.parse(raw) as Partial<PersistedDialogue> : null;
+    if (!value || typeof value.source !== "string") return null;
+    const overrides = value.overrides && typeof value.overrides === "object" ? value.overrides : {};
+    return { source: value.source, overrides };
+  } catch {
+    return null;
+  }
+}
+
+function writePersisted(key: string | null, value: PersistedDialogue): void {
+  if (!key) return;
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Storage may be full or blocked; the session still works in memory.
+  }
+}
+
+function gapError(gaps: Required<DialogueGapOptions>): string | null {
+  for (const [label, value] of [["between speakers", gaps.speakerChangeGapSec], ["within a speaker", gaps.sameSpeakerGapSec]] as const) {
+    if (!Number.isFinite(value) || value < 0 || value > MAX_DIALOGUE_GAP_SEC) {
+      return `The pause ${label} must be between 0 and ${MAX_DIALOGUE_GAP_SEC} seconds.`;
+    }
+  }
+  return null;
+}
 
 function isAbort(error: unknown): boolean {
   return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "AbortError";
@@ -108,9 +150,11 @@ export function useDialogueSession({
   exportOptions,
   voicePool,
   initialSource = "",
+  storageKey = DIALOGUE_STORAGE_KEY,
 }: DialogueSessionOptions): UseDialogueSessionReturn {
-  const [source, setSource] = useState(initialSource);
-  const [overrides, setOverrides] = useState<Record<string, VoicePreset>>({});
+  const [persisted] = useState(() => readPersisted(storageKey));
+  const [source, setSourceState] = useState(persisted?.source ?? initialSource);
+  const [overrides, setOverrides] = useState<Record<string, VoicePreset>>(persisted?.overrides ?? {});
   const [gaps, setGapsState] = useState(DEFAULT_GAPS);
   const [status, setStatus] = useState<DialogueRenderStatus>("idle");
   const [progress, setProgress] = useState<DialogueProgress | null>(null);
@@ -169,10 +213,13 @@ export function useDialogueSession({
       return turn ? [turn] : [];
     });
   }, [plan, turns]);
+  // Stitching copies every sample, so it waits for the render to finish
+  // instead of rerunning after each turn.
   const stitched = useMemo(
-    () => (orderedTurns.length > 0 ? stitchDialogueTurns(orderedTurns) : null),
-    [orderedTurns],
+    () => (status !== "rendering" && orderedTurns.length > 0 ? stitchDialogueTurns(orderedTurns) : null),
+    [orderedTurns, status],
   );
+  const gapProblem = gapError(gaps);
 
   const latest = useRef({ synthesize, exportOptions, plan, stitched });
   useEffect(() => {
@@ -184,10 +231,25 @@ export function useDialogueSession({
     auditionRef.current?.dispose();
   }, []);
 
+  const stateRef = useRef({ source, overrides });
+  useEffect(() => {
+    stateRef.current = { source, overrides };
+  });
+  const setSource = useCallback((next: string) => {
+    setSourceState(next);
+    writePersisted(storageKey, { source: next, overrides: stateRef.current.overrides });
+  }, [storageKey]);
   const castSpeaker = useCallback((speakerKey: string, preset: VoicePreset) => {
-    setOverrides((current) => ({ ...current, [speakerKey]: preset }));
-  }, []);
-  const autoCast = useCallback(() => setOverrides({}), []);
+    const next = { ...stateRef.current.overrides, [speakerKey]: preset };
+    stateRef.current = { ...stateRef.current, overrides: next };
+    setOverrides(next);
+    writePersisted(storageKey, { source: stateRef.current.source, overrides: next });
+  }, [storageKey]);
+  const autoCast = useCallback(() => {
+    stateRef.current = { ...stateRef.current, overrides: {} };
+    setOverrides({});
+    writePersisted(storageKey, { source: stateRef.current.source, overrides: {} });
+  }, [storageKey]);
   const setGaps = useCallback((next: Partial<Required<DialogueGapOptions>>) => {
     setGapsState((current) => ({ ...current, ...next }));
   }, []);
@@ -311,6 +373,7 @@ export function useDialogueSession({
     castSpeaker,
     autoCast,
     gaps,
+    gapProblem,
     setGaps,
     plan,
     status,
