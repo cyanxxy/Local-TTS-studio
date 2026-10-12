@@ -42,7 +42,7 @@ export const paradeeEngine = {
   label: "Paradee",
   params: PARADEE_PARAMS,
   runtime: "browser-worker",
-  targets: ["desktop"],
+  targets: ["web", "desktop"],
   picker: "browser",
   wasmOnly: true,
   capabilities,

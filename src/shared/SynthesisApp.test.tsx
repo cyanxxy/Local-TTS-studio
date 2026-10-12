@@ -642,6 +642,9 @@ function resetMockState() {
   mock.initialEngineSettings = {
     kokoro: ENGINES.kokoro.defaultSettings,
     supertonic: { ...ENGINES.supertonic.defaultSettings, voice: "Female" },
+    kitten: ENGINES.kitten.defaultSettings,
+    paradee: ENGINES.paradee.defaultSettings,
+    piper: ENGINES.piper.defaultSettings,
     audio8: ENGINES.audio8.defaultSettings,
     supertonic3: ENGINES.supertonic3.defaultSettings,
     neutts: ENGINES.neutts.defaultSettings,

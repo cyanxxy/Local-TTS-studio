@@ -41,7 +41,7 @@ export const kittenEngine = {
   label: "Kitten TTS",
   params: KITTEN_PARAMS,
   runtime: "browser-worker",
-  targets: ["desktop"],
+  targets: ["web", "desktop"],
   picker: "browser",
   capabilities,
   credits: [{

@@ -75,6 +75,9 @@ const QWEN3_LIVE: Qwen3LiveSettings = {
 const SURFACE_SETTINGS: SurfaceEngineSettings = {
   kokoro: { voice: "af_heart" },
   supertonic: { voice: "Female", language: "en" },
+  kitten: { voice: "Bella" },
+  paradee: { voice: "heart" },
+  piper: { voice: "en_US-kristin-medium" },
   audio8: { voice: "clara" },
   supertonic3: { voice: "M1", language: "en" },
   qwen3: QWEN3_LIVE,
@@ -108,7 +111,9 @@ function signature(id: SurfaceEngineId, tuning: GenerationTuningSettings, qualit
 describe("engine registry", () => {
   it("registers every engine once under its own id", () => {
     expect(new Set(ENGINE_IDS).size).toBe(ENGINE_IDS.length);
-    expect(ENGINE_IDS).toEqual(["kokoro", "supertonic", "audio8", "supertonic3", "neutts", "qwen3"]);
+    expect(ENGINE_IDS).toEqual([
+      "kokoro", "supertonic", "kitten", "paradee", "piper", "audio8", "supertonic3", "neutts", "qwen3",
+    ]);
     for (const id of ENGINE_IDS) {
       expect(ENGINES[id].id).toBe(id);
       expect(getEngine(id)).toBe(ENGINES[id]);
@@ -119,8 +124,10 @@ describe("engine registry", () => {
   });
 
   it("derives the engine id unions from the descriptors", () => {
-    expectTypeOf<EngineId>().toEqualTypeOf<"kokoro" | "supertonic" | "audio8" | "supertonic3" | "qwen3" | "neutts">();
-    expectTypeOf<BrowserEngineId>().toEqualTypeOf<"kokoro" | "supertonic">();
+    expectTypeOf<EngineId>().toEqualTypeOf<
+      "kokoro" | "supertonic" | "kitten" | "paradee" | "piper" | "audio8" | "supertonic3" | "qwen3" | "neutts"
+    >();
+    expectTypeOf<BrowserEngineId>().toEqualTypeOf<"kokoro" | "supertonic" | "kitten" | "paradee" | "piper">();
     expectTypeOf<DesktopInlineEngineId>().toEqualTypeOf<"audio8" | "supertonic3" | "qwen3">();
     expectTypeOf<SetupPageEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
     expectTypeOf<RustBridgeEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
@@ -128,14 +135,15 @@ describe("engine registry", () => {
     expectTypeOf<EngineSettings<"supertonic3">>().toEqualTypeOf<{ voice: string; language: string }>();
     expectTypeOf<EngineLiveSettings<"qwen3">>().toEqualTypeOf<Qwen3LiveSettings>();
 
-    expect(BROWSER_ENGINE_IDS).toEqual(["kokoro", "supertonic"]);
+    expect(BROWSER_ENGINE_IDS).toEqual(["kokoro", "supertonic", "kitten", "paradee", "piper"]);
     expect(DESKTOP_INLINE_ENGINE_IDS).toEqual(["audio8", "supertonic3", "qwen3"]);
     expect(SETUP_PAGE_ENGINE_IDS).toEqual(["neutts", "qwen3"]);
   });
 
   it("narrows unknown values to registered ids", () => {
     expect(isEngineId("neutts")).toBe(true);
-    expect(isEngineId("kitten")).toBe(false);
+    expect(isEngineId("kitten")).toBe(true);
+    expect(isEngineId("chatterbox")).toBe(false);
     expect(isEngineId(7)).toBe(false);
     expect(isBrowserEngineId("supertonic")).toBe(true);
     expect(isBrowserEngineId("audio8")).toBe(false);

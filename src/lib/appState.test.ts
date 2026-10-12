@@ -97,7 +97,7 @@ describe("appState", () => {
       audio8: { voice: "not-a-voice" },
       supertonic3: "M1",
       qwen3: { temperature: 99, profileRepo: "../../etc" },
-      kitten: { voice: "ignored" },
+      mystery: { voice: "ignored" },
     }));
 
     expect(getInitialAppState()).toEqual({
@@ -114,7 +114,7 @@ describe("appState", () => {
       supertonic3: ENGINES.supertonic3.defaultSettings,
       qwen3: { ...ENGINES.qwen3.defaultSettings, temperature: 2, profileRepo: null },
     });
-    expect(settings).not.toHaveProperty("kitten");
+    expect(settings).not.toHaveProperty("mystery");
   });
 
   it("round-trips each surface's desktop model and every engine's settings", () => {

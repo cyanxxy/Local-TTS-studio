@@ -223,6 +223,7 @@ describe("ModelToggle", () => {
         onModelChange={() => {}}
         kokoroState={readyState}
         supertonicState={readyState}
+        visibleModels={["kokoro", "supertonic"]}
         unavailableModels={{ supertonic: "Unavailable in this environment" }}
         desktopModelOptions={[{
           key: "qwen3",

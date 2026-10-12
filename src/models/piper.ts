@@ -136,7 +136,7 @@ export const piperEngine = {
   label: "Piper",
   params: PIPER_PARAMS,
   runtime: "browser-worker",
-  targets: ["desktop"],
+  targets: ["web", "desktop"],
   picker: "browser",
   wasmOnly: true,
   capabilities,

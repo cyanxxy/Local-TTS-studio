@@ -40,7 +40,7 @@ describe("browserSupport", () => {
     ).toBe(true);
   });
 
-  it("removes legacy Supertonic 2 from Electron browser models", () => {
+  it("removes legacy Supertonic 2 from Electron browser models and keeps the newer browser engines", () => {
     expect(
       getLocalBrowserSupport(
         {
@@ -54,7 +54,7 @@ describe("browserSupport", () => {
       isSupported: true,
       isIOS: false,
       message: null,
-      supportedModels: ["kokoro"],
+      supportedModels: ["kokoro", "kitten", "paradee", "piper"],
       unsupportedModelMessages: {},
     });
   });
