@@ -22,6 +22,51 @@ export async function mp3AudioOffset(mp3: Blob): Promise<number> {
   return ID3_HEADER_BYTES + size + footer;
 }
 
+const MPEG1_L3_KBPS = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+const MPEG2_L3_KBPS = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+const SAMPLE_RATES: Record<number, readonly number[]> = {
+  3: [44100, 48000, 32000], // MPEG 1
+  2: [22050, 24000, 16000], // MPEG 2
+  0: [11025, 12000, 8000], // MPEG 2.5
+};
+
+/**
+ * The playing time of an MP3's frames, counted from the frame headers (Layer
+ * III only), or null when it has none. Chapter markers are written from this
+ * rather than from the PCM that was encoded, so they sit on the timeline a
+ * player will actually decode, encoder padding included.
+ */
+export async function mp3DurationSec(mp3: Blob): Promise<number | null> {
+  const bytes = new Uint8Array(await mp3.arrayBuffer());
+  let offset = await mp3AudioOffset(mp3);
+  let samples = 0;
+  let rate = 0;
+  let misses = 0;
+  while (offset + 4 <= bytes.length) {
+    const version = (bytes[offset + 1] >> 3) & 3;
+    const layer = (bytes[offset + 1] >> 1) & 3;
+    const bitrateIndex = bytes[offset + 2] >> 4;
+    const rateIndex = (bytes[offset + 2] >> 2) & 3;
+    const valid = bytes[offset] === 0xff && (bytes[offset + 1] & 0xe0) === 0xe0 && version !== 1
+      && layer === 1 && bitrateIndex > 0 && bitrateIndex < 15 && rateIndex < 3;
+    if (!valid) {
+      // Padding or a trailing tag: resync, and give up on a long run of junk.
+      offset += 1;
+      misses += 1;
+      if (misses > 4096 && samples === 0) return null;
+      continue;
+    }
+    const sampleRate = SAMPLE_RATES[version][rateIndex];
+    const kbps = (version === 3 ? MPEG1_L3_KBPS : MPEG2_L3_KBPS)[bitrateIndex];
+    const padding = (bytes[offset + 2] >> 1) & 1;
+    const frameBytes = Math.floor(((version === 3 ? 144_000 : 72_000) * kbps) / sampleRate) + padding;
+    samples += version === 3 ? 1152 : 576;
+    rate = sampleRate;
+    offset += frameBytes;
+  }
+  return samples > 0 ? samples / rate : null;
+}
+
 /**
  * One MP3 holding every chapter back to back, with a book-level ID3v2.4 tag
  * whose CHAP/CTOC frames mark where each chapter starts. MPEG audio frames
@@ -48,9 +93,15 @@ export interface ZipEntry {
   data: Blob | Uint8Array;
 }
 
-/** A zip of stored (not recompressed) entries; MP3 and images do not shrink. */
+const ZIP_READ_BYTES = 4 * 1024 * 1024;
+
+/**
+ * A zip of stored (not recompressed) entries; MP3 and images do not shrink.
+ * Entries are read and written a few MiB at a time, and the output is kept as
+ * Blob pieces, so the whole book is never in JavaScript memory at once.
+ */
 export async function buildZip(entries: readonly ZipEntry[]): Promise<Blob> {
-  const parts: Uint8Array<ArrayBuffer>[] = [];
+  const parts: Blob[] = [];
   const zip = new Zip();
   const finished = new Promise<void>((resolve, reject) => {
     zip.ondata = (error, data, final) => {
@@ -58,14 +109,22 @@ export async function buildZip(entries: readonly ZipEntry[]): Promise<Blob> {
         reject(error);
         return;
       }
-      parts.push(data.slice());
+      parts.push(new Blob([data.slice()]));
       if (final) resolve();
     };
   });
   for (const entry of entries) {
     const file = new ZipPassThrough(entry.name);
     zip.add(file);
-    file.push(entry.data instanceof Blob ? new Uint8Array(await entry.data.arrayBuffer()) : entry.data, true);
+    if (entry.data instanceof Blob) {
+      for (let start = 0; start < entry.data.size; start += ZIP_READ_BYTES) {
+        const end = Math.min(entry.data.size, start + ZIP_READ_BYTES);
+        file.push(new Uint8Array(await entry.data.slice(start, end).arrayBuffer()), end === entry.data.size);
+      }
+      if (entry.data.size === 0) file.push(new Uint8Array(0), true);
+    } else {
+      file.push(entry.data, true);
+    }
   }
   zip.end();
   await finished;

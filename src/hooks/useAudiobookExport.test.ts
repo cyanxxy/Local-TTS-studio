@@ -32,7 +32,6 @@ function setup(options: { cached?: Record<string, CachedReaderAudio> } = {}) {
       cached[sectionId]?.signature === signature
     )),
     loadAudio: vi.fn(async (_documentId: string, sectionId: string) => cached[sectionId] ?? null),
-    saveAudio: vi.fn<(audio: CachedReaderAudio) => Promise<void>>(async () => undefined),
   };
   const renderSection = vi.fn((_text: string, signal: AbortSignal): AsyncIterable<SynthesisChunk> => (
     (async function* () {
@@ -65,7 +64,7 @@ describe("useAudiobookExport", () => {
     expect(result.current.state.status).toBe("idle");
   });
 
-  it("exports the book, rendering what the cache lacks and saving it, then hands the file to the save flow", async () => {
+  it("exports the book, rendering what the cache lacks without filling the listening cache, then hands the file to the save flow", async () => {
     const reusable: CachedReaderAudio = {
       cacheKey: "k",
       documentId: book.id,
@@ -86,8 +85,8 @@ describe("useAudiobookExport", () => {
 
     await waitFor(() => expect(result.current.state.status).toBe("done"));
     expect(renderSection).toHaveBeenCalledTimes(sections.length - 1);
-    expect(library.saveAudio).toHaveBeenCalledTimes(sections.length - 1);
-    expect(library.saveAudio.mock.calls[0][0]).toMatchObject({ documentId: book.id, synthesisComplete: true });
+    // The listening cache (96 entries) is for what the listener plays, not for an export.
+    expect("saveAudio" in library).toBe(false);
     expect(encode).toHaveBeenCalledTimes(2);
     expect(save).toHaveBeenCalledWith(expect.any(Blob), "Exported.mp3");
     expect(result.current.state.result).toMatchObject({
@@ -149,6 +148,15 @@ describe("useAudiobookExport", () => {
     expect(result.current.state.result?.reusedChapters).toBe(1);
   });
 
+  it("lets go of the kept chapters after a successful export, so the next one starts afresh", async () => {
+    const { result, encode } = setup();
+    act(() => result.current.start({ kind: "book" }, "mp3"));
+    await waitFor(() => expect(result.current.state.status).toBe("done"));
+    expect(encode).toHaveBeenCalledTimes(2);
+    act(() => result.current.start({ kind: "book" }, "mp3"));
+    await waitFor(() => expect(encode).toHaveBeenCalledTimes(4));
+  });
+
   it("refuses to start before the voice is known", async () => {
     const { result } = setup();
     // No signature parts: rendered with the hook below.
@@ -158,7 +166,7 @@ describe("useAudiobookExport", () => {
       engineId: "kokoro",
       signatureParts: null,
       renderSection: () => (async function* () { yield chunk(); })(),
-      library: { hasAudio: vi.fn(), loadAudio: vi.fn(), saveAudio: vi.fn() } as never,
+      library: { hasAudio: vi.fn(), loadAudio: vi.fn() } as never,
     }));
     act(() => unknown.result.current.start({ kind: "book" }, "mp3"));
     expect(unknown.result.current.state).toMatchObject({ status: "failed", error: expect.stringMatching(/voice/i) });

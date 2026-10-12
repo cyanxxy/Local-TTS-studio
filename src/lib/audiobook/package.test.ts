@@ -7,6 +7,7 @@ import {
   buildZip,
   coverFile,
   mp3AudioOffset,
+  mp3DurationSec,
 } from "./package";
 
 const frames = (fill: number, length = 64) => new Uint8Array(length).fill(fill);
@@ -51,6 +52,26 @@ describe("mp3AudioOffset", () => {
   });
 });
 
+/** Whole MPEG-2 Layer III frames at 24 kHz / 96 kbps: 288 bytes and 576 samples each. */
+function mp3Frames(count: number): Uint8Array {
+  const bytes = new Uint8Array(count * 288);
+  for (let index = 0; index < count; index += 1) bytes.set([0xff, 0xf3, 0xa4, 0x00], index * 288);
+  return bytes;
+}
+
+describe("mp3DurationSec", () => {
+  it("counts the frames after a tag, so 1000 frames at 24 kHz are exactly 24 s", async () => {
+    const tag = buildId3Tag({ title: "T" }, [], { paddingBytes: 30 });
+    expect(await mp3DurationSec(blobOf(tag, mp3Frames(1000)))).toBeCloseTo(24, 6);
+  });
+
+  it("copes with a trailing tag and has no answer for something that is not MP3", async () => {
+    const trailing = new Uint8Array(128).fill(0x54);
+    expect(await mp3DurationSec(blobOf(mp3Frames(500), trailing))).toBeCloseTo(12, 6);
+    expect(await mp3DurationSec(blobOf(new Uint8Array(10_000).fill(7)))).toBeNull();
+  });
+});
+
 describe("buildChapteredMp3", () => {
   it("joins the chapters' audio under a tag whose chapters start where each one does", async () => {
     const one = blobOf(frames(1));
@@ -86,6 +107,17 @@ describe("buildZip", () => {
     expect(Object.keys(files)).toEqual(["01 - One.mp3", "playlist.m3u8"]);
     expect(Array.from(files["01 - One.mp3"])).toEqual(Array.from(frames(7, 10)));
     expect(strFromU8(files["playlist.m3u8"])).toBe("#EXTM3U\n");
+  });
+});
+
+describe("buildZip streaming", () => {
+  it("round-trips an entry larger than one read slice", async () => {
+    const big = new Uint8Array(9 * 1024 * 1024).map((_, index) => index % 251);
+    const zip = await buildZip([{ name: "big.mp3", data: new Blob([big]) }, { name: "empty.txt", data: new Blob([]) }]);
+    const files = unzipSync(new Uint8Array(await zip.arrayBuffer()));
+    expect(files["big.mp3"].length).toBe(big.length);
+    expect(files["big.mp3"][1_234_567]).toBe(big[1_234_567]);
+    expect(files["empty.txt"].length).toBe(0);
   });
 });
 

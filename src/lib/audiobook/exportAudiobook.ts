@@ -14,6 +14,7 @@ import {
   buildPlaylist,
   buildZip,
   coverFile,
+  mp3DurationSec,
   type EncodedChapter,
   type ZipEntry,
 } from "./package";
@@ -83,6 +84,19 @@ export interface AudiobookResult {
   reusedSections: number;
   renderedSections: number;
   reusedChapters: number;
+}
+
+/** Encoded chapters kept for a retry, at most this many bytes (oldest dropped first). */
+export const MAX_RESUME_BYTES = 256 * 1024 * 1024;
+
+export function trimResumeStore(store: EncodedChapterStore, maxBytes: number): void {
+  let total = 0;
+  for (const entry of store.values()) total += entry.mp3.size;
+  for (const [key, entry] of store) {
+    if (total <= maxBytes || store.size <= 1) break;
+    store.delete(key);
+    total -= entry.mp3.size;
+  }
 }
 
 function toExportChunk(chunk: CachedReaderAudioChunk): AudioExportSourceChunk {
@@ -188,9 +202,13 @@ export async function exportAudiobook(request: AudiobookExportRequest): Promise<
     const entry: EncodedChapter = {
       title: chapter.chapter.title,
       mp3: result.blob,
-      durationSec: cachedChunksDurationSec(chunks),
+      // The marker timeline is the encoded file's own, not the PCM's.
+      durationSec: (await mp3DurationSec(result.blob)) ?? cachedChunksDurationSec(chunks),
     };
-    resume?.set(storeKey, entry);
+    if (resume) {
+      resume.set(storeKey, entry);
+      trimResumeStore(resume, MAX_RESUME_BYTES);
+    }
     encoded.push(entry);
   }
 

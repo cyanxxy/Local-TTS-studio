@@ -5,6 +5,7 @@ import type { ExportOptions, ExportResult } from "../exportAudio";
 import { buildReaderSections, createReaderDocument, type CachedReaderAudioChunk } from "../readerDocument";
 import {
   exportAudiobook,
+  trimResumeStore,
   type AudiobookProgress,
   type AudiobookSectionSource,
   type EncodedChapterStore,
@@ -192,6 +193,30 @@ describe("exportAudiobook", () => {
       resume,
     }));
     expect(sameAudio.calls).toHaveLength(2);
+  });
+
+  it("puts chapter markers on the encoded file's own timeline, not the PCM's", async () => {
+    // Each chapter's MP3 is 10 s of frames whatever the PCM length was.
+    const frames = new Uint8Array(417 * 288);
+    for (let index = 0; index < 417; index += 1) frames.set([0xff, 0xf3, 0xa4, 0x00], index * 288);
+    const encode = vi.fn(async () => ({ blob: new Blob([frames]), extension: "mp3" } as ExportResult));
+    const result = await exportAudiobook(request({ encode }));
+    expect(result.durationSec).toBeCloseTo(2 * 417 * 576 / 24_000, 6);
+    const bytes = new Uint8Array(await result.blob.arrayBuffer());
+    const view = new DataView(bytes.buffer);
+    // The first CHAP frame's end time is the first chapter's encoded length.
+    const chap = bytes.findIndex((_, index) => String.fromCharCode(...bytes.subarray(index, index + 4)) === "CHAP");
+    const idEnd = bytes.indexOf(0, chap + 10);
+    expect(view.getUint32(idEnd + 1 + 4)).toBe(Math.round((417 * 576 / 24_000) * 1000));
+  });
+
+  it("keeps the retry store bounded, dropping the oldest chapters first", () => {
+    const store: EncodedChapterStore = new Map();
+    for (const key of ["a", "b", "c"]) store.set(key, { title: key, mp3: new Blob([new Uint8Array(100)]), durationSec: 1 });
+    trimResumeStore(store, 250);
+    expect([...store.keys()]).toEqual(["b", "c"]);
+    trimResumeStore(store, 1);
+    expect([...store.keys()]).toEqual(["c"]);
   });
 
   it("refuses an empty plan", async () => {

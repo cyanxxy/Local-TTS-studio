@@ -12,12 +12,10 @@ import { planAudiobook, type AudiobookPlan, type AudiobookScope } from "../lib/a
 import { downloadBlob, LOUDNESS_PRESETS } from "../lib/exportAudio";
 import {
   buildAudioSignature,
-  createReaderAudioCacheKey,
-  getCachedReaderAudioByteLength,
   type ReaderDocumentRecord,
   type ReaderSection,
 } from "../lib/readerDocument";
-import { cachedChunksDurationSec, collectSectionChunks } from "../lib/readerRender";
+import { collectSectionChunks } from "../lib/readerRender";
 import type { SurfaceEngineId } from "../models/registry";
 import type { EngineSignatureParts } from "../models/types";
 import type { SynthesisChunk } from "../shared/engineRuntime";
@@ -63,7 +61,7 @@ interface Options {
   signatureParts: EngineSignatureParts | null;
   /** Renders text with the Reader's engine, voice and tuning (through its synthesize queue). */
   renderSection: (text: string, signal: AbortSignal) => AsyncIterable<SynthesisChunk>;
-  library: Pick<UseReaderLibraryReturn, "hasAudio" | "loadAudio" | "saveAudio">;
+  library: Pick<UseReaderLibraryReturn, "hasAudio" | "loadAudio">;
   /** Overridable for tests. */
   encode?: typeof exportAudioChunks;
   save?: (blob: Blob, fileName: string) => void;
@@ -145,22 +143,9 @@ export function useAudiobookExport({
         const chunks = await collectSectionChunks(renderSection(planned.text, signal));
         signal.throwIfAborted();
         if (chunks.length === 0) throw new Error("The voice produced no audio for a section.");
-        // Kept in the Reader cache, so listening to it next is instant and an
-        // export that is retried starts from here.
-        void library.saveAudio({
-          cacheKey: createReaderAudioCacheKey(document.id, planned.section.id),
-          documentId: document.id,
-          chapterId: planned.section.chapterId,
-          sectionId: planned.section.id,
-          signature,
-          chunks,
-          byteLength: getCachedReaderAudioByteLength(chunks),
-          currentTime: 0,
-          playbackRate: document.listening?.playbackRate ?? 1,
-          totalDuration: cachedChunksDurationSec(chunks),
-          synthesisComplete: true,
-          updatedAt: Date.now(),
-        }).catch(() => undefined);
+        // Not saved to the listening cache: a book's worth of sections would
+        // evict the audio the listener already has. A finished chapter is kept
+        // (as MP3) in the export's own resume store instead.
         return { chunks, reused: false };
       },
     };
@@ -180,6 +165,8 @@ export function useAudiobookExport({
     }).then(({ blob, ...result }) => {
       if (controller.signal.aborted) return;
       save(blob, result.fileName);
+      // Done: the chapters kept for a retry are no longer needed.
+      resumeRef.current = null;
       setState({ status: "done", progress: null, error: null, result, scope, format });
     }, (cause: unknown) => {
       // A cancelled export is not a failure: the listener asked for it.
