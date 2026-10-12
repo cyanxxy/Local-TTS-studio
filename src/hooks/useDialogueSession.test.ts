@@ -124,9 +124,7 @@ describe("useDialogueSession", () => {
     let failSecond = true;
     const synthesize: PresetSynthesize = (text) => {
       if (text === "Hi Anna." && failSecond) {
-        return (async function* (): AsyncGenerator<{ audio: Float32Array; samplingRate: number }> {
-          throw new Error("Engine crashed.");
-        })();
+        return { [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(new Error("Engine crashed.")) }) };
       }
       return tone(10, text === "Hi Anna." ? 2 : 1);
     };

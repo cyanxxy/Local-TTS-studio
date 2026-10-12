@@ -130,9 +130,7 @@ describe("useStudioTakes", () => {
 
   it("reports a failed render and a missing passage", async () => {
     const { result, harness } = setup();
-    harness.setSynthesize(() => (async function* () {
-      throw new Error("Qwen3 is busy.");
-    })());
+    harness.setSynthesize(() => ({ [Symbol.asyncIterator]: () => ({ next: () => Promise.reject(new Error("Qwen3 is busy.")) }) }));
     await act(async () => { await result.current.renderVariations(WHOLE_SCRIPT_TARGET, 2); });
     expect(result.current.error).toBe("Qwen3 is busy.");
 
