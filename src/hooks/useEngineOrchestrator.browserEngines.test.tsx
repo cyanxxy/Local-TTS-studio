@@ -6,6 +6,8 @@ import { PlaybackClock } from "../lib/playbackClock";
 import { encodeWavPcm16 } from "../lib/wavCodec";
 import { BROWSER_ENGINE_IDS, type BrowserEngineId } from "../models/registry";
 import type { EngineRuntime, SynthesisChunk } from "../shared/engineRuntime";
+import type { SpeechPipelineChoices } from "../shared/speechPipelineRuntime";
+import { createPronunciationDictionary } from "../lib/pronunciation/dictionary";
 import type { WorkerInMessage, WorkerOutMessage } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import type { ChatterboxWorkerInMessage } from "../lib/chatterboxProtocol";
@@ -22,6 +24,7 @@ vi.mock("../contexts/Qwen3RuntimeContext", () => ({
   useQwen3Runtime: () => ({ available: false, profile: { mode: "customVoice" }, speaker: "Aiden" }),
 }));
 
+const PLAIN_SPEECH: SpeechPipelineChoices = { dictionaries: [], normalize: false, cleanup: false };
 const TEXT = "A sentence long enough for every engine to speak aloud.";
 const TUNING = { speed: 1.1, quality: 5 };
 const SUPPORT: LocalBrowserSupport = {
@@ -137,6 +140,8 @@ function renderOrchestrator(
   model: BrowserEngineId,
   engineSettings: OrchestratedEngineSettings = ENGINE_SETTINGS,
   support: LocalBrowserSupport = SUPPORT,
+  speech: SpeechPipelineChoices = PLAIN_SPEECH,
+  text = TEXT,
 ) {
   const player = createPlayer();
   const setShowPlayer = vi.fn();
@@ -147,8 +152,8 @@ function renderOrchestrator(
     browserSupport,
     debugProfiling: false,
     initialState: { model, desktopModels: { studio: null, reader: null } },
-    text: TEXT,
-    speech: { dictionaries: [], normalize: false, cleanup: false },
+    text,
+    speech,
     engineSettings,
     generationSettings: TUNING,
     player,
@@ -250,6 +255,97 @@ describe("Kitten, Paradee and Piper through the engine orchestrator", () => {
       expect(result.current.engineIds.studio).toBe(engine);
       await waitFor(() => expect(result.current.runtimes[engine].modelState.ready).toBe(true));
       expect(worker(engine)?.loads).toHaveLength(1);
+    });
+  });
+
+  describe.each(NEW_ENGINES)("%s through the spoken-text pipeline", (engine) => {
+    const { samplingRate } = SETUP[engine];
+    const SOURCE = 'GIF files are small.<break time="1s"/>The end.';
+    const speech: SpeechPipelineChoices = {
+      dictionaries: [createPronunciationDictionary({ name: "Quick", rules: [{ type: "alias", from: "GIF", to: "jif" }] })],
+      normalize: false,
+      cleanup: false,
+    };
+
+    it("applies the dictionary once and turns a break into exact silence for a synthesize request", async () => {
+      const { result, worker } = renderOrchestrator(engine, ENGINE_SETTINGS, SUPPORT, speech);
+      await waitFor(() => expect(result.current.runtimes[engine].modelState.ready).toBe(true));
+      const runtime = result.current.runtimes[engine] as EngineRuntime<NewEngine>;
+
+      const pending = collect(runtime.synthesize({
+        text: SOURCE,
+        settings: { voice: SETUP[engine].voice },
+        // A dictionary the caller passed along must not be applied a second time by the engine.
+        tuning: { ...TUNING, pronunciationRules: [{ type: "alias", from: "jif", to: "gif" }] },
+      }));
+      await waitFor(() => expect(worker(engine)?.generations).toHaveLength(1));
+      const request = worker(engine)?.generations[0] as { text: string; pronunciationRules?: unknown[] };
+      expect(request.text).toBe("jif files are small.\n\nThe end.");
+      expect(request.pronunciationRules ?? []).toEqual([]);
+
+      const generationId = worker(engine)?.generations[0].generationId;
+      act(() => {
+        worker(engine)?.emit({
+          type: "AUDIO_CHUNK",
+          generationId,
+          audio: new Float32Array(samplingRate),
+          samplingRate,
+          text: "jif files are small.",
+          index: 1,
+          total: 2,
+          textStart: 0,
+          textEnd: 20,
+          pauseAfterSec: 0.44,
+        });
+        worker(engine)?.emit({
+          type: "AUDIO_CHUNK",
+          generationId,
+          audio: new Float32Array(10),
+          samplingRate,
+          text: "The end.",
+          index: 2,
+          total: 2,
+          textStart: 22,
+          textEnd: 30,
+        });
+        worker(engine)?.emit({ type: "GENERATION_COMPLETE", generationId });
+      });
+
+      const chunks = await pending;
+      expect(chunks).toHaveLength(2);
+      expect(chunks[0]).toMatchObject({ text: "GIF files are small.", textStart: 0, textEnd: 20, pauseAfterSec: 1 });
+      // The engine's 0.44 s of trailing silence is replaced by exactly one second.
+      expect(chunks[0].audio).toHaveLength(samplingRate - Math.round(0.44 * samplingRate) + samplingRate);
+      expect(chunks[1]).toMatchObject({ text: "The end." });
+    });
+
+    it("speaks the spoken form of the script on the surface and reports chunks against the written one", async () => {
+      const { result, player, worker } = renderOrchestrator(engine, ENGINE_SETTINGS, SUPPORT, speech, SOURCE);
+      await waitFor(() => expect(result.current.runtimes[engine].canGenerate).toBe(true));
+
+      act(() => result.current.runtimes[engine].handleGenerate());
+
+      await waitFor(() => expect(worker(engine)?.generations).toHaveLength(1));
+      expect(worker(engine)?.generations[0]).toMatchObject({ text: "jif files are small.\n\nThe end." });
+      const generationId = worker(engine)?.generations[0].generationId;
+      act(() => worker(engine)?.emit({
+        type: "AUDIO_CHUNK",
+        generationId,
+        audio: new Float32Array(samplingRate),
+        samplingRate,
+        text: "jif files are small.",
+        index: 1,
+        total: 1,
+        textStart: 0,
+        textEnd: 20,
+        pauseAfterSec: 0.44,
+      }));
+
+      await waitFor(() => expect(player.scheduleChunk).toHaveBeenCalled());
+      expect(player.scheduleChunk).toHaveBeenCalledWith(expect.objectContaining({
+        text: "GIF files are small.",
+        pauseAfterSec: 1,
+      }));
     });
   });
 
