@@ -1,9 +1,10 @@
 import type { LocalTtsQwen3Setup } from "../../electron";
 import type { Qwen3Profile } from "../../../electron/qwen3Profiles";
-import { ENGINES, type SurfaceEngineId, type SurfaceEngineSettings } from "../../models/registry";
+import { ENGINES, engineSignatureParts, type SurfaceEngineId, type SurfaceEngineSettings } from "../../models/registry";
 import { qwen3ProfileSupportsInstruct } from "../../models/qwen3";
 import type { Qwen3SynthesisSettings, SynthesisRequest } from "../../shared/engineRuntime";
 import type { GenerationTuningSettings } from "../../types";
+import { stableStringify } from "./previewKey";
 import { bytesToBase64 } from "./stagedReference";
 import type { VoicePreset } from "./types";
 
@@ -185,4 +186,45 @@ export async function buildPresetRequest(
     default:
       throw new PresetRequestError(`${preset.engineId} can't be previewed here.`);
   }
+}
+
+/**
+ * Everything that changes how a preset sounds, as one string: the effective
+ * engine settings (voice, language, Qwen3 profile and sampling, Chatterbox
+ * temperature), the seed, the tuning the engine actually hears (its own
+ * signature inputs), and the identity of any reference clip. The preview cache
+ * keys on this, so a changed speed, profile, seed or reference never replays
+ * stale audio.
+ */
+export async function presetRenderKey(
+  preset: VoicePreset,
+  context: PresetRequestContext,
+  reference?: { sha256: string; transcript: string },
+): Promise<string> {
+  const { engineId, request } = await buildPresetRequest("", preset, {
+    ...context,
+    loadVoiceAudio: async () => ({ wav: new Uint8Array(0), transcript: reference?.transcript ?? "", sha256: reference?.sha256 ?? "" }),
+    resolveChatterboxVoice: async (id) => `${id}:${reference?.sha256 ?? ""}`,
+  });
+  const settings: Record<string, unknown> = { ...(request.settings as unknown as Record<string, unknown>) };
+  // The clip's bytes are identified by referenceAudioSignature and the transcript.
+  delete settings.referenceAudioBase64;
+  let parts: ReturnType<typeof engineSignatureParts> | null = null;
+  try {
+    parts = engineSignatureParts(engineId, {
+      settings: request.settings,
+      tuning: request.tuning,
+      quality: request.tuning.quality,
+    } as never);
+  } catch {
+    parts = null;
+  }
+  return stableStringify({
+    engineId,
+    mode: preset.mode ?? null,
+    settings,
+    seed: request.seed ?? null,
+    voice: parts?.voice ?? null,
+    tuning: parts?.tuning ?? request.tuning,
+  });
 }

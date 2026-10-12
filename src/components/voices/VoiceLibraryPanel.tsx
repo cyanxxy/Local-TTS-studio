@@ -15,7 +15,7 @@ import { isSurfaceEngine } from "../../lib/voiceLibrary/presetRequest";
 import { defaultVoiceDesignPreviewText } from "../../lib/voiceDesignPreviews";
 import { loadBuiltinFavorites, saveBuiltinFavorites } from "../../lib/voiceLibrary/builtinFavorites";
 import type { VoicePresetSettings } from "../../lib/voiceLibrary/types";
-import { VOICE_PACKAGE_EXTENSION } from "../../lib/voiceLibrary/portable";
+import { MAX_VOICE_PACKAGE_BYTES, VOICE_PACKAGE_EXTENSION } from "../../lib/voiceLibrary/portable";
 import { useVoicePreview } from "../../hooks/useVoicePreview";
 import type { CreateAuditionAudio } from "../../hooks/useAudition";
 import type { ApplyResult, ApplySurface } from "../../hooks/useVoiceApplier";
@@ -35,6 +35,7 @@ export interface VoiceLibraryPanelProps {
   library: UseVoiceLibraryReturn;
   runtimeVoices: RuntimeVoiceMap;
   synthesize: PresetSynthesize;
+  renderKey?: (voice: CatalogVoice) => Promise<string>;
   apply: (voice: CatalogVoice, surface: ApplySurface) => Promise<ApplyResult>;
   createAudio?: CreateAuditionAudio;
   /** Saves an exported voice; defaults to a browser download. */
@@ -50,7 +51,7 @@ function previewTextFor(voice: CatalogVoice): string {
  * in one searchable list, with preview, favorites, presets, one-click use in
  * Studio or the Reader, and portable import and export.
  */
-export function VoiceLibraryPanel({ library, runtimeVoices, synthesize, apply, createAudio, saveFile = downloadBlob }: VoiceLibraryPanelProps) {
+export function VoiceLibraryPanel({ library, runtimeVoices, synthesize, renderKey, apply, createAudio, saveFile = downloadBlob }: VoiceLibraryPanelProps) {
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<Scope>("all");
   const [engineId, setEngineId] = useState("");
@@ -60,7 +61,7 @@ export function VoiceLibraryPanel({ library, runtimeVoices, synthesize, apply, c
   const [builtinFavorites, setBuiltinFavorites] = useState(() => loadBuiltinFavorites());
   const [presetKey, setPresetKey] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
-  const preview = useVoicePreview(synthesize, library.store, createAudio);
+  const preview = useVoicePreview(synthesize, library.store, createAudio, renderKey);
 
   const catalog = useMemo(
     () => [...buildEngineCatalog(runtimeVoices, builtinFavorites), ...library.voices.map(libraryCatalogVoice)],
@@ -136,6 +137,10 @@ export function VoiceLibraryPanel({ library, runtimeVoices, synthesize, apply, c
   const importFile = useCallback(async (file: File | undefined) => {
     if (!file) return;
     try {
+      // Size first: reading a huge file into memory is the cost to avoid.
+      if (file.size > MAX_VOICE_PACKAGE_BYTES) {
+        throw new Error(`That file is larger than ${Math.round(MAX_VOICE_PACKAGE_BYTES / 1_000_000)} MB, so it is not a voice package.`);
+      }
       const record = await library.importVoice(new Uint8Array(await file.arrayBuffer()));
       setScope("mine");
       setNotice({ ok: true, text: `Imported ${record.name}.` });

@@ -43,6 +43,8 @@ export function useVoicePreview(
   synthesize: PresetSynthesize,
   store: Pick<VoiceLibraryStore, "getPreview" | "putPreview">,
   createAudio?: CreateAuditionAudio,
+  /** Everything beyond the preset that shapes the audio; see presetRenderKey. */
+  renderKey?: (voice: CatalogVoice) => Promise<string>,
 ): UseVoicePreviewReturn {
   const audition = useAudition(createAudio);
   const { play, stop: stopAudition, playingKey } = audition;
@@ -67,9 +69,12 @@ export function useVoicePreview(
     const { key } = voice;
     const preset: VoicePreset = voice.preset;
     const owner = previewOwnerId(voice);
-    const previewKey = previewCacheKey(preset, text);
     setState({ key, status: "rendering" });
     try {
+      // A voice the engines cannot render has no key; rendering then reports why.
+      const extra = renderKey ? await renderKey(voice).catch(() => "") : "";
+      controller.signal.throwIfAborted();
+      const previewKey = previewCacheKey(preset, text, extra);
       let wav: Uint8Array;
       let cached = false;
       const hit = await store.getPreview(owner, previewKey).catch(() => null);
@@ -92,7 +97,7 @@ export function useVoicePreview(
     } finally {
       if (controllerRef.current === controller) controllerRef.current = null;
     }
-  }, [cancel, play, store, synthesize]);
+  }, [cancel, play, renderKey, store, synthesize]);
 
   useEffect(() => cancel, [cancel]);
 

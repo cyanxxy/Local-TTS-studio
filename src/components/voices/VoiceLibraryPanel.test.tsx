@@ -62,7 +62,7 @@ describe("VoiceLibraryPanel", () => {
 
   it("lists built-in voices from every engine and filters them", async () => {
     render(<Harness />);
-    await screen.findByText("Heart");
+    await screen.findByText("George");
     expect(voiceNames()).toEqual(expect.arrayContaining(["Heart", "George", "Clara", "Arthur", "Aiden"]));
 
     fireEvent.change(screen.getByLabelText("Engine"), { target: { value: "audio8" } });
@@ -191,11 +191,22 @@ describe("VoiceLibraryPanel", () => {
     expect(await screen.findByText("Portable", { selector: "p" })).toBeInTheDocument();
   });
 
+  it("refuses an oversized import without reading it", async () => {
+    render(<Harness />);
+    await screen.findByText("Arthur");
+    const huge = new File(["x"], "huge.voice.zip");
+    Object.defineProperty(huge, "size", { value: 500_000_000 });
+    const read = vi.spyOn(huge, "arrayBuffer");
+    await act(async () => { fireEvent.change(screen.getByLabelText("Import voice file"), { target: { files: [huge] } }); });
+    expect(await screen.findByText(/larger than \d+ MB/)).toBeInTheDocument();
+    expect(read).not.toHaveBeenCalled();
+  });
+
   it("explains a file that is not a voice package", async () => {
     render(<Harness />);
     await screen.findByText("Arthur");
     await act(async () => { fireEvent.change(screen.getByLabelText("Import voice file"), { target: { files: [new File(["nope"], "x.zip")] } }); });
-    expect(await screen.findByText(/voice|zip|archive/i, { selector: "p" })).toBeInTheDocument();
+    expect(await screen.findByText("The voice file is not a valid zip archive.")).toBeInTheDocument();
   });
 
   it("removes a saved voice only after confirming", async () => {

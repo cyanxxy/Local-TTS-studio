@@ -18,7 +18,7 @@ vi.mock("../../contexts/Qwen3RuntimeContext", () => ({
 function session(): SynthesisSession {
   return {
     engines: {
-      kokoroVoices: ["af_heart"],
+      kokoroVoices: ["af_heart", "bm_george"],
       runtimes: {},
       surfaceEngineSettings: {},
     },
@@ -44,7 +44,7 @@ describe("VoicesRoute", () => {
         <VoicesRoute />
       </SynthesisSessionContext.Provider>,
     );
-    expect(await screen.findByText("Heart")).toBeInTheDocument();
+    expect(await screen.findByText("George")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("tab", { name: "Design a voice" }));
     expect(screen.getByText(/needs the desktop app and its model/)).toBeInTheDocument();
   });

@@ -72,6 +72,21 @@ describe("useVoicePreview", () => {
     expect(synthesize).toHaveBeenCalledTimes(2);
   });
 
+  it("renders again when the engine's settings change, even for the same preset and text", async () => {
+    const synthesize = vi.fn<PresetSynthesize>(async function* () {
+      yield { audio: new Float32Array(2400).fill(0.2), samplingRate: 24000 };
+    });
+    let key = "speed-1";
+    const audios: FakeAudio[] = [];
+    const { result } = renderHook(() => useVoicePreview(synthesize, store, () => { const a = new FakeAudio(); audios.push(a); return a; }, async () => key));
+    await act(() => result.current.preview(voice, "Hello."));
+    await act(() => result.current.preview(voice, "Hello."));
+    expect(synthesize).toHaveBeenCalledTimes(1);
+    key = "speed-1.4";
+    await act(() => result.current.preview(voice, "Hello."));
+    expect(synthesize).toHaveBeenCalledTimes(2);
+  });
+
   it("reports a failed render without caching it", async () => {
     const synthesize = vi.fn<PresetSynthesize>(async function* () {
       throw new Error("Model missing");

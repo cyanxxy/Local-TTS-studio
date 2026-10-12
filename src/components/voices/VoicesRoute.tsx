@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useQwen3Runtime } from "../../contexts/Qwen3RuntimeContext";
 import { useVoiceLibrary } from "../../hooks/useVoiceLibrary";
-import { usePresetSynthesize } from "../../hooks/usePresetSynthesize";
+import { usePresetVoiceEngine } from "../../hooks/usePresetSynthesize";
 import { useSynthesisSession } from "../../shared/synthesisSessionContext";
 import { VoicesPage } from "./VoicesPage";
 
@@ -10,7 +10,7 @@ export function VoicesRoute() {
   const { engines, voices } = useSynthesisSession();
   const qwen3 = useQwen3Runtime();
   const library = useVoiceLibrary();
-  const synthesize = usePresetSynthesize();
+  const { synthesize, renderKey } = usePresetVoiceEngine();
   const kokoroVoices = engines.kokoroVoices;
   const runtimeVoices = useMemo(() => ({ kokoro: kokoroVoices }), [kokoroVoices]);
   const designInstalled = qwen3.available && qwen3.profiles.some((profile) => (
@@ -23,6 +23,7 @@ export function VoicesRoute() {
       library={library}
       runtimeVoices={runtimeVoices}
       synthesize={synthesize}
+      renderKey={renderKey}
       apply={voices.apply}
       designAvailable={designInstalled}
       designUnavailableReason={qwen3.available

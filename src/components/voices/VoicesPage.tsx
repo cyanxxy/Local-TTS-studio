@@ -16,6 +16,7 @@ export interface VoicesPageProps {
   library: UseVoiceLibraryReturn;
   runtimeVoices: RuntimeVoiceMap;
   synthesize: PresetSynthesize;
+  renderKey?: (voice: CatalogVoice) => Promise<string>;
   apply: (voice: CatalogVoice, surface: ApplySurface) => Promise<ApplyResult>;
   /** Whether a Qwen3 VoiceDesign model is installed, and what to tell the user when it is not. */
   designAvailable: boolean;
@@ -43,6 +44,7 @@ export function VoicesPage({
   library,
   runtimeVoices,
   synthesize,
+  renderKey,
   apply,
   designAvailable,
   designUnavailableReason,
@@ -98,6 +100,7 @@ export function VoicesPage({
             library={library}
             runtimeVoices={runtimeVoices}
             synthesize={synthesize}
+            renderKey={renderKey}
             apply={apply}
             createAudio={createAudio}
             saveFile={saveFile}

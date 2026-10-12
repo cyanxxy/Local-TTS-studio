@@ -3,7 +3,7 @@ import type { LocalTtsQwen3Setup } from "../../electron";
 import { getQwen3Profiles } from "../../../electron/qwen3Profiles";
 import type { Qwen3RuntimeSettings } from "../../contexts/Qwen3RuntimeContext";
 import type { SurfaceEngineSettings } from "../../models/registry";
-import { PresetRequestError, buildPresetRequest, isSurfaceEngine, type PresetRequestContext } from "./presetRequest";
+import { PresetRequestError, buildPresetRequest, isSurfaceEngine, presetRenderKey, type PresetRequestContext } from "./presetRequest";
 import type { VoicePreset } from "./types";
 
 const profiles = getQwen3Profiles("darwin", "arm64");
@@ -170,5 +170,53 @@ describe("buildPresetRequest", () => {
     expect(isSurfaceEngine("kokoro")).toBe(true);
     expect(isSurfaceEngine("neutts")).toBe(false);
     expect(isSurfaceEngine("nonsense")).toBe(false);
+  });
+
+  describe("presetRenderKey", () => {
+    const keyOf = (voice: VoicePreset, ctx = context(), reference?: { sha256: string; transcript: string }) => presetRenderKey(voice, ctx, reference);
+    const kokoro = preset({});
+
+    it("is stable and ignores display labels", async () => {
+      expect(await keyOf(kokoro)).toBe(await keyOf({ ...kokoro, label: "Renamed" }));
+    });
+
+    it("changes with every input that changes the audio", async () => {
+      const base = await keyOf(kokoro);
+      const different = [
+        await keyOf({ ...kokoro, settings: { speed: 1.4 } }),
+        await keyOf(kokoro, { ...context(), tuning: { speed: 1.2, quality: 5 } }),
+        await keyOf(kokoro, { ...context(), tuning: { speed: 1, quality: 5, pauseOverridesSec: { sentence: 0.9 } } }),
+        await keyOf({ ...kokoro, settings: { seed: 3 } }),
+        await keyOf({ ...kokoro, voiceId: "af_heart" }),
+      ];
+      for (const key of different) expect(key).not.toBe(base);
+      expect(new Set(different).size).toBe(different.length);
+    });
+
+    it("follows the engine's live settings that the preset leaves open", async () => {
+      const sup = preset({ engineId: "supertonic", voiceId: "F1" });
+      const ctx = context();
+      const changed = { ...ctx, engineSettings: { ...ctx.engineSettings, supertonic: { voice: "F1", language: "fr" } } } as PresetRequestContext;
+      expect(await keyOf(sup, changed)).not.toBe(await keyOf(sup, ctx));
+      const chatter = preset({ engineId: "chatterbox", voiceId: "default" });
+      const warmer = { ...ctx, engineSettings: { ...ctx.engineSettings, chatterbox: { voice: "default", temperature: 1.4, seed: null } } } as PresetRequestContext;
+      expect(await keyOf(chatter, warmer)).not.toBe(await keyOf(chatter, ctx));
+    });
+
+    it("tracks the Qwen3 profile, sampling and the reference clip", async () => {
+      const ctx = context();
+      const design = preset({ engineId: "qwen3", voiceId: "voice-design", mode: "voiceDesign", settings: { instruction: "Low.", seed: 1 } });
+      const base = await keyOf(design, ctx);
+      const hotter = { ...ctx, engineSettings: { ...ctx.engineSettings, qwen3: { ...ctx.engineSettings.qwen3, temperature: 1.5 } } } as PresetRequestContext;
+      expect(await keyOf(design, hotter)).not.toBe(base);
+      expect(await keyOf({ ...design, settings: { instruction: "Low.", seed: 1, language: "German" } }, ctx)).not.toBe(base);
+      expect(await keyOf({ ...design, settings: { instruction: "Lower.", seed: 1 } }, ctx)).not.toBe(base);
+
+      const clone = preset({ engineId: "qwen3", voiceId: "library:c1", mode: "voiceClone", libraryVoiceId: "c1" });
+      const one = await keyOf(clone, ctx, { sha256: "a".repeat(64), transcript: "Hello." });
+      expect(await keyOf(clone, ctx, { sha256: "b".repeat(64), transcript: "Hello." })).not.toBe(one);
+      expect(await keyOf(clone, ctx, { sha256: "a".repeat(64), transcript: "Hello there." })).not.toBe(one);
+      expect(one).not.toContain("AQID");
+    });
   });
 });
