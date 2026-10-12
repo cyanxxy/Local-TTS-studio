@@ -276,7 +276,7 @@ describe("Kitten, Paradee and Piper through the engine orchestrator", () => {
         text: SOURCE,
         settings: { voice: SETUP[engine].voice },
         // A dictionary the caller passed along must not be applied a second time by the engine.
-        tuning: { ...TUNING, pronunciationRules: [{ type: "alias", from: "jif", to: "gif" }] },
+        tuning: { ...TUNING, pronunciationRules: [{ from: "jif", to: "gif" }] },
       }));
       await waitFor(() => expect(worker(engine)?.generations).toHaveLength(1));
       const request = worker(engine)?.generations[0] as { text: string; pronunciationRules?: unknown[] };
