@@ -1,5 +1,5 @@
 import type { LocalTtsGenerateResult } from "../electron";
-import { createLocalAudioAssembler } from "../lib/localTtsStream";
+import { createLocalAudioAssembler, createLocalRequestId } from "../lib/localTtsStream";
 import type { TextChunk } from "../lib/chunking";
 import { buildQwen3RequestPlan, type Qwen3RequestSection } from "../lib/qwenChunking";
 import { qwen3ProfileSupportsInstruct } from "../models/qwen3";
@@ -14,7 +14,7 @@ export const QWEN3_SECTION_JOIN_PAUSE_SEC = 0.2;
 const REFERENCE_CACHE_MISS = /reference cache entry was not found/i;
 
 export function qwen3RequestId(kind: "probe" | "generate" | "job"): string {
-  return `${LOCAL_MODEL}-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return createLocalRequestId(LOCAL_MODEL, kind);
 }
 
 export function qwen3ErrorMessage(error: unknown): string {

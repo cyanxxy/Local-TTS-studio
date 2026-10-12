@@ -22,6 +22,7 @@ import {
   streamQwen3Synthesis,
 } from "./qwen3Synthesis";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import { useQwen3Warmup } from "./useQwen3Warmup";
 import { useSynthesisQueue } from "./useSynthesisQueue";
 import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
@@ -135,8 +136,6 @@ export function useQwen3LocalRuntime({
   // The player's content epoch when this runtime's generated audio entered it,
   // or null while the player holds nothing this runtime made.
   const ownedPlayerEpochRef = useRef<number | null>(null);
-  const warmedKeyRef = useRef<string | null>(null);
-  const warmingKeyRef = useRef<string | null>(null);
   const activeTextUnitsRef = useRef<TextChunk[]>([]);
   // The label a chunk gets when the plan has no text unit for it. A ref, so a
   // keystroke does not resubscribe to the audio stream.
@@ -316,26 +315,7 @@ export function useQwen3LocalRuntime({
     activeProbeRef.current = null;
   }, [cancelActiveGeneration, enabled, fetchProbe]);
 
-  useEffect(() => {
-    if (!electronAvailable || generateBusy || !bridge?.warm) return;
-    const path = settings.modelPath.trim();
-    if (!path || settings.readiness === "missing") return;
-    const key = `${settings.profile.repo}:${path}`;
-    if (warmedKeyRef.current === key || warmingKeyRef.current === key) return;
-    warmingKeyRef.current = key;
-    let active = true;
-    void bridge.warm({
-      model: LOCAL_MODEL,
-      mode: settings.profile.mode,
-      modelPath: path,
-      modelRepo: settings.profile.repo,
-    }).then((result) => {
-      if (active && result.warmed) warmedKeyRef.current = key;
-    }).catch(() => undefined).finally(() => {
-      if (warmingKeyRef.current === key) warmingKeyRef.current = null;
-    });
-    return () => { active = false; };
-  }, [bridge, electronAvailable, generateBusy, settings.modelPath, settings.profile, settings.readiness]);
+  useQwen3Warmup(electronAvailable, generateBusy, settings);
 
   // A lease keeps the model resident in the main process for as long as a
   // surface selects it, across the idle pauses between generations. It loads

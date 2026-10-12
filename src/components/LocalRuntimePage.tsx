@@ -9,7 +9,8 @@ import type {
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { GenerationStats } from "../types";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
-import { createLocalAudioAssembler } from "../lib/localTtsStream";
+import { useQwen3Warmup } from "../hooks/useQwen3Warmup";
+import { createLocalAudioAssembler, createLocalRequestId } from "../lib/localTtsStream";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import {
   hasPrimaryShortcutModifier,
@@ -79,14 +80,6 @@ function qwen3ReferenceGuidance(durationSec: number | null): StatusMessage {
     };
   }
   return { tone: "success", text: `Reference WAV loaded (${duration}).` };
-}
-
-function createLocalRequestId(model: LocalTtsModel): string {
-  return `${model}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function createProbeRequestId(model: LocalTtsModel): string {
-  return `${model}-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 const GENERATION_TIMING_LABELS: Array<[string, string]> = [
@@ -293,7 +286,7 @@ function LocalRuntimePageBody({
     if (!window.electron?.localTts) return;
     runtimeVersionRef.current += 1;
     const runtimeVersion = runtimeVersionRef.current;
-    const requestId = createProbeRequestId(model);
+    const requestId = createLocalRequestId(model, "probe");
 
     setRuntimeBusy(true);
     setGenerationProgress(null);
@@ -353,28 +346,7 @@ function LocalRuntimePageBody({
   }, [electronAvailable, model, refreshCacheInfo, refreshQwen3Setup, runProbe]);
 
   // Pre-warm the selected model inside the resident Rust worker.
-  const warmedKeyRef = useRef<string | null>(null);
-  const warmingKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (model !== "qwen3" || !electronAvailable || generateBusy) return;
-    const modelPath = qwen3.modelPath.trim();
-    if (!modelPath || qwen3.readiness === "missing") return;
-    const warmKey = `${qwen3.profile.repo}:${modelPath}`;
-    if (warmedKeyRef.current === warmKey || warmingKeyRef.current === warmKey) return;
-    warmingKeyRef.current = warmKey;
-    let active = true;
-    void window.electron?.localTts?.warm?.({
-      model,
-      mode: qwen3.profile.mode,
-      modelPath,
-      modelRepo: qwen3.profile.repo,
-    }).then((result) => {
-      if (active && result.warmed) warmedKeyRef.current = warmKey;
-    }).catch(() => undefined).finally(() => {
-      if (warmingKeyRef.current === warmKey) warmingKeyRef.current = null;
-    });
-    return () => { active = false; };
-  }, [electronAvailable, generateBusy, model, qwen3.modelPath, qwen3.profile, qwen3.readiness]);
+  useQwen3Warmup(model === "qwen3" && electronAvailable, generateBusy, qwen3);
 
   useEffect(() => {
     if (!electronAvailable || !window.electron?.localTts) return;
@@ -690,7 +662,7 @@ function LocalRuntimePageBody({
     if (!window.electron?.localTts) return;
     const pageVersion = pageVersionRef.current;
     const generationVersion = generationVersionRef.current;
-    const requestId = createLocalRequestId(model);
+    const requestId = createLocalRequestId(model, "generate");
 
     clearGeneratedResult();
     beginAudioStream();

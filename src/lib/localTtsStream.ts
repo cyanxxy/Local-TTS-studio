@@ -1,4 +1,9 @@
-import type { LocalTtsAudioChunkEvent, LocalTtsAudioGapEvent, LocalTtsAudioStreamEvent } from "../electron";
+import type { LocalTtsAudioChunkEvent, LocalTtsAudioGapEvent, LocalTtsAudioStreamEvent, LocalTtsModel } from "../electron";
+
+/** A fresh id for one bridge request; `kind` tells a probe, a job or a generation apart in logs. */
+export function createLocalRequestId(model: LocalTtsModel, kind: string): string {
+  return `${model}-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 /** One playable piece of a local bridge stream, in timeline order. */
 export interface AssembledAudio {
