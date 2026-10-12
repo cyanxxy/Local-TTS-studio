@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { useAppEnvironment } from "../hooks/useAppEnvironment";
 import { useAppPreferences } from "../hooks/useAppPreferences";
@@ -9,9 +9,14 @@ import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useDocumentImport } from "../hooks/useDocumentImport";
 import { useEngineOrchestrator } from "../hooks/useEngineOrchestrator";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
+import { useAudiobookExport } from "../hooks/useAudiobookExport";
+import { useGenerateAfterLookahead, type LookaheadControls } from "../hooks/useGenerateAfterLookahead";
+import { useReaderLookahead } from "../hooks/useReaderLookahead";
+import { useReaderListeningProfile, type ListeningTarget } from "../hooks/useReaderListeningProfile";
 import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderSession } from "../hooks/useReaderSession";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
+import { useStudioAudioKeeper } from "../hooks/useStudioAudioKeeper";
 import {
   getInitialAppState,
   getInitialCreatorState,
@@ -22,15 +27,18 @@ import {
   type PersistedAppState,
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
-import { getUnsupportedModelMessage } from "../lib/browserSupport";
+import { getReaderSectionText } from "../lib/readerDocument";
+import { getUnsupportedModelMessage, isModelSupportedInBrowser } from "../lib/browserSupport";
 import {
   getEngine,
+  isBrowserEngineId,
   surfaceEngineSignatureParts,
   type EngineSettings,
   type SurfaceEngineId,
 } from "../models/registry";
 import type { ModelType } from "../types";
 import type { CreatorEngineSupport } from "../components/CreatorToolsPanel";
+import type { SynthesisChunk, SynthesisRequest } from "./engineRuntime";
 
 export interface SynthesisSessionOptions {
   enableDesktopRuntimes: boolean;
@@ -144,8 +152,10 @@ export function useSynthesisSessionState({
     browser,
     surfaceEngineSettings,
     desktopModelOptions,
+    desktopEngineAvailability,
     retireAllAudio,
     selectBrowserModel,
+    selectDesktopModel,
     changeEngineInput,
   } = useEngineOrchestrator({
     surface: isReaderPage ? "reader" : isStudioPage ? "studio" : null,
@@ -169,20 +179,105 @@ export function useSynthesisSessionState({
   const studioRuntime = runtimes[studioEngineId];
   const readerRuntime = runtimes[readerEngineId];
 
+  const patchEngineSettings = useCallback(<Id extends AppEngineId>(
+    engine: Id,
+    patch: Partial<AppEngineSettings[Id]>,
+  ) => {
+    setEngineSettings((current) => ({ ...current, [engine]: { ...current[engine], ...patch } }));
+  }, []);
+
+  const { setPlaybackRate } = player;
+  const isListeningEngineUsable = useCallback((engine: SurfaceEngineId) => (
+    isBrowserEngineId(engine)
+      ? isModelSupportedInBrowser(engine, browserSupport)
+      : desktopEngineAvailability[engine]
+  ), [browserSupport, desktopEngineAvailability]);
+  // A book's remembered voice, quality and speed belong to the Reader. The
+  // values Studio had are set aside the first time the Reader changes them and
+  // put back when Studio is shown again or a book without a profile is opened.
+  const [studioGlobals, setStudioGlobals] = useState<{
+    engineSettings: AppEngineSettings;
+    quality: number;
+    playbackRate: number;
+  } | null>(null);
+  const currentPlaybackRate = player.playbackRate;
+  const setAsideStudioGlobals = useCallback(() => {
+    setStudioGlobals((current) => current ?? { engineSettings, quality, playbackRate: currentPlaybackRate });
+  }, [currentPlaybackRate, engineSettings, quality]);
+  const applyListeningProfile = useCallback(({ engine: profile, playbackRate: rate }: ListeningTarget) => {
+    setAsideStudioGlobals();
+    if (profile) {
+      const { engine } = profile;
+      if (engine !== readerEngineId) {
+        if (isBrowserEngineId(engine)) selectBrowserModel("reader", engine);
+        else selectDesktopModel("reader", engine);
+      }
+      switch (engine) {
+        case "kokoro":
+        case "audio8":
+          patchEngineSettings(engine, { voice: profile.voice });
+          break;
+        case "supertonic":
+          patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
+          break;
+        case "supertonic3":
+          patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
+          break;
+        case "qwen3":
+          break;
+      }
+      if (profile.quality !== undefined && getEngine(engine).capabilities.quality) setQuality(profile.quality);
+    }
+    if (rate !== null) setPlaybackRate(rate);
+  }, [patchEngineSettings, readerEngineId, selectBrowserModel, selectDesktopModel, setAsideStudioGlobals, setPlaybackRate]);
+  const readerListening = useReaderListeningProfile({
+    active: isReaderPage,
+    loading: readerLibrary.loading,
+    document: readerLibrary.activeDocument,
+    engineId: readerEngineId,
+    surfaceEngineSettings,
+    quality,
+    playbackRate: player.playbackRate,
+    isEngineUsable: isListeningEngineUsable,
+    apply: applyListeningProfile,
+    updateListening: readerLibrary.updateActiveListening,
+  });
+  const { remember: rememberProfile } = readerListening;
+  const rememberListening = useCallback((change: Parameters<typeof rememberProfile>[0]) => {
+    if (!isReaderPage) return;
+    setAsideStudioGlobals();
+    rememberProfile(change);
+  }, [isReaderPage, rememberProfile, setAsideStudioGlobals]);
+
+  const putBackStudioGlobals = useEffectEvent(() => {
+    if (!studioGlobals) return;
+    setEngineSettings(studioGlobals.engineSettings);
+    setQuality(studioGlobals.quality);
+    setPlaybackRate(studioGlobals.playbackRate);
+    setStudioGlobals(null);
+  });
+  const readerBookHasProfile = readerLibrary.activeDocument?.listening !== undefined;
+  const readerBookId = readerLibrary.activeDocument?.id ?? null;
+  useEffect(() => {
+    if (isReaderPage && (readerBookHasProfile || readerLibrary.loading)) return;
+    const timer = window.setTimeout(() => putBackStudioGlobals(), 0);
+    return () => window.clearTimeout(timer);
+  }, [isReaderPage, readerBookHasProfile, readerBookId, readerLibrary.loading]);
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       const persisted: PersistedAppState = {
         model: activeModel,
         text,
-        quality,
+        quality: studioGlobals?.quality ?? quality,
         desktopModels: chosenDesktopModels,
       };
       persistAppState(persisted);
-      persistEngineSettings(engineSettings);
+      persistEngineSettings(studioGlobals?.engineSettings ?? engineSettings);
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeModel, chosenDesktopModels, engineSettings, quality, text]);
+  }, [activeModel, chosenDesktopModels, engineSettings, quality, studioGlobals, text]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -198,7 +293,27 @@ export function useSynthesisSessionState({
 
   const handleReaderModelChange = useCallback((model: ModelType) => {
     selectBrowserModel("reader", model);
-  }, [selectBrowserModel]);
+    rememberListening({ engine: model });
+  }, [rememberListening, selectBrowserModel]);
+
+  const handleReaderPlaybackRateChange = useCallback((rate: number) => {
+    setPlaybackRate(rate);
+    rememberListening({ playbackRate: rate });
+  }, [rememberListening, setPlaybackRate]);
+
+  // A Reader choice is remembered for the open book. The pickers are shared
+  // with Studio, so only a change that reaches the Reader's own engine counts.
+  const readerEngineHas = useCallback((engine: SurfaceEngineId) => isReaderPage && readerEngineId === engine, [
+    isReaderPage,
+    readerEngineId,
+  ]);
+  const readerDesktopModelOptions = useMemo(() => desktopModelOptions.reader.map((option) => ({
+    ...option,
+    onSelect: () => {
+      option.onSelect();
+      rememberListening({ engine: option.key });
+    },
+  })), [desktopModelOptions.reader, rememberListening]);
 
   const resetAudioForTextEdit = useCallback(() => {
     const hasActiveAudioState = Object.values(runtimes).some((runtime) => runtime.isGenerating)
@@ -223,10 +338,23 @@ export function useSynthesisSessionState({
     text,
   ]);
 
+  // A look-ahead render holds the engine's queue, so a generate asked for
+  // while one runs first yields the engine and then waits for it to free up.
+  const lookaheadControlsRef = useRef<LookaheadControls>({
+    preempt: () => undefined,
+    isBusy: () => false,
+    settled: () => Promise.resolve(),
+  });
+  const { requestGenerate: requestReaderGenerate, cancelPending: cancelPendingReaderGenerate } = useGenerateAfterLookahead({
+    controls: lookaheadControlsRef,
+    canGenerate: readerRuntime.canGenerate,
+    startGenerate: readerRuntime.handleGenerate,
+    scopeKey: `${readerLibrary.activeDocument?.id ?? ""}:${readerSections.activeSection?.id ?? ""}`,
+  });
   const handleReaderGenerate = useCallback(() => {
     setExportError(null);
-    readerRuntime.handleGenerate();
-  }, [readerRuntime]);
+    requestReaderGenerate();
+  }, [requestReaderGenerate]);
 
   // The inputs that shape the Reader engine's audio — only those it reads, so
   // a control the engine ignores never discards its cached sections. Null
@@ -241,22 +369,82 @@ export function useSynthesisSessionState({
     setImportError(null);
   }, []);
   const reportReaderError = useCallback((message: string) => setImportError(message), []);
+  // The Reader empties the shared player as it enters a section; Studio's
+  // unsaved audio is set aside first and put back when Studio returns.
+  const { keepStudioAudio } = useStudioAudioKeeper({ isStudioPage, player, setShowPlayer });
+  const retireAudioForReader = useCallback(() => {
+    keepStudioAudio();
+    retireAllAudio();
+  }, [keepStudioAudio, retireAllAudio]);
   const readerSession = useReaderSession({
     active: isReaderPage,
     library: readerLibrary,
     sections: readerSections,
     player,
     engineId: readerEngineId,
-    signatureParts: readerSignatureParts,
+    // Held back until the book's remembered voice is in place, because a
+    // lookup under the wrong voice would discard the audio saved under its own.
+    signatureParts: readerListening.settled ? readerSignatureParts : null,
+    playbackRate: readerLibrary.activeDocument?.listening?.playbackRate ?? null,
+    keepMismatchedAudio: readerListening.pending,
     isGenerating: readerRuntime.isGenerating,
     generate: handleReaderGenerate,
     autoAdvance: readerViewPreferences.autoAdvance,
-    retireAllAudio,
+    retireAllAudio: retireAudioForReader,
     resetAudioForTextEdit,
     setShowPlayer,
     clearErrors: clearReaderErrors,
     onError: reportReaderError,
   });
+  const readerNextSectionText = useMemo(() => (
+    readerLibrary.activeDocument && readerSections.nextSection
+      ? getReaderSectionText(readerLibrary.activeDocument.text, readerSections.nextSection)
+      : ""
+  ), [readerLibrary.activeDocument, readerSections.nextSection]);
+  const readerTuning = creator.generationSettings;
+  const readerSynthesize = readerRuntime.synthesize as (request: SynthesisRequest) => AsyncIterable<SynthesisChunk>;
+  const renderReaderSection = useCallback((text: string, signal: AbortSignal) => readerSynthesize({
+    text,
+    // Qwen3's settings live in its provider, which also holds the clone reference.
+    settings: readerEngineId === "qwen3" ? qwen3Settings : surfaceEngineSettings[readerEngineId],
+    tuning: readerTuning,
+    signal,
+  } as SynthesisRequest), [qwen3Settings, readerEngineId, readerSynthesize, readerTuning, surfaceEngineSettings]);
+  const readerSignaturePartsWhenSettled = readerListening.settled ? readerSignatureParts : null;
+  const audiobook = useAudiobookExport({
+    document: readerLibrary.activeDocument,
+    sections: readerSections.sections,
+    engineId: readerEngineId,
+    signatureParts: readerSignaturePartsWhenSettled,
+    renderSection: renderReaderSection,
+    library: readerLibrary,
+  });
+  const audiobookRunning = audiobook.state.status === "running";
+  const readerLookahead = useReaderLookahead({
+    // An export renders through the same queue; the look-ahead would only wait behind it.
+    enabled: readerViewPreferences.prepareAhead && !audiobookRunning,
+    active: isReaderPage,
+    document: readerLibrary.activeDocument,
+    nextSection: readerSections.nextSection,
+    nextSectionText: readerNextSectionText,
+    engineId: readerEngineId,
+    signatureParts: readerSignaturePartsWhenSettled,
+    renderSection: renderReaderSection,
+    engineBusy: readerRuntime.isGenerating,
+    modelReady: readerRuntime.modelState.ready,
+    currentSectionPlaying: player.isPlaying && player.isSynthesisComplete && player.segments.length > 0,
+    isRetaking: browser.isRetakingSegment,
+    library: readerLibrary,
+    onFailure: (cause) => console.warn("Could not prepare the next part:", cause),
+  });
+  const { preempt: preemptLookahead, isBusy: isLookaheadBusy, settled: lookaheadSettled } = readerLookahead;
+  useEffect(() => {
+    lookaheadControlsRef.current = { preempt: preemptLookahead, isBusy: isLookaheadBusy, settled: lookaheadSettled };
+  }, [isLookaheadBusy, lookaheadSettled, preemptLookahead]);
+  const handleReaderRetakeSegment = useCallback((...args: Parameters<typeof browser.handleRetakeSegment>) => {
+    preemptLookahead();
+    browser.handleRetakeSegment(...args);
+  }, [browser, preemptLookahead]);
   const { flushAudio: flushReaderAudio } = readerSession;
   useEffect(() => {
     flushReaderAudioRef.current = flushReaderAudio;
@@ -279,39 +467,37 @@ export function useSynthesisSessionState({
     setImportError,
   });
 
-  const patchEngineSettings = useCallback(<Id extends AppEngineId>(
-    engine: Id,
-    patch: Partial<AppEngineSettings[Id]>,
-  ) => {
-    setEngineSettings((current) => ({ ...current, [engine]: { ...current[engine], ...patch } }));
-  }, []);
-
   const handleVoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === voice) return;
     changeEngineInput(activeModel, () => patchEngineSettings(activeModel, { voice: nextVoice }));
-  }, [activeModel, changeEngineInput, patchEngineSettings, voice]);
+    if (readerEngineHas(activeModel)) rememberListening({ voice: nextVoice });
+  }, [activeModel, changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, voice]);
 
   const handleAudio8VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === audio8Voice) return;
     changeEngineInput("audio8", () => patchEngineSettings("audio8", { voice: nextVoice }));
-  }, [audio8Voice, changeEngineInput, patchEngineSettings]);
+    if (readerEngineHas("audio8")) rememberListening({ voice: nextVoice });
+  }, [audio8Voice, changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening]);
 
   const handleSupertonic3VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === supertonic3Voice) return;
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { voice: nextVoice }));
-  }, [changeEngineInput, patchEngineSettings, supertonic3Voice]);
+    if (readerEngineHas("supertonic3")) rememberListening({ voice: nextVoice });
+  }, [changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, supertonic3Voice]);
 
   // The language shapes Supertonic 2 audio like its voice does, so it goes
   // through the same save-then-clear path rather than being set directly.
   const handleSupertonicLanguageChange = useCallback((nextLanguage: string) => {
     if (nextLanguage === supertonicLanguage) return;
     changeEngineInput("supertonic", () => patchEngineSettings("supertonic", { language: nextLanguage }));
-  }, [changeEngineInput, patchEngineSettings, supertonicLanguage]);
+    if (readerEngineHas("supertonic")) rememberListening({ language: nextLanguage });
+  }, [changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, supertonicLanguage]);
 
   const handleSupertonic3LanguageChange = useCallback((nextLanguage: string) => {
     if (nextLanguage === supertonic3Language) return;
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { language: nextLanguage }));
-  }, [changeEngineInput, patchEngineSettings, supertonic3Language]);
+    if (readerEngineHas("supertonic3")) rememberListening({ language: nextLanguage });
+  }, [changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, supertonic3Language]);
 
   const handleQualityChange = useCallback((nextQuality: number) => {
     if (nextQuality === quality) return;
@@ -322,7 +508,8 @@ export function useSynthesisSessionState({
       return;
     }
     changeEngineInput(visibleEngineId, () => setQuality(nextQuality));
-  }, [changeEngineInput, quality, visibleEngineId]);
+    if (isReaderPage) rememberListening({ quality: nextQuality });
+  }, [changeEngineInput, isReaderPage, quality, rememberListening, visibleEngineId]);
 
   const handlePageNavigation = useCallback((page: AppPage) => {
     if (isReaderPage && page !== "reader") flushReaderAudio();
@@ -349,8 +536,9 @@ export function useSynthesisSessionState({
   }, [studioRuntime]);
 
   const handleReaderStop = useCallback(() => {
+    cancelPendingReaderGenerate();
     readerRuntime.handleStop();
-  }, [readerRuntime]);
+  }, [cancelPendingReaderGenerate, readerRuntime]);
 
   const handleReaderRetryLoad = useCallback(() => {
     readerRuntime.retryLoad();
@@ -465,7 +653,7 @@ export function useSynthesisSessionState({
       runtimes,
       audio8,
       browser,
-      desktopModelOptions,
+      desktopModelOptions: { ...desktopModelOptions, reader: readerDesktopModelOptions },
       surfaceEngineSettings,
       voice,
       kokoroVoices: browser.voices.kokoro,
@@ -502,10 +690,14 @@ export function useSynthesisSessionState({
       desktopModel: readerDesktopModel,
       runtime: readerRuntime,
       changeModel: handleReaderModelChange,
+      setPlaybackRate: handleReaderPlaybackRateChange,
       generate: handleReaderGenerate,
       stop: handleReaderStop,
       retryLoad: handleReaderRetryLoad,
       jumpToSegment: handleJumpToSegment,
+      retakeSegment: handleReaderRetakeSegment,
+      lookahead: readerLookahead,
+      audiobook,
     },
     documents: {
       isImporting: isImportingDocument,

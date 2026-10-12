@@ -50,6 +50,7 @@ interface CachedReaderAudio {
 interface DocumentRow {
   record_json: string;
   last_opened_at: number;
+  progress_json: string | null;
 }
 
 interface SettingRow {
@@ -215,12 +216,54 @@ function parseCachedAudio(value: unknown): {
   return { audio, chunks, metadataJson };
 }
 
-function decodeDocument(json: string, lastOpenedAt: number): ReaderDocumentRecord | null {
+/** A progress timestamp may lead the clock only by the renderer's monotonic bumps. */
+const MAX_PROGRESS_FUTURE_MS = 2_000;
+
+function optionalId(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  return requiredString(value, label, 512);
+}
+
+/**
+ * Keeps only the known progress fields, so the row cannot grow with whatever a
+ * caller attaches. A timestamp from the far future would win every later
+ * comparison and block real writes, so it is clamped to just ahead of now.
+ */
+function parseProgress(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new TypeError("Reader progress must be an object.");
+  return {
+    positionSec: finiteNumber(value.positionSec, "Reader progress positionSec"),
+    totalDurationSec: finiteNumber(value.totalDurationSec, "Reader progress totalDurationSec"),
+    textOffset: finiteNumber(value.textOffset, "Reader progress textOffset"),
+    chapterId: optionalId(value.chapterId, "Reader progress chapterId"),
+    sectionId: optionalId(value.sectionId, "Reader progress sectionId"),
+    percent: finiteNumber(value.percent, "Reader progress percent"),
+    updatedAt: Math.min(finiteNumber(value.updatedAt, "Reader progress updatedAt"), Date.now() + MAX_PROGRESS_FUTURE_MS),
+  };
+}
+
+/**
+ * The progress row is written far more often than the book, so it can be
+ * newer than the progress inside the document record. The newer one wins.
+ */
+function mergeProgress(record: ReaderDocumentRecord, progressJson: string | null): ReaderDocumentRecord {
+  if (progressJson === null) return record;
   try {
-    return {
-      ...parseDocument(JSON.parse(json)).record,
-      lastOpenedAt,
-    };
+    const progress = parseProgress(JSON.parse(progressJson));
+    const stored = isRecord(record.progress) ? record.progress.updatedAt : undefined;
+    if (typeof stored === "number" && stored >= (progress.updatedAt as number)) return record;
+    return { ...record, progress };
+  } catch {
+    return record;
+  }
+}
+
+function decodeDocument(row: DocumentRow): ReaderDocumentRecord | null {
+  try {
+    return mergeProgress({
+      ...parseDocument(JSON.parse(row.record_json)).record,
+      lastOpenedAt: row.last_opened_at,
+    }, row.progress_json);
   } catch {
     return null;
   }
@@ -275,6 +318,15 @@ export class ReaderLibraryDatabase {
           `Reader library schema ${row.user_version} is newer than supported schema ${SCHEMA_VERSION}.`,
         );
       }
+      // Created on every open rather than behind user_version: older builds
+      // that open this database ignore the table, so downgrades keep working.
+      this.#database.exec(`
+        CREATE TABLE IF NOT EXISTS document_progress (
+          document_id TEXT PRIMARY KEY,
+          progress_json TEXT NOT NULL,
+          updated_at REAL NOT NULL
+        ) STRICT
+      `);
       if (row.user_version === 0) {
         this.#database.exec(`
           CREATE TABLE documents (
@@ -338,21 +390,43 @@ export class ReaderLibraryDatabase {
 
   listDocuments(): ReaderDocumentRecord[] {
     const rows = this.#database.prepare(`
-      SELECT record_json, last_opened_at
-      FROM documents
-      ORDER BY last_opened_at DESC, updated_at DESC
+      SELECT d.record_json, d.last_opened_at, p.progress_json
+      FROM documents d
+      LEFT JOIN document_progress p ON p.document_id = d.id
+      ORDER BY d.last_opened_at DESC, d.updated_at DESC
     `).all() as unknown as DocumentRow[];
     return rows
-      .map((row) => decodeDocument(row.record_json, row.last_opened_at))
+      .map(decodeDocument)
       .filter((record): record is ReaderDocumentRecord => record !== null);
   }
 
   getDocument(idValue: unknown): ReaderDocumentRecord | null {
     const id = requiredString(idValue, "Reader document id", 512);
-    const row = this.#database
-      .prepare("SELECT record_json, last_opened_at FROM documents WHERE id = ?")
-      .get(id) as DocumentRow | undefined;
-    return row ? decodeDocument(row.record_json, row.last_opened_at) : null;
+    const row = this.#database.prepare(`
+      SELECT d.record_json, d.last_opened_at, p.progress_json
+      FROM documents d
+      LEFT JOIN document_progress p ON p.document_id = d.id
+      WHERE d.id = ?
+    `).get(id) as DocumentRow | undefined;
+    return row ? decodeDocument(row) : null;
+  }
+
+  /**
+   * Stores a book's reading position on its own. Listening writes this every
+   * few seconds, so it must not rewrite the book. Writes for a book that no
+   * longer exists are dropped, and an older position never replaces a newer one.
+   */
+  saveProgress(documentIdValue: unknown, progressValue: unknown): void {
+    const id = requiredString(documentIdValue, "Reader document id", 512);
+    const progress = parseProgress(progressValue);
+    this.#database.prepare(`
+      INSERT INTO document_progress(document_id, progress_json, updated_at)
+      SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM documents WHERE id = ?)
+      ON CONFLICT(document_id) DO UPDATE SET
+        progress_json = excluded.progress_json,
+        updated_at = excluded.updated_at
+      WHERE excluded.updated_at >= document_progress.updated_at
+    `).run(id, JSON.stringify(progress), progress.updatedAt as number, id);
   }
 
   saveDocument(value: unknown): void {
@@ -397,6 +471,7 @@ export class ReaderLibraryDatabase {
     const id = requiredString(idValue, "Reader document id", 512);
     this.#transaction(() => {
       this.#database.prepare("DELETE FROM reader_audio WHERE document_id = ?").run(id);
+      this.#database.prepare("DELETE FROM document_progress WHERE document_id = ?").run(id);
       this.#database.prepare("DELETE FROM documents WHERE id = ?").run(id);
       this.#database.prepare("DELETE FROM settings WHERE key = ? AND value = ?").run(ACTIVE_DOCUMENT_KEY, id);
     });
@@ -470,6 +545,32 @@ export class ReaderLibraryDatabase {
       `).all(cacheKey) as unknown as AudioChunkRow[];
       return decodeCachedAudio(audioRow, chunkRows);
     }, "DEFERRED");
+  }
+
+  /**
+   * The signature a section's cached audio was saved under, or null without
+   * an entry. Reads only the entry's header, never its PCM, so callers can ask
+   * whether audio is already cached without streaming it.
+   */
+  getAudioSignature(documentIdValue: unknown, sectionIdValue: unknown): string | null {
+    const documentId = requiredString(documentIdValue, "Reader audio documentId", 512);
+    const sectionId = requiredString(sectionIdValue, "Reader audio sectionId", 512);
+    const row = this.#database.prepare(`
+      SELECT record_json
+      FROM reader_audio
+      WHERE document_id = ? AND section_id = ?
+    `).get(documentId, sectionId) as AudioRow | undefined;
+    if (!row) return null;
+    try {
+      const { signature, synthesisComplete } = JSON.parse(row.record_json) as {
+        signature?: unknown;
+        synthesisComplete?: unknown;
+      };
+      // A partial section is not audio worth skipping a render for.
+      return typeof signature === "string" && synthesisComplete === true ? signature : null;
+    } catch {
+      return null;
+    }
   }
 
   deleteAudio(documentIdValue: unknown, sectionIdValue?: unknown): void {

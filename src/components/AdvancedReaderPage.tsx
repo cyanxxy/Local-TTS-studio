@@ -28,10 +28,12 @@ import {
 } from "../lib/readerPreferences";
 import { getMeaningfulTextLength } from "../lib/textValidation";
 import type { GenerationStats, ModelState, ModelType } from "../types";
+import type { AudiobookExport } from "../hooks/useAudiobookExport";
 import { ReaderLibrarySidebar, type ReaderSidebarTab } from "./ReaderLibrarySidebar";
 import { ReaderAppearanceMenu } from "./reader/ReaderAppearanceMenu";
 import { ReaderChapterRail } from "./reader/ReaderChapterRail";
 import { ReaderDesktopModelAlert } from "./reader/ReaderDesktopModelAlert";
+import { ReaderExportMenu } from "./reader/ReaderExportMenu";
 import { ReaderImportMenu } from "./reader/ReaderImportMenu";
 import { ReaderPlayerDock } from "./reader/ReaderPlayerDock";
 import type { SelectedPassage } from "./reader/ReaderSelectionToolbar";
@@ -75,6 +77,10 @@ interface AdvancedReaderPageProps {
   activeSection?: ReaderSection | null;
   previousSection?: ReaderSection | null;
   nextSection?: ReaderSection | null;
+  /** Whether the next part's audio is being prepared in the background, or is ready. */
+  nextPartStatus?: "preparing" | "ready" | null;
+  /** Exports the open book as an audiobook; the control is left out without it. */
+  audiobook?: AudiobookExport;
   onNavigateToOffset?: (offset: number, positionSec?: number) => void;
   viewPreferences?: ReaderViewPreferences;
   onViewPreferencesChange?: (patch: Partial<ReaderViewPreferences>) => void;
@@ -183,6 +189,8 @@ export function AdvancedReaderPage({
   activeSection = null,
   previousSection = null,
   nextSection = null,
+  nextPartStatus = null,
+  audiobook,
   onNavigateToOffset,
   viewPreferences = DEFAULT_READER_VIEW_PREFERENCES,
   onViewPreferencesChange,
@@ -564,6 +572,10 @@ export function AdvancedReaderPage({
     (id: string, patch: { color: ReaderHighlightColor }) => onUpdateHighlight?.(id, patch),
   );
   const handleRemoveHighlight = useStableCallback((id: string) => onRemoveHighlight?.(id));
+  const handleExportChapter = useStableCallback((chapterId: string) => {
+    audiobook?.start({ kind: "chapter", chapterId }, "mp3");
+    closeLibrary();
+  });
 
   /* ── Sleep timer and keyboard ─────────────────────────────── */
   const sleepTimer = useReaderSleepTimer({
@@ -628,6 +640,7 @@ export function AdvancedReaderPage({
         onRemoveNote={handleRemoveNote}
         onUpdateHighlight={onUpdateHighlight ? handleUpdateHighlight : undefined}
         onRemoveHighlight={onRemoveHighlight ? handleRemoveHighlight : undefined}
+        onExportChapter={audiobook ? handleExportChapter : undefined}
         selectedPassage={selectedPassage}
         tab={libraryTab}
         onTabChange={setLibraryTab}
@@ -672,6 +685,14 @@ export function AdvancedReaderPage({
           onSleepTimerChange={startSleepTimer}
           onShowShortcuts={showShortcuts}
         />
+        {audiobook && activeDocument && (
+          <ReaderExportMenu
+            audiobook={audiobook}
+            chapterId={currentChapter?.id ?? null}
+            chapterTitle={currentChapter?.title ?? null}
+            chapterCount={activeDocument.chapters.length}
+          />
+        )}
         <button
           type="button"
           onClick={editing ? finishEditing : startEditing}
@@ -723,6 +744,12 @@ export function AdvancedReaderPage({
         <p className="px-1 text-xs text-danger" role="status">{libraryError}</p>
       )}
 
+      {audiobook?.state.status === "failed" && audiobook.state.error && (
+        <p className="px-1 text-xs text-danger" role="status">
+          Audiobook export failed: {audiobook.state.error} Open Export audiobook to try again.
+        </p>
+      )}
+
       <section
         className={`surface reader-tone-${viewPreferences.tone} relative flex flex-col overflow-hidden rounded-[28px] ${fullScreen ? "flex-1" : ""}`}
         style={{
@@ -747,6 +774,7 @@ export function AdvancedReaderPage({
             totalDuration={totalDuration}
             sleepTimerLabel={sleepTimer.label}
             onCancelSleepTimer={cancelSleepTimer}
+            nextPartStatus={nextPartStatus}
           />
         )}
 

@@ -494,3 +494,40 @@ describe.each(HARNESSES)("%s EngineRuntime contract", (engine, createHarness) =>
     harness.unmount = () => undefined;
   });
 });
+
+describe("qwen3 admission window", () => {
+  it("holds a request back until 500 ms after the previous one finished, whoever asked for it", async () => {
+    const harness = qwen3Harness();
+    const first = track(harness.synthesize());
+    await waitFor(() => expect(harness.started()).toBe(1));
+    act(() => harness.complete());
+    await first.finished;
+    const finishedAt = Date.now();
+
+    // The main process would refuse a start inside the window; the runtime
+    // waits it out so an audiobook export or a look-ahead never trips it.
+    const second = track(harness.synthesize());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    expect(harness.started()).toBe(1);
+
+    await waitFor(() => expect(harness.started()).toBe(2), { timeout: 2_000 });
+    expect(Date.now() - finishedAt).toBeGreaterThanOrEqual(500);
+    act(() => harness.complete());
+    await second.finished;
+    expect(second.error()).toBeUndefined();
+    harness.unmount();
+  });
+
+  it("does not delay the retry of a request that failed", async () => {
+    const harness = qwen3Harness();
+    const failing = track(harness.synthesize());
+    await waitFor(() => expect(harness.started()).toBe(1));
+    act(() => harness.fail("engine fell over"));
+    await failing.finished;
+    track(harness.synthesize());
+    await waitFor(() => expect(harness.started()).toBe(2), { timeout: 300 });
+    harness.unmount();
+  });
+});

@@ -1,4 +1,4 @@
-import { ChevronDown, ChevronLeft, ChevronRight, Moon } from "lucide-react";
+import { CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Loader2, Moon } from "lucide-react";
 import type { PlaybackClock } from "../../lib/playbackClock";
 import { RemainingTime } from "./RemainingTime";
 import { clamp } from "./readerTextLayout";
@@ -23,6 +23,8 @@ interface ReaderChapterRailProps {
   totalDuration: number;
   sleepTimerLabel: string | null;
   onCancelSleepTimer: () => void;
+  /** The next part's audio is being prepared in the background, or is ready. */
+  nextPartStatus?: "preparing" | "ready" | null;
 }
 
 /**
@@ -44,6 +46,7 @@ export function ReaderChapterRail({
   totalDuration,
   sleepTimerLabel,
   onCancelSleepTimer,
+  nextPartStatus = null,
 }: ReaderChapterRailProps) {
   return (
     <nav
@@ -129,6 +132,24 @@ export function ReaderChapterRail({
           totalDuration={totalDuration}
           className="hidden whitespace-nowrap font-mono text-2xs text-text-muted tabular-nums md:inline"
         />
+        {/* Always mounted so assistive tech hears the change, not a new node. */}
+        <span role="status" className={nextPartStatus ? undefined : "sr-only"}>
+          {nextPartStatus && (
+            <span
+              className={`flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-2xs ${
+                nextPartStatus === "ready" ? "bg-accent-light text-accent" : "bg-text-primary/[0.06] text-text-muted"
+              }`}
+              title={nextPartStatus === "ready"
+                ? "The next part is prepared, so it will start without a pause."
+                : "Preparing the next part while this one plays."}
+            >
+              {nextPartStatus === "ready"
+                ? <CheckCircle2 size={10} aria-hidden />
+                : <Loader2 size={10} className="animate-spin motion-reduce:animate-none" aria-hidden />}
+              {nextPartStatus === "ready" ? "Next part ready" : "Preparing next part"}
+            </span>
+          )}
+        </span>
         {sleepTimerLabel && (
           <button
             type="button"

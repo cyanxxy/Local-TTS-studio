@@ -27,6 +27,7 @@ import {
   resolveReaderHighlightRange,
   structureTextChapters,
   type ReaderHighlight,
+  type ReaderListeningProfile,
 } from "./readerDocument";
 
 describe("readerDocument", () => {
@@ -562,5 +563,33 @@ describe("createReaderOffsetRebaser", () => {
     expect(rebaseReaderTextOffset(...second, 9)).toBe(referenceRebase(...second, 9));
     expect(rebaseReaderTextOffset(...first, 9)).toBe(referenceRebase(...first, 9));
     expect(rebaseReaderChapters(first[0], first[1], [], "Book")).toHaveLength(1);
+  });
+});
+
+describe("reader listening profile", () => {
+  it("keeps a speed on its own, without an engine or voice", () => {
+    const document = createReaderDocument({ id: "rate-only", text: "Text to listen to." });
+    expect(normalizeReaderDocumentRecord({ ...document, listening: { playbackRate: 1.5, updatedAt: 4 } }).listening)
+      .toEqual({ playbackRate: 1.5, updatedAt: 4 });
+  });
+
+  const document = createReaderDocument({ id: "listening", text: "Text to listen to." });
+
+  it("is absent from a book that has none and kept when valid", () => {
+    expect(normalizeReaderDocumentRecord(document)).not.toHaveProperty("listening");
+    const listening = { engine: "kokoro", voice: "af_heart", language: "en", quality: 5, playbackRate: 1.5, updatedAt: 3 };
+    expect(normalizeReaderDocumentRecord({ ...document, listening }).listening).toEqual(listening);
+  });
+
+  it("drops a malformed profile and clamps the speed to what the player offers", () => {
+    const damaged = { engine: 7, voice: "x", updatedAt: 1 } as unknown as ReaderListeningProfile;
+    expect(normalizeReaderDocumentRecord({ ...document, listening: damaged })).not.toHaveProperty("listening");
+    // A voice without its engine, or an engine without its voice, says nothing usable.
+    expect(normalizeReaderDocumentRecord({ ...document, listening: { voice: "x", updatedAt: 1 } }))
+      .not.toHaveProperty("listening");
+    expect(normalizeReaderDocumentRecord({ ...document, listening: { engine: "kokoro", updatedAt: 1 } }))
+      .not.toHaveProperty("listening");
+    const fast = { engine: "kokoro", voice: "x", playbackRate: 40, updatedAt: 1 };
+    expect(normalizeReaderDocumentRecord({ ...document, listening: fast }).listening?.playbackRate).toBe(2);
   });
 });

@@ -5,6 +5,7 @@ import {
   type CachedReaderAudio,
   type CachedReaderAudioChunk,
   type ReaderDocumentRecord,
+  type ReaderProgress,
 } from "./readerDocument";
 
 const DB_NAME = "open-tts-reader-library";
@@ -15,6 +16,7 @@ const CHAPTER_AUDIO_STORE = "chapter-audio";
 const CHAPTER_AUDIO_META_STORE = "chapter-audio-meta";
 const SETTINGS_STORE = "settings";
 const ACTIVE_DOCUMENT_KEY = "active-document-id";
+const PROGRESS_KEY_PREFIX = "progress:";
 const LEGACY_IMPORT_STORAGE_KEY = "open-tts-reader-import-v1";
 export const MAX_READER_AUDIO_CACHE_BYTES = 512 * 1024 * 1024;
 const MAX_READER_AUDIO_CACHE_ENTRIES = 96;
@@ -29,6 +31,9 @@ interface ReaderSettingRecord {
 
 interface ReaderAudioMetadata {
   cacheKey: string;
+  /** Absent on entries saved before the signature was kept here. */
+  signature?: string;
+  synthesisComplete?: boolean;
   documentId: string;
   chapterId: string;
   sectionId: string;
@@ -248,18 +253,94 @@ function normalizeCachedReaderAudio(value: unknown): CachedReaderAudio | null {
   return value as CachedReaderAudio;
 }
 
+function parseStoredProgress(value: string | undefined): ReaderProgress | null {
+  if (!value) return null;
+  try {
+    const progress = JSON.parse(value) as Partial<ReaderProgress> | null;
+    return progress
+      && isFiniteNumber(progress.updatedAt)
+      && isFiniteNumber(progress.positionSec)
+      && isFiniteNumber(progress.totalDurationSec)
+      && isFiniteNumber(progress.textOffset)
+      && isFiniteNumber(progress.percent)
+      ? progress as ReaderProgress
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The progress row is written far more often than the book, so the newer one wins. */
+function mergeStoredProgress(record: unknown, stored: ReaderProgress | null): unknown {
+  if (!stored || !record || typeof record !== "object") return record;
+  const current = (record as Partial<ReaderDocumentRecord>).progress;
+  if (current && isFiniteNumber(current.updatedAt) && current.updatedAt >= stored.updatedAt) return record;
+  return { ...record, progress: stored };
+}
+
 async function listIndexedDbReaderDocuments(): Promise<ReaderDocumentRecord[]> {
-  const records = await withStore(DOCUMENTS_STORE, "readonly", (store) => store.getAll()) as unknown[];
-  return normalizeDocumentRecords(records);
+  const database = await openReaderLibrary();
+  try {
+    const transaction = database.transaction([DOCUMENTS_STORE, SETTINGS_STORE], "readonly");
+    const [records, settings] = await Promise.all([
+      requestResult(transaction.objectStore(DOCUMENTS_STORE).getAll()) as Promise<unknown[]>,
+      requestResult(transaction.objectStore(SETTINGS_STORE).getAll()) as Promise<ReaderSettingRecord[]>,
+    ]);
+    await transactionDone(transaction);
+    const progress = new Map(settings
+      .filter((setting) => setting.key.startsWith(PROGRESS_KEY_PREFIX))
+      .map((setting) => [setting.key.slice(PROGRESS_KEY_PREFIX.length), parseStoredProgress(setting.value)]));
+    return normalizeDocumentRecords(records.map((record) => mergeStoredProgress(
+      record,
+      progress.get((record as { id?: string } | null)?.id ?? "") ?? null,
+    )));
+  } finally {
+    database.close();
+  }
 }
 
 async function getIndexedDbReaderDocument(id: string): Promise<ReaderDocumentRecord | null> {
-  const result = await withStore(DOCUMENTS_STORE, "readonly", (store) => store.get(id)) as unknown;
+  const database = await openReaderLibrary();
+  let result: unknown;
+  let stored: ReaderProgress | null;
+  try {
+    const transaction = database.transaction([DOCUMENTS_STORE, SETTINGS_STORE], "readonly");
+    const [record, setting] = await Promise.all([
+      requestResult(transaction.objectStore(DOCUMENTS_STORE).get(id)) as Promise<unknown>,
+      requestResult(transaction.objectStore(SETTINGS_STORE).get(`${PROGRESS_KEY_PREFIX}${id}`)) as Promise<ReaderSettingRecord | undefined>,
+    ]);
+    await transactionDone(transaction);
+    result = record;
+    stored = parseStoredProgress(setting?.value);
+  } finally {
+    database.close();
+  }
   if (!result || typeof result !== "object") return null;
   try {
-    return normalizeReaderDocumentRecord(result as ReaderDocumentRecord);
+    return normalizeReaderDocumentRecord(mergeStoredProgress(result, stored) as ReaderDocumentRecord);
   } catch {
     return null;
+  }
+}
+
+async function saveIndexedDbReaderProgress(documentId: string, progress: ReaderProgress): Promise<void> {
+  const database = await openReaderLibrary();
+  try {
+    const transaction = database.transaction([DOCUMENTS_STORE, SETTINGS_STORE], "readwrite");
+    const exists = await requestResult(transaction.objectStore(DOCUMENTS_STORE).count(documentId)) > 0;
+    const settings = transaction.objectStore(SETTINGS_STORE);
+    const key = `${PROGRESS_KEY_PREFIX}${documentId}`;
+    const existing = parseStoredProgress(
+      (await requestResult(settings.get(key)) as ReaderSettingRecord | undefined)?.value,
+    );
+    // A deleted book must not leave a progress row behind, and a late write
+    // must not roll a newer position back.
+    if (exists && (!existing || existing.updatedAt <= progress.updatedAt)) {
+      settings.put({ key, value: JSON.stringify(progress) });
+    }
+    await transactionDone(transaction);
+  } finally {
+    database.close();
   }
 }
 
@@ -284,6 +365,7 @@ async function deleteIndexedDbReaderDocument(id: string): Promise<void> {
       metadataStore.delete(entry.cacheKey);
     }
     const settingStore = transaction.objectStore(SETTINGS_STORE);
+    settingStore.delete(`${PROGRESS_KEY_PREFIX}${id}`);
     const active = await requestResult(settingStore.get(ACTIVE_DOCUMENT_KEY)) as ReaderSettingRecord | undefined;
     if (active?.value === id) settingStore.delete(ACTIVE_DOCUMENT_KEY);
     await transactionDone(transaction);
@@ -309,13 +391,19 @@ async function saveIndexedDbCachedReaderAudio(audio: CachedReaderAudio): Promise
   try {
     const transaction = database.transaction([CHAPTER_AUDIO_STORE, CHAPTER_AUDIO_META_STORE], "readwrite");
     const audioStore = transaction.objectStore(CHAPTER_AUDIO_STORE);
-    const existing = await requestResult(audioStore.get(cacheKey)) as CachedReaderAudio | undefined;
+    // The timestamp lives in the metadata store, so the race check never reads
+    // the stored PCM back just to compare it.
+    const existing = await requestResult(
+      transaction.objectStore(CHAPTER_AUDIO_META_STORE).get(cacheKey),
+    ) as ReaderAudioMetadata | undefined;
     // A final section flush can race an older debounced write. Timestamps are
     // monotonic at the caller, so never let the stale snapshot win the race.
     if (!existing || existing.updatedAt <= normalized.updatedAt) {
       audioStore.put(normalized);
       transaction.objectStore(CHAPTER_AUDIO_META_STORE).put({
         cacheKey,
+        signature: normalized.signature,
+        synthesisComplete: normalized.synthesisComplete === true,
         documentId: normalized.documentId,
         chapterId: normalized.chapterId,
         sectionId: normalized.sectionId,
@@ -456,6 +544,25 @@ export async function saveReaderDocument(document: ReaderDocumentRecord): Promis
   await bridge.saveDocument(document);
 }
 
+/**
+ * Stores a book's reading position on its own, so listening does not rewrite
+ * the book. `fallbackDocument` is saved whole when the desktop bridge predates
+ * the progress channel.
+ */
+export async function saveReaderProgress(
+  documentId: string,
+  progress: ReaderProgress,
+  fallbackDocument?: ReaderDocumentRecord,
+): Promise<void> {
+  const bridge = getDesktopReaderLibraryBridge();
+  if (!bridge) return saveIndexedDbReaderProgress(documentId, progress);
+  if (bridge.saveProgress) {
+    await bridge.saveProgress(documentId, progress);
+    return;
+  }
+  if (fallbackDocument) await bridge.saveDocument(fallbackDocument);
+}
+
 export async function deleteReaderDocument(id: string): Promise<void> {
   const bridge = getDesktopReaderLibraryBridge();
   if (!bridge) return deleteIndexedDbReaderDocument(id);
@@ -492,6 +599,33 @@ export async function getCachedReaderAudio(
   const bridge = getDesktopReaderLibraryBridge();
   if (!bridge) return getIndexedDbCachedReaderAudio(documentId, sectionId);
   return normalizeCachedReaderAudio(await bridge.getAudio(documentId, sectionId));
+}
+
+/**
+ * The signature a section's complete cached audio was saved under, or null
+ * when there is none, without loading the audio. An entry that predates the
+ * metadata signature is read in full once.
+ */
+export async function getCachedReaderAudioSignature(
+  documentId: string,
+  sectionId: string,
+): Promise<string | null> {
+  const bridge = getDesktopReaderLibraryBridge();
+  if (bridge) {
+    if (bridge.getAudioSignature) return bridge.getAudioSignature(documentId, sectionId);
+    const audio = normalizeCachedReaderAudio(await bridge.getAudio(documentId, sectionId));
+    return audio?.synthesisComplete === true ? audio.signature : null;
+  }
+  const cacheKey = createReaderAudioCacheKey(documentId, sectionId);
+  const metadata = await withStore(
+    CHAPTER_AUDIO_META_STORE,
+    "readonly",
+    (store) => store.get(cacheKey),
+  ) as ReaderAudioMetadata | undefined;
+  if (!metadata) return null;
+  if (metadata.signature !== undefined) return metadata.synthesisComplete === true ? metadata.signature : null;
+  const audio = await getIndexedDbCachedReaderAudio(documentId, sectionId);
+  return audio?.synthesisComplete === true ? audio.signature : null;
 }
 
 export async function deleteCachedReaderAudio(documentId: string, sectionId?: string): Promise<void> {

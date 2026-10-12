@@ -23,6 +23,7 @@ import {
   type ReaderHighlight,
   type ReaderHighlightColor,
   type ReaderHighlightInput,
+  type ReaderListeningProfile,
   type ReaderNote,
   type ReaderSection,
   type ReaderTextChangeHint,
@@ -32,6 +33,7 @@ import {
   deleteReaderDocument,
   getActiveReaderDocumentId,
   getCachedReaderAudio,
+  getCachedReaderAudioSignature,
   isReaderLibrarySupported,
   isReaderLibraryShutdownError,
   listReaderDocuments,
@@ -39,8 +41,16 @@ import {
   MAX_READER_AUDIO_MEMORY_CACHE_ENTRIES,
   saveCachedReaderAudio,
   saveReaderDocument,
+  saveReaderProgress,
   setActiveReaderDocumentId,
 } from "../lib/readerLibrary";
+
+/**
+ * How long reading progress waits before it is written. It is a throttle, not
+ * a debounce: a position that keeps moving is still saved this often, and a
+ * pause, a hidden window or a quit writes it at once.
+ */
+export const READER_PROGRESS_SAVE_INTERVAL_MS = 5_000;
 
 interface ProgressUpdate {
   positionSec: number;
@@ -74,6 +84,10 @@ export interface UseReaderLibraryReturn {
   finalizeActiveTextEdit: (documentId?: string) => void;
   updateActiveMetadata: (patch: Pick<Partial<ReaderDocumentRecord>, "title" | "author" | "description" | "language">) => void;
   updateProgress: (update: ProgressUpdate) => void;
+  /** Remembers how the active book is listened to; see `ReaderListeningProfile`. */
+  updateActiveListening: (profile: Omit<ReaderListeningProfile, "updatedAt">) => void;
+  /** Writes the active book's reading position now, ahead of the usual throttle. */
+  flushProgress: () => void;
   addBookmark: (input: { label: string; textOffset: number; positionSec: number }) => void;
   removeBookmark: (bookmarkId: string) => void;
   addNote: (input: { text: string; quote: string; textOffset: number }) => void;
@@ -85,6 +99,8 @@ export interface UseReaderLibraryReturn {
   removeHighlight: (highlightId: string) => void;
   saveAudio: (audio: CachedReaderAudio) => Promise<void>;
   loadAudio: (documentId: string, sectionId: string) => Promise<CachedReaderAudio | null>;
+  /** Whether a finished section is already saved under `signature`; reads no PCM from storage. */
+  hasAudio: (documentId: string, sectionId: string, signature: string) => Promise<boolean>;
   clearAudio: (documentId: string, sectionId?: string) => Promise<void>;
 }
 
@@ -243,6 +259,13 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     void trackSave(saveReaderDocument(document));
   }, [persistent, trackSave]);
 
+  // Reading position is the one thing that changes while a book plays, so it
+  // is stored as its own small record instead of rewriting the whole book.
+  const persistProgress = useCallback((document: ReaderDocumentRecord) => {
+    if (!persistent) return;
+    void trackSave(saveReaderProgress(document.id, document.progress, document));
+  }, [persistent, trackSave]);
+
   const replaceDocument = useCallback((document: ReaderDocumentRecord, persist = true) => {
     const nextDocuments = sortDocuments([
       document,
@@ -318,6 +341,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
       ...pendingTextStructureIdsRef.current,
       ...textSaveTimersRef.current.keys(),
     ]);
+    const pendingDocumentIds = new Set(documentSaveTimersRef.current.keys());
     const pendingIds = new Set([
       ...pendingTextIds,
       ...progressSaveTimersRef.current.keys(),
@@ -335,6 +359,10 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     for (const id of pendingIds) {
       const latest = documentsRef.current.find((document) => document.id === id);
       if (!latest) continue;
+      if (!pendingTextIds.has(id) && !pendingDocumentIds.has(id)) {
+        persistProgress(latest);
+        continue;
+      }
       const flushed = pendingTextIds.has(id) ? structurePendingTextDocument(latest) : latest;
       void trackSave(saveReaderDocument(flushed));
     }
@@ -342,7 +370,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     // ones, so wait on the whole in-flight set rather than only what this call
     // issued.
     return Promise.allSettled([...inFlightSavesRef.current]).then(() => undefined);
-  }, [persistent, trackSave]);
+  }, [persistProgress, persistent, trackSave]);
 
   useEffect(() => {
     // React unmount is not part of closing a window or a browser tab, so the
@@ -501,6 +529,23 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     scheduleDocumentPersist(current.id);
   }, [replaceDocument, scheduleDocumentPersist]);
 
+  const updateActiveListening = useCallback((profile: Omit<ReaderListeningProfile, "updatedAt">) => {
+    const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
+    if (!current) return;
+    const previous = current.listening;
+    if (
+      previous
+      && previous.engine === profile.engine
+      && previous.voice === profile.voice
+      && previous.language === profile.language
+      && previous.quality === profile.quality
+      && previous.playbackRate === profile.playbackRate
+    ) return;
+    const updatedAt = nextReaderDocumentUpdatedAt(current);
+    replaceDocument({ ...current, listening: { ...profile, updatedAt }, updatedAt }, false);
+    scheduleDocumentPersist(current.id);
+  }, [replaceDocument, scheduleDocumentPersist]);
+
   const updateProgress = useCallback((update: ProgressUpdate) => {
     const id = activeDocumentIdRef.current;
     if (!id) return;
@@ -528,15 +573,34 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
       },
     };
     replaceDocument(next, false);
-    const pendingTimer = progressSaveTimersRef.current.get(id);
-    if (pendingTimer !== undefined) window.clearTimeout(pendingTimer);
+    // The first unsaved position starts the clock; later ones ride along.
+    if (progressSaveTimersRef.current.has(id)) return;
     const timer = window.setTimeout(() => {
       progressSaveTimersRef.current.delete(id);
       const latest = documentsRef.current.find((document) => document.id === id);
-      if (latest) persistDocument(latest);
-    }, 500);
+      if (latest) persistProgress(latest);
+    }, READER_PROGRESS_SAVE_INTERVAL_MS);
     progressSaveTimersRef.current.set(id, timer);
-  }, [persistDocument, replaceDocument, sectionsForDocument]);
+  }, [persistProgress, replaceDocument, sectionsForDocument]);
+
+  const flushProgress = useCallback(() => {
+    const id = activeDocumentIdRef.current;
+    if (!id) return;
+    const timer = progressSaveTimersRef.current.get(id);
+    if (timer === undefined) return;
+    window.clearTimeout(timer);
+    progressSaveTimersRef.current.delete(id);
+    const latest = documentsRef.current.find((document) => document.id === id);
+    if (latest) persistProgress(latest);
+  }, [persistProgress]);
+
+  useEffect(() => {
+    const flushWhenHidden = () => {
+      if (document.visibilityState === "hidden") flushProgress();
+    };
+    document.addEventListener("visibilitychange", flushWhenHidden);
+    return () => document.removeEventListener("visibilitychange", flushWhenHidden);
+  }, [flushProgress]);
 
   const addBookmark = useCallback((input: { label: string; textOffset: number; positionSec: number }) => {
     const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
@@ -658,6 +722,13 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     return audio ? rememberReaderAudio(memoryAudioRef.current, audio) : null;
   }, [persistent]);
 
+  const hasAudio = useCallback(async (documentId: string, sectionId: string, signature: string) => {
+    const memory = memoryAudioRef.current.get(createReaderAudioCacheKey(documentId, sectionId));
+    if (memory) return memory.synthesisComplete === true && memory.signature === signature;
+    if (!persistent) return false;
+    return (await getCachedReaderAudioSignature(documentId, sectionId)) === signature;
+  }, [persistent]);
+
   const clearAudio = useCallback(async (documentId: string, sectionId?: string) => {
     if (sectionId) {
       memoryAudioRef.current.delete(createReaderAudioCacheKey(documentId, sectionId));
@@ -682,6 +753,8 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     finalizeActiveTextEdit,
     updateActiveMetadata,
     updateProgress,
+    updateActiveListening,
+    flushProgress,
     addBookmark,
     removeBookmark,
     addNote,
@@ -692,6 +765,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     removeHighlight,
     saveAudio,
     loadAudio,
+    hasAudio,
     clearAudio,
   }), [
     activeDocument,
@@ -704,6 +778,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     documents,
     error,
     finalizeActiveTextEdit,
+    hasAudio,
     loadAudio,
     loading,
     openDocument,
@@ -717,5 +792,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     updateHighlight,
     updateNote,
     updateProgress,
+    updateActiveListening,
+    flushProgress,
   ]);
 }

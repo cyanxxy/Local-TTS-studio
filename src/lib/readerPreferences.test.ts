@@ -47,3 +47,11 @@ describe("readerPreferences", () => {
     expect(getInitialReaderViewPreferences()).toEqual(DEFAULT_READER_VIEW_PREFERENCES);
   });
 });
+
+describe("prepareAhead preference", () => {
+  it("is on by default, kept when set, and defaulted when stored data is malformed", () => {
+    expect(DEFAULT_READER_VIEW_PREFERENCES.prepareAhead).toBe(true);
+    expect(normalizeReaderViewPreferences({ prepareAhead: false }).prepareAhead).toBe(false);
+    expect(normalizeReaderViewPreferences({ prepareAhead: "no" as unknown as boolean }).prepareAhead).toBe(true);
+  });
+});

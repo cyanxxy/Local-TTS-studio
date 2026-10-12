@@ -127,6 +127,13 @@ export function registerReaderLibraryIpc(
     return getReaderLibraryWorker().request("saveDocument", [requestField(request, "document")]);
   });
 
+  ipc.handle("reader-library:save-progress", (_event, request) => {
+    return getReaderLibraryWorker().request("saveProgress", [
+      requestField(request, "documentId"),
+      requestField(request, "progress"),
+    ]);
+  });
+
   ipc.handle("reader-library:delete-document", (_event, request) => {
     return getReaderLibraryWorker().request("deleteDocument", [requestField(request, "id")]);
   });
@@ -177,6 +184,11 @@ export function registerReaderLibraryIpc(
     if (!acknowledge) return;
     pendingReaderLibraryFlushes.delete(request.token);
     acknowledge();
+  });
+
+  ipc.handle("reader-library:get-audio-signature", (_event, request) => {
+    if (!isRecord(request)) throw new TypeError("Invalid Reader audio signature request.");
+    return getReaderLibraryWorker().request("getAudioSignature", [request.documentId, request.sectionId]);
   });
 
   ipc.handle("reader-library:delete-audio", (_event, request) => {

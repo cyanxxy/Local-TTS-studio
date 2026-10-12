@@ -2,6 +2,7 @@ import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, 
 import {
   BookMarked,
   BookOpen,
+  FileAudio,
   FilePlus2,
   Library,
   NotebookPen,
@@ -60,6 +61,8 @@ interface ReaderLibrarySidebarProps {
   onUpdateHighlight?: (id: string, patch: { color: ReaderHighlightColor }) => void;
   /** Absent when highlights cannot be removed. */
   onRemoveHighlight?: (id: string) => void;
+  /** Exports one chapter as an MP3 with its audio; the action is left out without it. */
+  onExportChapter?: (chapterId: string) => void;
   selectedPassage?: { quote: string; textOffset: number } | null;
   tab: ReaderSidebarTab;
   onTabChange: (tab: ReaderSidebarTab) => void;
@@ -233,6 +236,7 @@ export function ReaderLibrarySidebar({
   onRemoveNote,
   onUpdateHighlight,
   onRemoveHighlight,
+  onExportChapter,
   selectedPassage = null,
   tab,
   onTabChange,
@@ -605,21 +609,35 @@ export function ReaderLibrarySidebar({
               )}
               <div className="space-y-1">
                 {visibleChapters.map((chapter) => (
-                  <button
-                    key={chapter.id}
-                    type="button"
-                    onClick={() => onJumpToOffset(chapter.start)}
-                    aria-current={chapter.id === currentChapter?.id ? "location" : undefined}
-                    className={`flex w-full items-center gap-2 rounded-xl py-2 pr-2 text-left text-sm transition-all active:scale-[0.99] ${
-                      chapter.id === currentChapter?.id
-                        ? "bg-accent-light font-semibold text-accent"
-                        : "text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
-                    }`}
-                    style={{ paddingLeft: `${8 + Math.min(3, chapter.level - 1) * 12}px` }}
-                  >
-                    <span className="w-5 shrink-0 text-right font-mono text-2xs text-text-muted">{chapter.order + 1}</span>
-                    <span className="truncate">{chapter.title}</span>
-                  </button>
+                  <div key={chapter.id} className="group/chapter relative">
+                    <button
+                      type="button"
+                      onClick={() => onJumpToOffset(chapter.start)}
+                      aria-current={chapter.id === currentChapter?.id ? "location" : undefined}
+                      className={`flex w-full items-center gap-2 rounded-xl py-2 text-left text-sm transition-all active:scale-[0.99] ${
+                        onExportChapter ? "pr-9" : "pr-2"
+                      } ${
+                        chapter.id === currentChapter?.id
+                          ? "bg-accent-light font-semibold text-accent"
+                          : "text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
+                      }`}
+                      style={{ paddingLeft: `${8 + Math.min(3, chapter.level - 1) * 12}px` }}
+                    >
+                      <span className="w-5 shrink-0 text-right font-mono text-2xs text-text-muted">{chapter.order + 1}</span>
+                      <span className="truncate">{chapter.title}</span>
+                    </button>
+                    {onExportChapter && (
+                      <button
+                        type="button"
+                        onClick={() => onExportChapter(chapter.id)}
+                        aria-label={`Export audio for ${chapter.title}`}
+                        title="Export this chapter as MP3"
+                        className="absolute top-1/2 right-1.5 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-text-muted opacity-60 transition-[opacity,color,background-color] hover:bg-text-primary/[0.08] hover:text-accent focus-visible:opacity-100 group-hover/chapter:opacity-100"
+                      >
+                        <FileAudio size={13} aria-hidden />
+                      </button>
+                    )}
+                  </div>
                 ))}
                 {visibleChapters.length === 0 && (
                   <p className="rounded-xl border border-dashed border-border px-3 py-4 text-center text-xs text-text-muted">

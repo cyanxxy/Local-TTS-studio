@@ -110,6 +110,26 @@ describe("readerLibraryWorker", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  it("saves reading progress apart from the book record", async () => {
+    const active = await startWorker();
+    active.send({ type: "request", requestId: "save-document", operation: "saveDocument", args: [createDocument("doc-1", 100)] });
+    active.send({
+      type: "request",
+      requestId: "save-progress",
+      operation: "saveProgress",
+      args: ["doc-1", {
+        positionSec: 3, totalDurationSec: 9, textOffset: 5, chapterId: null, sectionId: null, percent: 0.5, updatedAt: 300,
+      }],
+    });
+    active.send({ type: "request", requestId: "get", operation: "getDocument", args: ["doc-1"] });
+
+    expect(messageFor("save-progress", "result")).toMatchObject({ ok: true });
+    expect(messageFor("get", "result")).toMatchObject({
+      ok: true,
+      value: { progress: { textOffset: 5, updatedAt: 300 } },
+    });
+  });
+
   it("drops a streamed audio save that a document delete overtook", async () => {
     const active = await startWorker();
     active.send({

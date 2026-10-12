@@ -246,6 +246,8 @@ const mock = vi.hoisted(() => {
       finalizeActiveTextEdit: vi.fn(),
       updateActiveMetadata: vi.fn(),
       updateProgress: vi.fn(),
+      updateActiveListening: vi.fn(),
+      flushProgress: vi.fn(),
       addBookmark: vi.fn(),
       removeBookmark: vi.fn(),
       addNote: vi.fn(),
@@ -253,10 +255,16 @@ const mock = vi.hoisted(() => {
       removeNote: vi.fn(),
       saveAudio: vi.fn(async () => undefined),
       loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+      hasAudio: vi.fn(async () => false),
       clearAudio: vi.fn(async () => undefined),
     },
   };
 });
+
+// The OS media session is covered by its own tests; jsdom cannot play media.
+vi.mock("../hooks/useReaderMediaSession", () => ({
+  useReaderMediaSession: vi.fn(),
+}));
 
 vi.mock("../hooks/useAppRouting", () => ({
   useAppRouting: () => mock.routing,
@@ -482,6 +490,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
     onModelChange,
     onVoiceChange,
     onQualityChange,
+    onPlaybackRateChange,
     onGenerate,
     onRetryLoad,
     onStop,
@@ -514,6 +523,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
     onModelChange: (model: "kokoro" | "supertonic") => void;
     onVoiceChange: (voice: string) => void;
     onQualityChange: (value: number) => void;
+    onPlaybackRateChange: (rate: number) => void;
     onGenerate: () => void;
     onRetryLoad: () => void;
     onStop: () => void;
@@ -579,6 +589,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
       <button type="button" onClick={() => onModelChange("supertonic")}>reader-model</button>
       <button type="button" onClick={() => onVoiceChange("af_bella")}>reader-voice</button>
       <button type="button" onClick={() => onQualityChange(6)}>reader-quality</button>
+      <button type="button" onClick={() => onPlaybackRateChange(1.5)}>reader-rate</button>
       <button type="button" onClick={onGenerate}>reader-generate</button>
       <button type="button" onClick={onRetryLoad}>reader-retry</button>
       <button type="button" onClick={onStop}>reader-stop</button>
@@ -764,6 +775,8 @@ function resetMockState() {
     finalizeActiveTextEdit: vi.fn(),
     updateActiveMetadata: vi.fn(),
     updateProgress: vi.fn(),
+    updateActiveListening: vi.fn(),
+    flushProgress: vi.fn(),
     addBookmark: vi.fn(),
     removeBookmark: vi.fn(),
     addNote: vi.fn(),
@@ -771,6 +784,7 @@ function resetMockState() {
     removeNote: vi.fn(),
     saveAudio: vi.fn(async () => undefined),
     loadAudio: vi.fn(async (): Promise<CachedReaderAudio | null> => null),
+    hasAudio: vi.fn(async () => false),
     clearAudio: vi.fn(async () => undefined),
   };
   mock.localTts.probe.mockResolvedValue({
@@ -986,6 +1000,112 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Clara");
     fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps Studio's unsaved audio across a visit to the Reader and restores it on return", async () => {
+    const studioChunks = [{
+      audio: new Float32Array([0.3, 0.4]).buffer,
+      samplingRate: 24_000,
+      text: "Studio line.",
+      index: 0,
+      total: 1,
+    }];
+    mock.player.getAudioCacheSnapshot.mockReturnValue(studioChunks);
+    mock.playerClock.set(2.5);
+    mock.player.getPlaybackSnapshot.mockReturnValue({ playbackRate: 1.5, totalDuration: 4, synthesisComplete: true });
+    const book = createReaderDocument({ id: "keeper-book", text: "A book to read after Studio." });
+    mock.readerLibrary.documents = [book];
+    mock.readerLibrary.activeDocument = book;
+    const view = render(<WebApp />);
+
+    mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    view.rerender(<WebApp />);
+    await screen.findByTestId("reader-text-value");
+    await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    // The Reader emptied the player; what it holds now is not Studio's.
+    mock.player.getAudioCacheSnapshot.mockReturnValue([]);
+    mock.player.restoreAudioCache.mockClear();
+
+    mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+    view.rerender(<WebApp />);
+    await waitFor(() => expect(mock.player.restoreAudioCache).toHaveBeenCalledWith(studioChunks, {
+      currentTime: 2.5,
+      playbackRate: 1.5,
+      synthesisComplete: true,
+    }));
+  });
+
+  describe("per-book listening profile", () => {
+    const readerRoute = () => {
+      mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    };
+    const desktopBridge = () => Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+
+    it("remembers a speed change alone, and keeps a Reader voice and speed out of Studio", async () => {
+      readerRoute();
+      const book = createReaderDocument({ id: "scoped-book", text: "A book to listen to. ".repeat(40) });
+      mock.readerLibrary.documents = [book];
+      mock.readerLibrary.activeDocument = book;
+      const view = render(<WebApp />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "reader-rate" }));
+      expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1.5);
+      // Not pinned to the engine and voice that happen to be global.
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenCalledWith({ playbackRate: 1.5 });
+
+      fireEvent.click(screen.getByRole("button", { name: "reader-voice" }));
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenLastCalledWith(
+        expect.objectContaining({ engine: "kokoro", voice: "af_bella" }),
+      );
+      mock.persistEngineSettings.mockClear();
+      mock.player.setPlaybackRate.mockClear();
+
+      // Back in Studio, its own voice and speed return.
+      mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+      view.rerender(<WebApp />);
+      await waitFor(() => expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1));
+      await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ kokoro: expect.objectContaining({ voice: mock.initialEngineSettings.kokoro.voice }) }),
+      ));
+    });
+
+    it("remembers the engine the listener picks for the open book", async () => {
+      desktopBridge();
+      readerRoute();
+      const document = createReaderDocument({ id: "profile-book", text: "A book to listen to. ".repeat(40) });
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-audio8" }));
+
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenCalledWith(
+        expect.objectContaining({ engine: "audio8", voice: expect.any(String), playbackRate: expect.any(Number) }),
+      );
+    });
+
+    it("applies a book's remembered engine and speed when it opens", async () => {
+      desktopBridge();
+      readerRoute();
+      const base = createReaderDocument({ id: "profile-book", text: "A book to listen to. ".repeat(40) });
+      const document: ReaderDocumentRecord = {
+        ...base,
+        listening: { engine: "audio8", voice: "Clara", playbackRate: 1.5, updatedAt: 5 },
+      };
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+      expect(await screen.findByRole("button", { name: "reader-desktop-audio8-selected" })).toBeInTheDocument();
+      expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1.5);
+      await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+        expect.objectContaining({ desktopModels: expect.objectContaining({ reader: "audio8" }) }),
+      ));
+      await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    });
   });
 
   it("keeps the browser model loaded across page switches and stops only the engine left behind", async () => {

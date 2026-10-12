@@ -1,4 +1,4 @@
-import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import { IDBFactory, IDBKeyRange, IDBObjectStore } from "fake-indexeddb";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildReaderSections,
@@ -12,8 +12,10 @@ import {
   deleteReaderDocument,
   getActiveReaderDocumentId,
   getCachedReaderAudio,
+  getCachedReaderAudioSignature,
   getReaderDocument,
   listReaderDocuments,
+  saveReaderProgress,
   openReaderLibrary,
   saveCachedReaderAudio,
   saveReaderDocument,
@@ -245,6 +247,111 @@ describe("readerLibrary", () => {
     await saveCachedReaderAudio(makeCache("stale", 100));
 
     expect((await getCachedReaderAudio(document.id, section.id))?.signature).toBe("final");
+  });
+
+  describe("reading progress", () => {
+    const progress = (updatedAt: number, textOffset: number) => ({
+      positionSec: 2,
+      totalDurationSec: 10,
+      textOffset,
+      chapterId: null,
+      sectionId: null,
+      percent: 0.2,
+      updatedAt,
+    });
+
+    it("stores progress apart from the book and merges the newer one on read", async () => {
+      const document = createReaderDocument({ id: "book", text: "Some text to read.", now: 100 });
+      await saveReaderDocument(document);
+      await saveReaderProgress("book", progress(500, 7));
+
+      expect((await getReaderDocument("book"))?.progress).toMatchObject({ textOffset: 7, updatedAt: 500 });
+      expect((await listReaderDocuments())[0]?.progress).toMatchObject({ textOffset: 7 });
+
+      const database = await openReaderLibrary();
+      const stored = await new Promise<ReaderDocumentRecord>((resolve) => {
+        const request = database.transaction("documents").objectStore("documents").get("book");
+        request.onsuccess = () => resolve(request.result as ReaderDocumentRecord);
+      });
+      database.close();
+      expect(stored.progress.textOffset).toBe(document.progress.textOffset);
+    });
+
+    it("lets a newer whole-book save win and ignores late or orphaned progress", async () => {
+      const document = createReaderDocument({ id: "book", text: "Some text to read.", now: 100 });
+      await saveReaderDocument(document);
+      await saveReaderProgress("book", progress(500, 7));
+      await saveReaderProgress("book", progress(400, 3));
+      expect((await getReaderDocument("book"))?.progress.textOffset).toBe(7);
+
+      await saveReaderDocument({ ...document, progress: { ...document.progress, textOffset: 9, updatedAt: 900 } });
+      expect((await getReaderDocument("book"))?.progress.textOffset).toBe(9);
+
+      await saveReaderProgress("ghost", progress(500, 1));
+      await deleteReaderDocument("book");
+      expect(await getReaderDocument("book")).toBeNull();
+      await saveReaderDocument({ ...document, progress: { ...document.progress, textOffset: 1, updatedAt: 1 } });
+      expect((await getReaderDocument("book"))?.progress.textOffset).toBe(1);
+    });
+  });
+
+  it("checks a write's timestamp in the metadata store without reading the stored PCM", async () => {
+    const document = createReaderDocument({ id: "no-read", text: "No read before write." });
+    const section = buildReaderSections(document.text, document.chapters)[0];
+    const cache = (updatedAt: number): CachedReaderAudio => ({
+      cacheKey: createReaderAudioCacheKey(document.id, section.id),
+      documentId: document.id,
+      chapterId: section.chapterId,
+      sectionId: section.id,
+      signature: "sig",
+      chunks: [{ audio: new Float32Array([1, 2, 3]).buffer, samplingRate: 24_000, text: "t", index: 0, total: 1 }],
+      byteLength: 12,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      updatedAt,
+    });
+    await saveCachedReaderAudio(cache(100));
+
+    const get = vi.spyOn(IDBObjectStore.prototype, "get");
+    await saveCachedReaderAudio(cache(200));
+    await saveCachedReaderAudio(cache(150));
+    const stores = get.mock.contexts.map((store) => (store as { name: string }).name);
+    get.mockRestore();
+
+    expect(stores).toContain("chapter-audio-meta");
+    expect(stores).not.toContain("chapter-audio");
+    expect((await getCachedReaderAudio(document.id, section.id))?.updatedAt).toBe(200);
+  });
+
+  it("reads a complete section's signature from the metadata, and nothing for a partial one", async () => {
+    const document = createReaderDocument({ id: "signatures", text: "Signature lookups." });
+    const [section] = buildReaderSections(document.text, document.chapters);
+    const cache = (synthesisComplete: boolean): CachedReaderAudio => ({
+      cacheKey: createReaderAudioCacheKey(document.id, section.id),
+      documentId: document.id,
+      chapterId: section.chapterId,
+      sectionId: section.id,
+      signature: "the-signature",
+      chunks: [{ audio: new Float32Array([1]).buffer, samplingRate: 24_000, text: "t", index: 0, total: 1 }],
+      byteLength: 4,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      synthesisComplete,
+      updatedAt: 10,
+    });
+    expect(await getCachedReaderAudioSignature(document.id, section.id)).toBeNull();
+
+    await saveCachedReaderAudio(cache(false));
+    expect(await getCachedReaderAudioSignature(document.id, section.id)).toBeNull();
+
+    await saveCachedReaderAudio({ ...cache(true), updatedAt: 20 });
+    const get = vi.spyOn(IDBObjectStore.prototype, "get");
+    expect(await getCachedReaderAudioSignature(document.id, section.id)).toBe("the-signature");
+    const stores = get.mock.contexts.map((store) => (store as { name: string }).name);
+    get.mockRestore();
+    expect(stores).toEqual(["chapter-audio-meta"]);
   });
 
   it("skips a corrupt document record without hiding healthy books", async () => {
