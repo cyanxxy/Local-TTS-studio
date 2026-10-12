@@ -147,6 +147,39 @@ describe("appState", () => {
     });
   });
 
+  it("persists Kitten, Paradee and Piper settings with the other engines and rejects what they cannot speak", () => {
+    persistEngineSettings({
+      kitten: { voice: "Rosie" },
+      piper: { voice: "en_US-libritts-high#12" },
+    });
+    persistEngineSettings({ supertonic: { voice: "Male 3", language: "fr" } });
+
+    expect(getInitialEngineSettings()).toMatchObject({
+      kitten: { voice: "Rosie" },
+      paradee: ENGINES.paradee.defaultSettings,
+      piper: { voice: "en_US-libritts-high#12" },
+      supertonic: { voice: "Male 3", language: "fr" },
+    });
+
+    localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, JSON.stringify({
+      kitten: { voice: "Robot" },
+      paradee: { voice: "af_bella" },
+      piper: { voice: "en_US-libritts-high#99999" },
+    }));
+    expect(getInitialEngineSettings()).toMatchObject({
+      kitten: ENGINES.kitten.defaultSettings,
+      paradee: ENGINES.paradee.defaultSettings,
+      piper: { voice: "en_US-libritts-high" },
+    });
+  });
+
+  it("restores the browser model a user last chose among the new engines", () => {
+    for (const model of ["kitten", "paradee", "piper"] as const) {
+      persistAppState({ model });
+      expect(getInitialAppState().model).toBe(model);
+    }
+  });
+
   it("falls back to defaults when stored app JSON or localStorage access fails", () => {
     localStorage.setItem(APP_STATE_STORAGE_KEY, "{not json");
     localStorage.setItem(ENGINE_SETTINGS_STORAGE_KEY, "[1, 2]");

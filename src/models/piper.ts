@@ -110,7 +110,8 @@ function datasetCredits(): EngineCredit[] {
       name: [...new Set(voices.map((voice) => voice.name))].join(", "),
       license: first.license.id,
       ...(first.license.url ? { licenseUrl: first.license.url } : {}),
-      sourceUrl: first.datasetUrl ?? `https://huggingface.co/${PIPER_CATALOG.repo}`,
+      // The catalog records openslr.org with http, which the site also serves over https.
+      sourceUrl: (first.datasetUrl ?? `https://huggingface.co/${PIPER_CATALOG.repo}`).replace(/^http:\/\//, "https://"),
       note: first.attribution,
     };
   });

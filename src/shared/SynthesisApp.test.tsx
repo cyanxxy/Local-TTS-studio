@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { strToU8, zipSync } from "fflate";
 import WebApp from "../apps/web/WebApp";
@@ -1278,6 +1278,19 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
     expect(screen.getByText("Audio8 · Native CPU")).toBeInTheDocument();
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
+  });
+
+  it("names every browser model the build ships in the footer", () => {
+    mock.browserSupport = {
+      ...mock.browserSupport,
+      supportedModels: ["kokoro", "kitten", "paradee", "piper"],
+    };
+    render(<WebApp />);
+
+    const footer = screen.getByRole("contentinfo");
+    for (const label of ["Kokoro", "Supertonic", "Kitten TTS", "Paradee", "Piper"]) {
+      expect(within(footer).getByText(label)).toBeInTheDocument();
+    }
   });
 
   it("hides the desktop runtimes when the web build runs inside Electron", async () => {

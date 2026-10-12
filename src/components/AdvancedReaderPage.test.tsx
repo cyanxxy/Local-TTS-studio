@@ -12,6 +12,7 @@ import {
 import { DEFAULT_READER_VIEW_PREFERENCES } from "../lib/readerPreferences";
 import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
 import { chunkTextForModelDetailed } from "../lib/chunking";
+import { chunkKittenText, chunkParadeeText, chunkPiperText } from "../lib/phonemeModels";
 import { PlaybackClock } from "../lib/playbackClock";
 import { estimateSegmentWords } from "./reader/readerSegments";
 import { READER_SHORTCUTS_DIALOG_ATTRIBUTE } from "./reader/readerShortcuts";
@@ -791,6 +792,37 @@ describe("AdvancedReaderPage", () => {
     expect(props.sectionPreviewCount).toBe(chunkTextForModelDetailed(text, "supertonic", {
       runtime: { backend: readyState.backend, quality: 5 },
     }).length);
+  });
+
+  it.each([
+    ["kitten", "webgpu", chunkKittenText],
+    ["paradee", "wasm", (text: string) => chunkParadeeText(text)],
+    ["piper", "wasm", (text: string) => chunkPiperText(text)],
+  ] as const)("previews %s sections with the chunker its worker uses", (model, backend, chunker) => {
+    const text = "A compact sentence for a long Reader section, with a clause or two to cut at. ".repeat(60);
+    const state: ModelState = { ...readyState, backend };
+    renderReader({
+      text,
+      activeModel: model,
+      modelStates: { [model]: state },
+      voice: model === "piper" ? "en_US-kristin-medium" : model === "kitten" ? "Luna" : "heart",
+    });
+
+    const props = audioPlayerMock.mock.lastCall?.[0] as { sectionPreviewCount?: number };
+    expect(props.sectionPreviewCount).toBe(chunker(text, backend).length);
+    expect(props.sectionPreviewCount).toBeGreaterThan(1);
+  });
+
+  it.each([
+    ["kitten", "Luna", "Luna", "Kitten TTS"],
+    ["paradee", "heart", "Heart", "Paradee"],
+    ["piper", "en_US-libritts-high#12", "LibriTTS · High · Speaker 12", "Piper"],
+  ] as const)("labels the voice button with %s's own voice and model names", (model, voice, voiceLabel, modelLabel) => {
+    renderReader({ activeModel: model, voice, modelStates: { [model]: readyState } });
+
+    const button = screen.getByRole("button", { name: "Voice settings" });
+    expect(button).toHaveTextContent(voiceLabel);
+    expect(button).toHaveTextContent(modelLabel);
   });
 
   it("keeps every Qwen preview section visible while audio is still streaming", () => {
