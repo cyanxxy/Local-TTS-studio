@@ -135,6 +135,17 @@ describe("voice library store", () => {
     expect(await store.getVoiceAudio(voice.id, "reference")).toBeNull();
   });
 
+  it("lets a Chatterbox-only clone omit its transcript, and no other target", async () => {
+    const voice = await store.createVoice(cloned({ targets: ["chatterbox"], transcript: "" }));
+    expect(voice).toMatchObject({ kind: "cloned", targets: ["chatterbox"], transcript: "" });
+    await expect(store.createVoice(cloned({ targets: ["chatterbox", "neutts"], transcript: "" }))).rejects.toThrow(/Transcript is required/);
+    await expect(store.updateVoice(voice.id, { targets: ["qwen3-base"] })).rejects.toThrow(/Transcript is required/);
+    expect(await store.updateVoice(voice.id, { targets: ["qwen3-base"], transcript: "Now it has one." }))
+      .toMatchObject({ targets: ["qwen3-base"], transcript: "Now it has one." });
+    const imported = await store.importVoice((await store.exportVoice(voice.id)).bytes);
+    expect(imported.kind).toBe("cloned");
+  });
+
   it("refuses references the bridge would reject", async () => {
     await expect(store.createVoice(cloned({ referenceWav: wav(21) }))).rejects.toThrow(/20 seconds/);
     await expect(store.createVoice(cloned({ referenceWav: new Uint8Array(0) }))).rejects.toThrow(/non-empty WAV/);
@@ -438,6 +449,7 @@ describe("voice presets from records", () => {
     expect(voicePresetFromRecord(clone)).toMatchObject({ engineId: "qwen3", mode: "voiceClone", voiceId: "library:v1", settings: { language: "English" } });
     expect(voicePresetFromRecord(clone, { cloneTarget: "neutts" }).engineId).toBe("neutts");
     expect(voicePresetFromRecord({ ...clone, targets: ["qwen3-base"] }, { cloneTarget: "neutts" }).engineId).toBe("qwen3");
+    expect(voicePresetFromRecord({ ...clone, targets: ["chatterbox"] })).toMatchObject({ engineId: "chatterbox", mode: "voiceClone" });
     expect(voicePresetFromRecord({
       ...base,
       kind: "designed",

@@ -15,6 +15,7 @@ import {
   type NewVoice,
   type StoredAudioInfo,
   type VoiceAudioRole,
+  type VoiceCloneTarget,
   type VoicePatch,
   type VoicePreset,
   type VoiceRecord,
@@ -27,7 +28,7 @@ import {
   normalizeLanguage,
   normalizePreset,
   normalizeStoredAudioInfo,
-  normalizeTranscript,
+  normalizeCloneTranscript,
   normalizeVoiceDescription,
   normalizeVoiceDesign,
   normalizeVoiceId,
@@ -249,12 +250,13 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
       case "preset":
         return { record: { ...base, kind: "preset", preset: normalizePreset(input.preset) }, audio: [] };
       case "cloned": {
+        const targets = normalizeCloneTargets(input.targets);
         const record: VoiceRecord = {
           ...base,
           kind: "cloned",
-          transcript: normalizeTranscript(input.transcript),
+          transcript: normalizeCloneTranscript(input.transcript, targets),
           language: normalizeLanguage(input.language),
-          targets: normalizeCloneTargets(input.targets),
+          targets,
           source: normalizeVoiceSource(input.source),
           reference: await readAudioInfo(input.referenceWav, VOICE_LIBRARY_LIMITS.maxReferenceDurationSec),
         };
@@ -350,9 +352,10 @@ export function createVoiceLibraryStore(options: VoiceLibraryStoreOptions = {}):
     };
     if (next.kind === "preset" && patch.preset !== undefined) next.preset = normalizePreset(patch.preset);
     if (next.kind === "cloned") {
-      if (patch.transcript !== undefined) next.transcript = normalizeTranscript(patch.transcript);
-      if (patch.language !== undefined) next.language = normalizeLanguage(patch.language);
       if (patch.targets !== undefined) next.targets = normalizeCloneTargets(patch.targets);
+      if (patch.transcript !== undefined) next.transcript = normalizeCloneTranscript(patch.transcript, next.targets);
+      else if (patch.targets !== undefined) next.transcript = normalizeCloneTranscript(next.transcript, next.targets);
+      if (patch.language !== undefined) next.language = normalizeLanguage(patch.language);
     }
     return next;
   }
@@ -539,6 +542,13 @@ export function getVoiceLibraryStore(): VoiceLibraryStore {
   return defaultStore;
 }
 
+/** The engine registry id each clone target renders through. */
+export const CLONE_TARGET_ENGINE: Readonly<Record<VoiceCloneTarget, string>> = {
+  "qwen3-base": "qwen3",
+  neutts: "neutts",
+  chatterbox: "chatterbox",
+};
+
 /**
  * The VoicePreset a synthesizer should use for a library voice. Cloned voices
  * render through Qwen3 Base or NeuTTS (the first target unless one is asked
@@ -546,7 +556,7 @@ export function getVoiceLibraryStore(): VoiceLibraryStore {
  */
 export function voicePresetFromRecord(
   record: VoiceRecord,
-  options: { cloneTarget?: "qwen3-base" | "neutts" } = {},
+  options: { cloneTarget?: VoiceCloneTarget } = {},
 ): VoicePreset {
   switch (record.kind) {
     case "preset":
@@ -556,7 +566,7 @@ export function voicePresetFromRecord(
         ? options.cloneTarget
         : record.targets[0];
       return {
-        engineId: target === "neutts" ? "neutts" : "qwen3",
+        engineId: CLONE_TARGET_ENGINE[target],
         voiceId: `library:${record.id}`,
         mode: "voiceClone",
         settings: { language: record.language },
