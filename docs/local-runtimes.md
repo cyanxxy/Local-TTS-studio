@@ -279,7 +279,7 @@ npm run test
 npm run build:desktop
 ```
 
-`npm run test:rust:policy` needs no native toolchain. `npm run test:rust` (and `electron/rustLocalBridge.test.ts`, the real bridge end-to-end test) still needs a Metal-capable machine, and the end-to-end test has not been run since the bridge was split into modules and its I/O changed; run it on a Metal-capable Mac before releasing.
+`npm run test:rust:policy` needs no native toolchain. `npm run test:rust` (the unit tests, run through `scripts/test-rust-bridge.mjs`) still needs a Metal-capable machine. `electron/rustLocalBridge.test.ts`, the real bridge end-to-end test, could not be run on the machine that split the bridge into modules and changed its I/O; CI runs it on Linux, so run it on an Apple Silicon Mac before releasing to exercise the MLX path.
 
 Tagged releases publish source archives only. Maintainers can build unsigned
 Apple Silicon macOS packages locally with `npm run dist:mac`; the build scripts

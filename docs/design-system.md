@@ -17,4 +17,4 @@ Open TTS uses a Liquid Glass direction: translucent blurred surfaces, specular e
 
 The `.glass*` utilities are intentionally unlayered so they win over Tailwind utilities. Use them on static containers and build interactive states from explicit utilities such as `bg-white/40`, `border-white/55`, `backdrop-blur-md`, and `shadow-glass-sm`. Electron on macOS also relies on transparent window vibrancy plus the `is-electron` / `is-mac` HTML classes, so keep that CSS scoping intact.
 
-The creator components (pronunciation dictionaries, script tools, export panel) and the Voices, History, and Dialogue panels use solid content surfaces. Only the pause menu is a `glass-pop` popover. No tokens changed.
+The creator components (pronunciation dictionaries, script tools, export panel) use solid content surfaces; only the pause menu is a `glass-pop` popover. No tokens changed.

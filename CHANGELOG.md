@@ -241,9 +241,10 @@ All notable changes to Open TTS are documented here.
 
 ### Known gaps
 
-- `electron/rustLocalBridge.test.ts`, the real bridge end-to-end test, has not
-  run since the bridge was split; it needs a Metal-capable machine. Run it
-  before releasing.
+- `electron/rustLocalBridge.test.ts`, the real bridge end-to-end test, could
+  not run on the development machine (no Metal toolchain) since the bridge was
+  split into modules and its I/O changed. CI runs it on Linux; run it on an
+  Apple Silicon Mac before releasing to exercise the MLX path.
 - Media keys and Now Playing, the large audiobook save dialog and the
   microphone permission prompt have only been verified by unit tests, not in a
   signed, packaged build.
