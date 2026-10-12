@@ -113,6 +113,7 @@ export function useReaderSession({
     deleteDocument: deleteLibraryDocument,
     finalizeActiveTextEdit,
     openDocument: openLibraryDocument,
+    flushProgress,
     updateActiveText,
     updateProgress,
   } = library;
@@ -180,6 +181,7 @@ export function useReaderSession({
     isGenerating,
     isRestorePending,
     updateProgress,
+    flushProgress,
     autoAdvance,
     advance,
   });

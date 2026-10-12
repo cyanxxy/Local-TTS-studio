@@ -14,6 +14,7 @@ import {
   getCachedReaderAudio,
   getReaderDocument,
   listReaderDocuments,
+  saveReaderProgress,
   openReaderLibrary,
   saveCachedReaderAudio,
   saveReaderDocument,
@@ -245,6 +246,52 @@ describe("readerLibrary", () => {
     await saveCachedReaderAudio(makeCache("stale", 100));
 
     expect((await getCachedReaderAudio(document.id, section.id))?.signature).toBe("final");
+  });
+
+  describe("reading progress", () => {
+    const progress = (updatedAt: number, textOffset: number) => ({
+      positionSec: 2,
+      totalDurationSec: 10,
+      textOffset,
+      chapterId: null,
+      sectionId: null,
+      percent: 0.2,
+      updatedAt,
+    });
+
+    it("stores progress apart from the book and merges the newer one on read", async () => {
+      const document = createReaderDocument({ id: "book", text: "Some text to read.", now: 100 });
+      await saveReaderDocument(document);
+      await saveReaderProgress("book", progress(500, 7));
+
+      expect((await getReaderDocument("book"))?.progress).toMatchObject({ textOffset: 7, updatedAt: 500 });
+      expect((await listReaderDocuments())[0]?.progress).toMatchObject({ textOffset: 7 });
+
+      const database = await openReaderLibrary();
+      const stored = await new Promise<ReaderDocumentRecord>((resolve) => {
+        const request = database.transaction("documents").objectStore("documents").get("book");
+        request.onsuccess = () => resolve(request.result as ReaderDocumentRecord);
+      });
+      database.close();
+      expect(stored.progress.textOffset).toBe(document.progress.textOffset);
+    });
+
+    it("lets a newer whole-book save win and ignores late or orphaned progress", async () => {
+      const document = createReaderDocument({ id: "book", text: "Some text to read.", now: 100 });
+      await saveReaderDocument(document);
+      await saveReaderProgress("book", progress(500, 7));
+      await saveReaderProgress("book", progress(400, 3));
+      expect((await getReaderDocument("book"))?.progress.textOffset).toBe(7);
+
+      await saveReaderDocument({ ...document, progress: { ...document.progress, textOffset: 9, updatedAt: 900 } });
+      expect((await getReaderDocument("book"))?.progress.textOffset).toBe(9);
+
+      await saveReaderProgress("ghost", progress(500, 1));
+      await deleteReaderDocument("book");
+      expect(await getReaderDocument("book")).toBeNull();
+      await saveReaderDocument({ ...document, progress: { ...document.progress, textOffset: 1, updatedAt: 1 } });
+      expect((await getReaderDocument("book"))?.progress.textOffset).toBe(1);
+    });
   });
 
   it("skips a corrupt document record without hiding healthy books", async () => {

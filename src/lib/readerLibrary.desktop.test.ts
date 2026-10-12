@@ -17,6 +17,7 @@ import {
   openReaderLibrary,
   saveCachedReaderAudio,
   saveReaderDocument,
+  saveReaderProgress,
   setActiveReaderDocumentId,
 } from "./readerLibrary";
 
@@ -369,5 +370,26 @@ describe("isReaderLibraryShutdownError", () => {
     ]) {
       expect(isReaderLibraryShutdownError(cause), String(cause)).toBe(false);
     }
+  });
+
+  describe("reading progress", () => {
+    const progress = {
+      positionSec: 1, totalDurationSec: 2, textOffset: 3, chapterId: null, sectionId: null, percent: 0.1, updatedAt: 9,
+    };
+
+    it("sends only the progress record over the bridge", async () => {
+      const saveProgress = vi.fn(async () => undefined);
+      const bridge = installDesktopBridge({ saveProgress });
+      await saveReaderProgress("book", progress);
+      expect(saveProgress).toHaveBeenCalledWith("book", progress);
+      expect(bridge.saveDocument).not.toHaveBeenCalled();
+    });
+
+    it("saves the whole book through a bridge that predates the progress channel", async () => {
+      const bridge = installDesktopBridge();
+      const document = createReaderDocument({ id: "book", text: "Text" });
+      await saveReaderProgress("book", progress, document);
+      expect(bridge.saveDocument).toHaveBeenCalledWith(document);
+    });
   });
 });

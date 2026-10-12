@@ -45,6 +45,28 @@ function installFailingDesktopBridge(cause: Error) {
 
 // A desktop bridge whose writes are held open, so a flush can be observed
 // separately from the write it is waiting on.
+function installProgressDesktopBridge() {
+  const seed = createReaderDocument({ id: "desktop-book", text: "A stored desktop book.", now: 100 });
+  const saveDocument = vi.fn(async (_document: unknown) => undefined);
+  const saveProgress = vi.fn(async (_documentId: string, _progress: unknown) => undefined);
+  window.electron = {
+    isElectron: true,
+    readerLibrary: {
+      listDocuments: vi.fn(async () => [seed]),
+      getDocument: vi.fn(async () => seed),
+      saveDocument,
+      saveProgress,
+      deleteDocument: vi.fn(async () => undefined),
+      getActiveDocumentId: vi.fn(async () => seed.id),
+      setActiveDocumentId: vi.fn(async () => undefined),
+      saveAudio: vi.fn(async () => undefined),
+      getAudio: vi.fn(async () => null),
+      deleteAudio: vi.fn(async () => undefined),
+    },
+  };
+  return { saveDocument, saveProgress };
+}
+
 function installDeferredDesktopBridge() {
   const seed = createReaderDocument({ id: "desktop-book", text: "A stored desktop book.", now: 100 });
   const pendingSaves: Array<() => void> = [];
@@ -301,6 +323,68 @@ describe("useReaderLibrary", () => {
       expect(stored?.text).toBe("Flushed reader text.");
       expect(stored?.progress.positionSec).toBe(3);
       expect(stored?.progress.textOffset).toBe(7);
+    });
+  });
+
+  describe("progress persistence", () => {
+    it("throttles a moving position into small progress writes and never rewrites the book", async () => {
+      const { saveDocument, saveProgress } = installProgressDesktopBridge();
+      const { result } = renderHook(() => useReaderLibrary("Ignored seed text."));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      saveDocument.mockClear();
+
+      vi.useFakeTimers();
+      try {
+        for (let step = 1; step <= 10; step += 1) {
+          act(() => {
+            result.current.updateProgress({ positionSec: step, totalDurationSec: 60, textOffset: step });
+            vi.advanceTimersByTime(750);
+          });
+        }
+        // 7.5 s in: one throttled write has fired, carrying the latest position.
+        expect(saveProgress).toHaveBeenCalledTimes(1);
+        expect(saveProgress.mock.calls[0][1]).toMatchObject({ positionSec: 6 });
+        act(() => { vi.advanceTimersByTime(5_000); });
+        expect(saveProgress).toHaveBeenCalledTimes(2);
+        expect(saveProgress.mock.calls[1][1]).toMatchObject({ positionSec: 10 });
+        expect(saveDocument).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("writes the position at once on flushProgress and when the page is hidden", async () => {
+      const { saveProgress } = installProgressDesktopBridge();
+      const { result } = renderHook(() => useReaderLibrary("Ignored seed text."));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+
+      vi.useFakeTimers();
+      try {
+        act(() => result.current.updateProgress({ positionSec: 3, totalDurationSec: 9, textOffset: 2 }));
+        expect(saveProgress).not.toHaveBeenCalled();
+        act(() => result.current.flushProgress());
+        expect(saveProgress).toHaveBeenCalledTimes(1);
+
+        act(() => result.current.updateProgress({ positionSec: 4, totalDurationSec: 9, textOffset: 3 }));
+        const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+        act(() => { document.dispatchEvent(new Event("visibilitychange")); });
+        visibility.mockRestore();
+        expect(saveProgress).toHaveBeenCalledTimes(2);
+        expect(saveProgress.mock.calls[1][1]).toMatchObject({ positionSec: 4 });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("flushes a pending position through the progress record on page hide", async () => {
+      const { saveDocument, saveProgress } = installProgressDesktopBridge();
+      const { result } = renderHook(() => useReaderLibrary("Ignored seed text."));
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      saveDocument.mockClear();
+      act(() => result.current.updateProgress({ positionSec: 8, totalDurationSec: 9, textOffset: 5 }));
+      act(() => { window.dispatchEvent(new Event("pagehide")); });
+      expect(saveProgress).toHaveBeenCalledTimes(1);
+      expect(saveDocument).not.toHaveBeenCalled();
     });
   });
 
