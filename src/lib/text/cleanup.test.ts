@@ -171,6 +171,39 @@ describe("cleanupText", () => {
   });
 });
 
+describe("cleanupText on pathological input", () => {
+  // Quadratic patterns took tens of seconds on these; the generous timeout is
+  // only there to fail such a regression (the linear versions take milliseconds).
+  const LIMIT_MS = 20_000;
+  const all = (text: string) => cleanupText(text, { actions: ALL_TEXT_CLEANUP_ACTIONS });
+
+  it("handles a long run of blanks", () => {
+    const run = " ".repeat(200_000);
+    expect(all(`a${run}b`).text).toBe("a b");
+    expect(all(`a${run}\nb`).text).toBe("a b");
+    expect(all(`${run}x`).text).toBe("x");
+    expect(all(`x${run}`).text).toBe("x");
+    expect(all(`a&nbsp;${run}b`).text).toBe("a b");
+    expect(all(`# title${run}#`).text).toBe("title");
+    expect(all(`a\n${run}\nb`).text).toBe("a\n\nb");
+    expect(all("a\t".repeat(50_000)).text).toBe("a ".repeat(50_000).trimEnd());
+  }, LIMIT_MS);
+
+  it("handles many unmatched openers", () => {
+    for (const unit of ["![", "**a ", "[1", "[a](", "<http://x", "`a ", "~~a ", "*a "]) {
+      const text = unit.repeat(60_000);
+      expect(all(text).text.length).toBeGreaterThan(0);
+    }
+  }, LIMIT_MS);
+
+  it("leaves markers whose closer is further away than the scan bound", () => {
+    const far = "x".repeat(2500);
+    expect(only("markdown", `**${far}**`)).toBe(`**${far}**`);
+    expect(only("markdown", `[${far}](http://a.b)`)).toBe(`[${far}](http://a.b)`);
+    expect(only("markdown", "**near**")).toBe("near");
+  });
+});
+
 describe("buildTextDiff", () => {
   it("lists equal, removed and inserted parts in reading order", () => {
     const result = cleanupText("Tom &amp; Jerry[1] laugh!!!", { actions: ["htmlEntities", "citations", "repeatedPunctuation"] });

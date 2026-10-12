@@ -123,23 +123,26 @@ function removeLines(cleanup: Cleanup, pattern: RegExp, reason: TextCleanupActio
 // ---------------------------------------------------------------------------
 // Markdown
 
+// Scans that look for a closing marker are bounded to 2000 characters, and
+// patterns that start on whitespace cannot start inside a run of it: both keep
+// cleanup linear on pasted text with long unmatched openers or blank runs.
 const CODE_FENCE_LINE = /^[ \t]*(?:```|~~~)[^\n]*(?:\n|$)/gm;
 const HEADING_MARKER = /^[ \t]{0,3}(#{1,6})[ \t]+/gm;
-const HEADING_CLOSING = /[ \t]+#+[ \t]*$/gm;
+const HEADING_CLOSING = /(?<![ \t])[ \t]+#+[ \t]*$/gm;
 const BLOCKQUOTE_MARKER = /^[ \t]{0,3}(?:>[ \t]?)+/gm;
 const BULLET_MARKER = /^[ \t]*[-*+][ \t]+(?=\S)/gm;
 const HORIZONTAL_RULE = /^[ \t]*(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})(?:\n|$)/gm;
-const CODE_SPAN = /(?<!`)(`+)(?!`)([^\n]+?)(?<!`)\1(?!`)/dg;
-const IMAGE = /!\[([^\]\n]+)\]\([^)\n]*\)/dg;
-const IMAGE_WITHOUT_ALT = /!\[[ \t]*\]\([^)\n]*\)/g;
-const LINK = /\[([^\]\n]+)\](?:\([^)\n]*\)|\[[^\]\n]*\])/dg;
-const AUTOLINK = /<(https?:\/\/[^>\s]+)>/dg;
-const STRONG = /(\*\*|__)(?=\S)([^\n]+?)(?<=\S)\1/dg;
-const EMPHASIS_STAR = /(?<![\w*])\*(?=[^\s*])([^*\n]+?)(?<=[^\s*])\*(?![\w*])/dg;
-const EMPHASIS_UNDERSCORE = /(?<![\w_])_(?=[^\s_])([^_\n]+?)(?<=[^\s_])_(?![\w_])/dg;
-const STRIKETHROUGH = /~~(?=\S)([^\n]+?)(?<=\S)~~/dg;
+const CODE_SPAN = /(?<!`)(`+)(?!`)([^\n]{1,2000}?)(?<!`)\1(?!`)/dg;
+const IMAGE = /!\[([^\]\n]{1,2000})\]\([^)\n]{0,2000}\)/dg;
+const IMAGE_WITHOUT_ALT = /!\[[ \t]*\]\([^)\n]{0,2000}\)/g;
+const LINK = /\[([^\]\n]{1,2000})\](?:\([^)\n]{0,2000}\)|\[[^\]\n]{0,2000}\])/dg;
+const AUTOLINK = /<(https?:\/\/[^>\s]{1,2000})>/dg;
+const STRONG = /(\*\*|__)(?=\S)([^\n]{1,2000}?)(?<=\S)\1/dg;
+const EMPHASIS_STAR = /(?<![\w*])\*(?=[^\s*])([^*\n]{1,2000}?)(?<=[^\s*])\*(?![\w*])/dg;
+const EMPHASIS_UNDERSCORE = /(?<![\w_])_(?=[^\s_])([^_\n]{1,2000}?)(?<=[^\s_])_(?![\w_])/dg;
+const STRIKETHROUGH = /~~(?=\S)([^\n]{1,2000}?)(?<=\S)~~/dg;
 /** "[^1]" footnote references (definitions keep their text). */
-const MARKDOWN_FOOTNOTE = /\[\^[^\]\s]+\](?!:)/g;
+const MARKDOWN_FOOTNOTE = /\[\^[^\]\s]{1,100}\](?!:)/g;
 
 /** Deletes the markers around a captured group (patterns use the `d` flag), keeping the group's text. */
 function unwrap(cleanup: Cleanup, pattern: RegExp, group = 1, protectContent = false): void {
@@ -271,7 +274,7 @@ const SOFT_HYPHEN = /­/g;
 /** A line holding only a page number: "12", "Page 12", "- 12 -", "12 of 300". */
 const PAGE_NUMBER_LINE = /^[ \t]*(?:[-–—][ \t]*)?(?:page[ \t]+)?\d{1,4}(?:[ \t]+of[ \t]+\d{1,4})?(?:[ \t]*[-–—])?[ \t]*(?:\n|$)/gim;
 /** A single line break (never part of a paragraph break) with the spaces around it. */
-const SINGLE_LINE_BREAK = /(?<!\n[ \t]*)[ \t]*\n[ \t]*(?![ \t]*\n)/g;
+const SINGLE_LINE_BREAK = /(?<![ \t])(?<!\n[ \t]*)[ \t]*\n[ \t]*(?![ \t\n])/g;
 const LIST_ITEM_START = /^(?:[-*•]|\d+[.)])\s/u;
 
 function lineBefore(text: string, index: number): string {
@@ -343,7 +346,7 @@ function decodeEntity(decimal: string | undefined, hex: string | undefined, name
 }
 
 /** Non-breaking space entities with the spaces around them, read as one space. */
-const SPACE_ENTITY_RUN = /[ \t]*(?:&nbsp;|&#160;|&#[xX]0*[aA]0;)(?:[ \t]|&nbsp;|&#160;|&#[xX]0*[aA]0;)*/g;
+const SPACE_ENTITY_RUN = /(?<![ \t])[ \t]*(?:&nbsp;|&#160;|&#[xX]0*[aA]0;)(?:[ \t]|&nbsp;|&#160;|&#[xX]0*[aA]0;)*/g;
 
 function cleanHtmlEntities(cleanup: Cleanup): void {
   const { text } = cleanup;
@@ -382,7 +385,7 @@ function cleanRepeatedPunctuation(cleanup: Cleanup): void {
 
 const CARRIAGE_RETURN = /\r\n?/g;
 const SPACE_RUN = /(?<=\S)[ \t\u00A0]{2,}(?=\S)|\t/g;
-const TRAILING_SPACE = /[ \t\u00A0]+$/gm;
+const TRAILING_SPACE = /(?<![ \t\u00A0])[ \t\u00A0]+$/gm;
 const LEADING_SPACE = /^[ \t\u00A0]+/gm;
 const BLANK_LINE_RUN = /\n{3,}/g;
 
