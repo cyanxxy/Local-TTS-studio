@@ -107,7 +107,7 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
       const fileName = historyDownloadFileName(entry, "wav").replace(/\.wav$/, "");
       await downloadAudioChunks(historyAudioToExportChunks(chunks), latest.current.session.creator.exportOptions, { fileName });
     } catch (cause) {
-      if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(errorMessage(cause));
+      if ((cause as { name?: unknown } | null)?.name !== "AbortError") setError(errorMessage(cause));
     }
   }, [loadAudio]);
 

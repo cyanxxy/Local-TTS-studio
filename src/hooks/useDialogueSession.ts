@@ -85,7 +85,7 @@ const DEFAULT_GAPS: Required<DialogueGapOptions> = { speakerChangeGapSec: 0.35, 
 const EXPORT_FILE_NAME = "open-tts-dialogue";
 
 function isAbort(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
+  return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "AbortError";
 }
 
 function errorMessage(error: unknown): string {

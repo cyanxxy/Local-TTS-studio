@@ -956,6 +956,22 @@ describe("SynthesisApp", () => {
     expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("A new Studio-only script.");
   });
 
+  it("switches Studio to Dialogue mode and back without losing the single-voice script", async () => {
+    render(<WebApp />);
+    expect(screen.getByRole("textbox", { name: "script" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Generation History/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Dialogue" }));
+    const script = await screen.findByRole("textbox", { name: "Dialogue script" });
+    expect(screen.queryByRole("textbox", { name: "script" })).not.toBeInTheDocument();
+    fireEvent.change(script, { target: { value: "Anna: Hello there.\nBen: Hi Anna." } });
+    expect(screen.getByLabelText("Voice for Anna")).toBeInTheDocument();
+    expect(screen.getByLabelText("Voice for Ben")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Single voice" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toBeInTheDocument();
+  });
+
   it("supports Audio8 local generation in both Studio and Reader", async () => {
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },

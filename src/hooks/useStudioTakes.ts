@@ -53,7 +53,7 @@ export interface UseStudioTakesReturn {
 }
 
 function isAbort(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
+  return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "AbortError";
 }
 
 function toArrayBuffer(samples: Float32Array): ArrayBuffer {
