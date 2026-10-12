@@ -1,6 +1,6 @@
 # Electron local runtimes
 
-Electron exposes NeuTTS Nano/Air and Qwen3-TTS through one resident compiled inference process: `open-tts-local-bridge`. Supertonic 3 runs separately in an Electron-renderer Web Worker using its official ONNX graph. Audio8 is a third, independent path: it runs `onnxruntime-node` on the CPU in a Node worker thread that Electron's main process owns, and never touches the bridge. The desktop package also contains the short-lived `open-tts-hf-xet-downloader`, used only as a scoped transport fallback for approved, revision-pinned Qwen safetensors files. It is not an inference backend. The package does not require Python or launch model-specific adapter programs. Model weights remain per-user downloads.
+Electron exposes NeuTTS Nano/Air and Qwen3-TTS through one resident compiled inference process: `open-tts-local-bridge`. Supertonic 3 (and Chatterbox Turbo) run separately in an Electron-renderer Web Worker using their official ONNX graphs. Audio8 is a third, independent path: it runs `onnxruntime-node` on the CPU in a Node worker thread that Electron's main process owns, and never touches the bridge. The desktop package also contains the short-lived `open-tts-hf-xet-downloader`, used only as a scoped transport fallback for approved, revision-pinned Qwen safetensors files. It is not an inference backend. The package does not require Python or launch model-specific adapter programs. Model weights remain per-user downloads.
 
 ## Architecture
 
@@ -16,12 +16,22 @@ Electron main process
   │    └─ Qwen3-TTS / pinned qwen3-tts-rs
   │         ├─ Apple Silicon: MLX + Metal
   │         └─ Windows x64: LibTorch (CPU or CUDA in custom builds)
-  ├─ audio8NativeWorker (worker_threads)
-  │    └─ Audio8 TTS / onnxruntime-node, CPU
+  ├─ electron/nativeModels worker host (worker_threads)
+  │    └─ audio8NativeWorker: Audio8 TTS / onnxruntime-node, CPU
   └─ open-tts-hf-xet-downloader (download-only, short-lived when needed)
 ```
 
 The bridge has one backend contract regardless of platform. Platform selection happens at compile/runtime inside Rust; renderer requests never select a tensor engine, dtype, or attention implementation.
+
+### Electron-side layout
+
+`electron/main.ts` is a small composition root. Feature IPC lives in `electron/ipc/` (`registerLocalTtsIpc`, `registerAudio8Ipc`, `registerDocumentIpc`, `registerReaderLibraryIpc`), every handler is registered through `createTrustedIpc` (`ipc/trusted.ts`, which checks the sender), and `ipc/channels.ts` is the single channel list that `electron/preload.ts` and main are both tied to by a contract test. A new channel must be added there. The local-TTS runtime is in `electron/localTts/` (`localTtsRuntime.ts`, the request registry, probe runner, warm-ups, `keepWarmLeases.ts`, `modelDirValidationCache.ts`, Qwen3 setup). The WebSocket client is `electron/webSocketBridgeWorker.ts` (the worker pool) plus `electron/wsBridge/{protocol,audioStreamValidator,requestWatchdog,bridgeProcess,connection}.ts`, each with pure unit tests. `electron/localTtsProtocolParity.test.ts` scans all of `rust/local-tts-bridge/src` and holds every limit shared with Rust to the Rust source: change a bridge limit in Rust and in `electron/localTtsLimits.ts` or `electron/wsBridge/protocol.ts` together, or `npm test` fails. The parser is regex-based by design, so a constant must be a plain literal.
+
+Launching a second copy of the app brings the existing window forward (a single-instance lock keyed by `userData`; a dev run sharing `userData` with an installed copy therefore hands off to it).
+
+### Diagnostics log
+
+The main process keeps a bounded rotating log at `userData/logs/main.log` (up to 3 files of 1 MiB; the home directory is shown as `~`) recording native runtime failures, IPC errors, warm-up failures, and renderer or GPU process crashes. Attach it to bug reports. Bridge crashes, timeouts, and startup failures report how the process exited and its last output.
 
 The bridge supports exactly two process actions:
 
@@ -85,7 +95,7 @@ Generation payloads are strict and reject unknown fields. Supported fields are:
 }
 ```
 
-`maxNewTokens` is a per-passage limit: Electron accepts 64-384 because the bridge caps every text unit at 384 codec tokens (32 seconds at 12 frames per second) to bound its KV cache. `seed` is optional (0 to 2^32-1); when present the bridge reseeds sampling before every text unit, so the same request repeats the same take. On MLX, whose upstream sampler seeds every draw from the clock, the vendored patch derives each draw's key from the seed and a draw counter; on LibTorch it calls `tch::manual_seed`.
+`maxNewTokens` is a per-passage limit: Electron accepts 64-384 because the bridge caps every text unit at 384 codec tokens (about 30.7 seconds at the codec's 12.5 Hz frame rate) to bound its KV cache. `seed` is optional (0 to 2^32-1); when present the bridge reseeds sampling before every text unit, so the same request repeats the same take. On MLX, whose upstream sampler seeds every draw from the clock, the vendored patch derives each draw's key from the seed and a draw counter; on LibTorch it calls `tch::manual_seed`.
 
 `temperature` accepts 0 to 2 (0 selects greedy decoding), and `topK` accepts 1 to 1,000.
 
@@ -95,7 +105,7 @@ Warm-up uses only `{mode, modelRepo, modelPath}` and never downloads weights. El
 
 ## Native Qwen inference
 
-The Rust dependency is pinned by Git revision in `rust/local-tts-bridge/Cargo.toml`. Production generation uses the low-level `TTSInference`, `AudioEncoder`, and `SpeakerEncoder` APIs.
+`qwen3-tts-rs` is a vendored path dependency (`rust/vendor/qwen3-tts-rs`, declared in `rust/local-tts-bridge/Cargo.toml`), not a Git-revision pin; see `OPEN_TTS_VENDOR.md` for how it differs from upstream. Production generation uses the low-level `TTSInference`, `AudioEncoder`, and `SpeakerEncoder` APIs.
 
 The bridge resolves hardware capabilities when the native process starts and retains that decision for the process lifetime. On Apple Silicon it queries MLX for Metal availability, initializes the matching MLX GPU or CPU stream, and passes the corresponding backend-neutral device marker. On Windows x64, `tch` 0.20 requires LibTorch 2.7.0; a CUDA-enabled custom build selects CUDA when LibTorch reports it available and otherwise selects CPU. Probe, warm-up, and generation metadata expose the compiled provider separately from the resolved device, so `mlx/metal`, `mlx/cpu`, `libtorch/cuda`, and `libtorch/cpu` cannot be confused. There is no alternate Qwen implementation behind the same UI.
 
@@ -108,6 +118,12 @@ Base mode decodes, downmixes, and resamples the reference WAV, then caches encod
 CustomVoice dialect speakers (Dylan, Eric) use their dialect token when the language is Chinese or Auto. The renderer re-splits each request after Electron and Rust trimming, so streamed text-unit indexes match the source ranges.
 
 Rust replaces NaN/Inf samples with zero but does not peak-normalize. Renderer WAV conversion owns normalization.
+
+### Rust bridge layout
+
+The bridge is split so most of it builds and tests without a native inference toolchain: `cli.rs` and `protocol.rs` at the top; `ws/` (`server`, `handshake`, `connection`) is the model-free WebSocket transport behind a `ws::Backend` trait; `neutts_backend/` and `qwen3/` implement backends. In `qwen3/`, `host.rs` keys the resident model, `engines.rs` holds the engines, `streaming.rs` drives text units, `target.rs` selects the provider, and `request.rs`, `config.rs`, `text.rs`, `reference.rs`, and `model_files.rs` hold validation and policy. `build.rs` sets `cfg(qwen3_native)` for macOS aarch64 and Windows x64; keep it in step with the target-specific `qwen3-tts-rs` tables in `Cargo.toml`. Adding a native backend means implementing `ws::Backend`, keeping payload validation in a model-free `request.rs`, and listing it in `rust/bridge-policy-tests/src/lib.rs`. `npm run test:rust:policy` covers the WebSocket transport (loopback tests), request validators, the streaming driver, the WAV reader, and the Qwen3 config, text, and model-file policy without MLX, Metal, or LibTorch.
+
+Rust I/O: accepted connections are set back to blocking mode (they used to inherit the listener's non-blocking mode, which made an idle bridge flood Electron with WebSocket pings on macOS); the acceptor takes the Electron connection without a polling sleep; cancel is polled between audio chunks without blocking (two `fcntl` calls per chunk, no 1 ms stall); and each streamed audio chunk leaves in a single write together with its metadata, scrubbed and encoded in one pass. The wire format is unchanged.
 
 ## WebSocket protocol
 
@@ -130,6 +146,8 @@ Rust resolves the configured host once and refuses to start unless every bind ad
 
 The upgrade is refused outright when it carries an `Origin` header: only Electron's main process is a legitimate client, and it never sends one, so no browser can reach the socket even if the token leaked. Handshakes run off the accept loop (at most 8 concurrent) so a peer that connects and then goes silent cannot hold the listener for its whole handshake deadline.
 
+**Delivery to the renderer.** Main sends each chunk of a generation as `{type:'chunk', ...}` followed by `{type:'end'}` on one ordered channel, `local-tts:audio-stream`, and `generate()` in the preload resolves only after the end marker, so no chunk can arrive after the result (the old "audio delivery timed out" failure). Each request's chunks go only to the listener that asked for it (`onAudioChunk`), cancelling stops delivery at once, and the preload keys streams by the trimmed request id main runs the request under.
+
 For generation the bridge emits progress JSON, then an `audio_chunk` JSON frame immediately followed by exactly `sampleCount * 4` bytes of little-endian Float32 audio. Rust bounds an outgoing Float32 frame to 262,144 samples (about 1 MiB); a Qwen text unit can therefore span multiple transport frames.
 
 All three Qwen3 modes stream audio *during* a text unit rather than emitting one buffer per unit. The talker's codes are decoded in batches of four frames and sent as they are produced, so first audio arrives after a fraction of a sentence instead of after the whole sentence — the dominant term in perceived latency. Voice cloning already worked this way; CustomVoice and VoiceDesign now share the same generate/decode tail through `generate_with_instruct_streaming`, whose conditioning is built by the same helper as the buffered API so the two cannot drift. Because a unit's 0.2 s trailing gap has to ride on that unit's *final* chunk, and which chunk is final is only known once the unit ends, the bridge holds each chunk back by one before sending it. Every streamed chunk still carries `textUnitIndex`/`textUnitTotal`, so the renderer can map audio back to sentences for highlighting. One final result frame includes sample rate, model repository, timings, duration, transport marker, and the authoritative transport-chunk count. It never contains `wavBase64`.
@@ -146,9 +164,15 @@ The transport applies bounded resource and liveness rules:
 - each Rust WebSocket message/frame is capped at 64 MiB, and the serialized JSON request is capped at 63 MiB so an oversize request is rejected in Electron, naming the limit, rather than tripping the server's frame-size abort;
 - one request may deliver at most 256 MiB of Float32 audio, including declared inter-chunk silence, with no more than 10,000 chunks;
 - a two-minute liveness watchdog is reset by Rust heartbeats or WebSocket traffic, while a 30-minute protocol-progress watchdog is reset only by WebSocket frames;
-- an idle resident worker is evicted after five minutes to release model memory.
+- an idle resident worker is evicted to release model memory: a Qwen3 worker after 60 seconds (its MLX/Metal working set is large), or after 30 minutes while a window holds a keep-warm lease on the loaded model; NeuTTS after five minutes. See [Residency and keep-warm leases](#residency-and-keep-warm-leases).
 
 These are safety ceilings, not recommended working sizes. The IPC and Rust boundaries still reject an oversized individual request, while the Studio and Reader orchestration layers keep each local Qwen request under that ceiling automatically. If a later section fails, audio chunks attributed to that failed attempt are removed before the completed-section result is exposed, so duration and seekable playback remain consistent.
+
+### Residency and keep-warm leases
+
+A renderer that has a Qwen3 model selected in Studio or the Reader takes a keep-warm lease (`local-tts:keep-warm`, released with `local-tts:release-keep-warm`) naming the model target (mode, repository, and folder). While any window's lease names what a worker has loaded, that worker idles for the 30-minute keep-warm window (`QWEN3_KEEP_WARM_IDLE_EVICT_MS`) instead of 60 seconds. A window holds at most eight leases, and a window that crashes, navigates, or closes drops them all. The idle clock is recorded when a worker goes idle (`idleSince`), so lease changes re-time an idle worker but never postpone eviction past its window; a Stop or handled failure aimed at the already-loaded model keeps the lease. When a worker goes away, every window is told on `local-tts:model-evicted` with the reason (`idle`, `stopped`, or `failed`).
+
+Qwen3 setup inspection reuses recent folder checks: `modelDirValidationCache.ts` remembers a successful model-folder validation for 30 seconds, so a folder deleted outside Open TTS can keep passing for up to 30 seconds before the bridge reports its own error. Weight digests are cached in-process per file identity (device, inode, size, mtime, ctime) by `electron/nativeModels/fileDigest.ts`; a cached digest is still compared with the pinned manifest every time, and files changed within the last 3 seconds of the read (the racy-clean window) are not cached, so a freshly written file is hashed once more on its next inspection.
 
 ## NeuTTS
 
@@ -159,6 +183,10 @@ NeuTTS remains in the same bridge and is keyed by model repository. Alongside Na
 Supertonic 3 is Electron-only even though it uses a renderer worker. The desktop entry is the only entry that imports that worker; the web app neither lists nor initializes it. Assets come from `Supertone/supertonic-3` revision `3cadd1ee6394adea1bd021217a0e650ede09a323`, are cached after first use, and run through WebGPU with a WASM fallback. The runtime exposes ten preset styles, 31 languages, and the model's `<laugh>`, `<breath>`, and `<sigh>` expression tags.
 
 The first WAV reference can trigger a one-time NeuCodec RTen encoder download of about 1.8 GB. Open TTS pins Hugging Face revision `836c82069dba26eaab204a2df951b19facf777e1` and verifies the 1,772,018,304-byte artifact against SHA-256 `155574ffc88ca5f86f0f0849ac2f75ce9b197fc205598698eb5b366081e68d7c` before use. The default file lives under the NeuTTS cache at `neucodec-encoder/neucodec_encoder_v2.rten`; a custom local file can be supplied to development builds with `OPEN_TTS_NEUCODEC_ENCODER=/absolute/path/to/neucodec_encoder_v2.rten`. The encoder is retained in the resident process after loading. Supplying pre-encoded `.npy` codes avoids this download. NeuTTS produces whole-text audio, split only when transport chunk limits require it.
+
+## Chatterbox Turbo
+
+Chatterbox Turbo is a renderer-worker engine (`src/workers/chatterbox.worker.ts`), WebGPU-only, available in the desktop shell. Its files come from `ResembleAI/chatterbox-turbo-ONNX` (revision `d21799bd`, MIT) plus a 0.7 MB default voice from `onnx-community/chatterbox-ONNX`, about 0.9 GB in all, pinned and verified by SHA-256. The quantized graphs use `GatherBlockQuantized`, which `onnxruntime-web`'s WASM provider lacks, so devices without a working WebGPU adapter get a clear load error and the picker falls back to the default engine. The q4f16 language model and fp16 variants of the other graphs produced garbled speech on the current ORT build and are not used. Real-time factor is above 1 on an Apple GPU. Reference clips are prepared to a trimmed, normalized 24 kHz window of at most 10 seconds; no transcript is needed.
 
 ## Audio8
 
@@ -178,7 +206,7 @@ audio8:cache-info    path, existence, and size of the audio8 namespace
 audio8:clear-cache   stop the worker, then remove every revision
 ```
 
-Every payload is validated in the main process before it reaches the worker: request ids must match `^[a-zA-Z0-9._-]{1,128}$`, text must be non-empty and at most 1,000 Unicode scalar values, and an unknown voice is rejected rather than replaced with the default — quietly rendering a whole request in a voice the caller did not ask for is a wrong answer with nothing to show it. The worker re-checks the text and the voice itself, and rejects an unknown voice in the same wording, so the two boundaries cannot disagree about what a valid request is.
+The handlers are registered in `electron/ipc/registerAudio8Ipc.ts`. Every payload is validated in the main process before it reaches the worker: request ids must match `^[a-zA-Z0-9._-]{1,128}$`, text must be non-empty and at most 1,000 Unicode scalar values, and an unknown voice is rejected rather than replaced with the default — quietly rendering a whole request in a voice the caller did not ask for is a wrong answer with nothing to show it. The worker re-checks the text and the voice itself, and rejects an unknown voice in the same wording, so the two boundaries cannot disagree about what a valid request is.
 
 Messages are `load`, `generate`, and `cancel` in, `progress`, `result`, and `error` out, all keyed by request id. Progress is delivered only to the request that produced it, so one window's download percentages cannot land in another window's progress bar. Downloads own the first 90% of a load, and the remaining steps (92, 95, 97, 100) mark off the three ONNX sessions, whose durations are fixed enough that stepped values read better than a synthetic ramp. `generate` returns the sample rate, the elapsed time, and one transferred `ArrayBuffer` of Float32 PCM; there is no chunk stream, so the renderer splits text into 180-character chunks and schedules each returned buffer itself.
 
@@ -188,7 +216,7 @@ A request that goes five minutes without any message from the worker fails and t
 
 A slow autoregressive transformer emits one semantic token and a hidden state per frame; a fast transformer expands that hidden state into the remaining acoustic codebooks; a codec decoder turns the finished code matrix into 44.1 kHz mono Float32 PCM. Sequence lengths, layer and head counts, codebook size, and token ids are read from the model's own `runtime_manifest.json` rather than hard-coded, so the graphs and the driver cannot drift apart. The prompt is a `(codebooks + 1, length)` matrix: row 0 carries text tokens and the voice's semantic codes, the remaining rows carry that voice's acoustic codes under the same positions. The token budget for a request is `min(512, max(64, characters × 2.5), maxSeqLen − promptLength)`.
 
-Sampling is top-k, then nucleus, then temperature, and the sampler is seeded, so one text, voice, and revision reproduce the same audio — that reproducibility is what makes a regression in this loop detectable at all. A semantic token the model has just produced is re-rolled once at a higher temperature, which is what stops generation settling into a repeated syllable.
+Sampling is top-k, then nucleus, then temperature, and the sampler is seeded, so one text, voice, and revision reproduce the same audio — that reproducibility is what makes a regression in this loop detectable at all. `audio8:generate` accepts an optional `seed` (uint32, default 42) and `temperature` (0.1 to 1, default 0.3), validated in `electron/audio8Ipc.ts` and again in the worker; omitting both gives the same audio as before. The top-k step selects the 50 best logits with a bounded selection (`topKLogitIndices`) instead of sorting the whole vocabulary for every token, with identical draws for the same seed. A semantic token the model has just produced is re-rolled once at a higher temperature, which is what stops generation settling into a repeated syllable.
 
 Intra-op threads are chosen at session creation by `electron/audio8Threading.ts`: up to four Apple performance cores on arm64 macOS, because scheduling across efficiency cores hurts latency and the memory-bandwidth-bound INT4 graphs benchmark faster at four threads than at five or six on a six-performance-core M1 Pro. Smaller M-series chips automatically use their available count. Other platforms use `min(6, availableParallelism())`, because the graphs stop scaling well before a large machine runs out of cores and the desktop app still has a UI to keep responsive.
 
@@ -202,11 +230,19 @@ Every file is verified against its exact byte length and then a digest before it
 
 ### Single-flight and cancellation
 
-`electron/audio8SharedTask.ts` provides a reference-counted single-flight used for the model load (`SharedTask`) and for per-file downloads (`SharedTaskGroup`, keyed by file). Guarding only the finished state is not enough: the renderer re-issues `load` on React StrictMode's double effect, on model toggles, and from its retry button, and two concurrent loads would fetch the same 572 MiB into the same `.partial` path, interleaving chunks into corrupt bytes. Progress fans out to every participant, and the shared work is abandoned only once the last participant has given up, so one window pressing Stop cannot cancel a transfer another window is still waiting on.
+`electron/nativeModels/sharedTask.ts` provides a reference-counted single-flight used for the model load (`SharedTask`) and for per-file downloads (`SharedTaskGroup`, keyed by file). Guarding only the finished state is not enough: the renderer re-issues `load` on React StrictMode's double effect, on model toggles, and from its retry button, and two concurrent loads would fetch the same 572 MiB into the same `.partial` path, interleaving chunks into corrupt bytes. Progress fans out to every participant, and the shared work is abandoned only once the last participant has given up, so one window pressing Stop cannot cancel a transfer another window is still waiting on.
 
 Stopping a generation sends `audio8:cancel`, which reports honestly whether there was anything to stop: `false` covers a request that had already settled, a worker that is gone, and an id that was never issued. The worker checks the abort signal at every token step of the sampling loop, and downloads check it between chunks, so a Stop is observed without waiting for the whole request. A model load is deliberately *not* cancelled when the user switches away from Audio8 or closes the page — the download is shared process-wide and abandoning it part way would throw away everything already fetched — but it keeps reporting into renderer state either way, so a load that fails while Audio8 is deselected still surfaces its error instead of leaving the runtime stuck on "loading".
 
 The on-disk cache, its revision scoping, pruning, and the ordering that clearing requires are described in [Local persistence](./storage.md#audio8-model-cache).
+
+### Native model framework
+
+Audio8 is the first consumer of `electron/nativeModels`, which Qwen3's downloads also use in part: `descriptor.ts` (what a model is), `workerHost.ts` (`startNativeModelWorker`, the worker side), `workerClient.ts` (`NativeModelWorkerClient`, the main-process client; it resolves the worker script relative to `dist-electron`, so the folder must stay one level below the output root), `workerProtocol.ts`, `modelCache.ts` and `pinnedAssetCache.ts` (revision-scoped cache), `verifiedDownload.ts`, `hubHttps.ts`, `fileDigest.ts`, `progressThrottle.ts`, `sharedTask.ts`, `ortNode.ts` and `inferenceThreads.ts` (ONNX Runtime set-up), and `runtimeBenchmark.ts`. Adding a native ONNX model means a descriptor, an asset table, a worker built on `startNativeModelWorker`, and a client subclass of `NativeModelWorkerClient`.
+
+Audio8 and Qwen3 share one verified downloader: HTTPS only with a Hugging Face host allow-list, exact length and digest verification, a `.partial` file promoted atomically, and stall detection. Progress is throttled where it is produced (at most every 100 ms or 0.5%, always including the start, the end, and file boundaries), and a throttle that is closed after a failure reports nothing further.
+
+Benchmark Audio8 with `npm run build:electron:main && OPEN_TTS_AUDIO8_MODEL_DIR=<userData>/local-model-cache/audio8/<revision> node scripts/benchmark-native-runtimes.cjs` (see [Performance benchmarks](./performance.md)).
 
 ## Platform support
 
@@ -243,6 +279,8 @@ npm run test
 npm run build:desktop
 ```
 
+`npm run test:rust:policy` needs no native toolchain. `npm run test:rust` (the unit tests, run through `scripts/test-rust-bridge.mjs`) still needs a Metal-capable machine. `electron/rustLocalBridge.test.ts`, the real bridge end-to-end test, could not be run on the machine that split the bridge into modules and changed its I/O; CI runs it on Linux, so run it on an Apple Silicon Mac before releasing to exercise the MLX path.
+
 Tagged releases publish source archives only. Maintainers can build unsigned
 Apple Silicon macOS packages locally with `npm run dist:mac`; the build scripts
 still verify and bundle the native bridge dependencies. Windows CPU/CUDA
@@ -261,4 +299,6 @@ Releases.
 - **No output / protocol-progress timeout:** inspect the surfaced bridge diagnostics. Heartbeats prevent false two-minute liveness failures during native work, but 30 minutes without any WebSocket protocol frame is treated as a stuck request and the worker is replaced.
 - **Audio8 reports a failed integrity verification:** the file on disk does not match its pinned length and digest, so it is refused rather than loaded. The partial file is already removed; retry the load, and if it keeps failing, use **Clear Local Cache** in Audio8's model settings and download again.
 - **Audio8 stops with "download stalled":** a transfer produced no bytes for two minutes. Total duration is not capped, so this is a wedged connection rather than a slow one; retry the load, which resumes from the files already verified on disk.
+- **Reporting a native failure:** attach `userData/logs/main.log` (home directory is redacted) to the bug report.
+- **A Qwen3 model unloads sooner than expected:** a window only keeps it warm while that model is selected in Studio or the Reader; otherwise the worker idles out after 60 seconds.
 - **Authentication failure in manual bridge testing:** supply a non-empty `OPEN_TTS_WS_AUTH_TOKEN` and connect to `ws://127.0.0.1:<announced-port>/<the-same-token>`. Electron creates this value automatically; do not persist it.

@@ -4,6 +4,262 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Voices (desktop): one searchable library of every engine's voices and your
+  own, with previews, favorites, saved presets, one-click use in Studio or the
+  Reader, and portable `.voice.zip` import and export.
+- Instant voice cloning wizard: record from the microphone or choose a WAV,
+  trim it on a waveform, get per-engine quality guidance, type the transcript,
+  and save the clone for Qwen3 Base, NeuTTS or Chatterbox. Voice Design lets
+  you describe a voice, audition three seeded previews, and save the one you
+  like (optionally as a Qwen3 Base clone reference).
+- Studio Generation History: finished generations are saved with their text,
+  engine, voice, seed and audio, and can be replayed, exported, reused,
+  favorited, deleted or cleared, with storage use shown.
+- Studio Variations: render three seeded (or speed-varied) takes of the script
+  or a passage, listen to each and put the chosen one in the timeline.
+- Studio Dialogue mode: write speaker-labelled (`Name: line`) scripts, cast an
+  engine and voice per speaker, render turn by turn with cancel and per-line
+  regenerate, and export audio with VTT or SRT captions.
+- New local engines in Studio and the Reader: Kitten TTS Nano 0.8 (eight
+  English voices, Apache-2.0), Paradee-8M (one English voice, Apache-2.0) and
+  Piper (eight curated English voices, downloaded per voice on first use), each
+  with saved settings. A Piper voice browser groups voices by accent with
+  quality filter, download size, progress, licence and attribution, and a
+  Credits section in Settings lists model licences (including the CC BY 4.0
+  attribution for LibriTTS).
+- Chatterbox Turbo (desktop, WebGPU only): zero-shot voice cloning from a
+  3-10 second WAV clip with no transcript, inline expression tags such as
+  `[laugh]`, `[sigh]` and `[whispering]` (unknown bracketed directions are
+  never read aloud), and temperature, top-k, top-p, repetition-penalty and seed
+  controls. First use downloads about 0.9 GB; files are pinned to a revision
+  and verified by SHA-256. Devices without WebGPU keep their saved choice but
+  run the default engine instead.
+- Seed controls for Audio8 and Supertonic 3 (and a temperature control for
+  Audio8), so a take can be reproduced or varied. Leaving them out gives the
+  same audio as before.
+- Pronunciation dictionaries: named, toggleable lists of alias and IPA rules
+  with case, whole-word and language options, importable and exportable as JSON
+  or W3C PLS files and testable against a phrase in the Creator Toolkit. Your
+  existing pronunciation lines move into a "Quick rules" dictionary.
+- Inline pauses: `<break time="1.5s"/>`, `<break time="500ms"/>` and
+  `[pause 1.5s]` (or the Pause button under the script) insert real silences of
+  up to 10 seconds on every engine and are never read aloud.
+- Optional English text normalization reads numbers, dates, times, currency,
+  units, percentages, abbreviations, URLs, emails and Roman numerals as words.
+  Normalization, dictionaries and pauses apply the same way on every engine,
+  including Qwen3 and Audio8, and Reader highlighting and captions stay aligned
+  with the text you wrote.
+- Script tools: one-click text cleanup (citations, footnote markers, links,
+  emoji, Markdown syntax and PDF artifacts) with a preview of every change and
+  undo, and a script preflight showing the spoken text, a passage and pause
+  map, and a length estimate for the selected engine.
+- Export: FLAC (16- and 24-bit); loudness presets for streaming, podcasts,
+  broadcast and ACX audiobooks with a true-peak limiter; silence trimming,
+  padding, fades and smoother chunk joins; a loudness report (LUFS, loudness
+  range, true peak) with an ACX check after every export; caption styles;
+  progress and cancel from the export panel or the player's download button;
+  and file names that carry the voice and time.
+- Reader audiobook export: one MP3 with chapter markers (ID3 `CHAP`/`CTOC`) or
+  a zip of numbered chapter MP3s with a playlist and cover, for a chapter or
+  the whole book. Already-rendered parts are reused, progress and cancel are
+  shown, and a retry keeps finished chapters.
+- Reader prepares the next section in the background while the current one
+  plays, so turning to it starts without a pause. A chip shows when it is
+  ready; **Prepare the next part** in Reading appearance turns it off.
+- Reader: OS media keys and Now Playing (book, chapter, cover, play/pause,
+  seek, previous/next section), per-book listening profiles that restore a
+  book's engine, voice, language, quality and speed, coloured highlights (five
+  colours) that are listed in the Notes tab, Markdown or JSON export of a
+  book's notes, highlights and bookmarks, EPUB covers in the library,
+  previous/next sentence and paragraph controls (<kbd>Shift</kbd>+arrows), and
+  keyboard and screen-reader access to the text (Tab to a paragraph, arrows to
+  move, <kbd>Enter</kbd> to listen from it, <kbd>Shift</kbd>+<kbd>Enter</kbd>
+  to select it).
+- Open TTS remembers each surface's desktop model, Supertonic 2 and 3 voice and
+  language, and Qwen3 settings (profile, speaker, language, instructions,
+  sampling, seed) across launches. Reference clips are never stored.
+- The desktop app keeps a bounded, rotating diagnostics log
+  (`userData/logs/main.log`, home directory redacted) recording native runtime
+  failures, IPC errors, warm-up failures and renderer or GPU process crashes.
+- The desktop app can keep a selected Qwen3 model loaded while it stays
+  selected (up to 30 idle minutes instead of one) and tells every window when a
+  local model is unloaded.
+- Browser models (Kokoro, Supertonic 2 and 3) accept a soft `ABORT` that stops
+  a generation without closing the worker or reloading the model. Supertonic 3
+  accepts an optional seed.
+- Pinned, verified model manifests: `scripts/pin-hf-assets.mjs` and
+  `scripts/pin-piper-voices.mjs` generate and `--check` them (network
+  maintainer tools, not CI); downloads are verified by size and SHA-256 before
+  use and before caching.
+- `scripts/benchmark-native-runtimes.cjs` reports Audio8 load time, time to
+  first audio and real-time factor with the machine it ran on, and
+  `npm run eval:inference` now benchmarks Supertonic 3 (`--model supertonic3`,
+  or `--model all`) with cold and warm load times (report schema 4).
+
+### Changed
+
+- The Electron desktop app is now the product focus. The web build keeps
+  working but is deprioritized and new work lands desktop first.
+- Reader "Listen from here", contents and search jumps start at the exact word
+  instead of the start of the generated passage containing it.
+- Reading progress is stored as a small separate record (written at most every
+  5 seconds while playing, and on pause, hide and quit) instead of rewriting
+  the whole book.
+- Stopping a browser-model generation no longer reloads the model: the worker
+  aborts in place and is replaced only if it stops answering. Leaving Studio or
+  the Reader stops only the generation of the engine that page was using.
+- A Qwen3 model selected in Studio or the Reader stays resident instead of
+  being evicted after a minute of idling, and a generation with missing
+  streamed audio fails immediately instead of after five seconds.
+- Stopping a local generation stops delivering its audio at once, and a
+  generation's audio goes only to the window that asked for it.
+- Launching Open TTS while it is already running brings the existing window
+  forward instead of starting a second copy.
+- Caption exports split long passages into readable cues of at most two
+  42-character lines and 7 seconds. MP3 export offers bitrates from 64 kbps and
+  caps at 160 kbps below 32 kHz, where MP3 cannot go higher.
+- Creator Toolkit disables speed, pause and pronunciation controls the selected
+  engine ignores, and says why. Creator settings use a new versioned format.
+- The Reader previews section boundaries with each browser engine's own
+  chunker, and the Wasm/CPU badge is no longer shown for Paradee and Piper,
+  which run on the CPU by design.
+- Reader cache signatures are version 2 and hash only the inputs the engine
+  reads. Audio cached under the old signature is recognized and re-saved when
+  its inputs match; otherwise it regenerates once (the first Reader visit after
+  upgrading also misses once for users with dictionary rules or toggles).
+
+### Fixed
+
+- A Reader, setup page or settings dialog that fails to load or render shows a
+  retry card in its place instead of replacing the whole app, so Studio's
+  script and audio survive. Failed chunk loads are retried once.
+- Going to the Reader no longer discards Studio's unsaved audio; it is back,
+  paused where it was, when you return to Studio.
+- The Reader's sleep timer actually stops playback and auto-continuation: when
+  it ends a chapter, the next section turns into view without playing.
+  Reader highlights follow text edits, and switching books mid-edit saves the
+  draft into the right book.
+- The 0.5x playback speed plays at 0.5x instead of 0.75x. Changing the
+  Supertonic 2 language in the Reader no longer caches the old language's audio
+  under the new one, and changing Qwen3 settings while another engine is active
+  no longer clears that engine's audio.
+- Local generations no longer fail with "audio delivery timed out" under heavy
+  load: the end of each audio stream travels on the same ordered channel as its
+  chunks. Pressing Stop right after a local model crash no longer blocks the
+  next generation with "already running", and bridge crashes, timeouts and
+  startup failures say how the process exited and show its last output.
+- On macOS an idle Rust bridge no longer floods Electron with WebSocket pings
+  (about 195,000 a second, a full core on each side).
+- Supertonic 3 runs on WebGPU again instead of always falling back to WASM
+  (about 7x faster, with first audio in roughly 0.3 s on Apple GPUs), and its
+  cold downloads no longer fail when Hugging Face serves compressed assets
+  without a `Content-Length`.
+- Kokoro no longer silently drops the end of long or number-dense passages that
+  exceed its 512-token context; they are split at natural boundaries. Kokoro
+  loads time out only when they stop making progress, and abandoned loads no
+  longer flash the loading state after the model is ready.
+- Pronunciation rules no longer change ordinary words that share letters with
+  an acronym ("US" no longer rewrites "us"), respect word boundaries in every
+  script, and never rewrite another rule's output. Loudness mastering uses a
+  true-peak limiter and hits the target on speech with strong peaks instead of
+  ending several LU too quiet. WebVTT captions escape `&`, `<` and `>`.
+- Reader imports no longer read quoted paragraphs and list items twice or drop
+  EPUB paragraphs written as plain divs; EPUB imports skip embedded media, SVG
+  and form-control text and find covers more reliably. Desktop PDF imports drop
+  running headers, footers and page numbers while keeping lone numbers,
+  per-page headings and the title page. The book's language is applied for
+  screen-reader pronunciation and hyphenation.
+- The Reader no longer rewrites unchanged cached audio on restore or at every
+  gap between streamed chunks.
+
+### Performance
+
+- Web launches start only the selected browser model's worker, and switching
+  between Studio and the Reader no longer reloads a model the other surface
+  still uses.
+- Speech starts sooner: the first chunk of Kokoro and Supertonic generations is
+  capped (140/160 characters) and later chunks ramp up to full size. Supertonic
+  3 warms WebGPU up before reporting ready and overlaps downloads with session
+  creation. The IndexedDB model cache lists and clears entries without reading
+  model bodies.
+- Qwen3 setup stops re-hashing gigabytes of weights on every check and profile
+  switch (digests are remembered while a file provably has not changed and are
+  still compared with the pinned manifest every time), and Qwen3 generations
+  and warm-ups reuse a recent model folder check.
+- The Audio8 sampler uses bounded top-k selection instead of sorting the whole
+  vocabulary for every token, with identical draws for the same seed. Download
+  progress for Audio8 and Qwen3 is throttled where it is produced.
+- The Rust bridge checks for a cancel between audio chunks without blocking
+  (about 1 ms saved per chunk and progress update) and sends each audio chunk
+  in a single write. The Electron side of the WebSocket bridge no longer
+  re-creates timers for every audio frame and line of native output.
+- Exports resample with a precomputed polyphase filter (about 10x faster) and
+  stream chunk by chunk with far less memory. Heavy-limiting mastering costs
+  about 2 seconds per audio minute.
+- Changing a control the Reader's engine ignores no longer discards its cached
+  sections, only the reading pane re-renders as the spoken word advances, and
+  edits rebase bookmarks, notes and chapters with a single scan.
+
+### Security
+
+- The desktop app grants microphone capture, and only microphone capture, to
+  its own pages; video, mixed audio/video, other permissions and other origins
+  stay denied. macOS builds declare `NSMicrophoneUsageDescription` and the
+  audio-input entitlement.
+- Voice packages are inspected before they are read (size, entry count, names,
+  compression method, expansion ratio, WAV validity and manifest hashes).
+
+### Maintenance
+
+- A typed engine registry (`src/models`) drives pickers, labels, routes,
+  persistence and Reader cache signatures; every engine implements one
+  `EngineRuntime` contract with a synthesize stream, held in one keyed map by an
+  engine orchestrator. The browser model loader is an N-engine worker pool, and
+  `SynthesisApp` is a shell over a shared session with Studio, Reader and
+  setup-page surfaces. All React Compiler lint warnings are cleared.
+- Browser workers share one worker kit (`src/workers/kit`) for messaging, run
+  lock, progress, backend fallback and chunk emission. One pinned-asset manifest
+  format and one `phonemizer` asset path serve all browser models.
+- The Electron main process is a small composition root over feature modules
+  with one trusted-sender IPC helper and a contract test tying main and preload
+  to one channel list. The WebSocket bridge client is split into protocol,
+  stream-validator, watchdog, process and connection modules, and a parity test
+  holds every limit shared with the Rust bridge to the Rust source.
+- A native ONNX model framework (`electron/nativeModels`) covers worker
+  hosting, single-flight loads, cancellation, the worker client, the revision
+  cache and ONNX Runtime set-up; Audio8 and Qwen3 share one verified-download
+  pipeline (HTTPS with a Hugging Face host allow-list, size and digest
+  verification, `.partial` promotion, stall detection).
+- The Rust bridge's `main.rs` and Qwen3 runtime are split into transport,
+  protocol, validation, backend and runtime modules; the model-free transport,
+  request validation and streaming policy run in `npm run test:rust:policy`.
+- Reader, creator, text, export and caption modules are split into focused
+  components, hooks and pure helpers, and the 100% coverage gate now includes
+  the text, pronunciation, caption and export modules.
+
+### Known gaps
+
+- `electron/rustLocalBridge.test.ts`, the real bridge end-to-end test, could
+  not run on the development machine (no Metal toolchain) since the bridge was
+  split into modules and its I/O changed. CI runs it on Linux; run it on an
+  Apple Silicon Mac before releasing to exercise the MLX path.
+- Media keys and Now Playing, the large audiobook save dialog and the
+  microphone permission prompt have only been verified by unit tests, not in a
+  signed, packaged build.
+- Whisper auto-transcription of clone references is not available yet; type the
+  transcript yourself.
+- Kitten's WebGPU path is unverified in a real browser (it falls back to WASM
+  on failure). Chatterbox Turbo is slower than real time on an Apple GPU and
+  untested on low-end GPUs.
+- `phonemizer` (the eSpeak NG build Kitten, Paradee and Piper phonemize with)
+  is not declared in `package.json`; it is only installed because `kokoro-js`
+  depends on it. Declare it before relying on that.
+- With normalization on and cleanup off, citation markers such as `[1]` are
+  read as "[one]".
+- A Piper multi-speaker voice (LibriTTS) is chosen by speaker number, not name.
+
 ## [1.8.5] - 2026-10-03
 
 ### Fixed

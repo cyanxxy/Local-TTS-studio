@@ -10,6 +10,8 @@ proprietary storage SDK. Persistence stays on the user's device.
 | Web | IndexedDB | `localStorage` | Browser Cache API / IndexedDB |
 | Electron desktop | SQLite | `localStorage` | Per-user app cache |
 
+The Voice Library and Generation History are renderer IndexedDB databases on both targets and are independent of the Reader library (see below).
+
 The Reader backends are independent apart from one upgrade path: the first time
 a desktop build reads the library, it imports the documents a pre-SQLite release
 left in the renderer's IndexedDB, so upgrading does not look like an erased
@@ -43,6 +45,26 @@ contains:
 Indexes cover document recency, audio lookup by document, and audio LRU
 pruning. The initial schema is created transactionally.
 
+Reading progress has its own table, `document_progress` (`document_id`,
+`progress_json`, `updated_at`), created with `CREATE TABLE IF NOT EXISTS` on
+every open rather than behind `user_version`, so the schema version is
+unchanged and an older build that opens the database simply ignores the table.
+The renderer writes progress through `reader-library:save-progress` at most
+every 5 seconds while playing and flushes on pause, window hide, and quit,
+instead of rewriting the whole document row. Reads merge the two: the newer of
+the row and the progress inside the document record wins. The main process
+keeps only the known progress fields (ids are bounded to 512 characters) and
+clamps a timestamp to 2 seconds ahead of the clock so a future-dated row
+cannot block later writes. On the web the same record is a `progress:<id>` key
+in the settings store.
+
+Document records may also carry optional `highlights[]`
+(`{id, start, end, color, quote, createdAt, updatedAt}`) and `cover`
+(`{dataUrl}`, a raster data URL of at most 384 KiB). Both are additive, need no
+schema or `DB_VERSION` change, and older builds ignore them. Stored highlights
+are validated on load (safe-integer offsets, duplicate ids keep the first, a
+quote re-anchors over its own length).
+
 The connection enables foreign keys, WAL journaling, a five-second busy
 timeout, and normal synchronous durability. Document and audio writes reject
 older snapshots so a delayed renderer write cannot replace a newer one. Writes
@@ -62,6 +84,78 @@ stops accepting work, because closing the worker first left the last edit
 rejected and silently discarded. A window that never answers cannot delay the
 quit past its bounded flush window. Closing a window or a browser tab flushes
 the same way, on both targets.
+
+## Generated-audio cache writes
+
+Section audio is stored with a metadata record that keeps the `signature` the
+audio was generated under and a `synthesisComplete` flag, so the Reader can ask
+`reader-library:get-audio-signature` whether a section is complete without
+reading its PCM (the web build falls back to the audio record for entries saved
+before the metadata held a signature). The Reader no longer rewrites unchanged
+audio on restore or at the gaps between streamed chunks, streaming saves land
+about every 30 seconds, and the browser cache compares metadata instead of
+reading audio to check timestamps. Reader signatures are version 2: audio saved
+under a version 1 signature is recognized and re-saved when its inputs match,
+and otherwise regenerates once.
+
+## Voice Library
+
+`open-tts-voice-library` is an IndexedDB database (managed by
+`openVersionedDatabase`, with a store-specific message when a newer schema is
+found) with three stores: `voices` (an `updatedAt` index), `audio`
+(reference and sample WAVs, keyed by voice and role, with a `voiceId` index),
+and `previews` (a bounded cache, 64 entries or 64 MiB, with `ownerId` and
+`lastUsedAt` indexes). It holds presets, clones (a 24 kHz mono PCM16
+reference and its exact transcript), and designed voices, with favorites and
+tags, up to 500 voices. `createVoices` writes a batch in one transaction, so a
+designed voice and its linked clone are saved together or not at all.
+
+Voices export as `.voice.zip`: a `voice.json` manifest (format
+`open-tts-voice`, version 1) plus `reference.wav` and/or `sample.wav`, each
+checked against the manifest's byte length and SHA-256 on import. Import
+rejects oversized files before reading them, then inspects the zip central
+directory (at most 3 entries, allowed unique names, store or deflate only,
+declared-size caps, a 200:1 expansion guard) and requires the audio to decode
+as a WAV matching the manifest. Reference clips are never written to
+`tts-engine-settings-v1`.
+
+## Generation History
+
+`open-tts-generation-history` (schema version 1) has an `entries` store
+(`createdAt` and `lastAccessedAt` indexes) and an `audio` store. Studio saves a
+completed generation with its text (up to 200,000 characters), engine, voice,
+settings, seed, and audio, bounded to 200 entries and 512 MiB in total, with at
+most 256 MiB per entry. Favorites have their own budget (at most 50 entries and
+never more than the bytes left after reserving one maximum-size entry), so they
+cannot make history unbounded; a save is refused rather than exceeding the
+limits. Entries that cannot be parsed (corrupt, or written by a newer schema)
+are skipped by eviction, and clearing history while keeping favorites leaves
+newer-schema entries untouched. Variations and Dialogue sessions are not stored
+here; the Dialogue script and manual casting persist in
+`localStorage` (`open-tts:dialogue-session`).
+
+## Settings and migrations
+
+All keys live in `localStorage`, written and read through `src/lib/appState.ts`:
+
+| Key | Contents |
+|---|---|
+| `tts-app-state-v2` | Selected model, text, quality, and `desktopModels` per surface (`studio`, `reader`) |
+| `tts-engine-settings-v1` | Per-engine settings, each validated field by field by the engine descriptor's `parseSettings`; reference clips are never stored |
+| `tts-app-creator-v2` | Creator settings: versioned, pronunciation dictionaries (v2), toggles for cleanup and normalization, export finishing options, caption style |
+| `open-tts-reader-view-v1` | Reader appearance and preferences (including **Prepare the next part**) |
+| `open-tts:dialogue-session` | Dialogue script and manual casting |
+
+Migrations are read-once and non-destructive: `tts-app-state-v1` (and the
+older `tts-app-model`) feed `tts-app-state-v2`, and `tts-app-creator-v1` feeds
+`tts-app-creator-v2`, which moves the old pronunciation lines into a "Quick
+rules" dictionary. The v1 keys are left in place. A lexicon that does not fit
+the new limits (rules over 200 or 500 characters, or past 5,000 rules) is
+filtered rule by rule rather than failing, and the Creator panel shows a
+dismissible one-time notice. Browser model files are cached in Cache Storage
+under `transformers-cache-kitten-v1`, `-paradee-v1`, and `-piper-v1` (Piper
+holds every downloaded voice); the model-storage **Re-download** action deletes
+the whole cache for these engines.
 
 ## Cache limits and backup
 
