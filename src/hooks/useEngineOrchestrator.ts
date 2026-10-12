@@ -223,10 +223,11 @@ export function useEngineOrchestrator({
     for (const runtime of all) runtime.resetGeneratedAudio();
   }, [runtimes]);
 
-  // A surface generation belongs to the surface that started it. When the
-  // visible engine changes because the page did (or its selection did), the
-  // engine left behind stops: its audio would otherwise keep streaming into
-  // the player under a surface that did not ask for it.
+  // When the visible engine changes, whether because the page or its
+  // selection did, the engine left behind stops: its audio would otherwise
+  // keep streaming into the player under a surface that did not ask for it.
+  // Switching between surfaces that select the same engine changes nothing
+  // here, so a generation continues across that switch.
   const previousVisibleEngineRef = useRef(visibleEngineId);
   useEffect(() => {
     const previous = previousVisibleEngineRef.current;
