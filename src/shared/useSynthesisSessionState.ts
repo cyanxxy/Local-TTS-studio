@@ -12,6 +12,7 @@ import { useReaderLibrary } from "../hooks/useReaderLibrary";
 import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderSession } from "../hooks/useReaderSession";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
+import { useVoiceApplier } from "../hooks/useVoiceApplier";
 import {
   getInitialAppState,
   getInitialCreatorState,
@@ -23,8 +24,10 @@ import {
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
 import { getUnsupportedModelMessage } from "../lib/browserSupport";
+import { getVoiceLibraryStore } from "../lib/voiceLibrary/store";
 import {
   getEngine,
+  parseEngineSettings,
   surfaceEngineSignatureParts,
   type EngineSettings,
   type SurfaceEngineId,
@@ -144,8 +147,10 @@ export function useSynthesisSessionState({
     browser,
     surfaceEngineSettings,
     desktopModelOptions,
+    desktopEngineAvailability,
     retireAllAudio,
     selectBrowserModel,
+    selectDesktopModel,
     changeEngineInput,
   } = useEngineOrchestrator({
     surface: isReaderPage ? "reader" : isStudioPage ? "studio" : null,
@@ -329,6 +334,27 @@ export function useSynthesisSessionState({
     navigateToPage(page);
   }, [flushReaderAudio, isReaderPage, navigateToPage]);
 
+  // The Voice Library sends a voice to Studio or the Reader: engine, voice and
+  // settings in one step. Language only applies to the engines that have one.
+  const patchVoice = useCallback((engine: AppEngineId, patch: { voice?: string; language?: string }) => {
+    const accepted = engine === "supertonic" || engine === "supertonic3" ? patch : { voice: patch.voice };
+    setEngineSettings((current) => ({
+      ...current,
+      [engine]: parseEngineSettings(engine, { ...current[engine], ...accepted }),
+    }));
+  }, []);
+  const applyVoice = useVoiceApplier({
+    selectBrowserModel,
+    selectDesktopModel,
+    desktopEngineAvailability,
+    patchVoice,
+    setSpeed: creator.onSpeedChange,
+    navigate: handlePageNavigation,
+    qwen3: qwen3Settings,
+    library: getVoiceLibraryStore(),
+    neuttsEnabled: preferences.showNeuTTS,
+  });
+
   const handleJumpToSegment = useCallback((segmentId: string) => {
     if (!segmentId) return;
     jumpToSegment(segmentId);
@@ -507,6 +533,7 @@ export function useSynthesisSessionState({
       retryLoad: handleReaderRetryLoad,
       jumpToSegment: handleJumpToSegment,
     },
+    voices: { apply: applyVoice },
     documents: {
       isImporting: isImportingDocument,
       importDocument: handleImportDocument,

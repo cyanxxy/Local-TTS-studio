@@ -18,6 +18,11 @@ interface SynthesisAppProps {
   createSupertonic3Worker?: () => Worker;
 }
 
+// The Voice Library page (cloning, design, previews) is a large subtree that
+// only the desktop build routes to, so it loads on first visit.
+const VoicesRoute = lazyWithRetry(() => import("../components/voices/VoicesRoute")
+  .then((module) => module.VoicesRoute));
+
 // The app settings dialog is only mounted once the user asks for it. It sits
 // inside a SurfaceErrorBoundary, so a failed chunk costs only the dialog.
 const AppSettingsDialog = lazyWithRetry(() => import("../components/AppSettingsDialog")
@@ -27,6 +32,7 @@ function SynthesisShell({ enableDesktopRuntimes }: { enableDesktopRuntimes: bool
   const { appSettings, chrome, environment, preferences, routing, studio } = useSynthesisSession();
   const { browserSupport, desktopRuntimesAvailable } = environment;
   const { activePage, isReaderPage, isStudioPage } = routing;
+  const isVoicesPage = activePage === "voices";
   const localInferenceSupported = browserSupport.isSupported;
   // Reader focus layout: hides the app header and page tabs for reading.
   const [readerImmersive, setReaderImmersive] = useState(false);
@@ -73,6 +79,14 @@ function SynthesisShell({ enableDesktopRuntimes }: { enableDesktopRuntimes: bool
               : browserSupportPanel
           ) : null}
         </div>
+
+        {isVoicesPage && enableDesktopRuntimes && (
+          <SurfaceErrorBoundary name="The Voice Library" resetKeys={[activePage]}>
+            <Suspense fallback={null}>
+              <VoicesRoute />
+            </Suspense>
+          </SurfaceErrorBoundary>
+        )}
 
         <LocalRuntimePages enableDesktopRuntimes={enableDesktopRuntimes} />
 

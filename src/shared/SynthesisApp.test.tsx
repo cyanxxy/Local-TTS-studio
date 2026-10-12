@@ -615,6 +615,10 @@ vi.mock("../components/LocalRuntimePage", () => ({
   ),
 }));
 
+vi.mock("../components/voices/VoicesRoute", () => ({
+  VoicesRoute: () => <div data-testid="voices-route">Voice Library</div>,
+}));
+
 function resetMockState() {
   vi.clearAllMocks();
   mock.routing = {
@@ -1275,6 +1279,16 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
     expect(screen.getByText("Audio8 · Native CPU")).toBeInTheDocument();
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
+  });
+
+  it("shows the Voice Library only on the desktop build's voices page", async () => {
+    mock.routing = { ...mock.routing, activePage: "voices", isReaderPage: false, isStudioPage: false };
+    const desktop = render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+    expect(await screen.findByTestId("voices-route")).toBeInTheDocument();
+    desktop.unmount();
+
+    render(<SynthesisApp enableDesktopRuntimes={false} />);
+    expect(screen.queryByTestId("voices-route")).not.toBeInTheDocument();
   });
 
   it("hides the desktop runtimes when the web build runs inside Electron", async () => {
