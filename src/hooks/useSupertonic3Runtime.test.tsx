@@ -323,4 +323,48 @@ describe("useSupertonic3Runtime", () => {
     await waitFor(() => expect(workers).toHaveLength(2));
     expect(workers[1].postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
   });
+
+  it("starts a replacement worker for a synthesize hold after the held worker is replaced", async () => {
+    const workers: FakeWorker[] = [];
+    const createWorker = vi.fn(() => {
+      const worker = new FakeWorker();
+      workers.push(worker);
+      return worker as unknown as Worker;
+    });
+    const { result } = renderHook(() => useSupertonic3Runtime({
+      ...baseOptions,
+      active: false,
+      createWorker,
+      player: createPlayer(),
+    }));
+    const request = (async () => {
+      try {
+        for await (const chunk of result.current.synthesize({
+          text: "A preview line.",
+          settings: { voice: "M1", language: "en" },
+          tuning: { speed: 1, quality: 5 },
+        })) void chunk;
+      } catch {
+        // The replaced worker ends the request; this test follows its successor.
+      }
+    })();
+    await waitFor(() => expect(workers).toHaveLength(1));
+    act(() => workers[0].dispatchEvent(new MessageEvent("message", {
+      data: { type: "READY", voices: ["M1"], backend: "wasm" },
+    })));
+    await waitFor(() => expect(workers[0].postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "GENERATE" }),
+    ));
+
+    // The runtime is inactive, so only the hold needs a worker.
+    ttsState.isGenerating = true;
+    act(() => result.current.handleStop());
+    const onUnresponsive = ttsState.abort.mock.calls[0][0] as (worker: Worker) => void;
+    act(() => onUnresponsive(workers[0] as unknown as Worker));
+
+    expect(workers[0].terminate).toHaveBeenCalledOnce();
+    await waitFor(() => expect(workers).toHaveLength(2));
+    expect(workers[1].postMessage).toHaveBeenCalledWith({ type: "LOAD", forceReload: false });
+    await request;
+  });
 });

@@ -61,6 +61,7 @@ export function useSupertonic3Runtime({
   const [workerResident, setWorkerResident] = useState(supported && active);
   // Outstanding synthesize holds; a held worker is started, loaded and kept.
   const [holds, setHolds] = useState(0);
+  const holdCountRef = useRef(0);
   const inUse = active || holds > 0;
   // Whatever needs the model brings its worker back in this same commit.
   if (supported && inUse && !workerResident) setWorkerResident(true);
@@ -293,9 +294,10 @@ export function useSupertonic3Runtime({
     voice,
   ]);
   // A worker that does not answer a soft abort is replaced, unless it
-  // already was. Stopping otherwise keeps the model loaded.
+  // already was. Stopping otherwise keeps the model loaded. The replacement
+  // starts whenever the surface or a synthesize hold still needs a worker.
   const replaceUnresponsiveWorker = useCallback((worker: Worker) => {
-    if (workerRef.current === worker) hardCancelGeneration(activeRef.current);
+    if (workerRef.current === worker) hardCancelGeneration(activeRef.current || holdCountRef.current > 0);
   }, [hardCancelGeneration]);
   const abortGeneration = useCallback(() => {
     abortTts(replaceUnresponsiveWorker);
@@ -344,6 +346,7 @@ export function useSupertonic3Runtime({
     const release = () => {
       if (!held) return;
       held = false;
+      holdCountRef.current = Math.max(0, holdCountRef.current - 1);
       setHolds((count) => Math.max(0, count - 1));
     };
     let retried = false;
@@ -382,6 +385,7 @@ export function useSupertonic3Runtime({
       retryLoad();
     }
 
+    holdCountRef.current += 1;
     setHolds((count) => count + 1);
     holdListenersRef.current.add(check);
     signal.addEventListener("abort", onAbort, { once: true });
