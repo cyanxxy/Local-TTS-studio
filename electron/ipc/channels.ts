@@ -10,6 +10,7 @@ export const IPC_INVOKE_CHANNELS = [
   "reader-library:list-documents",
   "reader-library:get-document",
   "reader-library:save-document",
+  "reader-library:save-progress",
   "reader-library:delete-document",
   "reader-library:get-active-document-id",
   "reader-library:set-active-document-id",

@@ -5,6 +5,7 @@ type ReaderLibraryOperation =
   | "listDocuments"
   | "getDocument"
   | "saveDocument"
+  | "saveProgress"
   | "deleteDocument"
   | "getActiveDocumentId"
   | "setActiveDocumentId"

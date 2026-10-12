@@ -127,6 +127,13 @@ export function registerReaderLibraryIpc(
     return getReaderLibraryWorker().request("saveDocument", [requestField(request, "document")]);
   });
 
+  ipc.handle("reader-library:save-progress", (_event, request) => {
+    return getReaderLibraryWorker().request("saveProgress", [
+      requestField(request, "documentId"),
+      requestField(request, "progress"),
+    ]);
+  });
+
   ipc.handle("reader-library:delete-document", (_event, request) => {
     return getReaderLibraryWorker().request("deleteDocument", [requestField(request, "id")]);
   });

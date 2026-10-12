@@ -5,6 +5,7 @@ type ReaderLibraryOperation =
   | "listDocuments"
   | "getDocument"
   | "saveDocument"
+  | "saveProgress"
   | "deleteDocument"
   | "getActiveDocumentId"
   | "setActiveDocumentId"
@@ -141,6 +142,8 @@ function handleRequest(request: WorkerRequest): unknown {
       return database.getDocument(request.args[0]);
     case "saveDocument":
       return database.saveDocument(request.args[0]);
+    case "saveProgress":
+      return database.saveProgress(request.args[0], request.args[1]);
     case "deleteDocument":
       invalidatePendingSaves(request.args[0]);
       return database.deleteDocument(request.args[0]);

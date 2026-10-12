@@ -50,6 +50,7 @@ interface CachedReaderAudio {
 interface DocumentRow {
   record_json: string;
   last_opened_at: number;
+  progress_json: string | null;
 }
 
 interface SettingRow {
@@ -215,12 +216,38 @@ function parseCachedAudio(value: unknown): {
   return { audio, chunks, metadataJson };
 }
 
-function decodeDocument(json: string, lastOpenedAt: number): ReaderDocumentRecord | null {
+function parseProgress(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new TypeError("Reader progress must be an object.");
+  finiteNumber(value.updatedAt, "Reader progress updatedAt");
+  finiteNumber(value.positionSec, "Reader progress positionSec");
+  finiteNumber(value.totalDurationSec, "Reader progress totalDurationSec");
+  finiteNumber(value.textOffset, "Reader progress textOffset");
+  finiteNumber(value.percent, "Reader progress percent");
+  return value;
+}
+
+/**
+ * The progress row is written far more often than the book, so it can be
+ * newer than the progress inside the document record. The newer one wins.
+ */
+function mergeProgress(record: ReaderDocumentRecord, progressJson: string | null): ReaderDocumentRecord {
+  if (progressJson === null) return record;
   try {
-    return {
-      ...parseDocument(JSON.parse(json)).record,
-      lastOpenedAt,
-    };
+    const progress = parseProgress(JSON.parse(progressJson));
+    const stored = isRecord(record.progress) ? record.progress.updatedAt : undefined;
+    if (typeof stored === "number" && stored >= (progress.updatedAt as number)) return record;
+    return { ...record, progress };
+  } catch {
+    return record;
+  }
+}
+
+function decodeDocument(row: DocumentRow): ReaderDocumentRecord | null {
+  try {
+    return mergeProgress({
+      ...parseDocument(JSON.parse(row.record_json)).record,
+      lastOpenedAt: row.last_opened_at,
+    }, row.progress_json);
   } catch {
     return null;
   }
@@ -275,6 +302,15 @@ export class ReaderLibraryDatabase {
           `Reader library schema ${row.user_version} is newer than supported schema ${SCHEMA_VERSION}.`,
         );
       }
+      // Created on every open rather than behind user_version: older builds
+      // that open this database ignore the table, so downgrades keep working.
+      this.#database.exec(`
+        CREATE TABLE IF NOT EXISTS document_progress (
+          document_id TEXT PRIMARY KEY,
+          progress_json TEXT NOT NULL,
+          updated_at REAL NOT NULL
+        ) STRICT
+      `);
       if (row.user_version === 0) {
         this.#database.exec(`
           CREATE TABLE documents (
@@ -338,21 +374,43 @@ export class ReaderLibraryDatabase {
 
   listDocuments(): ReaderDocumentRecord[] {
     const rows = this.#database.prepare(`
-      SELECT record_json, last_opened_at
-      FROM documents
-      ORDER BY last_opened_at DESC, updated_at DESC
+      SELECT d.record_json, d.last_opened_at, p.progress_json
+      FROM documents d
+      LEFT JOIN document_progress p ON p.document_id = d.id
+      ORDER BY d.last_opened_at DESC, d.updated_at DESC
     `).all() as unknown as DocumentRow[];
     return rows
-      .map((row) => decodeDocument(row.record_json, row.last_opened_at))
+      .map(decodeDocument)
       .filter((record): record is ReaderDocumentRecord => record !== null);
   }
 
   getDocument(idValue: unknown): ReaderDocumentRecord | null {
     const id = requiredString(idValue, "Reader document id", 512);
-    const row = this.#database
-      .prepare("SELECT record_json, last_opened_at FROM documents WHERE id = ?")
-      .get(id) as DocumentRow | undefined;
-    return row ? decodeDocument(row.record_json, row.last_opened_at) : null;
+    const row = this.#database.prepare(`
+      SELECT d.record_json, d.last_opened_at, p.progress_json
+      FROM documents d
+      LEFT JOIN document_progress p ON p.document_id = d.id
+      WHERE d.id = ?
+    `).get(id) as DocumentRow | undefined;
+    return row ? decodeDocument(row) : null;
+  }
+
+  /**
+   * Stores a book's reading position on its own. Listening writes this every
+   * few seconds, so it must not rewrite the book. Writes for a book that no
+   * longer exists are dropped, and an older position never replaces a newer one.
+   */
+  saveProgress(documentIdValue: unknown, progressValue: unknown): void {
+    const id = requiredString(documentIdValue, "Reader document id", 512);
+    const progress = parseProgress(progressValue);
+    this.#database.prepare(`
+      INSERT INTO document_progress(document_id, progress_json, updated_at)
+      SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM documents WHERE id = ?)
+      ON CONFLICT(document_id) DO UPDATE SET
+        progress_json = excluded.progress_json,
+        updated_at = excluded.updated_at
+      WHERE excluded.updated_at >= document_progress.updated_at
+    `).run(id, JSON.stringify(progress), progress.updatedAt as number, id);
   }
 
   saveDocument(value: unknown): void {
@@ -397,6 +455,7 @@ export class ReaderLibraryDatabase {
     const id = requiredString(idValue, "Reader document id", 512);
     this.#transaction(() => {
       this.#database.prepare("DELETE FROM reader_audio WHERE document_id = ?").run(id);
+      this.#database.prepare("DELETE FROM document_progress WHERE document_id = ?").run(id);
       this.#database.prepare("DELETE FROM documents WHERE id = ?").run(id);
       this.#database.prepare("DELETE FROM settings WHERE key = ? AND value = ?").run(ACTIVE_DOCUMENT_KEY, id);
     });

@@ -113,6 +113,75 @@ describe("ReaderLibraryDatabase", () => {
     });
   });
 
+  describe("reading progress", () => {
+    const progress = (updatedAt: number, textOffset = 10) => ({
+      positionSec: 4,
+      totalDurationSec: 60,
+      textOffset,
+      chapterId: null,
+      sectionId: null,
+      percent: 0.1,
+      updatedAt,
+    });
+
+    it("stores a position without rewriting the book and merges it on read", () => {
+      database.saveDocument({ ...createDocument("book", 100), progress: progress(100, 1) });
+      const recordBefore = JSON.stringify(database.getDocument("book"));
+      database.saveProgress("book", progress(500, 42));
+
+      expect(database.getDocument("book")?.progress).toMatchObject({ textOffset: 42, updatedAt: 500 });
+      expect(database.listDocuments()[0]?.progress).toMatchObject({ textOffset: 42 });
+      expect(JSON.parse(recordBefore).progress.textOffset).toBe(1);
+      const raw = new DatabaseSync(path.join(directory, "reader-library.sqlite3"));
+      const row = raw.prepare("SELECT record_json FROM documents WHERE id = ?").get("book") as { record_json: string };
+      raw.close();
+      expect(JSON.parse(row.record_json).progress.textOffset).toBe(1);
+    });
+
+    it("lets a newer progress inside the document record win over an older row", () => {
+      database.saveDocument({ ...createDocument("book", 100), progress: progress(100, 1) });
+      database.saveProgress("book", progress(200, 20));
+      database.saveDocument({ ...createDocument("book", 300), progress: progress(300, 77) });
+
+      expect(database.getDocument("book")?.progress).toMatchObject({ textOffset: 77, updatedAt: 300 });
+    });
+
+    it("keeps the newer row when an older progress arrives late", () => {
+      database.saveDocument(createDocument("book", 100));
+      database.saveProgress("book", progress(400, 40));
+      database.saveProgress("book", progress(300, 30));
+
+      expect(database.getDocument("book")?.progress).toMatchObject({ textOffset: 40 });
+    });
+
+    it("drops progress for a missing book and removes it with the book", () => {
+      database.saveProgress("ghost", progress(100));
+      database.saveDocument(createDocument("book", 100));
+      database.saveProgress("book", progress(200));
+      database.deleteDocument("book");
+      database.saveDocument(createDocument("book", 300));
+
+      const raw = new DatabaseSync(path.join(directory, "reader-library.sqlite3"));
+      expect(raw.prepare("SELECT COUNT(*) AS count FROM document_progress").get()).toEqual({ count: 0 });
+      raw.close();
+      expect(database.getDocument("book")).not.toHaveProperty("progress.textOffset");
+    });
+
+    it("rejects malformed progress", () => {
+      database.saveDocument(createDocument("book", 100));
+      expect(() => database.saveProgress("book", { updatedAt: "x" })).toThrow(TypeError);
+    });
+
+    it("leaves the schema version alone so older builds can still open the database", () => {
+      database.saveProgress("book", progress(1));
+      database.close();
+      const raw = new DatabaseSync(path.join(directory, "reader-library.sqlite3"));
+      expect(raw.prepare("PRAGMA user_version").get()).toEqual({ user_version: 1 });
+      raw.close();
+      database = new ReaderLibraryDatabase(path.join(directory, "reader-library.sqlite3"));
+    });
+  });
+
   it("closes its connection when schema initialization fails", () => {
     const newerPath = path.join(directory, "newer.sqlite3");
     const newer = new DatabaseSync(newerPath);

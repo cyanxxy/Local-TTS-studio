@@ -409,6 +409,9 @@ contextBridge.exposeInMainWorld("electron", {
     listDocuments: () => ipcRenderer.invoke("reader-library:list-documents"),
     getDocument: (id: string) => ipcRenderer.invoke("reader-library:get-document", { id }),
     saveDocument: (document: unknown) => ipcRenderer.invoke("reader-library:save-document", { document }),
+    saveProgress: (documentId: string, progress: unknown) => (
+      ipcRenderer.invoke("reader-library:save-progress", { documentId, progress })
+    ),
     deleteDocument: (id: string) => ipcRenderer.invoke("reader-library:delete-document", { id }),
     getActiveDocumentId: () => ipcRenderer.invoke("reader-library:get-active-document-id"),
     setActiveDocumentId: (id: string) => ipcRenderer.invoke("reader-library:set-active-document-id", { id }),

@@ -137,6 +137,8 @@ interface ReaderLibraryBridge {
   listDocuments: () => Promise<unknown[]>;
   getDocument: (id: string) => Promise<unknown | null>;
   saveDocument: (document: unknown) => Promise<void>;
+  // Stores only the reading position. Optional so older preloads can omit it.
+  saveProgress?: (documentId: string, progress: unknown) => Promise<void>;
   deleteDocument: (id: string) => Promise<void>;
   getActiveDocumentId: () => Promise<string | null>;
   setActiveDocumentId: (id: string) => Promise<void>;
