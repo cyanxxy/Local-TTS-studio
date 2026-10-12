@@ -9,14 +9,15 @@ import { useQwen3LocalRuntime } from "../hooks/useQwen3LocalRuntime";
 import { useSupertonic3Runtime } from "../hooks/useSupertonic3Runtime";
 import { PlaybackClock } from "../lib/playbackClock";
 import type { LocalBrowserSupport } from "../lib/browserSupport";
-import type { SurfaceEngineId } from "../models/registry";
+import type { BrowserEngineId, SurfaceEngineId } from "../models/registry";
 import type { WorkerInMessage, WorkerOutMessage } from "../types";
 import type { EngineRuntime, Qwen3SynthesisSettings, SynthesisChunk } from "./engineRuntime";
 
 // Every engine runtime must honour the same `synthesize` contract. Each harness
 // below drives one runtime's real hook against a fake transport; the suite at
-// the bottom runs the same assertions against all of them. (Supertonic 2 runs
-// beside Kokoro without driving a surface, so it has no surface to keep idle.)
+// the bottom runs the same assertions against all of them. (Every browser engine
+// but Kokoro runs beside it without driving a surface, so it has no surface to
+// keep idle.)
 
 vi.mock("../contexts/Qwen3RuntimeContext", () => ({ useQwen3Runtime: vi.fn() }));
 
@@ -268,16 +269,26 @@ const BROWSER_SUPPORT: LocalBrowserSupport = {
   isSupported: true,
   isIOS: false,
   message: null,
-  supportedModels: ["kokoro", "supertonic"],
+  supportedModels: ["kokoro", "supertonic", "kitten", "paradee", "piper"],
   unsupportedModelMessages: {},
 };
 
-function browserHarness(engine: "kokoro" | "supertonic"): Harness {
+/** What each browser engine's request carries: its own voice and, where it has one, language. */
+const BROWSER_REQUEST_SETTINGS = {
+  kokoro: { voice: "af_heart" },
+  supertonic: { voice: "Female", language: "en" },
+  kitten: { voice: "Jasper" },
+  paradee: { voice: "heart" },
+  // A multi-speaker voice, the way the worker takes one.
+  piper: { voice: "en_US-libritts-high#12" },
+} as const satisfies { readonly [Id in BrowserEngineId]: unknown };
+
+function browserHarness(engine: BrowserEngineId): Harness {
   vi.stubGlobal("Worker", ScriptedWorker);
   const { player, methods } = createPlayer();
   const setShowPlayer = vi.fn();
-  // Kokoro is the surface's engine; Supertonic 2 is not selected at all, so
-  // its requests also prove the worker loads on demand.
+  // Kokoro is the surface's engine; every other browser engine is not selected
+  // at all, so its requests also prove the worker loads on demand.
   const view = renderHook(() => useBrowserEngineRuntimes({
     activeModel: "kokoro",
     active: true,
@@ -298,14 +309,12 @@ function browserHarness(engine: "kokoro" | "supertonic"): Harness {
   const worker = () => ScriptedWorker.instances.filter((instance) => instance.url.includes(`/${engine}.worker`)).at(-1);
   return {
     runtime: () => view.result.current.runtimes[engine],
-    synthesize: (signal) => (engine === "kokoro"
-      ? view.result.current.runtimes.kokoro.synthesize({ text: TEXT, settings: { voice: "af_heart" }, tuning: TUNING, signal })
-      : view.result.current.runtimes.supertonic.synthesize({
-          text: TEXT,
-          settings: { voice: "Female", language: "en" },
-          tuning: TUNING,
-          signal,
-        })),
+    synthesize: (signal) => view.result.current.runtimes[engine].synthesize({
+      text: TEXT,
+      settings: BROWSER_REQUEST_SETTINGS[engine] as never,
+      tuning: TUNING,
+      signal,
+    }),
     started: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.generations.length, 0),
     complete: () => worker()?.completeLatest(),
     fail: (message) => worker()?.failLatest(message),
@@ -320,6 +329,9 @@ function browserHarness(engine: "kokoro" | "supertonic"): Harness {
 const HARNESSES: Array<[SurfaceEngineId, () => Harness]> = [
   ["kokoro", () => browserHarness("kokoro")],
   ["supertonic", () => browserHarness("supertonic")],
+  ["kitten", () => browserHarness("kitten")],
+  ["paradee", () => browserHarness("paradee")],
+  ["piper", () => browserHarness("piper")],
   ["audio8", audio8Harness],
   ["supertonic3", supertonic3Harness],
   ["qwen3", qwen3Harness],
@@ -419,7 +431,7 @@ describe.each(HARNESSES)("%s EngineRuntime contract", (engine, createHarness) =>
     expect(next.error()).toBeUndefined();
   });
 
-  it.skipIf(!["kokoro", "supertonic", "supertonic3"].includes(engine))(
+  it.skipIf(!["kokoro", "supertonic", "kitten", "paradee", "piper", "supertonic3"].includes(engine))(
     "aborts a stopped request on its worker without closing the worker or reloading the model",
     async () => {
       const controller = new AbortController();
@@ -474,7 +486,7 @@ describe.each(HARNESSES)("%s EngineRuntime contract", (engine, createHarness) =>
     expect(healthy.error()).toBeUndefined();
   });
 
-  it.skipIf(engine === "supertonic")("keeps the surface from generating while a request runs", async () => {
+  it.skipIf(["supertonic", "kitten", "paradee", "piper"].includes(engine))("keeps the surface from generating while a request runs", async () => {
     await harness.ready();
     await waitFor(() => expect(harness.runtime().canGenerate).toBe(true));
 

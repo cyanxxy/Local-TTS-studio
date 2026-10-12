@@ -8,7 +8,16 @@ import { pinnedAssetUrl } from "../lib/pinnedModelAssets";
 import type { PinnedAssetManifest } from "../lib/pinnedModelFetch";
 import type { PiperVoiceEntry } from "../lib/piperVoices";
 import type { StyleTtsOutMessage } from "../lib/styleTtsRuntime";
+import { piperEngine } from "../models/piper";
 import type { WorkerInMessage } from "../types";
+
+const PREVIEW_TEXT = [
+  "Chapter One",
+  "",
+  "The first paragraph has a few sentences. It keeps going, with a comma here; and a clause there.",
+  "",
+  "A second paragraph follows after a blank line, long enough that every chunker has to make a decision about where to cut it into passages for synthesis. And a third sentence closes it out.",
+].join("\n");
 
 function voiceConfig(speakers: Record<string, number> = {}) {
   return JSON.stringify({
@@ -195,6 +204,18 @@ describe("piper.worker", () => {
     const last = chunks.at(-1)!;
     expect(last.pauseAfterSec).toBe(0.5);
     expect(Array.from(last.audio.subarray(-11_025)).every((sample) => sample === 0)).toBe(true);
+  });
+
+  it("emits the passages the Piper engine previews for the Reader", async () => {
+    const worker = await startWorker();
+    await settledLoad(worker);
+
+    await generate(worker, SINGLE, PREVIEW_TEXT);
+
+    const preview = piperEngine.previewChunks(PREVIEW_TEXT, { settings: { voice: SINGLE }, backend: "wasm", quality: 5 });
+    expect(preview.length).toBeGreaterThan(1);
+    expect(worker.ofType("AUDIO_CHUNK").map(({ text, textStart, textEnd }) => ({ text, start: textStart, end: textEnd })))
+      .toEqual(preview.map(({ text, start, end }) => ({ text, start, end })));
   });
 
   it("switches to another voice on demand, selecting the speaker and releasing the previous session", async () => {

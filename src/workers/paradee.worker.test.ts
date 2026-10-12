@@ -7,12 +7,21 @@ import type { EspeakPhonemize } from "../lib/espeakPhonemizer";
 import { pinnedAssetUrl } from "../lib/pinnedModelAssets";
 import type { PinnedAssetManifest } from "../lib/pinnedModelFetch";
 import type { StyleTtsOutMessage } from "../lib/styleTtsRuntime";
+import { paradeeEngine } from "../models/paradee";
 import type { WorkerInMessage } from "../types";
 
 function pinnedFile(content: string, path: string) {
   const bytes = new TextEncoder().encode(content);
   return { path, content, byteLength: bytes.byteLength, sha256: createHash("sha256").update(bytes).digest("hex") };
 }
+
+const PREVIEW_TEXT = [
+  "Chapter One",
+  "",
+  "The first paragraph has a few sentences. It keeps going, with a comma here; and a clause there.",
+  "",
+  "A second paragraph follows after a blank line, long enough that every chunker has to make a decision about where to cut it into passages for synthesis. And a third sentence closes it out.",
+].join("\n");
 
 const VOCAB = { ",": 3, ".": 4, "!": 5, "?": 6, " ": 16, ...Object.fromEntries(Array.from("abcdefghijklmnopqrstuvwxyz", (letter, index) => [letter, 43 + index])) };
 const FILES = {
@@ -134,6 +143,19 @@ describe("paradee.worker", () => {
     const last = chunks.at(-1)!;
     expect(last.pauseAfterSec).toBe(0.5);
     expect(Array.from(last.audio.subarray(-12_000)).every((sample) => sample === 0)).toBe(true);
+  });
+
+  it("emits the passages the Paradee engine previews for the Reader", async () => {
+    const worker = await startWorker();
+    await settledLoad(worker);
+
+    worker.send({ type: "GENERATE", generationId: "g1", text: PREVIEW_TEXT, voice: "heart", speed: 1, quality: 5 });
+    await vi.waitFor(() => expect(worker.ofType("GENERATION_COMPLETE")).toHaveLength(1));
+
+    const preview = paradeeEngine.previewChunks(PREVIEW_TEXT, { settings: paradeeEngine.defaultSettings, backend: "wasm", quality: 5 });
+    expect(preview.length).toBeGreaterThan(1);
+    expect(worker.ofType("AUDIO_CHUNK").map(({ text, textStart, textEnd }) => ({ text, start: textStart, end: textEnd })))
+      .toEqual(preview.map(({ text, start, end }) => ({ text, start, end })));
   });
 
   it("refuses a model that fails digest verification", async () => {
