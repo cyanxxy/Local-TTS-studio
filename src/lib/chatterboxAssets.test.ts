@@ -16,8 +16,8 @@ const MODEL = "Org/chatter-onnx";
 const REVISION = "a".repeat(40);
 const OTHER_REVISION = "b".repeat(40);
 
-async function pin(text: string): Promise<{ bytes: Uint8Array; integrity: PinnedAssetIntegrity }> {
-  const bytes = new TextEncoder().encode(text);
+async function pin(text: string): Promise<{ bytes: Uint8Array<ArrayBuffer>; integrity: PinnedAssetIntegrity }> {
+  const bytes = new Uint8Array(new TextEncoder().encode(text));
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   const sha256 = Array.from(digest, (value) => value.toString(16).padStart(2, "0")).join("");
   return { bytes, integrity: { byteLength: bytes.byteLength, sha256 } };
