@@ -16,6 +16,7 @@ import {
   parsePortAnnouncement,
   parseResultAudioMetadata,
   parseStartupFailure,
+  parseUnitGapMetadata,
   SHUTDOWN_COMMAND,
 } from "./protocol";
 
@@ -204,5 +205,43 @@ describe("parseResultAudioMetadata", () => {
   it.each([7_999, 192_001, 24_000.5, "24000", undefined])("rejects the sample rate %s", (sampleRate) => {
     expect(() => parseResultAudioMetadata({ result: { audioChunkCount: 1, sampleRate } }))
       .toThrow("invalid sample rate");
+  });
+});
+
+describe("parseUnitGapMetadata", () => {
+  const GAP = { type: "unit_gap", requestId: "r1", sampleRate: 24_000, textUnitIndex: 1, textUnitTotal: 3, silenceSamples: 4_800 };
+
+  it("reads a well-formed gap and stamps the request id it was checked against", () => {
+    expect(parseUnitGapMetadata(GAP, "r1")).toEqual({
+      requestId: "r1",
+      sampleRate: 24_000,
+      textUnitIndex: 1,
+      textUnitTotal: 3,
+      silenceSamples: 4_800,
+    });
+  });
+
+  it.each([7_999, 192_001])("rejects the sample rate %s", (sampleRate) => {
+    expect(() => parseUnitGapMetadata({ ...GAP, sampleRate }, "r1")).toThrow("invalid sample rate");
+  });
+
+  it.each([
+    [{ textUnitTotal: 0 }],
+    [{ textUnitIndex: 3 }],
+    [{ textUnitTotal: MAX_REQUEST_AUDIO_CHUNKS + 1 }],
+  ])("rejects out-of-range text-unit metadata %j", (overrides) => {
+    expect(() => parseUnitGapMetadata({ ...GAP, ...overrides }, "r1")).toThrow("invalid text-unit metadata");
+  });
+
+  it.each([-1, 1.5, "4800", undefined])("rejects the field value %s", (silenceSamples) => {
+    expect(() => parseUnitGapMetadata({ ...GAP, silenceSamples }, "r1")).toThrow("invalid unit gap `silenceSamples`");
+  });
+
+  it("rejects no silence and more silence than a chunk may declare", () => {
+    expect(() => parseUnitGapMetadata({ ...GAP, silenceSamples: 0 }, "r1")).toThrow("invalid silence");
+    expect(() => parseUnitGapMetadata({ ...GAP, silenceSamples: MAX_AUDIO_SILENCE_SAMPLES + 1 }, "r1"))
+      .toThrow("invalid silence");
+    expect(parseUnitGapMetadata({ ...GAP, silenceSamples: MAX_AUDIO_SILENCE_SAMPLES }, "r1").silenceSamples)
+      .toBe(MAX_AUDIO_SILENCE_SAMPLES);
   });
 });
