@@ -4,7 +4,7 @@
 
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 // Electron accepts reference-audio base64 strings up to 60,000,000 bytes. Keep
 // the transport ceiling above that payload plus its bounded JSON envelope.
@@ -13,6 +13,8 @@ pub const MAX_AUDIO_CHUNK_SAMPLES: usize = 262_144;
 // Cancellation unwinds generation through the normal error path; the exact
 // text is what the client matches on to keep the worker warm.
 pub const CANCELLED_MESSAGE: &str = "Generation cancelled.";
+/// The `type` of the frame that reports the silence after a finished text unit.
+pub const UNIT_GAP_FRAME_TYPE: &str = "unit_gap";
 pub const MAX_LOCAL_TTS_TEXT_CHARS: usize = 6_000;
 pub const MAX_REFERENCE_TEXT_CHARS: usize = 2_000;
 pub const MAX_REFERENCE_AUDIO_BASE64_CHARS: usize = 60_000_000;
@@ -46,6 +48,26 @@ pub fn classify_buffered_request(text: String) -> BufferedRequest {
         Some(request_id) if !request_id.trim().is_empty() => BufferedRequest::Cancel(request_id),
         _ => BufferedRequest::Ignored,
     }
+}
+
+/// The text-only frame sent after a streamed text unit's last audio chunk when
+/// `silence_samples` of silence follow it. The client inserts the silence at
+/// that point of its timeline; it never counts toward `audioChunkCount`.
+pub fn unit_gap_frame(
+    request_id: &str,
+    sample_rate: u32,
+    text_unit_index: usize,
+    text_unit_total: usize,
+    silence_samples: usize,
+) -> Value {
+    json!({
+        "type": UNIT_GAP_FRAME_TYPE,
+        "requestId": request_id,
+        "sampleRate": sample_rate,
+        "textUnitIndex": text_unit_index,
+        "textUnitTotal": text_unit_total,
+        "silenceSamples": silence_samples,
+    })
 }
 
 pub fn ensure_reference_audio_base64_len(encoded_len: usize) -> Result<()> {
@@ -133,6 +155,21 @@ pub fn float32_to_le_bytes(samples: &[f32]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_unit_gap_frame_carries_exactly_the_documented_fields() {
+        assert_eq!(
+            unit_gap_frame("r1", 24_000, 2, 5, 4_800),
+            json!({
+                "type": "unit_gap",
+                "requestId": "r1",
+                "sampleRate": 24_000,
+                "textUnitIndex": 2,
+                "textUnitTotal": 5,
+                "silenceSamples": 4_800,
+            })
+        );
+    }
 
     fn output_with(
         samples: Vec<f32>,

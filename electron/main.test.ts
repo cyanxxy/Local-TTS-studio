@@ -1481,6 +1481,38 @@ describe("local model cache lifecycle IPC", () => {
       });
     });
 
+    it("forwards a unit gap on the same ordered channel between the chunks", async () => {
+      const event = createEvent(undefined);
+      const gap = {
+        requestId: "local-generate",
+        afterChunkIndex: 0,
+        sampleRate: 24_000,
+        silenceSamples: 4_800,
+        textUnitIndex: 0,
+        textUnitTotal: 2,
+      };
+      mocks.localWsRun.mockImplementationOnce(async (_model, options: {
+        onAudioChunk: (chunk: unknown) => void;
+        onAudioGap: (gap: unknown) => void;
+      }) => {
+        options.onAudioChunk(audioChunk);
+        options.onAudioGap(gap);
+        options.onAudioChunk({ ...audioChunk, index: 1, total: 2 });
+        return { response: { ok: true, result: {
+          sampleRate: 24_000, modelRepo: "model", durationSec: 1, elapsedSec: 1,
+          audioTransport: "websocket-binary", audioChunkCount: 2, phaseTimingsSec: {},
+        } } };
+      });
+
+      await generateWithEvent(event);
+
+      expect(event.sender.send.mock.calls.map(([, payload]) => (payload as { type: string }).type))
+        .toEqual(["chunk", "gap", "chunk", "end"]);
+      expect(event.sender.send).toHaveBeenNthCalledWith(2, "local-tts:audio-stream", {
+        type: "gap", model: "neutts", ...gap,
+      });
+    });
+
     it("ends the stream of a generation that fails", async () => {
       const event = createEvent(undefined);
       mocks.localWsRun.mockRejectedValueOnce(new Error("Rust local bridge exited before returning a result."));

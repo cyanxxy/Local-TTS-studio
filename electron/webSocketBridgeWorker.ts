@@ -25,13 +25,15 @@ import {
   isTerminalResultFor,
   parseBridgeMessage,
   SHUTDOWN_COMMAND,
+  UNIT_GAP_MESSAGE_TYPE,
   type BridgeCommand,
   type BridgeMessage,
   type WebSocketAudioChunk,
+  type WebSocketUnitGap,
 } from "./wsBridge/protocol";
 import { RequestWatchdog } from "./wsBridge/requestWatchdog";
 
-export type { WebSocketAudioChunk } from "./wsBridge/protocol";
+export type { WebSocketAudioChunk, WebSocketUnitGap } from "./wsBridge/protocol";
 
 export interface WebSocketWorkerSpawnConfig {
   bridgeBinary: string;
@@ -65,6 +67,8 @@ export interface WebSocketWorkerRunOptions {
   maxStderrBytes: number;
   onProgress: (payload: unknown) => void;
   onAudioChunk: (payload: WebSocketAudioChunk) => void;
+  /** Told of the silence after a finished text unit, in stream order with the chunks. */
+  onAudioGap?: (payload: WebSocketUnitGap) => void;
   /**
    * Names what this request leaves loaded in the worker (for Qwen3, the model
    * folder). Once the request succeeds the worker is resident with this key,
@@ -101,7 +105,7 @@ export interface CreateWebSocketBridgeWorkerPoolOptions<TModel extends string> {
    * pool keeps serving the request either way: a consumer bug must never
    * break the transport.
    */
-  onListenerError?: (error: unknown, details: { requestId: string; listener: "progress" | "audioChunk" }) => void;
+  onListenerError?: (error: unknown, details: { requestId: string; listener: "progress" | "audioChunk" | "audioGap" }) => void;
   /** Told once for every worker that had connected, when it goes away. */
   onWorkerExit?: (model: TModel, details: { reason: WorkerExitReason }) => void;
 }
@@ -121,7 +125,7 @@ export interface WebSocketBridgeWorkerPool<TModel extends string> {
   refreshIdleEviction: (model: TModel) => void;
 }
 
-type StreamListener = "progress" | "audioChunk";
+type StreamListener = "progress" | "audioChunk" | "audioGap";
 
 interface ActiveRequest {
   requestId: string;
@@ -130,6 +134,7 @@ interface ActiveRequest {
   reject: (error: Error) => void;
   onProgress: (payload: unknown) => void;
   onAudioChunk: (payload: WebSocketAudioChunk) => void;
+  onAudioGap: ((payload: WebSocketUnitGap) => void) | null;
   idleTimeoutMs: number;
   progressTimeoutMs: number;
   maxStdoutBytes: number;
@@ -505,6 +510,12 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       case "audio_chunk":
         active.stream.acceptMetadata(message);
         return;
+      case UNIT_GAP_MESSAGE_TYPE: {
+        const gap = active.stream.acceptGap(message);
+        const onAudioGap = active.onAudioGap;
+        if (onAudioGap) deliver(active, "audioGap", () => onAudioGap(gap));
+        return;
+      }
       case "result":
         handleResult(model, worker, active, message);
         return;
@@ -708,6 +719,7 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
           reject,
           onProgress: options.onProgress,
           onAudioChunk: options.onAudioChunk,
+          onAudioGap: options.onAudioGap ?? null,
           idleTimeoutMs: options.idleTimeoutMs,
           progressTimeoutMs: Math.max(
             options.idleTimeoutMs,

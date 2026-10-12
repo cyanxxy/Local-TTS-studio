@@ -168,6 +168,85 @@ describe("useAudioPlayer", () => {
     expect(result.current.isPlaying).toBe(false);
   });
 
+  it("starts the output device when a stream begins, before any chunk arrives", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+
+    await act(async () => {
+      result.current.beginStream();
+    });
+
+    const ctx = MockAudioContext.instances[0];
+    expect(ctx).toBeDefined();
+    expect(ctx.resume).toHaveBeenCalledTimes(1);
+    expect(ctx.state).toBe("running");
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 4, 4));
+    });
+    // The device was already running, so the first chunk does not resume it again.
+    expect(ctx.resume).toHaveBeenCalledTimes(1);
+    expect(MockAudioContext.instances).toHaveLength(1);
+    expect(result.current.isPlaying).toBe(true);
+  });
+
+  it("leaves a paused stream paused when a new stream begins", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 4, 4));
+      await result.current.togglePlay();
+    });
+    const ctx = MockAudioContext.instances[0];
+    expect(ctx.state).toBe("suspended");
+
+    await act(async () => {
+      result.current.beginStream();
+    });
+
+    expect(ctx.resume).toHaveBeenCalledTimes(1);
+    expect(ctx.state).toBe("suspended");
+  });
+
+  it("does not let a blocked output surface at stream start", async () => {
+    MockAudioContext.resumeError = new Error("blocked");
+    const { result } = renderHook(() => useAudioPlayer());
+
+    await act(async () => {
+      result.current.beginStream();
+    });
+
+    expect(result.current.error).toBeNull();
+  });
+
+  it("schedules the first chunk of a running device with only its output latency of lead", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      result.current.beginStream();
+    });
+    const ctx = MockAudioContext.instances[0];
+    ctx.currentTime = 10;
+    (ctx as unknown as { baseLatency: number }).baseLatency = 0.02;
+
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("First", 4, 4));
+    });
+
+    const [when] = ctx.createdSources[0].startedWith!;
+    expect(when).toBeCloseTo(10.02);
+  });
+
+  it("keeps a wider start lead while the device is still starting", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    MockAudioContext.resumeGate = new Promise(() => undefined);
+
+    await act(async () => {
+      await Promise.race([result.current.scheduleChunk(makeChunk("First", 4, 4)), Promise.resolve()]);
+    });
+
+    const ctx = MockAudioContext.instances[0];
+    expect(ctx.state).toBe("suspended");
+    expect(ctx.createdSources[0].startedWith![0]).toBeCloseTo(0.05);
+  });
+
   it("retains full history for long sessions instead of dropping old chunks", async () => {
     const { result } = renderHook(() => useAudioPlayer());
 

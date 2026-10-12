@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { LocalTtsAudioChunkEvent, LocalTtsGenerateResult } from "../electron";
+import type { LocalTtsAudioChunkEvent, LocalTtsAudioGapEvent, LocalTtsAudioStreamEvent, LocalTtsGenerateResult } from "../electron";
 import { buildQwen3RequestPlan } from "../lib/qwenChunking";
 import { encodeSpeechBreakMark } from "../lib/speechBreakMarks";
 import type { Qwen3SynthesisSettings, SynthesisChunk } from "../shared/engineRuntime";
@@ -7,7 +7,6 @@ import {
   QWEN3_SECTION_JOIN_PAUSE_SEC,
   qwen3BasePayload,
   qwen3ChunkTextUnitIndex,
-  qwen3PlaybackSamples,
   qwen3SettingsProblem,
   streamQwen3Synthesis,
   type LocalTtsBridge,
@@ -41,7 +40,7 @@ type GenerateRequest = Parameters<LocalTtsBridge["generate"]>[0];
 
 /** A bridge whose requests the test settles and streams audio for by hand. */
 function createBridge() {
-  const listeners = new Set<(event: LocalTtsAudioChunkEvent) => void>();
+  const listeners = new Set<(event: LocalTtsAudioStreamEvent) => void>();
   const requests: Array<{
     request: GenerateRequest;
     resolve: (result: LocalTtsGenerateResult) => void;
@@ -52,7 +51,7 @@ function createBridge() {
       requests.push({ request, resolve, reject });
     })),
     cancel: vi.fn(async () => ({ cancelled: true })),
-    subscribeAudioChunk: vi.fn((listener: (event: LocalTtsAudioChunkEvent) => void) => {
+    subscribeAudioChunk: vi.fn((listener: (event: LocalTtsAudioStreamEvent) => void) => {
       listeners.add(listener);
       return () => listeners.delete(listener);
     }),
@@ -61,6 +60,19 @@ function createBridge() {
     bridge: bridge as unknown as LocalTtsBridge & typeof bridge,
     requests,
     listenerCount: () => listeners.size,
+    emitGap(requestId: string, afterChunkIndex: number, textUnitIndex: number, silenceSamples = 4_800) {
+      const event: LocalTtsAudioGapEvent = {
+        kind: "gap",
+        requestId,
+        model: "qwen3",
+        afterChunkIndex,
+        sampleRate: SAMPLE_RATE,
+        silenceSamples,
+        textUnitIndex,
+        textUnitTotal: 2,
+      };
+      for (const listener of [...listeners]) listener(event);
+    },
     emit(requestId: string, index: number, total: number, extra: Partial<LocalTtsAudioChunkEvent> = {}) {
       const sampleCount = extra.sampleCount ?? 4;
       const event: LocalTtsAudioChunkEvent = {
@@ -144,6 +156,29 @@ describe("streamQwen3Synthesis", () => {
     expect(output[1]).toMatchObject({ index: 2, total: units.length, textStart: units[1].start, textEnd: units[1].end });
     expect(listenerCount()).toBe(0);
     expect(bridge.cancel).not.toHaveBeenCalled();
+  });
+
+  it("yields a unit gap as silence that extends the sentence it ends", async () => {
+    const { bridge, requests, emit, emitGap } = createBridge();
+    const text = [
+      "The first sentence wanders along the harbour road past the lamps and the boats and the nets that dry on the wall, long enough to fill a passage by itself.",
+      "The second sentence follows the tide back out beyond the breakwater where the gulls circle the fishing fleet, and it is long enough to stand alone as well.",
+    ].join(" ");
+    const chunks = collect(streamQwen3Synthesis(bridge, { text, settings: SETTINGS, seed: 3 }, new AbortController().signal));
+    await settle();
+
+    const [{ request }] = requests;
+    emit(request.requestId, 0, 0, { textUnitIndex: 0, textUnitTotal: 2 });
+    emitGap(request.requestId, 0, 0);
+    emit(request.requestId, 1, 0, { textUnitIndex: 1, textUnitTotal: 2 });
+    requests[0].resolve(result(2));
+
+    const output = await chunks;
+    expect(output.map((chunk) => chunk.audio.length)).toEqual([4, 4_800, 4]);
+    expect(output[1]).toMatchObject({ index: 1, text: output[0].text, textStart: output[0].textStart, textEnd: output[0].textEnd });
+    expect(output[1].pauseAfterSec).toBeCloseTo(0.2);
+    expect(output[1].audio.every((sample) => sample === 0)).toBe(true);
+    expect(output[2].index).toBe(2);
   });
 
   it("joins request sections with a short pause and keeps a voice-clone reference cached", async () => {
@@ -285,12 +320,6 @@ describe("Qwen3 synthesis helpers", () => {
     expect(qwen3BasePayload({ ...SETTINGS, profile: { ...SETTINGS.profile, mode: "voiceDesign" } }, 3))
       .toEqual(expect.objectContaining({ instruct: "Warm and calm.", seed: 3 }));
     expect(qwen3BasePayload(SETTINGS, null)).not.toHaveProperty("seed");
-  });
-
-  it("zeroes non-finite samples and appends the bridge's trailing silence", () => {
-    const audio = new Float32Array([0.5, Number.NaN, Number.POSITIVE_INFINITY]).buffer;
-    expect(Array.from(qwen3PlaybackSamples({ audio, sampleCount: 3, silenceAfterSamples: 2 }))).toEqual([0.5, 0, 0, 0, 0]);
-    expect(qwen3PlaybackSamples({ audio, sampleCount: 1, silenceAfterSamples: 0 })).toHaveLength(1);
   });
 
   it("maps a chunk onto the request's text units, clamped to its section", () => {

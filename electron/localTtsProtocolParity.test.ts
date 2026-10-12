@@ -17,7 +17,16 @@ import {
   QWEN3_MAX_NEW_TOKENS_PER_PASSAGE,
   QWEN3_MIN_NEW_TOKENS,
 } from "./localTtsLimits";
-import { BRIDGE_PORT_PREFIX, DEFAULT_MAX_REQUEST_TEXT_BYTES, MAX_AUDIO_CHUNK_SAMPLES } from "./wsBridge/protocol";
+import {
+  BRIDGE_PORT_PREFIX,
+  DEFAULT_MAX_REQUEST_TEXT_BYTES,
+  MAX_AUDIO_CHUNK_SAMPLES,
+  MAX_AUDIO_SILENCE_SAMPLES,
+  MAX_AUDIO_SAMPLE_RATE,
+  UNIT_GAP_FIELDS,
+  UNIT_GAP_MESSAGE_TYPE,
+  parseUnitGapMetadata,
+} from "./wsBridge/protocol";
 
 // Limits and protocol strings that TypeScript and the Rust bridge each declare
 // and must agree on. The Rust side cannot be built on every machine, so its
@@ -178,6 +187,24 @@ describe("TypeScript and Rust bridge parity", () => {
     expect(MAX_AUDIO_CHUNK_SAMPLES).toBe(rust("MAX_AUDIO_CHUNK_SAMPLES"));
     expect(MAX_AUDIO_CHUNK_SAMPLES * Float32Array.BYTES_PER_ELEMENT)
       .toBeLessThanOrEqual(rust("MAX_WEBSOCKET_WRITE_BUFFER_BYTES") as number);
+  });
+
+  it("agrees on the unit_gap frame: its type, its fields, and a silence the stream limits admit", () => {
+    expect(UNIT_GAP_MESSAGE_TYPE).toBe(rust("UNIT_GAP_FRAME_TYPE"));
+
+    // The fields the Rust frame builder writes, read from its json! literal.
+    const protocolSource = sources.find(({ file }) => file === "protocol.rs")!.source;
+    const builder = /pub fn unit_gap_frame\([\s\S]*?json!\(\{([\s\S]*?)\}\)/.exec(withoutTestModules(protocolSource));
+    if (!builder) throw new Error("unit_gap_frame is not declared in protocol.rs.");
+    const rustFields = [...builder[1].matchAll(/"(\w+)"\s*:/g)].map((match) => match[1]).filter((field) => field !== "type");
+    expect(rustFields.sort()).toEqual([...UNIT_GAP_FIELDS].sort());
+
+    // A frame with exactly those fields parses, and the 0.2 s gap Rust writes
+    // (a fifth of the rate) stays under the ceiling at the highest accepted rate.
+    const frame = { type: UNIT_GAP_MESSAGE_TYPE, requestId: "r", sampleRate: 24_000, textUnitIndex: 0, textUnitTotal: 2, silenceSamples: 4_800 };
+    expect(Object.keys(frame).filter((field) => field !== "type").sort()).toEqual([...UNIT_GAP_FIELDS].sort());
+    expect(parseUnitGapMetadata(frame, "r")).toMatchObject({ silenceSamples: 4_800 });
+    expect(Math.floor(MAX_AUDIO_SAMPLE_RATE / 5)).toBeLessThanOrEqual(MAX_AUDIO_SILENCE_SAMPLES);
   });
 
   it("refuses an oversize request before the bridge's frame ceiling would close the socket", () => {

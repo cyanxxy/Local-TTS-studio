@@ -366,6 +366,98 @@ describe("useQwen3LocalRuntime long-text batching", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("schedules a unit gap between the chunks it separates and keeps one subscription while the text changes", async () => {
+    vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
+    let emitAudioChunk: ((event: Record<string, unknown>) => void) | undefined;
+    let finishRequest!: () => void;
+    const generate = vi.fn((request: GenerateRequest) => new Promise((resolve) => {
+      finishRequest = () => resolve({
+        sampleRate: 24_000,
+        modelRepo: String(request.payload?.modelRepo),
+        durationSec: 0.3,
+        elapsedSec: 0.1,
+        audioTransport: "websocket-binary" as const,
+        audioChunkCount: 2,
+        phaseTimingsSec: { inferenceSec: 0.1 },
+      });
+    }));
+    const subscribeAudioChunk = vi.fn((listener) => {
+      emitAudioChunk = listener as (event: Record<string, unknown>) => void;
+      return () => undefined;
+    });
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate,
+        cancel: vi.fn().mockResolvedValue({ cancelled: true }),
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk,
+      },
+    } as never;
+    const { player, methods } = audioPlayer();
+    const { result, rerender } = renderHook(({ text }) => useQwen3LocalRuntime({
+      enabled: true,
+      text,
+      player,
+      setShowPlayer: vi.fn(),
+    }), { initialProps: { text: "First sentence of the take. Second sentence of the take." } });
+
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+    act(() => result.current.handleGenerate());
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    await act(async () => { await Promise.resolve(); });
+    const subscriptions = subscribeAudioChunk.mock.calls.length;
+    rerender({ text: "First sentence of the take. Second sentence of the take, edited." });
+    expect(subscribeAudioChunk).toHaveBeenCalledTimes(subscriptions);
+
+    const { requestId } = generate.mock.calls[0][0];
+    const chunk = (index: number, unit: number) => ({
+      requestId,
+      model: "qwen3",
+      index,
+      total: 0,
+      sampleRate: 24_000,
+      sampleCount: 2,
+      silenceAfterSamples: 0,
+      textUnitIndex: unit,
+      textUnitTotal: 2,
+      audio: new Float32Array([0.1, -0.1]).buffer,
+    });
+    act(() => {
+      emitAudioChunk?.(chunk(0, 0));
+      emitAudioChunk?.({
+        kind: "gap",
+        requestId,
+        model: "qwen3",
+        afterChunkIndex: 0,
+        sampleRate: 24_000,
+        silenceSamples: 4_800,
+        textUnitIndex: 0,
+        textUnitTotal: 2,
+      });
+      emitAudioChunk?.(chunk(1, 1));
+    });
+    await waitFor(() => expect(methods.scheduleChunk).toHaveBeenCalledTimes(3));
+    act(() => finishRequest());
+    await waitFor(() => expect(result.current.isGenerating).toBe(false));
+
+    const scheduled = methods.scheduleChunk.mock.calls.map(([part]) => part as {
+      audio: Float32Array;
+      index: number;
+      text: string;
+      pauseAfterSec: number;
+    });
+    expect(scheduled.map((part) => part.audio.length)).toEqual([2, 4_800, 2]);
+    // The gap belongs to the sentence it ends, so it extends that sentence's segment.
+    expect(scheduled[1]).toMatchObject({ index: scheduled[0].index, text: scheduled[0].text });
+    expect(scheduled[1].pauseAfterSec).toBeCloseTo(0.2);
+    expect(result.current.error).toBeNull();
+  });
+
   it("fails at once when a settled request is missing streamed audio", async () => {
     vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
     const generate = vi.fn(async (request: GenerateRequest) => ({

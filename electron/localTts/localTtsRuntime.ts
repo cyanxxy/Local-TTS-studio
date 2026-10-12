@@ -41,6 +41,7 @@ import { getQwen3Profile } from "../qwen3Profiles";
 import {
   createWebSocketBridgeWorkerPool,
   type WebSocketAudioChunk,
+  type WebSocketUnitGap,
   type WebSocketBridgeWorkerPool,
   type WebSocketWorkerRunResult,
   type WorkerExitReason,
@@ -302,6 +303,11 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
         event.sender.send("local-tts:audio-stream", { type: "chunk", model, ...chunk });
       };
 
+      const onAudioGap = (gap: WebSocketUnitGap) => {
+        if (event.sender.isDestroyed()) return;
+        event.sender.send("local-tts:audio-stream", { type: "gap", model, ...gap });
+      };
+
       // run() registers the request with the pool synchronously, so once it
       // returns cancel is routed there; the warm-waiter entry can be dropped.
       runPromise = getWebSocketBridgeWorkers().run(model, {
@@ -315,6 +321,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
         maxStderrBytes: RUST_BRIDGE_WS_DIAGNOSTIC_MAX_STDERR_BYTES,
         onProgress,
         onAudioChunk,
+        onAudioGap,
       });
     } finally {
       warmups.removeWaiter(requestId);

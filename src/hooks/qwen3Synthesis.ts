@@ -1,4 +1,5 @@
-import type { LocalTtsAudioChunkEvent, LocalTtsGenerateResult } from "../electron";
+import type { LocalTtsGenerateResult } from "../electron";
+import { createLocalAudioAssembler, createLocalRequestId } from "../lib/localTtsStream";
 import type { TextChunk } from "../lib/chunking";
 import { buildQwen3RequestPlan, type Qwen3RequestSection } from "../lib/qwenChunking";
 import { qwen3ProfileSupportsInstruct } from "../models/qwen3";
@@ -17,7 +18,7 @@ export const QWEN3_SECTION_JOIN_PAUSE_SEC = 0.2;
 const REFERENCE_CACHE_MISS = /reference cache entry was not found/i;
 
 export function qwen3RequestId(kind: "probe" | "generate" | "job"): string {
-  return `${LOCAL_MODEL}-${kind}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  return createLocalRequestId(LOCAL_MODEL, kind);
 }
 
 export function qwen3ErrorMessage(error: unknown): string {
@@ -27,28 +28,6 @@ export function qwen3ErrorMessage(error: unknown): string {
 
 export function isQwen3ReferenceCacheMiss(error: unknown): boolean {
   return REFERENCE_CACHE_MISS.test(qwen3ErrorMessage(error));
-}
-
-/** The streamed PCM with non-finite samples zeroed and the bridge's trailing silence appended. */
-export function qwen3PlaybackSamples(chunk: {
-  audio: ArrayBuffer;
-  sampleCount: number;
-  silenceAfterSamples: number;
-}): Float32Array {
-  const samples = new Float32Array(chunk.audio, 0, chunk.sampleCount);
-  for (let index = 0; index < samples.length; index += 1) {
-    if (!Number.isFinite(samples[index])) samples[index] = 0;
-  }
-  const trailingSilence = Math.max(0, chunk.silenceAfterSamples);
-  if (trailingSilence === 0) return samples;
-  const output = new Float32Array(samples.length + trailingSilence);
-  output.set(samples);
-  return output;
-}
-
-/** Whether a streamed audio event is well formed: some samples, and exactly that many bytes. */
-export function isPlayableQwen3Chunk(event: LocalTtsAudioChunkEvent): boolean {
-  return event.sampleCount > 0 && event.audio.byteLength === event.sampleCount * Float32Array.BYTES_PER_ELEMENT;
 }
 
 /**
@@ -147,46 +126,30 @@ async function* streamSection(
   const section = sections[sectionIndex];
   const requestId = qwen3RequestId("generate");
   const channel = createAsyncChannel<SynthesisChunk>();
-  const pending = new Map<number, LocalTtsAudioChunkEvent>();
-  const received = new Set<number>();
-  let nextIndex = 0;
-  let sampleRate: number | null = null;
   let expectedChunks: number | null = null;
   let result: LocalTtsGenerateResult | null = null;
   let settled = false;
 
+  const assembler = createLocalAudioAssembler((part) => {
+    const unitIndex = qwen3ChunkTextUnitIndex(part, part.chunkIndex, part.declaredTotal, section, units.length);
+    const unit = units[unitIndex];
+    channel.push({
+      audio: part.samples,
+      samplingRate: part.sampleRate,
+      text: unit?.text ?? text,
+      index: unitIndex + 1,
+      total: units.length || 1,
+      textStart: unit?.start ?? 0,
+      textEnd: unit?.end ?? text.length,
+      pauseAfterSec: part.pauseAfterSec,
+    });
+  });
   const finishIfComplete = () => {
-    if (expectedChunks !== null && received.size >= expectedChunks) channel.close();
+    if (expectedChunks !== null && assembler.receivedCount >= expectedChunks) channel.close();
   };
   const unsubscribe = bridge.subscribeAudioChunk((event) => {
-    if (event.model !== LOCAL_MODEL || event.requestId !== requestId || !isPlayableQwen3Chunk(event)) return;
-    if (sampleRate !== event.sampleRate) {
-      pending.clear();
-      received.clear();
-      sampleRate = event.sampleRate;
-      nextIndex = 0;
-    }
-    if (!received.has(event.index)) {
-      received.add(event.index);
-      pending.set(event.index, event);
-    }
-    while (pending.has(nextIndex)) {
-      const index = nextIndex++;
-      const chunk = pending.get(index)!;
-      pending.delete(index);
-      const unitIndex = qwen3ChunkTextUnitIndex(chunk, index, event.total, section, units.length);
-      const unit = units[unitIndex];
-      channel.push({
-        audio: qwen3PlaybackSamples(chunk),
-        samplingRate: chunk.sampleRate,
-        text: unit?.text ?? text,
-        index: unitIndex + 1,
-        total: units.length || 1,
-        textStart: unit?.start ?? 0,
-        textEnd: unit?.end ?? text.length,
-        pauseAfterSec: chunk.silenceAfterSamples / chunk.sampleRate,
-      });
-    }
+    if (event.model !== LOCAL_MODEL || event.requestId !== requestId) return;
+    assembler.accept(event);
     finishIfComplete();
   });
   const cancelRequest = () => {

@@ -318,6 +318,33 @@ describe("preload local TTS audio delivery", () => {
     unsubscribe();
   });
 
+  it("hands a subscriber a gap as an event of its own kind, in order with the chunks around it", async () => {
+    const received: unknown[] = [];
+    const unsubscribe = exposed.localTts!.subscribeAudioChunk((payload) => received.push(payload));
+    const reply = pendingReply();
+    const generation = generate({ model: "qwen3", requestId: "gaps", payload: {} });
+
+    const gap = {
+      requestId: "gaps",
+      model: "qwen3",
+      afterChunkIndex: 0,
+      sampleRate: 24_000,
+      silenceSamples: 4_800,
+      textUnitIndex: 0,
+      textUnitTotal: 2,
+    };
+    emitIpc("local-tts:audio-stream", chunk("gaps", 0));
+    emitIpc("local-tts:audio-stream", { type: "gap", ...gap });
+    emitIpc("local-tts:audio-stream", chunk("gaps", 1));
+    endStream("gaps");
+    reply({});
+    await generation;
+
+    expect(received.map((payload) => (payload as { kind?: string }).kind)).toEqual([undefined, "gap", undefined]);
+    expect(received[1]).toEqual({ kind: "gap", ...gap });
+    unsubscribe();
+  });
+
   it("delivers a request's chunks only to its own listener when it has one", async () => {
     const subscriber = vi.fn();
     const unsubscribe = exposed.localTts!.subscribeAudioChunk(subscriber);

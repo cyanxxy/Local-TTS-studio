@@ -97,6 +97,8 @@ export interface LocalTtsProgressEvent {
 }
 
 export interface LocalTtsAudioChunkEvent {
+  /** Absent on chunks; a stream event carrying `kind: "gap"` is a LocalTtsAudioGapEvent. */
+  kind?: undefined;
   requestId: string;
   model: LocalTtsModel;
   index: number;
@@ -108,6 +110,25 @@ export interface LocalTtsAudioChunkEvent {
   textUnitTotal?: number;
   audio: ArrayBuffer;
 }
+
+/**
+ * Silence the bridge puts after a finished text unit. It arrives on the audio
+ * stream in order with the chunks: after the chunk numbered `afterChunkIndex`
+ * and before the next one. It is not a chunk and never counts toward
+ * `audioChunkCount`.
+ */
+export interface LocalTtsAudioGapEvent {
+  kind: "gap";
+  requestId: string;
+  model: LocalTtsModel;
+  afterChunkIndex: number;
+  sampleRate: number;
+  silenceSamples: number;
+  textUnitIndex: number;
+  textUnitTotal: number;
+}
+
+export type LocalTtsAudioStreamEvent = LocalTtsAudioChunkEvent | LocalTtsAudioGapEvent;
 
 // A resident Rust worker went away, and the model it had loaded with it:
 // evicted after idling, stopped on purpose (a cache clear, a respawn with new
@@ -174,7 +195,7 @@ interface LocalTtsBridge {
       sectionCount: number;
     };
   }, options?: {
-    onAudioChunk?: (event: LocalTtsAudioChunkEvent) => void;
+    onAudioChunk?: (event: LocalTtsAudioStreamEvent) => void;
   }) => Promise<LocalTtsGenerateResult>;
   warm?: (request: {
     model: LocalTtsModel;
@@ -211,7 +232,7 @@ interface LocalTtsBridge {
   ) => () => void;
   subscribeProgress: (listener: (event: LocalTtsProgressEvent) => void) => () => void;
   // Chunks of the requests started without their own `onAudioChunk`.
-  subscribeAudioChunk: (listener: (event: LocalTtsAudioChunkEvent) => void) => () => void;
+  subscribeAudioChunk: (listener: (event: LocalTtsAudioStreamEvent) => void) => () => void;
   subscribeModelEvicted?: (listener: (event: LocalTtsModelEvictedEvent) => void) => () => void;
 }
 

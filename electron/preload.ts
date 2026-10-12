@@ -84,12 +84,15 @@ ipcRenderer.on("local-tts:audio-stream", (_event: IpcRendererEvent, message: unk
     stream.end();
     return;
   }
-  if (type !== "chunk" || stream.stopped) return;
+  if ((type !== "chunk" && type !== "gap") || stream.stopped) return;
+  // A gap rides the same ordered channel as the chunks it sits between, and
+  // reaches the same listeners, told apart by `kind`.
+  const event = type === "gap" ? { kind: "gap", ...chunk } : chunk;
   if (stream.onAudioChunk) {
-    callListener(stream.onAudioChunk, chunk);
+    callListener(stream.onAudioChunk, event);
     return;
   }
-  for (const listener of [...audioChunkSubscribers]) callListener(listener, chunk);
+  for (const listener of [...audioChunkSubscribers]) callListener(listener, event);
 });
 
 // The id main runs a request under, and so stamps on its stream messages:

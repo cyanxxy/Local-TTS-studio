@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import type {
-  LocalTtsAudioChunkEvent,
   LocalTtsGenerateResult,
   LocalTtsProgressEvent,
   LocalTtsProbeResult,
@@ -8,21 +7,21 @@ import type {
 import { MIN_TEXT_LENGTH } from "../constants";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { TextChunk } from "../lib/chunking";
+import { createLocalAudioAssembler } from "../lib/localTtsStream";
 import { buildQwen3RequestPlan } from "../lib/qwenChunking";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
 import type { EngineRuntime, SynthesisRequest } from "../shared/engineRuntime";
 import type { GenerationStats, ModelState } from "../types";
 import {
-  isPlayableQwen3Chunk,
   isQwen3ReferenceCacheMiss,
   qwen3BasePayload,
   qwen3ErrorMessage as message,
-  qwen3PlaybackSamples as playbackSamples,
   qwen3ReferencePayload,
   qwen3RequestId as requestId,
   streamQwen3Synthesis,
 } from "./qwen3Synthesis";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import { useQwen3Warmup } from "./useQwen3Warmup";
 import { useSynthesisQueue } from "./useSynthesisQueue";
 import {
   MAX_LOCAL_TTS_TEXT_LENGTH,
@@ -41,14 +40,6 @@ interface UseQwen3LocalRuntimeOptions {
   allowLongText?: boolean;
   player: UseAudioPlayerReturn;
   setShowPlayer: (showPlayer: boolean) => void;
-}
-
-interface ReceivedAudioChunk {
-  audio: ArrayBuffer;
-  sampleCount: number;
-  silenceAfterSamples: number;
-  textUnitIndex?: number;
-  textUnitTotal?: number;
 }
 
 const LOCAL_MODEL = "qwen3";
@@ -133,12 +124,10 @@ export function useQwen3LocalRuntime({
   const activeRequestRef = useRef<string | null>(null);
   const activeRequestVersionRef = useRef<number | null>(null);
   const activeProbeRef = useRef<string | null>(null);
-  // Retain PCM only until an in-order chunk has been handed to the player.
-  // A Set tracks delivery without keeping a second reference to every buffer.
-  const pendingChunksRef = useRef(new Map<number, ReceivedAudioChunk>());
-  const receivedChunkIndexesRef = useRef(new Set<number>());
-  const sampleRateRef = useRef<number | null>(null);
-  const scheduledCountRef = useRef(0);
+  // Puts streamed audio back in order and retains PCM only until an in-order
+  // chunk has been handed to the player. It never changes, so the bridge
+  // subscription below survives re-renders; its sink tracks the latest props.
+  const [assembler] = useState(() => createLocalAudioAssembler());
   const activeRequestUnitOffsetRef = useRef(0);
   const activeRequestUnitCountRef = useRef(1);
   const pendingProgressRef = useRef<LocalTtsProgressEvent | null>(null);
@@ -146,9 +135,10 @@ export function useQwen3LocalRuntime({
   // The player's content epoch when this runtime's generated audio entered it,
   // or null while the player holds nothing this runtime made.
   const ownedPlayerEpochRef = useRef<number | null>(null);
-  const warmedKeyRef = useRef<string | null>(null);
-  const warmingKeyRef = useRef<string | null>(null);
   const activeTextUnitsRef = useRef<TextChunk[]>([]);
+  // The label a chunk gets when the plan has no text unit for it. A ref, so a
+  // keystroke does not resubscribe to the audio stream.
+  const textRef = useRef(text);
   const bridge = window.electron?.localTts;
   const electronAvailable = enabled && !!bridge;
   const beginStream = player.beginStream;
@@ -171,16 +161,13 @@ export function useQwen3LocalRuntime({
   // Empties the shared player and forgets the streamed audio bookkeeping. It
   // touches no React state, so the settings effect below can call it.
   const releasePlayerAudio = useCallback(() => {
-    pendingChunksRef.current.clear();
-    receivedChunkIndexesRef.current.clear();
-    sampleRateRef.current = null;
-    scheduledCountRef.current = 0;
+    assembler.reset();
     activeRequestUnitOffsetRef.current = 0;
     activeRequestUnitCountRef.current = 1;
     activeTextUnitsRef.current = [];
     resetPlayer();
     ownedPlayerEpochRef.current = null;
-  }, [resetPlayer]);
+  }, [assembler, resetPlayer]);
 
   const clearGeneratedResult = useCallback(() => {
     releasePlayerAudio();
@@ -327,26 +314,7 @@ export function useQwen3LocalRuntime({
     activeProbeRef.current = null;
   }, [cancelActiveGeneration, enabled, fetchProbe]);
 
-  useEffect(() => {
-    if (!electronAvailable || generateBusy || !bridge?.warm) return;
-    const path = settings.modelPath.trim();
-    if (!path || settings.readiness === "missing") return;
-    const key = `${settings.profile.repo}:${path}`;
-    if (warmedKeyRef.current === key || warmingKeyRef.current === key) return;
-    warmingKeyRef.current = key;
-    let active = true;
-    void bridge.warm({
-      model: LOCAL_MODEL,
-      mode: settings.profile.mode,
-      modelPath: path,
-      modelRepo: settings.profile.repo,
-    }).then((result) => {
-      if (active && result.warmed) warmedKeyRef.current = key;
-    }).catch(() => undefined).finally(() => {
-      if (warmingKeyRef.current === key) warmingKeyRef.current = null;
-    });
-    return () => { active = false; };
-  }, [bridge, electronAvailable, generateBusy, settings.modelPath, settings.profile, settings.readiness]);
+  useQwen3Warmup(electronAvailable, generateBusy, settings);
 
   // A lease keeps the model resident in the main process for as long as a
   // surface selects it, across the idle pauses between generations. It loads
@@ -377,57 +345,45 @@ export function useQwen3LocalRuntime({
   }, [bridge, electronAvailable]);
 
   useEffect(() => {
+    textRef.current = text;
+  }, [text]);
+
+  useEffect(() => {
+    assembler.setSink((part) => {
+      const reportedUnitIndex = part.textUnitIndex
+        ?? (part.declaredTotal > 0 ? part.chunkIndex : activeRequestUnitCountRef.current === 1 ? 0 : part.chunkIndex);
+      const localTextUnitIndex = Math.min(
+        Math.max(0, reportedUnitIndex),
+        Math.max(0, activeRequestUnitCountRef.current - 1),
+      );
+      const textUnitIndex = Math.min(
+        activeRequestUnitOffsetRef.current + localTextUnitIndex,
+        Math.max(0, activeTextUnitsRef.current.length - 1),
+      );
+      const textUnit = activeTextUnitsRef.current[textUnitIndex];
+      void scheduleChunk({
+        audio: part.samples,
+        samplingRate: part.sampleRate,
+        text: textUnit?.text ?? textRef.current,
+        index: textUnitIndex + 1,
+        total: activeTextUnitsRef.current.length || 1,
+        textStart: textUnit?.start ?? 0,
+        textEnd: textUnit?.end ?? textRef.current.length,
+        pauseAfterSec: part.pauseAfterSec,
+      }).catch((nextError: unknown) => {
+        if (mountedRef.current) setError(message(nextError));
+      });
+    });
+  }, [assembler, scheduleChunk]);
+
+  useEffect(() => {
     if (!electronAvailable || !bridge) return;
-    return bridge.subscribeAudioChunk((event: LocalTtsAudioChunkEvent) => {
+    return bridge.subscribeAudioChunk((event) => {
       if (!mountedRef.current || event.model !== LOCAL_MODEL || event.requestId !== activeRequestRef.current) return;
       if (activeRequestVersionRef.current !== generationVersionRef.current) return;
-      if (!isPlayableQwen3Chunk(event)) return;
-      if (sampleRateRef.current !== event.sampleRate) {
-        pendingChunksRef.current.clear();
-        receivedChunkIndexesRef.current.clear();
-        sampleRateRef.current = event.sampleRate;
-        scheduledCountRef.current = 0;
-      }
-      if (!receivedChunkIndexesRef.current.has(event.index)) {
-        receivedChunkIndexesRef.current.add(event.index);
-        pendingChunksRef.current.set(event.index, {
-          audio: event.audio,
-          sampleCount: event.sampleCount,
-          silenceAfterSamples: event.silenceAfterSamples,
-          textUnitIndex: event.textUnitIndex,
-          textUnitTotal: event.textUnitTotal,
-        });
-      }
-      while (pendingChunksRef.current.has(scheduledCountRef.current)) {
-        const index = scheduledCountRef.current++;
-        const chunk = pendingChunksRef.current.get(index)!;
-        pendingChunksRef.current.delete(index);
-        const reportedUnitIndex = chunk.textUnitIndex
-          ?? (event.total > 0 ? index : activeRequestUnitCountRef.current === 1 ? 0 : index);
-        const localTextUnitIndex = Math.min(
-          Math.max(0, reportedUnitIndex),
-          Math.max(0, activeRequestUnitCountRef.current - 1),
-        );
-        const textUnitIndex = Math.min(
-          activeRequestUnitOffsetRef.current + localTextUnitIndex,
-          Math.max(0, activeTextUnitsRef.current.length - 1),
-        );
-        const textUnit = activeTextUnitsRef.current[textUnitIndex];
-        void scheduleChunk({
-          audio: playbackSamples(chunk),
-          samplingRate: event.sampleRate,
-          text: textUnit?.text ?? text,
-          index: textUnitIndex + 1,
-          total: activeTextUnitsRef.current.length || 1,
-          textStart: textUnit?.start ?? 0,
-          textEnd: textUnit?.end ?? text.length,
-          pauseAfterSec: chunk.silenceAfterSamples / event.sampleRate,
-        }).catch((nextError: unknown) => {
-          if (mountedRef.current) setError(message(nextError));
-        });
-      }
+      assembler.accept(event);
     });
-  }, [bridge, electronAvailable, scheduleChunk, text]);
+  }, [assembler, bridge, electronAvailable]);
 
   useEffect(() => () => {
     cancelProgressFlushRef.current?.();
@@ -520,9 +476,7 @@ export function useQwen3LocalRuntime({
 
           const activateRequest = (nextId: string, progressMessage: string) => {
             id = nextId;
-            pendingChunksRef.current.clear();
-            receivedChunkIndexesRef.current.clear();
-            scheduledCountRef.current = 0;
+            assembler.reset();
             activeRequestRef.current = nextId;
             activeRequestVersionRef.current = version;
             setProgress({
@@ -582,7 +536,7 @@ export function useQwen3LocalRuntime({
           ) return;
           // generate() settles only after the preload has delivered every
           // chunk of the request, so a shortfall is a failure, not a wait.
-          if (receivedChunkIndexesRef.current.size !== generated.audioChunkCount) {
+          if (assembler.receivedCount !== generated.audioChunkCount) {
             throw new Error("Generation returned incomplete streamed audio.");
           }
           combinedResult = mergeGenerateResults(combinedResult, generated);
@@ -653,6 +607,7 @@ export function useQwen3LocalRuntime({
     };
     void runSections();
   }, [
+    assembler,
     beginStream,
     bridge,
     canGenerate,
@@ -705,10 +660,7 @@ export function useQwen3LocalRuntime({
     else stopAll();
     activeRequestRef.current = null;
     activeRequestVersionRef.current = null;
-    pendingChunksRef.current.clear();
-    receivedChunkIndexesRef.current.clear();
-    sampleRateRef.current = null;
-    scheduledCountRef.current = 0;
+    assembler.reset();
     pendingProgressRef.current = null;
     cancelProgressFlushRef.current?.();
     cancelProgressFlushRef.current = null;
@@ -717,6 +669,7 @@ export function useQwen3LocalRuntime({
     setGenerateBusy(false);
     setError(null);
   }, [
+    assembler,
     cancelActiveGeneration,
     endStream,
     generateBusy,
