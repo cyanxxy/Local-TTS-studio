@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AudioExportOptions } from "../types";
+import type { ExportOptions } from "../lib/exportAudio";
 
 const buildExportAudio = vi.hoisted(() => vi.fn());
 
@@ -7,7 +7,7 @@ vi.mock("../lib/exportAudio", () => ({
   buildExportAudio,
 }));
 
-const OPTIONS: AudioExportOptions = {
+const OPTIONS: ExportOptions = {
   format: "wav-f32",
   sampleRate: "source",
   bitrateKbps: 320,
@@ -18,6 +18,8 @@ const OPTIONS: AudioExportOptions = {
   },
 };
 
+const CHUNK = { audio: new Float32Array([0]), samplingRate: 24000 };
+
 async function loadWorker() {
   vi.resetModules();
   const posted: unknown[] = [];
@@ -25,11 +27,12 @@ async function loadWorker() {
     postMessage: vi.fn((message: unknown) => {
       posted.push(message);
     }),
-    onmessage: null as ((event: MessageEvent) => void) | null,
+    onmessage: null as ((event: MessageEvent) => Promise<void>) | null,
   };
   vi.stubGlobal("self", workerGlobal);
   await import("./export.worker");
-  return { posted, workerGlobal };
+  const send = (data: unknown) => workerGlobal.onmessage?.({ data } as MessageEvent);
+  return { posted, send };
 }
 
 describe("export.worker", () => {
@@ -41,38 +44,55 @@ describe("export.worker", () => {
     vi.unstubAllGlobals();
   });
 
-  it("posts successful export results", async () => {
+  it("collects streamed chunks, reports progress and posts the result", async () => {
     const blob = new Blob(["wav"], { type: "audio/wav" });
-    buildExportAudio.mockResolvedValue({ blob, extension: "wav" });
-    const { posted, workerGlobal } = await loadWorker();
+    const result = { blob, extension: "wav", report: {}, timings: [], gainDb: 0, limiterReductionDb: 0 };
+    buildExportAudio.mockImplementation(async (_chunks, _options, hooks: { onProgress: (progress: unknown) => void }) => {
+      hooks.onProgress({ phase: "encoding", fraction: 0.5 });
+      return result;
+    });
+    const { posted, send } = await loadWorker();
 
-    workerGlobal.onmessage?.({
-      data: {
-        type: "EXPORT",
-        chunks: [{ audio: new Float32Array([0]), samplingRate: 24000 }],
-        options: OPTIONS,
-      },
-    } as MessageEvent);
+    await send({ type: "EXPORT_BEGIN", options: OPTIONS, chunkCount: 2 });
+    await send({ type: "EXPORT_CHUNK", chunk: CHUNK });
+    await send({ type: "EXPORT_CHUNK", chunk: CHUNK });
+    await send({ type: "EXPORT_END" });
 
-    await vi.waitFor(() => expect(posted).toEqual([{ type: "EXPORT_DONE", blob, extension: "wav" }]));
-    expect(buildExportAudio).toHaveBeenCalledOnce();
+    expect(buildExportAudio).toHaveBeenCalledWith([CHUNK, CHUNK], OPTIONS, expect.any(Object));
+    expect(posted).toEqual([
+      { type: "EXPORT_PROGRESS", phase: "encoding", fraction: 0.5 },
+      { type: "EXPORT_DONE", ...result },
+    ]);
   });
 
   it("posts Error and non-Error export failures", async () => {
     buildExportAudio.mockRejectedValueOnce(new Error("bad export")).mockRejectedValueOnce("plain failure");
-    const { posted, workerGlobal } = await loadWorker();
-    const message = {
-      data: {
-        type: "EXPORT",
-        chunks: [{ audio: new Float32Array([0]), samplingRate: 24000 }],
-        options: OPTIONS,
-      },
-    } as MessageEvent;
+    const { posted, send } = await loadWorker();
 
-    workerGlobal.onmessage?.(message);
-    await vi.waitFor(() => expect(posted.at(-1)).toEqual({ type: "EXPORT_ERROR", message: "bad export" }));
+    for (const message of ["bad export", "plain failure"]) {
+      await send({ type: "EXPORT_BEGIN", options: OPTIONS, chunkCount: 1 });
+      await send({ type: "EXPORT_CHUNK", chunk: CHUNK });
+      await send({ type: "EXPORT_END" });
+      expect(posted.at(-1)).toEqual({ type: "EXPORT_ERROR", message });
+    }
+  });
 
-    workerGlobal.onmessage?.(message);
-    await vi.waitFor(() => expect(posted.at(-1)).toEqual({ type: "EXPORT_ERROR", message: "plain failure" }));
+  it("rejects messages out of order and incomplete exports", async () => {
+    const { posted, send } = await loadWorker();
+
+    await send({ type: "EXPORT_CHUNK", chunk: CHUNK });
+    expect(posted.at(-1)).toEqual({ type: "EXPORT_ERROR", message: "Received audio before the export started." });
+
+    await send({ type: "EXPORT_END" });
+    expect(posted.at(-1)).toEqual({ type: "EXPORT_ERROR", message: "The export was never started." });
+
+    await send({ type: "EXPORT_BEGIN", options: OPTIONS, chunkCount: 2 });
+    await send({ type: "EXPORT_CHUNK", chunk: CHUNK });
+    await send({ type: "EXPORT_END" });
+    expect(posted.at(-1)).toEqual({ type: "EXPORT_ERROR", message: "Expected 2 audio chunks but received 1." });
+
+    await send({ type: "EXPORT" });
+    expect(posted.at(-1)).toEqual({ type: "EXPORT_ERROR", message: "Unknown export message." });
+    expect(buildExportAudio).not.toHaveBeenCalled();
   });
 });

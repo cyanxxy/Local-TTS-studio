@@ -1,0 +1,338 @@
+/**
+ * Streaming loudness measurement for mono audio: ITU-R BS.1770-4 integrated
+ * loudness (LUFS), EBU Tech 3342 loudness range (LU), 4x-oversampled true
+ * peak (dBTP), sample peak and RMS (dBFS).
+ *
+ * Feed chunks of any size to `LoudnessMeter.process()`; filter state carries
+ * across calls, so the result equals measuring the whole signal at once.
+ */
+import { designPolyphaseFilter, type PolyphaseFilterOptions } from "./resample";
+
+/** Mono gain offset of BS.1770: a full-scale 997 Hz sine reads -3.01 LUFS. */
+const LOUDNESS_OFFSET_DB = -0.691;
+const ABSOLUTE_GATE_LUFS = -70;
+const INTEGRATED_RELATIVE_GATE_LU = -10;
+const RANGE_RELATIVE_GATE_LU = -20;
+const SUB_BLOCK_SEC = 0.1;
+/** Momentary blocks are 400 ms (4 sub-blocks, 75% overlap); short-term blocks are 3 s. */
+const MOMENTARY_SUB_BLOCKS = 4;
+const SHORT_TERM_SUB_BLOCKS = 30;
+const TRUE_PEAK_OVERSAMPLING = 4;
+/** Short interpolation filter for peak detection (12 taps per phase, as BS.1770 Annex 2 suggests). */
+export const TRUE_PEAK_FILTER = { halfWidth: 6, rolloff: 0.9, beta: 6 } as const;
+
+export function gainToDb(gain: number): number {
+  return gain > 0 ? 20 * Math.log10(gain) : Number.NEGATIVE_INFINITY;
+}
+
+export function dbToGain(db: number): number {
+  return 10 ** (db / 20);
+}
+
+function energyToLufs(energy: number): number {
+  return energy > 0 ? LOUDNESS_OFFSET_DB + 10 * Math.log10(energy) : Number.NEGATIVE_INFINITY;
+}
+
+interface Biquad {
+  b0: number;
+  b1: number;
+  b2: number;
+  a1: number;
+  a2: number;
+}
+
+/**
+ * BS.1770 K-weighting at any sample rate: the analog prototypes of the
+ * standard's 48 kHz filters (as derived for libebur128), discretized with the
+ * bilinear transform. At 48 kHz this reproduces the published coefficients.
+ */
+export function kWeightingCoefficients(sampleRate: number): [Biquad, Biquad] {
+  const shelfK = Math.tan((Math.PI * 1681.974450955533) / sampleRate);
+  const shelfQ = 0.7071752369554196;
+  const highGain = 10 ** (3.999843853973347 / 20);
+  const bandGain = highGain ** 0.4996667741545416;
+  const shelfA0 = 1 + shelfK / shelfQ + shelfK * shelfK;
+  const shelf: Biquad = {
+    b0: (highGain + (bandGain * shelfK) / shelfQ + shelfK * shelfK) / shelfA0,
+    b1: (2 * (shelfK * shelfK - highGain)) / shelfA0,
+    b2: (highGain - (bandGain * shelfK) / shelfQ + shelfK * shelfK) / shelfA0,
+    a1: (2 * (shelfK * shelfK - 1)) / shelfA0,
+    a2: (1 - shelfK / shelfQ + shelfK * shelfK) / shelfA0,
+  };
+  const passK = Math.tan((Math.PI * 38.13547087602444) / sampleRate);
+  const passQ = 0.5003270373238773;
+  const passA0 = 1 + passK / passQ + passK * passK;
+  const highPass: Biquad = {
+    b0: 1,
+    b1: -2,
+    b2: 1,
+    a1: (2 * (passK * passK - 1)) / passA0,
+    a2: (1 - passK / passQ + passK * passK) / passA0,
+  };
+  return [shelf, highPass];
+}
+
+export interface TruePeakDetectorOptions {
+  /** Interpolation factor; 4 is the BS.1770 estimate, higher factors are used as a safety check. */
+  oversampling?: number;
+  filter?: PolyphaseFilterOptions;
+  /**
+   * Linear level at or below which the exact peak is not needed. A period
+   * whose interpolated values provably stay under it (by the filter's
+   * absolute coefficient sum) is reported as its own sample magnitude, which
+   * skips the interpolation for most of a quiet signal.
+   */
+  ignoreBelow?: number;
+}
+
+/**
+ * Oversampled peak of each input sample period, streamed: the larger of the
+ * sample itself and the interpolated points that follow it (4x by default).
+ * Samples past the end of the stream count as silence.
+ */
+export class TruePeakDetector {
+  private readonly coefficients: Float64Array[];
+  private readonly offsets: number[];
+  private readonly taps: number;
+  private readonly lookahead: number;
+  private readonly reach: number;
+  /** Largest absolute coefficient sum of any phase: interpolated values never exceed it times the local maximum. */
+  private readonly gainBound: number;
+  private readonly ignoreBelow: number;
+  /** Input from absolute index `historyStart` on. */
+  private history = new Float32Array(0);
+  private historyStart = 0;
+  /** Next input index whose peak is emitted. */
+  private next = 0;
+
+  constructor(sampleRate: number, options: TruePeakDetectorOptions = {}) {
+    if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
+      throw new RangeError(`Sample rate must be a positive integer; got ${sampleRate}.`);
+    }
+    const oversampling = options.oversampling ?? TRUE_PEAK_OVERSAMPLING;
+    const filter = designPolyphaseFilter(oversampling, 1, options.filter ?? TRUE_PEAK_FILTER);
+    this.taps = filter.taps;
+    // Phase 0 interpolates the sample itself, so only the other phases are computed.
+    const phases = Array.from({ length: oversampling - 1 }, (_, index) => index + 1);
+    this.coefficients = phases.map((phase) => Float64Array.from(filter.coefficients.subarray(phase * filter.taps, (phase + 1) * filter.taps)));
+    this.offsets = phases.map((phase) => filter.offsets[phase]);
+    this.lookahead = Math.max(...this.offsets.map((offset) => this.taps - 1 - offset));
+    this.reach = Math.max(...this.offsets);
+    this.gainBound = Math.max(...this.coefficients.map((row) => row.reduce((sum, value) => sum + Math.abs(value), 0)));
+    this.ignoreBelow = options.ignoreBelow ?? 0;
+  }
+
+  /** Returns the peaks of the input samples that are now complete, in order. */
+  process(input: Float32Array): Float32Array {
+    const combined = new Float32Array(this.history.length + input.length);
+    combined.set(this.history);
+    combined.set(input, this.history.length);
+    this.history = combined;
+    return this.emit(this.historyStart + combined.length - this.lookahead);
+  }
+
+  flush(): Float32Array {
+    return this.emit(this.historyStart + this.history.length);
+  }
+
+  /** Largest magnitude among the samples any phase reads for `index`. */
+  private localMaximum(index: number): number {
+    const first = Math.max(this.historyStart, index - this.reach);
+    const last = Math.min(this.historyStart + this.history.length - 1, index + this.lookahead);
+    let maximum = 0;
+    for (let sample = first; sample <= last; sample += 1) {
+      const magnitude = Math.abs(this.history[sample - this.historyStart]);
+      if (magnitude > maximum) maximum = magnitude;
+    }
+    return maximum;
+  }
+
+  /** Emits peaks for input indices below `end`. */
+  private emit(end: number): Float32Array {
+    const count = Math.max(0, end - this.next);
+    const peaks = new Float32Array(count);
+    const { history, historyStart, taps, coefficients, offsets } = this;
+    const historyEnd = historyStart + history.length;
+    for (let output = 0; output < count; output += 1) {
+      const index = this.next + output;
+      let peak = Math.abs(history[index - historyStart]);
+      if (this.ignoreBelow > 0 && this.localMaximum(index) * this.gainBound <= this.ignoreBelow) {
+        peaks[output] = peak;
+        continue;
+      }
+      for (let phase = 0; phase < coefficients.length; phase += 1) {
+        const first = index - offsets[phase];
+        const row = coefficients[phase];
+        let sum = 0;
+        if (first >= historyStart && first + taps <= historyEnd) {
+          const base = first - historyStart;
+          for (let tap = 0; tap < taps; tap += 1) sum += history[base + tap] * row[tap];
+        } else {
+          for (let tap = 0; tap < taps; tap += 1) {
+            const sample = first + tap;
+            if (sample >= historyStart && sample < historyEnd) sum += history[sample - historyStart] * row[tap];
+          }
+        }
+        const magnitude = Math.abs(sum);
+        if (magnitude > peak) peak = magnitude;
+      }
+      peaks[output] = peak;
+    }
+    this.next += count;
+    // Keep what the next outputs still read.
+    const keepFrom = Math.max(historyStart, this.next - this.reach);
+    if (keepFrom > historyStart) {
+      this.history = history.slice(keepFrom - historyStart);
+      this.historyStart = keepFrom;
+    }
+    return peaks;
+  }
+}
+
+export interface LoudnessReport {
+  /** Gated integrated loudness, or -Infinity for silence. */
+  integratedLufs: number;
+  /** Loudness range in LU (0 when there is too little audio to measure it). */
+  loudnessRangeLu: number;
+  truePeakDbtp: number;
+  samplePeakDbfs: number;
+  /** Unweighted RMS level of the whole signal. */
+  rmsDbfs: number;
+  durationSec: number;
+}
+
+function percentile(sorted: readonly number[], fraction: number): number {
+  const position = (sorted.length - 1) * fraction;
+  const lower = Math.floor(position);
+  const upper = Math.ceil(position);
+  return sorted[lower] + (sorted[upper] - sorted[lower]) * (position - lower);
+}
+
+export class LoudnessMeter {
+  readonly sampleRate: number;
+  private readonly filters: [Biquad, Biquad];
+  /** Biquad state: [x1, x2, y1, y2] per stage. */
+  private readonly state = new Float64Array(8);
+  private readonly subBlockSize: number;
+  private readonly subBlockEnergies: number[] = [];
+  private subBlockSum = 0;
+  private subBlockFill = 0;
+  /** K-weighted energy of everything, for signals shorter than one block. */
+  private totalWeightedSum = 0;
+  private squareSum = 0;
+  private samplePeak = 0;
+  private truePeak = 0;
+  private sampleCount = 0;
+  /** Null when true peak is not measured (it is then reported as the sample peak). */
+  private readonly peakDetector: TruePeakDetector | null;
+  private finished = false;
+
+  /** `truePeak: false` skips the oversampled peak search, the costliest part, when only loudness matters. */
+  constructor(sampleRate: number, options: { truePeak?: boolean } = {}) {
+    if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
+      throw new RangeError(`Sample rate must be a positive integer; got ${sampleRate}.`);
+    }
+    this.sampleRate = sampleRate;
+    this.filters = kWeightingCoefficients(sampleRate);
+    this.subBlockSize = Math.max(1, Math.round(sampleRate * SUB_BLOCK_SEC));
+    this.peakDetector = options.truePeak === false ? null : new TruePeakDetector(sampleRate);
+  }
+
+  process(input: Float32Array): void {
+    if (this.finished) throw new Error("LoudnessMeter cannot accept more input after result().");
+    const [shelf, highPass] = this.filters;
+    const state = this.state;
+    let [sx1, sx2, sy1, sy2, hx1, hx2, hy1, hy2] = state;
+    for (let index = 0; index < input.length; index += 1) {
+      const x = input[index];
+      const shelfOut = shelf.b0 * x + shelf.b1 * sx1 + shelf.b2 * sx2 - shelf.a1 * sy1 - shelf.a2 * sy2;
+      sx2 = sx1;
+      sx1 = x;
+      sy2 = sy1;
+      sy1 = shelfOut;
+      const weighted = highPass.b0 * shelfOut + highPass.b1 * hx1 + highPass.b2 * hx2 - highPass.a1 * hy1 - highPass.a2 * hy2;
+      hx2 = hx1;
+      hx1 = shelfOut;
+      hy2 = hy1;
+      hy1 = weighted;
+
+      const weightedSquare = weighted * weighted;
+      this.subBlockSum += weightedSquare;
+      this.totalWeightedSum += weightedSquare;
+      this.subBlockFill += 1;
+      if (this.subBlockFill === this.subBlockSize) {
+        this.subBlockEnergies.push(this.subBlockSum / this.subBlockSize);
+        this.subBlockSum = 0;
+        this.subBlockFill = 0;
+      }
+      this.squareSum += x * x;
+      const magnitude = Math.abs(x);
+      if (magnitude > this.samplePeak) this.samplePeak = magnitude;
+    }
+    state.set([sx1, sx2, sy1, sy2, hx1, hx2, hy1, hy2]);
+    this.sampleCount += input.length;
+    if (this.peakDetector) this.trackTruePeak(this.peakDetector.process(input));
+  }
+
+  /** Finishes the measurement; the meter cannot take more input afterwards. */
+  result(): LoudnessReport {
+    if (!this.finished) {
+      this.finished = true;
+      if (this.peakDetector) this.trackTruePeak(this.peakDetector.flush());
+    }
+    return {
+      integratedLufs: this.integratedLoudness(),
+      loudnessRangeLu: this.loudnessRange(),
+      truePeakDbtp: gainToDb(this.peakDetector ? this.truePeak : this.samplePeak),
+      samplePeakDbfs: gainToDb(this.samplePeak),
+      rmsDbfs: this.sampleCount > 0 ? 10 * Math.log10(this.squareSum / this.sampleCount) : Number.NEGATIVE_INFINITY,
+      durationSec: this.sampleCount / this.sampleRate,
+    };
+  }
+
+  private trackTruePeak(peaks: Float32Array): void {
+    for (let index = 0; index < peaks.length; index += 1) {
+      if (peaks[index] > this.truePeak) this.truePeak = peaks[index];
+    }
+  }
+
+  /** Mean energy of each window of `length` sub-blocks, one window per sub-block. */
+  private windowEnergies(length: number): number[] {
+    const energies: number[] = [];
+    let sum = 0;
+    for (let index = 0; index < this.subBlockEnergies.length; index += 1) {
+      sum += this.subBlockEnergies[index];
+      if (index >= length) sum -= this.subBlockEnergies[index - length];
+      if (index >= length - 1) energies.push(Math.max(0, sum) / length);
+    }
+    return energies;
+  }
+
+  private integratedLoudness(): number {
+    const blocks = this.windowEnergies(MOMENTARY_SUB_BLOCKS);
+    // Shorter than one 400 ms block: measure it as a single block.
+    if (blocks.length === 0 && this.sampleCount > 0) blocks.push(this.totalWeightedSum / this.sampleCount);
+    const absolute = blocks.filter((energy) => energyToLufs(energy) > ABSOLUTE_GATE_LUFS);
+    if (absolute.length === 0) return Number.NEGATIVE_INFINITY;
+    const relativeGate = energyToLufs(absolute.reduce((sum, energy) => sum + energy, 0) / absolute.length)
+      + INTEGRATED_RELATIVE_GATE_LU;
+    const gated = absolute.filter((energy) => energyToLufs(energy) > relativeGate);
+    return energyToLufs(gated.reduce((sum, energy) => sum + energy, 0) / gated.length);
+  }
+
+  private loudnessRange(): number {
+    const absolute = this.windowEnergies(SHORT_TERM_SUB_BLOCKS).filter((energy) => energyToLufs(energy) > ABSOLUTE_GATE_LUFS);
+    if (absolute.length < 2) return 0;
+    const relativeGate = energyToLufs(absolute.reduce((sum, energy) => sum + energy, 0) / absolute.length)
+      + RANGE_RELATIVE_GATE_LU;
+    const levels = absolute.map(energyToLufs).filter((level) => level > relativeGate).sort((a, b) => a - b);
+    return percentile(levels, 0.95) - percentile(levels, 0.1);
+  }
+}
+
+/** Measures a whole signal at once. */
+export function measureLoudness(audio: Float32Array, sampleRate: number): LoudnessReport {
+  const meter = new LoudnessMeter(sampleRate);
+  meter.process(audio);
+  return meter.result();
+}
