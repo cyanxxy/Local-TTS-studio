@@ -94,7 +94,7 @@ describe("useVoicePreview", () => {
     const { result } = rendering(synthesize, store);
     let pending: Promise<void> = Promise.resolve();
     act(() => { pending = result.current.preview(voice, "Hello."); });
-    await waitFor(() => expect(result.current.state?.status).toBe("rendering"));
+    await waitFor(() => expect(seenSignal).toBeDefined());
     act(() => result.current.stop());
     await act(() => pending);
     expect(seenSignal?.aborted).toBe(true);
