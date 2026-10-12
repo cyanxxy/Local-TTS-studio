@@ -186,7 +186,6 @@ All notable changes to Open TTS are documented here.
 - Audio output starts warming up when you press Generate instead of on the
   first chunk, and the start delay is shorter (an estimated 30–40 ms per
   request, more on the first one of a session).
-
 - Web launches start only the selected browser model's worker, and switching
   between Studio and the Reader no longer reloads a model the other surface
   still uses.
