@@ -132,6 +132,9 @@ All notable changes to Open TTS are documented here.
 
 ### Fixed
 
+- The NeuTTS and Qwen3 setup pages no longer replace a finished generation's
+  result message with a late "Received audio chunk" status.
+
 - A Reader, setup page or settings dialog that fails to load or render shows a
   retry card in its place instead of replacing the whole app, so Studio's
   script and audio survive. Failed chunk loads are retried once.
@@ -176,6 +179,14 @@ All notable changes to Open TTS are documented here.
 
 ### Performance
 
+- Qwen3 audio reaches the player one decode batch sooner. The bridge no longer
+  holds each streamed chunk back to attach the pause between sentences; it sends
+  that pause as its own small message instead (an estimated 160–320 ms off the
+  first audio of every request; not yet measured on hardware).
+- Audio output starts warming up when you press Generate instead of on the
+  first chunk, and the start delay is shorter (an estimated 30–40 ms per
+  request, more on the first one of a session).
+
 - Web launches start only the selected browser model's worker, and switching
   between Studio and the Reader no longer reloads a model the other surface
   still uses.
@@ -212,6 +223,10 @@ All notable changes to Open TTS are documented here.
   compression method, expansion ratio, WAV validity and manifest hashes).
 
 ### Maintenance
+
+- One stream assembler (`src/lib/localTtsStream.ts`) now orders, cleans and
+  pads local-runtime audio for Studio, the Reader and the setup pages, replacing
+  three copies.
 
 - A typed engine registry (`src/models`) drives pickers, labels, routes,
   persistence and Reader cache signatures; every engine implements one
