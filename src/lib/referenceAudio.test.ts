@@ -9,8 +9,10 @@ import {
   findSpeechBounds,
   normalizePeak,
   prepareReferenceClip,
+  referenceTargetNeedsTranscript,
   trimClip,
   type ReferenceCheckId,
+  type ReferenceCloneTarget,
   type ReferenceClipAnalysis,
 } from "./referenceAudio";
 import { decodeWav, encodeWavPcm16 } from "./wavCodec";
@@ -49,7 +51,7 @@ function clip(options: {
   return output;
 }
 
-function statusOf(analysis: ReferenceClipAnalysis, id: ReferenceCheckId, transcript?: string, target: "qwen3-base" | "neutts" = "qwen3-base") {
+function statusOf(analysis: ReferenceClipAnalysis, id: ReferenceCheckId, transcript?: string, target: ReferenceCloneTarget = "qwen3-base") {
   return assessReferenceClip(analysis, target, { transcript }).checks.find((check) => check.id === id);
 }
 
@@ -136,6 +138,16 @@ describe("assessReferenceClip", () => {
     const halfSecond = analyzeReferenceClip(clip({ speechSec: 0.7 }), RATE);
     expect(statusOf(halfSecond, "duration", undefined, "neutts")?.status).toBe("warn");
     expect(statusOf(halfSecond, "duration")?.status).toBe("fail");
+  });
+
+  it("holds Chatterbox to its own 3-10 s window and skips the transcript", () => {
+    expect(REFERENCE_DURATION_LIMITS.chatterbox).toEqual({ minSec: 3, recommendedMinSec: 5, maxSec: 10 });
+    expect(referenceTargetNeedsTranscript("chatterbox")).toBe(false);
+    expect(referenceTargetNeedsTranscript("neutts")).toBe(true);
+    const long = analyzeReferenceClip(clip({ speechSec: 12 }), RATE);
+    expect(statusOf(long, "duration", undefined, "chatterbox")).toMatchObject({ status: "fail", message: expect.stringMatching(/Chatterbox Turbo rejects/) });
+    const ok = analyzeReferenceClip(clip({ speechSec: 6 }), RATE);
+    expect(statusOf(ok, "duration", undefined, "chatterbox")?.status).toBe("pass");
   });
 
   it("grades clipping, loudness, noise and edge silence", () => {

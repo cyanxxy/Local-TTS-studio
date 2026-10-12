@@ -10,7 +10,7 @@ import { decodeWav, encodeWavPcm16 } from "./wavCodec";
  * and normalize it before it is saved or sent to the bridge.
  */
 
-export type ReferenceCloneTarget = "qwen3-base" | "neutts";
+export type ReferenceCloneTarget = "qwen3-base" | "neutts" | "chatterbox";
 export type ReferenceCheckStatus = "pass" | "warn" | "fail";
 export type ReferenceCheckId =
   | "duration"
@@ -79,7 +79,22 @@ export interface ReferenceDurationLimits {
 export const REFERENCE_DURATION_LIMITS: Readonly<Record<ReferenceCloneTarget, ReferenceDurationLimits>> = {
   "qwen3-base": { minSec: 1, recommendedMinSec: 3, maxSec: 20 },
   neutts: { minSec: 0.5, recommendedMinSec: 3, maxSec: 20 },
+  // Chatterbox Turbo uses the first 10 s (src/lib/chatterboxReference.ts) and
+  // wants 5-10 s of clean speech; it needs no transcript.
+  chatterbox: { minSec: 3, recommendedMinSec: 5, maxSec: 10 },
 };
+
+/** Display names for the clone runtimes. */
+export const REFERENCE_TARGET_LABELS: Readonly<Record<ReferenceCloneTarget, string>> = {
+  "qwen3-base": "Qwen3 Base",
+  neutts: "NeuTTS",
+  chatterbox: "Chatterbox Turbo",
+};
+
+/** Whether a runtime clones from audio alone, without the clip's exact transcript. */
+export function referenceTargetNeedsTranscript(target: ReferenceCloneTarget): boolean {
+  return target !== "chatterbox";
+}
 
 /**
  * prepareReferenceClip refuses longer clips before resampling, which costs
@@ -274,7 +289,7 @@ function formatSeconds(value: number): string {
 
 function checkDuration(analysis: ReferenceClipAnalysis, target: ReferenceCloneTarget): ReferenceCheck {
   const limits = REFERENCE_DURATION_LIMITS[target];
-  const runtime = target === "qwen3-base" ? "Qwen3 Base" : "NeuTTS";
+  const runtime = REFERENCE_TARGET_LABELS[target];
   const duration = analysis.durationSec;
   if (analysis.speechDurationSec < limits.minSec) {
     return {

@@ -18,7 +18,8 @@ function engineCanRender(record: VoiceRecord, engineId: string): boolean {
   if (record.kind === "preset") return record.preset.engineId === engineId;
   if (record.kind === "designed") return engineId === "qwen3";
   return (engineId === "qwen3" && record.targets.includes("qwen3-base"))
-    || (engineId === "neutts" && record.targets.includes("neutts"));
+    || (engineId === "neutts" && record.targets.includes("neutts"))
+    || (engineId === "chatterbox" && record.targets.includes("chatterbox"));
 }
 
 /** Filter and order voices for a picker: favorites first, then most recent. */

@@ -18,6 +18,8 @@ import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderSession } from "../hooks/useReaderSession";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
 import { useStudioAudioKeeper } from "../hooks/useStudioAudioKeeper";
+import { useLibraryChatterboxClips } from "../hooks/useLibraryChatterboxClips";
+import { useVoiceApplier } from "../hooks/useVoiceApplier";
 import {
   getInitialAppState,
   getInitialCreatorState,
@@ -33,11 +35,14 @@ import { getUnsupportedModelMessage, getWebGPUUnavailableModelMessages, isModelS
 import { buildExportFileName } from "../lib/audioExportClient";
 import { describeSpeechPipeline } from "../lib/speechPipeline";
 import { isSpeechNormalizationSupported } from "../lib/text/normalize";
+import { chatterboxClipForVoice } from "../lib/voiceLibrary/chatterboxLibrary";
+import { getVoiceLibraryStore } from "../lib/voiceLibrary/store";
 import {
   engineIsWasmOnly,
   getEngine,
   isBrowserEngineId,
   surfaceEnginePreviewChunks,
+  parseEngineSettings,
   surfaceEngineSignatureParts,
   surfaceEngineVoiceLabel,
   type EngineSettings,
@@ -574,6 +579,29 @@ export function useSynthesisSessionState({
     navigateToPage(page);
   }, [flushReaderAudio, isReaderPage, navigateToPage]);
 
+  // The Voice Library sends a voice to Studio or the Reader: engine, voice and
+  // settings in one step. Language only applies to the engines that have one.
+  const patchVoice = useCallback((engine: AppEngineId, patch: { voice?: string; language?: string }) => {
+    const accepted = engine === "supertonic" || engine === "supertonic3" ? patch : { voice: patch.voice };
+    setEngineSettings((current) => ({
+      ...current,
+      [engine]: parseEngineSettings(engine, { ...current[engine], ...accepted }),
+    }));
+  }, []);
+  useLibraryChatterboxClips();
+  const applyVoice = useVoiceApplier({
+    selectBrowserModel,
+    selectDesktopModel,
+    desktopEngineAvailability,
+    patchVoice,
+    setSpeed: creator.onSpeedChange,
+    navigate: handlePageNavigation,
+    qwen3: qwen3Settings,
+    library: getVoiceLibraryStore(),
+    resolveChatterboxVoice: async (record) => (await chatterboxClipForVoice(getVoiceLibraryStore(), record)).id,
+    neuttsEnabled: preferences.showNeuTTS,
+  });
+
   const handleJumpToSegment = useCallback((segmentId: string) => {
     if (!segmentId) return;
     jumpToSegment(segmentId);
@@ -791,6 +819,7 @@ export function useSynthesisSessionState({
       lookahead: readerLookahead,
       audiobook,
     },
+    voices: { apply: applyVoice },
     documents: {
       isImporting: isImportingDocument,
       importDocument: handleImportDocument,

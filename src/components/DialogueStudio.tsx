@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { AlertTriangle, Download, Loader2, Play, RefreshCw, Square, Subtitles, Users } from "lucide-react";
+import { useVoiceLibrary } from "../hooks/useVoiceLibrary";
 import { useDialogueSession, type UseDialogueSessionReturn } from "../hooks/useDialogueSession";
 import { formatClock } from "../lib/formatClock";
 import type { PresetSynthesize } from "../lib/presetSynthesis";
 import { createRuntimeSynthesize, presetFromSelection, type SynthesisBase } from "../lib/studioSynthesis";
+import { dialoguePoolPresets } from "../lib/voiceLibrary/catalog";
 import type { VoicePreset } from "../lib/voiceLibrary/types";
 import { engineVoices, getEngine, type SurfaceEngineId } from "../models/registry";
 import type { EngineVoice } from "../models/types";
@@ -314,18 +316,24 @@ export function DialogueStudio() {
     [kokoroVoices],
   );
 
+  const library = useVoiceLibrary();
+  const savedPresets = useMemo(
+    () => dialoguePoolPresets(library.voices, castableEngines.map((engine) => engine.id)),
+    [castableEngines, library.voices],
+  );
+
   const voicePool = useMemo<VoicePreset[]>(() => {
     const selected = presetFromSelection(studio.engineId, base);
     const voices = voicesFor(studio.engineId);
-    if (voices.length === 0) return [selected];
+    if (voices.length === 0) return [selected, ...savedPresets];
     // Studio's own voice leads, so a one-speaker script sounds like Studio.
     return [selected, ...voices.filter((voice) => voice.id !== selected.voiceId).map((voice): VoicePreset => ({
       engineId: studio.engineId,
       voiceId: voice.id,
       settings: {},
       label: voice.label,
-    }))];
-  }, [base, studio.engineId, voicesFor]);
+    })), ...savedPresets];
+  }, [base, savedPresets, studio.engineId, voicesFor]);
 
   const dialogue = useDialogueSession({ synthesize, exportOptions: creator.exportOptions, voicePool });
   return <DialogueStudioView dialogue={dialogue} castableEngines={castableEngines} voicesFor={voicesFor} />;

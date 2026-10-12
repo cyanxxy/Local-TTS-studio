@@ -13,8 +13,8 @@ const mocks = vi.hoisted(() => ({
   appListeners: new Map<string, Listener>(),
   protocolHandlers: new Map<string, (request: { url: string }) => unknown>(),
   headerListener: null as null | ((details: Record<string, unknown>, callback: (response: unknown) => void) => void),
-  permissionRequest: null as null | ((webContents: unknown, permission: string, callback: (granted: boolean) => void) => void),
-  permissionCheck: null as null | (() => boolean),
+  permissionRequest: null as null | ((webContents: unknown, permission: string, callback: (granted: boolean) => void, details?: unknown) => void),
+  permissionCheck: null as null | ((...args: unknown[]) => boolean),
   devicePermission: null as null | (() => boolean),
   openExternal: vi.fn(),
   netFetch: vi.fn((url: string) => ({ fetched: url })),
@@ -256,14 +256,42 @@ describe("session security", () => {
     expect(attach.preventDefault).toHaveBeenCalledTimes(1);
   });
 
-  it("denies permission requests, checks, and device selection", () => {
+  it("grants only audio-only microphone requests from trusted app URLs", () => {
     registerSessionSecurity({ isDev: false, appDirectory: APP_DIRECTORY });
-    const callback = vi.fn();
+    const ask = (permission: string, details: unknown) => {
+      const callback = vi.fn();
+      mocks.permissionRequest!({}, permission, callback, details);
+      return callback.mock.calls[0][0];
+    };
+    const app = "app://-/studio";
 
-    mocks.permissionRequest!({}, "media", callback);
+    expect(ask("media", { requestingUrl: app, mediaTypes: ["audio"] })).toBe(true);
+    expect(ask("media", { requestingUrl: app, mediaTypes: ["video"] })).toBe(false);
+    expect(ask("media", { requestingUrl: app, mediaTypes: ["audio", "video"] })).toBe(false);
+    expect(ask("media", { requestingUrl: app })).toBe(false);
+    expect(ask("media", { requestingUrl: "https://evil.example/", mediaTypes: ["audio"] })).toBe(false);
+    expect(ask("media", { requestingUrl: "http://localhost:5173/", mediaTypes: ["audio"] })).toBe(false);
+    expect(ask("geolocation", { requestingUrl: app })).toBe(false);
+    expect(ask("notifications", { requestingUrl: app, mediaTypes: ["audio"] })).toBe(false);
+  });
 
-    expect(callback).toHaveBeenCalledWith(false);
-    expect(mocks.permissionCheck!()).toBe(false);
+  it("answers permission checks with the same audio-only policy and denies devices", () => {
+    registerSessionSecurity({ isDev: false, appDirectory: APP_DIRECTORY });
+    const check = (permission: string, origin: string, details: unknown) =>
+      (mocks.permissionCheck as unknown as (...args: unknown[]) => boolean)({}, permission, origin, details);
+
+    expect(check("media", "app://-", { requestingUrl: "app://-/", mediaType: "audio" })).toBe(true);
+    expect(check("media", "app://-", { requestingUrl: "app://-/", mediaType: "video" })).toBe(false);
+    expect(check("media", "app://-", { requestingUrl: "app://-/", mediaType: "unknown" })).toBe(false);
+    expect(check("media", "https://evil.example", { requestingUrl: "https://evil.example/", mediaType: "audio" })).toBe(false);
+    expect(check("clipboard-read", "app://-", { requestingUrl: "app://-/" })).toBe(false);
     expect(mocks.devicePermission!()).toBe(false);
+  });
+
+  it("trusts the dev server for microphone capture only in dev", () => {
+    registerSessionSecurity({ isDev: true, appDirectory: APP_DIRECTORY });
+    const callback = vi.fn();
+    mocks.permissionRequest!({}, "media", callback, { requestingUrl: "http://localhost:5173/", mediaTypes: ["audio"] });
+    expect(callback).toHaveBeenCalledWith(true);
   });
 });

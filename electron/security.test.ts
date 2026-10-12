@@ -65,5 +65,34 @@ describe("buildContentSecurityPolicy", () => {
 
   it("denies renderer permission requests by default", () => {
     expect(shouldGrantPermission()).toBe(false);
+    expect(shouldGrantPermission({ permission: "geolocation", requestingUrl: "app://-/" })).toBe(false);
+  });
+
+  describe("microphone permission", () => {
+    const app = "app://-/studio";
+    const media = (extra: object) => ({ permission: "media", requestingUrl: app, ...extra });
+
+    it("grants audio-only media from the app", () => {
+      expect(shouldGrantPermission(media({ mediaTypes: ["audio"] }))).toBe(true);
+      expect(shouldGrantPermission(media({ mediaType: "audio" }))).toBe(true);
+    });
+
+    it("denies video, mixed, empty and unknown media", () => {
+      expect(shouldGrantPermission(media({ mediaTypes: ["video"] }))).toBe(false);
+      expect(shouldGrantPermission(media({ mediaTypes: ["audio", "video"] }))).toBe(false);
+      expect(shouldGrantPermission(media({ mediaTypes: [] }))).toBe(false);
+      expect(shouldGrantPermission(media({ mediaType: "video" }))).toBe(false);
+      expect(shouldGrantPermission(media({ mediaType: "unknown" }))).toBe(false);
+      expect(shouldGrantPermission(media({}))).toBe(false);
+    });
+
+    it("denies untrusted or missing origins and the dev server in production", () => {
+      expect(shouldGrantPermission(media({ requestingUrl: "https://example.com/", mediaTypes: ["audio"] }))).toBe(false);
+      expect(shouldGrantPermission(media({ requestingUrl: undefined, mediaTypes: ["audio"] }))).toBe(false);
+      expect(shouldGrantPermission(media({ requestingUrl: "not a url", mediaTypes: ["audio"] }))).toBe(false);
+      const dev = media({ requestingUrl: "http://localhost:5173/", mediaTypes: ["audio"] });
+      expect(shouldGrantPermission(dev)).toBe(true);
+      expect(shouldGrantPermission(dev, { allowDevServer: false })).toBe(false);
+    });
   });
 });

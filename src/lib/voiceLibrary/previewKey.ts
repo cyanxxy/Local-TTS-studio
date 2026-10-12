@@ -28,9 +28,10 @@ export function fnv1a64Hex(text: string): string {
 /**
  * Cache key for a rendered preview: the same engine, voice, settings and text
  * always map to the same key, and any change to them misses the cache. The
- * label is display-only and deliberately excluded.
+ * label is display-only and deliberately excluded. `renderKey` carries the
+ * inputs the preset leaves to the engine's live settings (see presetRenderKey).
  */
-export function previewCacheKey(preset: VoicePreset, text: string): string {
+export function previewCacheKey(preset: VoicePreset, text: string, renderKey = ""): string {
   const { engineId, voiceId, mode, settings, libraryVoiceId } = preset;
-  return fnv1a64Hex(stableStringify({ preset: { engineId, voiceId, mode, settings, libraryVoiceId }, text }));
+  return fnv1a64Hex(stableStringify({ preset: { engineId, voiceId, mode, settings, libraryVoiceId }, text, render: renderKey }));
 }

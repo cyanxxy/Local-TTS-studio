@@ -100,7 +100,7 @@ export function registerSessionSecurity({ isDev, appDirectory }: AppWindowOption
   registerProductionAppProtocol(isDev, appDirectory);
   registerRendererSecurityHeaders(isDev);
   registerNavigationSecurityHandlers(isDev);
-  registerPermissionHandlers();
+  registerPermissionHandlers(isDev);
 }
 
 function registerRendererSecurityHeaders(isDev: boolean): void {
@@ -166,15 +166,30 @@ function registerNavigationSecurityHandlers(isDev: boolean): void {
   });
 }
 
-function registerPermissionHandlers(): void {
+function registerPermissionHandlers(isDev: boolean): void {
   // Deny every permission across all three gates: the async request flow, the
   // synchronous check flow (navigator.permissions.query, capability checks),
   // and device selection (WebUSB/Serial/HID). The Electron security checklist
   // requires wiring all of them, not just the request handler, so synchronous
   // checks don't fall through to permissive built-in defaults.
-  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
-    callback(shouldGrantPermission());
+  // Only microphone capture from the app's own pages is granted (see
+  // shouldGrantPermission); the dev server counts as the app in dev only.
+  const trust = { allowDevServer: isDev };
+  session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    const request = details as { requestingUrl?: string; mediaTypes?: string[] } | undefined;
+    callback(
+      shouldGrantPermission(
+        { permission, requestingUrl: request?.requestingUrl, mediaTypes: request?.mediaTypes ?? [] },
+        trust,
+      ),
+    );
   });
-  session.defaultSession.setPermissionCheckHandler(() => shouldGrantPermission());
-  session.defaultSession.setDevicePermissionHandler(() => shouldGrantPermission());
+  session.defaultSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) => {
+    const check = details as { requestingUrl?: string; mediaType?: string } | undefined;
+    return shouldGrantPermission(
+      { permission, requestingUrl: check?.requestingUrl ?? requestingOrigin, mediaType: check?.mediaType },
+      trust,
+    );
+  });
+  session.defaultSession.setDevicePermissionHandler(() => false);
 }

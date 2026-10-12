@@ -11,6 +11,7 @@ import { MAX_REFERENCE_CODES_FILE_BYTES } from "../../electron/localTtsLimits";
 import { LocalRuntimePage } from "./LocalRuntimePage";
 import { PlaybackClock } from "../lib/playbackClock";
 import { float32ChunksToWavBytes } from "./localRuntime/utils";
+import { getStagedReference, resetStagedReferences, stageReference } from "../lib/voiceLibrary/stagedReference";
 
 const CUSTOM_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-6bit";
 const BASE_REPO = "mlx-community/Qwen3-TTS-12Hz-0.6B-Base-6bit";
@@ -521,6 +522,31 @@ describe("LocalRuntimePage", () => {
       referenceCodesBase64: "AQID",
       referenceText: "Exact words",
     }));
+  });
+
+  it("generates NeuTTS from a reference the Voice Library staged, then releases it", async () => {
+    probe.mockResolvedValue({ ready: true, message: "NeuTTS ready", runtime: "rust", package: "neutts" });
+    stageReference({
+      voiceId: "v1",
+      name: "My voice",
+      target: "neutts",
+      wavBase64: "AQID",
+      transcript: "Library words",
+      language: "English",
+      durationSec: 5,
+      sha256: "d".repeat(64),
+    });
+    renderPage("neutts");
+    await waitFor(() => expect(screen.getByLabelText("Reference transcript")).toHaveValue("Library words"));
+    expect(getStagedReference("neutts")).toBeNull();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    expect(generate.mock.calls[0][0].payload).toEqual(expect.objectContaining({
+      referenceAudioBase64: "AQID",
+      referenceText: "Library words",
+    }));
+    resetStagedReferences();
   });
 
   it("rejects NeuTTS code files above the 64 KiB renderer limit", async () => {

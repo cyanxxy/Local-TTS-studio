@@ -135,6 +135,17 @@ describe("voice library store", () => {
     expect(await store.getVoiceAudio(voice.id, "reference")).toBeNull();
   });
 
+  it("lets a Chatterbox-only clone omit its transcript, and no other target", async () => {
+    const voice = await store.createVoice(cloned({ targets: ["chatterbox"], transcript: "" }));
+    expect(voice).toMatchObject({ kind: "cloned", targets: ["chatterbox"], transcript: "" });
+    await expect(store.createVoice(cloned({ targets: ["chatterbox", "neutts"], transcript: "" }))).rejects.toThrow(/Transcript is required/);
+    await expect(store.updateVoice(voice.id, { targets: ["qwen3-base"] })).rejects.toThrow(/Transcript is required/);
+    expect(await store.updateVoice(voice.id, { targets: ["qwen3-base"], transcript: "Now it has one." }))
+      .toMatchObject({ targets: ["qwen3-base"], transcript: "Now it has one." });
+    const imported = await store.importVoice((await store.exportVoice(voice.id)).bytes);
+    expect(imported.kind).toBe("cloned");
+  });
+
   it("refuses references the bridge would reject", async () => {
     await expect(store.createVoice(cloned({ referenceWav: wav(21) }))).rejects.toThrow(/20 seconds/);
     await expect(store.createVoice(cloned({ referenceWav: new Uint8Array(0) }))).rejects.toThrow(/non-empty WAV/);
@@ -364,7 +375,9 @@ describe("portable voice files", () => {
       strToU8(JSON.stringify({ format: "open-tts-voice", version: 1, voice, ...extra }));
 
     await expect(parseVoicePackage(new Uint8Array([1, 2, 3]), digest)).rejects.toThrow(/zip archive/);
-    await expect(parseVoicePackage(zipSync({ "other.txt": strToU8("x") }), digest)).rejects.toThrow(/no voice.json/);
+    await expect(parseVoicePackage(zipSync({ "other.txt": strToU8("x") }), digest)).rejects.toThrow(/unexpected entry/);
+    await expect(parseVoicePackage(zipSync({ "evil/../voice.json": strToU8("{}") }), digest)).rejects.toThrow(/unexpected entry/);
+    await expect(parseVoicePackage(zipSync({ "reference.wav": new Uint8Array(4) }), digest)).rejects.toThrow(/no voice.json/);
     await expect(parseVoicePackage(zipSync({ "voice.json": strToU8("{") }), digest)).rejects.toThrow(/not valid JSON/);
     await expect(parseVoicePackage(zipSync({ "voice.json": strToU8('{"format":"x"}') }), digest)).rejects.toThrow(/not an Open TTS/);
     await expect(parseVoicePackage(zipSync({ "voice.json": manifest({}, { version: 2 }) }), digest)).rejects.toThrow(/newer version/);
@@ -384,7 +397,7 @@ describe("portable voice files", () => {
     }), digest)).rejects.toThrow(/missing sample.wav/);
 
     const oversizedManifest = zipSync({ "voice.json": [new Uint8Array(70 * 1024), { level: 0 }] });
-    await expect(parseVoicePackage(oversizedManifest, digest)).rejects.toThrow(/no voice.json/);
+    await expect(parseVoicePackage(oversizedManifest, digest)).rejects.toThrow(/too large/);
     await expect(parseVoicePackage(new Uint8Array(MAX_VOICE_PACKAGE_BYTES + 1), digest)).rejects.toThrow(/too large/);
 
     // Field validation still applies when an imported voice is saved.
@@ -402,7 +415,52 @@ describe("portable voice files", () => {
         break;
       }
     }
-    await expect(parseVoicePackage(zipped, async () => "")).rejects.toThrow(/too large/);
+    await expect(parseVoicePackage(zipped, async () => "")).rejects.toThrow(/valid zip/);
+  });
+
+  it("refuses archives with too many entries, odd compression, or a hostile expansion ratio", async () => {
+    const digest = async () => "0".repeat(64);
+    const many = zipSync({ "voice.json": strToU8("{}"), "reference.wav": new Uint8Array(4), "sample.wav": new Uint8Array(4), "extra.txt": new Uint8Array(1) });
+    await expect(parseVoicePackage(many, digest)).rejects.toThrow(/too many entries/);
+
+    // 40 MB of zeros deflates to roughly 40 KB: a ratio no real voice file has.
+    const bomb = zipSync({ "reference.wav": [new Uint8Array(40 * 1024 * 1024), { level: 9 }] });
+    expect(bomb.byteLength).toBeLessThan(200 * 1024);
+    await expect(parseVoicePackage(bomb, digest)).rejects.toThrow(/expands suspiciously/);
+
+    const unsupported = zipSync({ "voice.json": strToU8("{}") });
+    const view = new DataView(unsupported.buffer, unsupported.byteOffset, unsupported.byteLength);
+    for (let offset = unsupported.byteLength - 22; offset >= 0; offset -= 1) {
+      if (view.getUint32(offset, true) === 0x02014b50) { view.setUint16(offset + 10, 12, true); break; }
+    }
+    await expect(parseVoicePackage(unsupported, digest)).rejects.toThrow(/unsupported compression/);
+  });
+
+  it("validates the audio inside a package and keeps audio out of voices that do not use it", async () => {
+    const sha = async (bytes: Uint8Array) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes as BufferSource)), (b) => b.toString(16).padStart(2, "0")).join("");
+    const manifest = (voice: unknown) => strToU8(JSON.stringify({ format: "open-tts-voice", version: 1, voice }));
+    const garbage = new Uint8Array(2000).fill(7);
+    const garbageInfo = { sampleRate: 24000, durationSec: 1, byteLength: garbage.byteLength, sha256: await sha(garbage) };
+    const base = { kind: "cloned", name: "X", transcript: "t", targets: ["qwen3-base"] };
+    await expect(parseVoicePackage(zipSync({
+      "voice.json": manifest({ ...base, reference: garbageInfo }),
+      "reference.wav": garbage,
+    }), sha)).rejects.toThrow(/not valid audio/);
+
+    const good = wav(1);
+    const goodInfo = { sampleRate: 24000, durationSec: 1, byteLength: good.byteLength, sha256: await sha(good) };
+    await expect(parseVoicePackage(zipSync({
+      "voice.json": manifest({ ...base, reference: { ...goodInfo, durationSec: 5 } }),
+      "reference.wav": good,
+    }), sha)).rejects.toThrow(/not valid audio, or does not match/);
+    await expect(parseVoicePackage(zipSync({
+      "voice.json": manifest({ kind: "preset", name: "P", preset: { engineId: "kokoro", voiceId: "a", settings: {} } }),
+      "reference.wav": good,
+    }), sha)).rejects.toThrow(/does not use/);
+    await expect(parseVoicePackage(zipSync({
+      "voice.json": manifest({ ...base, reference: goodInfo }),
+      "reference.wav": good,
+    }), sha)).resolves.toMatchObject({ kind: "cloned", name: "X" });
   });
 
   it("refuses to export a voice whose audio is gone", async () => {
@@ -438,6 +496,7 @@ describe("voice presets from records", () => {
     expect(voicePresetFromRecord(clone)).toMatchObject({ engineId: "qwen3", mode: "voiceClone", voiceId: "library:v1", settings: { language: "English" } });
     expect(voicePresetFromRecord(clone, { cloneTarget: "neutts" }).engineId).toBe("neutts");
     expect(voicePresetFromRecord({ ...clone, targets: ["qwen3-base"] }, { cloneTarget: "neutts" }).engineId).toBe("qwen3");
+    expect(voicePresetFromRecord({ ...clone, targets: ["chatterbox"] })).toMatchObject({ engineId: "chatterbox", mode: "voiceClone" });
     expect(voicePresetFromRecord({
       ...base,
       kind: "designed",

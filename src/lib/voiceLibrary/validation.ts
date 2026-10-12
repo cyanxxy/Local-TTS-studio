@@ -1,5 +1,5 @@
 import { QWEN3_MAX_SEED } from "../../../electron/localTtsLimits";
-import { MAX_REFERENCE_WAV_BYTES, REFERENCE_DURATION_LIMITS } from "../referenceAudio";
+import { MAX_REFERENCE_WAV_BYTES, REFERENCE_DURATION_LIMITS, referenceTargetNeedsTranscript } from "../referenceAudio";
 import {
   VOICE_LIBRARY_SCHEMA_VERSION,
   type StoredAudioInfo,
@@ -43,7 +43,7 @@ export const VOICE_LIBRARY_LIMITS = {
 const DURATION_TOLERANCE_SEC = 0.005;
 const ENGINE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]*$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const CLONE_TARGETS: readonly VoiceCloneTarget[] = ["qwen3-base", "neutts"];
+const CLONE_TARGETS: readonly VoiceCloneTarget[] = ["qwen3-base", "neutts", "chatterbox"];
 const VOICE_SOURCES: readonly VoiceSource[] = ["upload", "recording", "voiceDesign"];
 const RENDER_MODES: readonly unknown[] = ["preset", "voiceClone", "voiceDesign"];
 
@@ -118,6 +118,17 @@ export function normalizeVoiceId(value: unknown): string {
 export function normalizeTranscript(value: unknown): string {
   // Whitespace inside a transcript is preserved: it is sent verbatim.
   return boundedText(value, "Transcript", VOICE_LIBRARY_LIMITS.maxTranscriptLength, { required: true, collapse: false });
+}
+
+/**
+ * A clone's transcript is required whenever a runtime that conditions on it is
+ * a target; a Chatterbox-only clone may leave it empty.
+ */
+export function normalizeCloneTranscript(value: unknown, targets: readonly VoiceCloneTarget[]): string {
+  if (targets.every((target) => !referenceTargetNeedsTranscript(target)) && (value === undefined || value === "")) {
+    return "";
+  }
+  return normalizeTranscript(value);
 }
 
 export function normalizeLanguage(value: unknown, fallback = "Auto"): string {
@@ -215,7 +226,7 @@ export function normalizeCloneTargets(value: unknown): VoiceCloneTarget[] {
   if (!Array.isArray(value)) fail("Choose at least one clone target.");
   const targets = CLONE_TARGETS.filter((target) => value.includes(target));
   if (targets.length === 0 || targets.length !== new Set(value).size) {
-    fail("Clone targets must be Qwen3 Base and/or NeuTTS.");
+    fail("Clone targets must be Qwen3 Base, NeuTTS and/or Chatterbox.");
   }
   return targets;
 }
@@ -286,12 +297,13 @@ export function parseStoredVoiceRecord(value: unknown): VoiceRecord | null {
       case "preset":
         return { ...base, kind: "preset", preset: normalizePreset(value.preset) };
       case "cloned": {
+        const targets = normalizeCloneTargets(value.targets);
         const record: VoiceRecord = {
           ...base,
           kind: "cloned",
-          transcript: normalizeTranscript(value.transcript),
+          transcript: normalizeCloneTranscript(value.transcript, targets),
           language: normalizeLanguage(value.language),
-          targets: normalizeCloneTargets(value.targets),
+          targets,
           source: normalizeVoiceSource(value.source),
           reference: normalizeStoredAudioInfo(value.reference, { maxDurationSec: VOICE_LIBRARY_LIMITS.maxReferenceDurationSec }),
         };
