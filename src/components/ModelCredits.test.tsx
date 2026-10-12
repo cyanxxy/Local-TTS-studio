@@ -31,4 +31,13 @@ describe("ModelCredits", () => {
     const libritts = PIPER_VOICES.find((voice) => voice.id === "en_US-libritts-high")!;
     expect(piper).toHaveTextContent(libritts.attribution);
   });
+
+  it("credits Chatterbox Turbo and says voice clips stay on the device", () => {
+    render(<ModelCredits idPrefix="credits" />);
+
+    const chatterbox = screen.getByRole("region", { name: "Chatterbox Turbo" });
+    expect(chatterbox).toHaveTextContent("by Resemble AI");
+    expect(chatterbox).toHaveTextContent("MIT");
+    expect(chatterbox).toHaveTextContent("never uploaded");
+  });
 });

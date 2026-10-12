@@ -269,7 +269,7 @@ const BROWSER_SUPPORT: LocalBrowserSupport = {
   isSupported: true,
   isIOS: false,
   message: null,
-  supportedModels: ["kokoro", "supertonic", "kitten", "paradee", "piper"],
+  supportedModels: ["kokoro", "supertonic", "kitten", "paradee", "piper", "chatterbox"],
   unsupportedModelMessages: {},
 };
 
@@ -281,6 +281,7 @@ const BROWSER_REQUEST_SETTINGS = {
   paradee: { voice: "heart" },
   // A multi-speaker voice, the way the worker takes one.
   piper: { voice: "en_US-libritts-high#12" },
+  chatterbox: { voice: "chatterbox-default", temperature: 0.5, seed: 7 },
 } as const satisfies { readonly [Id in BrowserEngineId]: unknown };
 
 function browserHarness(engine: BrowserEngineId): Harness {
@@ -301,6 +302,7 @@ function browserHarness(engine: BrowserEngineId): Harness {
       kitten: "Bella",
       paradee: "heart",
       piper: "en_US-kristin-medium",
+      chatterbox: "chatterbox-default",
     },
     generationSettings: TUNING,
     player,
@@ -332,6 +334,7 @@ const HARNESSES: Array<[SurfaceEngineId, () => Harness]> = [
   ["kitten", () => browserHarness("kitten")],
   ["paradee", () => browserHarness("paradee")],
   ["piper", () => browserHarness("piper")],
+  ["chatterbox", () => browserHarness("chatterbox")],
   ["audio8", audio8Harness],
   ["supertonic3", supertonic3Harness],
   ["qwen3", qwen3Harness],
@@ -431,7 +434,7 @@ describe.each(HARNESSES)("%s EngineRuntime contract", (engine, createHarness) =>
     expect(next.error()).toBeUndefined();
   });
 
-  it.skipIf(!["kokoro", "supertonic", "kitten", "paradee", "piper", "supertonic3"].includes(engine))(
+  it.skipIf(!["kokoro", "supertonic", "kitten", "paradee", "piper", "chatterbox", "supertonic3"].includes(engine))(
     "aborts a stopped request on its worker without closing the worker or reloading the model",
     async () => {
       const controller = new AbortController();
@@ -486,7 +489,7 @@ describe.each(HARNESSES)("%s EngineRuntime contract", (engine, createHarness) =>
     expect(healthy.error()).toBeUndefined();
   });
 
-  it.skipIf(["supertonic", "kitten", "paradee", "piper"].includes(engine))("keeps the surface from generating while a request runs", async () => {
+  it.skipIf(["supertonic", "kitten", "paradee", "piper", "chatterbox"].includes(engine))("keeps the surface from generating while a request runs", async () => {
     await harness.ready();
     await waitFor(() => expect(harness.runtime().canGenerate).toBe(true));
 

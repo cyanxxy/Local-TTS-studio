@@ -1,5 +1,6 @@
 import type { TextChunk } from "../lib/chunking";
 import { audio8Engine } from "./audio8";
+import { chatterboxEngine } from "./chatterbox";
 import { kittenEngine } from "./kitten";
 import { kokoroEngine } from "./kokoro";
 import { neuttsEngine } from "./neutts";
@@ -36,6 +37,7 @@ export const ENGINES = defineEngineRegistry({
   kitten: kittenEngine,
   paradee: paradeeEngine,
   piper: piperEngine,
+  chatterbox: chatterboxEngine,
   audio8: audio8Engine,
   supertonic3: supertonic3Engine,
   neutts: neuttsEngine,
@@ -127,10 +129,22 @@ export function engineVoices(id: EngineId, context?: EngineVoiceContext): readon
   return TYPED_ENGINES[id].voices(context);
 }
 
+/** The extra GENERATE fields for `settings` on a browser engine; empty for most. */
+export function browserEngineWorkerFields(id: BrowserEngineId, settings: unknown): Readonly<Record<string, unknown>> {
+  const engine: AnyEngineDescriptor = ENGINES[id];
+  return engine.workerFields?.(settings) ?? {};
+}
+
 /** The label of `voice` for a browser engine, whatever else its settings hold. */
 export function browserEngineVoiceLabel(id: BrowserEngineId, voice: string): string {
   const engine: AnyEngineDescriptor = ENGINES[id];
   return engine.voiceLabel({ ...(engine.defaultSettings as object), voice });
+}
+
+/** Whether the engine's model cannot run without WebGPU. */
+export function engineRequiresWebGPU(id: EngineId): boolean {
+  const engine: AnyEngineDescriptor = ENGINES[id];
+  return engine.requiresWebGPU === true;
 }
 
 /** Whether the engine's model only runs on the CPU, so a WASM backend is expected rather than a fallback. */

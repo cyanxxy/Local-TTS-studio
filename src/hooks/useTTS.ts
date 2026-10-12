@@ -32,7 +32,13 @@ export interface UseTTSReturn<Model extends string = ModelType> {
   error: string | null;
   stats: GenerationStats;
   generationProgress: number;
-  generate: (text: string, model: Model, voice: string, settings: GenerationTuningSettings) => void;
+  generate: (
+    text: string,
+    model: Model,
+    voice: string,
+    settings: GenerationTuningSettings,
+    engineFields?: Readonly<Record<string, unknown>>,
+  ) => void;
   /** Hard stop: closes the worker, which must then be replaced and its model loaded again. */
   cancel: () => void;
   /**
@@ -140,7 +146,7 @@ export function useTTS<Model extends string>({
   useEffect(() => cleanup, [cleanup]);
 
   const generate = useCallback(
-    (text: string, model: Model, voice: string, settings: GenerationTuningSettings) => {
+    (text: string, model: Model, voice: string, settings: GenerationTuningSettings, engineFields?: Readonly<Record<string, unknown>>) => {
       const worker = getWorker(model);
       if (!worker) return;
 
@@ -238,7 +244,7 @@ export function useTTS<Model extends string>({
       const message = {
         type: "GENERATE",
         generationId,
-        ...workerGenerateRequest(text, voice, settings),
+        ...workerGenerateRequest(text, voice, settings, engineFields),
       } satisfies WorkerInMessage;
       try {
         postWorkerGenerate(worker, message);

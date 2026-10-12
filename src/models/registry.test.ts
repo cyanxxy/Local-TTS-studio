@@ -78,6 +78,7 @@ const SURFACE_SETTINGS: SurfaceEngineSettings = {
   kitten: { voice: "Bella" },
   paradee: { voice: "heart" },
   piper: { voice: "en_US-kristin-medium" },
+  chatterbox: { voice: "chatterbox-default", temperature: 0.8, seed: null },
   audio8: { voice: "clara" },
   supertonic3: { voice: "M1", language: "en" },
   qwen3: QWEN3_LIVE,
@@ -112,7 +113,7 @@ describe("engine registry", () => {
   it("registers every engine once under its own id", () => {
     expect(new Set(ENGINE_IDS).size).toBe(ENGINE_IDS.length);
     expect(ENGINE_IDS).toEqual([
-      "kokoro", "supertonic", "kitten", "paradee", "piper", "audio8", "supertonic3", "neutts", "qwen3",
+      "kokoro", "supertonic", "kitten", "paradee", "piper", "chatterbox", "audio8", "supertonic3", "neutts", "qwen3",
     ]);
     for (const id of ENGINE_IDS) {
       expect(ENGINES[id].id).toBe(id);
@@ -125,9 +126,9 @@ describe("engine registry", () => {
 
   it("derives the engine id unions from the descriptors", () => {
     expectTypeOf<EngineId>().toEqualTypeOf<
-      "kokoro" | "supertonic" | "kitten" | "paradee" | "piper" | "audio8" | "supertonic3" | "qwen3" | "neutts"
+      "kokoro" | "supertonic" | "kitten" | "paradee" | "piper" | "chatterbox" | "audio8" | "supertonic3" | "qwen3" | "neutts"
     >();
-    expectTypeOf<BrowserEngineId>().toEqualTypeOf<"kokoro" | "supertonic" | "kitten" | "paradee" | "piper">();
+    expectTypeOf<BrowserEngineId>().toEqualTypeOf<"kokoro" | "supertonic" | "kitten" | "paradee" | "piper" | "chatterbox">();
     expectTypeOf<DesktopInlineEngineId>().toEqualTypeOf<"audio8" | "supertonic3" | "qwen3">();
     expectTypeOf<SetupPageEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
     expectTypeOf<RustBridgeEngineId>().toEqualTypeOf<"qwen3" | "neutts">();
@@ -135,7 +136,7 @@ describe("engine registry", () => {
     expectTypeOf<EngineSettings<"supertonic3">>().toEqualTypeOf<{ voice: string; language: string }>();
     expectTypeOf<EngineLiveSettings<"qwen3">>().toEqualTypeOf<Qwen3LiveSettings>();
 
-    expect(BROWSER_ENGINE_IDS).toEqual(["kokoro", "supertonic", "kitten", "paradee", "piper"]);
+    expect(BROWSER_ENGINE_IDS).toEqual(["kokoro", "supertonic", "kitten", "paradee", "piper", "chatterbox"]);
     expect(DESKTOP_INLINE_ENGINE_IDS).toEqual(["audio8", "supertonic3", "qwen3"]);
     expect(SETUP_PAGE_ENGINE_IDS).toEqual(["neutts", "qwen3"]);
   });
@@ -143,7 +144,7 @@ describe("engine registry", () => {
   it("narrows unknown values to registered ids", () => {
     expect(isEngineId("neutts")).toBe(true);
     expect(isEngineId("kitten")).toBe(true);
-    expect(isEngineId("chatterbox")).toBe(false);
+    expect(isEngineId("whisper")).toBe(false);
     expect(isEngineId(7)).toBe(false);
     expect(isBrowserEngineId("supertonic")).toBe(true);
     expect(isBrowserEngineId("audio8")).toBe(false);
@@ -156,7 +157,8 @@ describe("engine registry", () => {
     for (const engine of ENGINE_REGISTRY) {
       if (engine.picker === "browser") {
         expect(engine.runtime, engine.id).toBe("browser-worker");
-        expect(engine.targets, engine.id).toContain("web");
+        // WebGPU-only engines ship to the desktop build alone.
+        expect(engine.targets.length, engine.id).toBeGreaterThan(0);
       } else if (engine.picker === "desktop") {
         expect(engine.targets, engine.id).toEqual(["desktop"]);
         expect(engine.badge?.length, engine.id).toBeGreaterThan(0);

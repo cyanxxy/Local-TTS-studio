@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 import type { DesktopInlineEngineId } from "../models/registry";
 import type { SynthesisSession } from "../shared/useSynthesisSessionState";
 import { Audio8InlineSettings } from "./Audio8InlineSettings";
+import { ChatterboxInlineSettings } from "./ChatterboxInlineSettings";
 import { Qwen3InlineSettings } from "./Qwen3InlineSettings";
 import { Supertonic3InlineSettings } from "./Supertonic3InlineSettings";
 import { SupertonicLanguageSettings } from "./SupertonicLanguageSettings";
@@ -40,6 +41,15 @@ export function renderSurfaceEngineSettings(
         />
       );
     default:
+      if (engines.activeModel === "chatterbox") {
+        return (
+          <ChatterboxInlineSettings
+            settings={engines.chatterbox}
+            onChange={engines.changeChatterbox}
+            modelState={engines.currentModelState}
+          />
+        );
+      }
       return engines.activeModel === "supertonic"
         ? (
           <SupertonicLanguageSettings

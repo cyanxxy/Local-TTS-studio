@@ -70,6 +70,7 @@ const ENGINE_SETTINGS = {
   kitten: { voice: "Bella" },
   paradee: { voice: "heart" },
   piper: { voice: "en_US-kristin-medium" },
+  chatterbox: { voice: "chatterbox-default", temperature: 0.8, seed: null },
   audio8: { voice: "clara" },
   supertonic3: { voice: "M1", language: "en" },
 };

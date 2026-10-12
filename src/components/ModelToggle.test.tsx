@@ -403,6 +403,7 @@ describe("ModelToggle", () => {
       "model-option-kitten",
       "model-option-paradee",
       "model-option-piper",
+      "model-option-chatterbox",
     ]);
     expect(within(menu).getByTestId("model-option-kitten")).toHaveTextContent("Kitten TTS");
     expect(within(menu).getByTestId("model-option-kitten")).toHaveTextContent("15M · Ready");

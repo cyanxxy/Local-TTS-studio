@@ -22,7 +22,7 @@ import {
   type PersistedAppState,
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
-import { getUnsupportedModelMessage } from "../lib/browserSupport";
+import { getUnsupportedModelMessage, getWebGPUUnavailableModelMessages } from "../lib/browserSupport";
 import {
   engineIsWasmOnly,
   getEngine,
@@ -77,8 +77,8 @@ export function useSynthesisSessionState({
 
   const [text, setText] = useState(initialState.text);
   const [engineSettings, setEngineSettings] = useState<AppEngineSettings>(() => {
-    const { kokoro, supertonic, kitten, paradee, piper, audio8, supertonic3 } = getInitialEngineSettings();
-    return { kokoro, supertonic, kitten, paradee, piper, audio8, supertonic3 };
+    const { kokoro, supertonic, kitten, paradee, piper, chatterbox, audio8, supertonic3 } = getInitialEngineSettings();
+    return { kokoro, supertonic, kitten, paradee, piper, chatterbox, audio8, supertonic3 };
   });
   const [quality, setQuality] = useState(initialState.quality);
   const [showPlayer, setShowPlayer] = useState(false);
@@ -314,6 +314,12 @@ export function useSynthesisSessionState({
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { language: nextLanguage }));
   }, [changeEngineInput, patchEngineSettings, supertonic3Language]);
 
+  // Temperature and seed shape Chatterbox's audio, so they go through the same
+  // save-then-clear path as its voice.
+  const handleChatterboxChange = useCallback((patch: Partial<Pick<AppEngineSettings["chatterbox"], "temperature" | "seed">>) => {
+    changeEngineInput("chatterbox", () => patchEngineSettings("chatterbox", patch));
+  }, [changeEngineInput, patchEngineSettings]);
+
   const handleQualityChange = useCallback((nextQuality: number) => {
     if (nextQuality === quality) return;
     // Both Supertonic engines read the shared quality. Audio from an engine
@@ -394,7 +400,13 @@ export function useSynthesisSessionState({
     ? webgpuStatus?.message ?? null
     : null;
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
-  const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport);
+  const unavailableModels = useMemo(() => ({
+    ...browserSupport.unsupportedModelMessages,
+    ...getWebGPUUnavailableModelMessages(webgpuStatus === null ? null : webgpuStatus.available),
+  }), [browserSupport.unsupportedModelMessages, webgpuStatus]);
+  const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport)
+    ?? unavailableModels[activeModel]
+    ?? null;
 
   const handleTogglePlayback = useCallback(() => void togglePlay(), [togglePlay]);
   useAppShortcuts({
@@ -478,6 +490,9 @@ export function useSynthesisSessionState({
       changeVoice: handleVoiceChange,
       audio8Voice,
       changeAudio8Voice: handleAudio8VoiceChange,
+      unavailableModels,
+      chatterbox: engineSettings.chatterbox,
+      changeChatterbox: handleChatterboxChange,
       supertonicLanguage,
       changeSupertonicLanguage: handleSupertonicLanguageChange,
       supertonic3Voice,

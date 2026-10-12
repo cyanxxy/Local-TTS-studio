@@ -122,7 +122,7 @@ export function ReaderVoiceMenu({
               unavailableModels={unavailableModels}
             />
 
-            {selectedDesktopModel && desktopModelSettings}
+            {(selectedDesktopModel || activeModel === "chatterbox") && desktopModelSettings}
 
             {!selectedDesktopModel && (
               <VoiceSelector

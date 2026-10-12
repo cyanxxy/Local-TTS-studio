@@ -3,6 +3,7 @@ import { ChevronDown, Check } from "lucide-react";
 import type { ModelState, ModelType } from "../types";
 import { engineVoices } from "../models/registry";
 import type { EngineVoice } from "../models/types";
+import { ChatterboxVoiceControls } from "./ChatterboxVoiceControls";
 import { PiperVoiceBrowser } from "./PiperVoiceBrowser";
 
 interface VoiceSelectorProps {
@@ -49,6 +50,11 @@ export function VoiceSelector({
   // with sizes, licences and attribution.
   if (activeModel === "piper") {
     return <PiperVoiceBrowser voice={voice} onVoiceChange={onVoiceChange} modelState={modelState} />;
+  }
+
+  // Chatterbox clones a reference clip instead of choosing from a list.
+  if (activeModel === "chatterbox") {
+    return <ChatterboxVoiceControls voice={voice} onVoiceChange={onVoiceChange} />;
   }
 
   if (voices.length === 0) {

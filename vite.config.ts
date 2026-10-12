@@ -84,6 +84,7 @@ export default defineConfig({
       "src/workers/kitten.worker.ts",
       "src/workers/paradee.worker.ts",
       "src/workers/piper.worker.ts",
+      "src/workers/chatterbox.worker.ts",
     ],
     // kokoro-js is deliberately absent: pre-bundling breaks its embedded
     // espeak-ng runtime, so the worker imports it by URL instead.

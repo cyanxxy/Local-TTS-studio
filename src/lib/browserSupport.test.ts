@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   getDefaultSupportedModel,
   getLocalBrowserSupport,
+  getWebGPUUnavailableModelMessages,
   IOS_KOKORO_UNSUPPORTED_MESSAGE,
   IOS_PARTIAL_SUPPORT_MESSAGE,
   isIOSBrowser,
@@ -54,7 +55,7 @@ describe("browserSupport", () => {
       isSupported: true,
       isIOS: false,
       message: null,
-      supportedModels: ["kokoro", "kitten", "paradee", "piper"],
+      supportedModels: ["kokoro", "kitten", "paradee", "piper", "chatterbox"],
       unsupportedModelMessages: {},
     });
   });
@@ -79,5 +80,13 @@ describe("browserSupport", () => {
     expect(isModelSupportedInBrowser("supertonic", support)).toBe(true);
     expect(isModelSupportedInBrowser("kokoro", support)).toBe(false);
     expect(getDefaultSupportedModel(support)).toBe("supertonic");
+  });
+
+  it("rules out models that need WebGPU only once WebGPU is known to be missing", () => {
+    expect(getWebGPUUnavailableModelMessages(null)).toEqual({});
+    expect(getWebGPUUnavailableModelMessages(true)).toEqual({});
+    expect(getWebGPUUnavailableModelMessages(false)).toEqual({
+      chatterbox: "Chatterbox Turbo needs WebGPU, which this device does not provide.",
+    });
   });
 });

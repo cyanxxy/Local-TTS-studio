@@ -70,7 +70,7 @@ function renderRuntimes(savedKokoroVoice = "af_heart") {
     retain: true,
     browserSupport: SUPPORT,
     text: "Enough text for the surface to speak.",
-    savedVoices: { kokoro: savedKokoroVoice, supertonic: "Female", kitten: "Bella", paradee: "heart", piper: "en_US-kristin-medium" },
+    savedVoices: { kokoro: savedKokoroVoice, supertonic: "Female", kitten: "Bella", paradee: "heart", piper: "en_US-kristin-medium", chatterbox: "chatterbox-default" },
     generationSettings: { speed: 1, quality: 5 },
     player,
     setShowPlayer,

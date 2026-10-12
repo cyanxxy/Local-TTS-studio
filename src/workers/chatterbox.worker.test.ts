@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatterboxWorkerInMessage } from "../lib/chatterboxProtocol";
 import { getChatterboxTokenBudget, type ChatterboxConditioning, type ChatterboxRuntime, type ChatterboxSynthesisResult } from "../lib/chatterboxRuntime";
 import { encodeWavPcm16 } from "../lib/wavCodec";
+import { chatterboxEngine } from "../models/chatterbox";
+import type { AnyEngineDescriptor } from "../models/types";
 
 type Posted = Record<string, unknown> & { type: string };
 
@@ -303,6 +305,27 @@ describe("chatterbox.worker", () => {
       expect(ofType("GENERATION_COMPLETE")[0]).toEqual({ type: "GENERATION_COMPLETE", generationId: "g1" });
       const call = runtime.synthesize.mock.calls.at(-1)!;
       expect(call[2].sampling).toMatchObject({ temperature: 0.5, seed: 5 + chunks.length - 1 });
+    });
+
+    it("emits the passages the Chatterbox engine previews for the Reader, tag-only passages skipped", async () => {
+      const text = [
+        "Chapter One",
+        "",
+        "The first paragraph has a few sentences. It keeps going, with a comma here; and a clause there.",
+        "",
+        "[waves hello]",
+        "",
+        "A second paragraph follows after a blank line, long enough that the chunker has to decide where to cut it into passages. [laugh] And a third sentence closes it out.",
+      ].join("\n");
+      const { load, dispatch, waitFor, ofType } = await loadWorker();
+      await load();
+      dispatch({ type: "GENERATE", generationId: "g1", text });
+      await waitFor(() => ofType("GENERATION_COMPLETE").length === 1);
+
+      const preview = (chatterboxEngine as AnyEngineDescriptor).previewChunks(text, { settings: chatterboxEngine.defaultSettings, backend: "webgpu", quality: 5 });
+      expect(preview.length).toBeGreaterThan(1);
+      expect(ofType("AUDIO_CHUNK").map((chunk) => [chunk.textStart, chunk.textEnd]))
+        .toEqual(preview.map((chunk) => [chunk.start, chunk.end]));
     });
 
     it("sends canonical tags to the model and reports directions it cannot perform", async () => {

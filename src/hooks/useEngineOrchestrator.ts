@@ -6,7 +6,9 @@ import {
   type LocalBrowserSupport,
 } from "../lib/browserSupport";
 import type { InitialAppState } from "../lib/appState";
+import type { ChatterboxSettings } from "../models/chatterbox";
 import {
+  browserEngineWorkerFields,
   isBrowserEngineId,
   type BrowserEngineId,
   type DesktopInlineEngineId,
@@ -32,6 +34,7 @@ export interface OrchestratedEngineSettings {
   kitten: { voice: string };
   paradee: { voice: string };
   piper: { voice: string };
+  chatterbox: ChatterboxSettings;
   audio8: { voice: string };
   supertonic3: { voice: string; language: string };
 }
@@ -166,6 +169,7 @@ export function useEngineOrchestrator({
     kitten: kittenSettings,
     paradee: paradeeSettings,
     piper: piperSettings,
+    chatterbox: chatterboxSettings,
   } = engineSettings;
   // Warms the Supertonic 2 worker, and downloads the Piper voice, the user
   // will speak first.
@@ -180,14 +184,21 @@ export function useEngineOrchestrator({
       kitten: kittenSettings.voice,
       paradee: paradeeSettings.voice,
       piper: piperSettings.voice,
+      chatterbox: chatterboxSettings.voice,
     }),
     [
       kittenSettings.voice,
+      chatterboxSettings.voice,
       kokoroSettings.voice,
       paradeeSettings.voice,
       piperSettings.voice,
       supertonicSettings.voice,
     ],
+  );
+  // What only the shared browser model's worker reads (Chatterbox's reference voice and sampling).
+  const browserEngineFields = useMemo(
+    () => browserEngineWorkerFields(activeModel, engineSettings[activeModel]),
+    [activeModel, engineSettings],
   );
   const browser = useBrowserEngineRuntimes({
     activeModel,
@@ -203,6 +214,7 @@ export function useEngineOrchestrator({
     text,
     savedVoices: savedBrowserVoices,
     generationSettings,
+    engineFields: browserEngineFields,
     player,
     setShowPlayer,
   });
@@ -300,10 +312,11 @@ export function useEngineOrchestrator({
     kitten: { voice: voicesInUse.kitten },
     paradee: { voice: voicesInUse.paradee },
     piper: { voice: voicesInUse.piper },
+    chatterbox: { ...chatterboxSettings, voice: voicesInUse.chatterbox },
     audio8: engineSettings.audio8,
     supertonic3: engineSettings.supertonic3,
     qwen3: qwen3Settings,
-  }), [engineSettings.audio8, engineSettings.supertonic3, qwen3Settings, supertonicSettings.language, voicesInUse]);
+  }), [chatterboxSettings, engineSettings.audio8, engineSettings.supertonic3, qwen3Settings, supertonicSettings.language, voicesInUse]);
 
   const desktopModelOptions = useMemo(() => {
     const optionsFor = (target: Surface) => describeDesktopModelOptions(

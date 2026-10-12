@@ -110,6 +110,23 @@ describe("modelCache", () => {
     expect(result).toEqual({ deletedEntries: 2, deletedKeys: [cacheName] });
   });
 
+  it("clears only Chatterbox's repositories from the shared cache", async () => {
+    const chatterbox = new Request("https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX/resolve/rev/onnx/language_model_q4.onnx");
+    const voice = new Request("https://huggingface.co/onnx-community/chatterbox-ONNX/resolve/rev/default_voice.wav");
+    const kokoro = new Request("https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/model.onnx");
+    const cacheDelete = vi.fn(async () => true);
+    vi.stubGlobal("caches", {
+      keys: vi.fn(async () => ["transformers-cache"]),
+      open: vi.fn(async () => ({ keys: vi.fn(async () => [chatterbox, voice, kokoro]), delete: cacheDelete })),
+    });
+    const { module } = await loadModule();
+
+    const result = await module.clearModelCacheForModel("chatterbox");
+
+    expect(deletedRequestUrls(cacheDelete).sort()).toEqual([chatterbox.url, voice.url].sort());
+    expect(result.deletedEntries).toBe(2);
+  });
+
   it("reports nothing cleared when a model's own cache was never created", async () => {
     const deleteCache = vi.fn(async () => true);
     vi.stubGlobal("caches", { keys: vi.fn(async () => []), has: vi.fn(async () => false), delete: deleteCache });

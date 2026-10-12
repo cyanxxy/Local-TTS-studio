@@ -34,9 +34,9 @@ const DTYPE_SUFFIX: Readonly<Record<ChatterboxSessionDtype, string>> = {
 export type ChatterboxDtype = Readonly<Record<ChatterboxSession, ChatterboxSessionDtype>>;
 
 export interface ChatterboxAssetCache {
-  match(request: RequestInfo | URL): Promise<Response | undefined>;
-  put(request: RequestInfo | URL, response: Response): Promise<void>;
-  delete?(request: RequestInfo | URL): Promise<boolean>;
+  match(request: string | URL | Request): Promise<Response | undefined>;
+  put(request: string | URL | Request, response: Response): Promise<void>;
+  delete?(request: string | URL | Request): Promise<boolean>;
 }
 
 export interface ChatterboxAssetGuardOptions {
@@ -85,7 +85,7 @@ export function buildChatterboxAssetUrl(modelId: string, revision: string, file:
   return `https://huggingface.co/${modelId}/resolve/${revision}/${file}`;
 }
 
-function toUrl(request: RequestInfo | URL): string {
+function toUrl(request: string | URL | Request): string {
   if (typeof request === "string") return request;
   if (request instanceof URL) return request.toString();
   return request.url;
@@ -256,8 +256,8 @@ export function createChatterboxAssetGuard({
   const serial = createSerialQueue();
   // Transformers.js also probes local-path cache keys such as
   // "/models/<repo>/<file>"; those can never hold verified bytes.
-  const isLocalRepoKey = (request: RequestInfo | URL) => toUrl(request).includes(`/${modelId}/`);
-  const lookup = (request: RequestInfo | URL) => {
+  const isLocalRepoKey = (request: string | URL | Request) => toUrl(request).includes(`/${modelId}/`);
+  const lookup = (request: string | URL | Request) => {
     const asset = resolveChatterboxAssetPath(pinHuggingFaceModelUrl(toUrl(request), modelId, revision), modelId);
     if (!asset) return null;
     const expected = Object.hasOwn(files, asset.file) ? files[asset.file] : undefined;

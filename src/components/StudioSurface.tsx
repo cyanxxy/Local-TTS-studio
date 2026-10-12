@@ -56,7 +56,7 @@ export function StudioSurface() {
               supertonicState={supertonicState}
               modelStates={browserStates}
               visibleModels={browserSupport.supportedModels}
-              unavailableModels={browserSupport.unsupportedModelMessages}
+              unavailableModels={engines.unavailableModels}
             />
 
             {renderSurfaceEngineSettings(session, studio.desktopModel)}

@@ -112,4 +112,12 @@ describe("VoiceSelector", () => {
     fireEvent.click(screen.getByRole("button", { name: /Kristin/ }));
     expect(onVoiceChange).toHaveBeenCalledWith("en_US-kristin-medium");
   });
+
+  it("hands Chatterbox to its reference voice controls", () => {
+    const onVoiceChange = vi.fn();
+    render(<VoiceSelector activeModel="chatterbox" voice="chatterbox-default" onVoiceChange={onVoiceChange} kokoroVoices={[]} />);
+
+    expect(screen.getByRole("button", { name: /Default voice/ })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Clone a voice from a WAV file/ })).toBeInTheDocument();
+  });
 });

@@ -1,11 +1,14 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { LocalBrowserSupport } from "../lib/browserSupport";
+import { addChatterboxClipFromWav, getChatterboxClips, removeChatterboxClip } from "../lib/chatterboxClips";
 import { PlaybackClock } from "../lib/playbackClock";
+import { encodeWavPcm16 } from "../lib/wavCodec";
 import { BROWSER_ENGINE_IDS, type BrowserEngineId } from "../models/registry";
 import type { EngineRuntime, SynthesisChunk } from "../shared/engineRuntime";
 import type { WorkerInMessage, WorkerOutMessage } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import type { ChatterboxWorkerInMessage } from "../lib/chatterboxProtocol";
 import { useEngineOrchestrator, type OrchestratedEngineSettings } from "./useEngineOrchestrator";
 
 // Kitten, Paradee and Piper run through the real browser worker pool, surface
@@ -45,13 +48,16 @@ const ENGINE_SETTINGS: OrchestratedEngineSettings = {
   kitten: { voice: SETUP.kitten.voice },
   paradee: { voice: SETUP.paradee.voice },
   piper: { voice: SETUP.piper.voice },
+  chatterbox: { voice: "chatterbox-default", temperature: 0.8, seed: null },
   audio8: { voice: "clara" },
   supertonic3: { voice: "M1", language: "en" },
 };
 
 class ScriptedWorker extends EventTarget {
   static instances: ScriptedWorker[] = [];
-  posted: WorkerInMessage[] = [];
+  /** How Chatterbox answers SET_REFERENCE: accept it, fail it, or stay silent. */
+  static referenceReply: "accept" | "fail" | "silent" = "accept";
+  posted: Array<WorkerInMessage | ChatterboxWorkerInMessage> = [];
   terminate = vi.fn();
   onmessage: ((event: MessageEvent<WorkerOutMessage>) => void) | null = null;
   readonly engine: string;
@@ -62,7 +68,7 @@ class ScriptedWorker extends EventTarget {
     ScriptedWorker.instances.push(this);
   }
 
-  postMessage(message: WorkerInMessage) {
+  postMessage(message: WorkerInMessage | ChatterboxWorkerInMessage) {
     this.posted.push(message);
     if (message.type === "LOAD") {
       const setup = SETUP[this.engine as NewEngine];
@@ -71,6 +77,11 @@ class ScriptedWorker extends EventTarget {
         voices: setup?.reported ?? ["af_heart"],
         backend: setup?.backend ?? "wasm",
       }));
+    } else if (message.type === "SET_REFERENCE" && ScriptedWorker.referenceReply !== "silent") {
+      const { referenceId } = message as unknown as { referenceId: string };
+      queueMicrotask(() => this.emit((ScriptedWorker.referenceReply === "accept"
+        ? { type: "REFERENCE_READY", referenceId, digest: "d", durationSec: 5 }
+        : { type: "ERROR", scope: "reference", referenceId, message: "The reference clip is silent." }) as never));
     } else if (message.type === "ABORT") {
       const { generationId } = message;
       queueMicrotask(() => this.emit({ type: "ABORTED", generationId }));
@@ -122,7 +133,7 @@ function createPlayer() {
   } as unknown as UseAudioPlayerReturn;
 }
 
-function renderOrchestrator(model: BrowserEngineId) {
+function renderOrchestrator(model: BrowserEngineId, engineSettings: OrchestratedEngineSettings = ENGINE_SETTINGS) {
   const player = createPlayer();
   const setShowPlayer = vi.fn();
   const view = renderHook(() => useEngineOrchestrator({
@@ -133,7 +144,7 @@ function renderOrchestrator(model: BrowserEngineId) {
     debugProfiling: false,
     initialState: { model, desktopModels: { studio: null, reader: null } },
     text: TEXT,
-    engineSettings: ENGINE_SETTINGS,
+    engineSettings,
     generationSettings: TUNING,
     player,
     setShowPlayer,
@@ -153,11 +164,13 @@ async function collect(iterable: AsyncIterable<SynthesisChunk>) {
 describe("Kitten, Paradee and Piper through the engine orchestrator", () => {
   beforeEach(() => {
     ScriptedWorker.instances = [];
+    ScriptedWorker.referenceReply = "accept";
     vi.stubGlobal("Worker", ScriptedWorker);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    for (const clip of getChatterboxClips()) removeChatterboxClip(clip.id);
   });
 
   describe.each(NEW_ENGINES)("%s", (engine) => {
@@ -244,5 +257,91 @@ describe("Kitten, Paradee and Piper through the engine orchestrator", () => {
 
     act(() => worker("piper")?.emit({ type: "LOAD_PROGRESS", percent: 100 }));
     expect(result.current.runtimes.piper.modelState).toMatchObject({ ready: true, loading: false, downloadProgress: 100, backend: "wasm" });
+  });
+
+  describe("chatterbox", () => {
+    const withChatterbox = (chatterbox: OrchestratedEngineSettings["chatterbox"]): OrchestratedEngineSettings => ({
+      ...ENGINE_SETTINGS,
+      chatterbox,
+    });
+
+    async function loadClip() {
+      const samples = new Float32Array(5 * 24_000);
+      for (let i = 0; i < samples.length; i += 1) {
+        samples[i] = 0.3 * (0.6 + (0.4 * Math.sin(i / 4000))) * Math.sin(i / 12);
+      }
+      const bytes = encodeWavPcm16(samples, 24_000);
+      return addChatterboxClipFromWav(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, "Narrator.wav");
+    }
+
+    it("generates with the default voice, its temperature and its seed, sending no clip", async () => {
+      const { result, worker } = renderOrchestrator("chatterbox", withChatterbox({ voice: "chatterbox-default", temperature: 0.5, seed: 7 }));
+      await waitFor(() => expect(result.current.runtimes.chatterbox.canGenerate).toBe(true));
+
+      act(() => result.current.runtimes.chatterbox.handleGenerate());
+
+      await waitFor(() => expect(worker("chatterbox")?.generations).toHaveLength(1));
+      expect(worker("chatterbox")?.generations[0]).toMatchObject({
+        text: TEXT,
+        referenceId: "chatterbox-default",
+        temperature: 0.5,
+        seed: 7,
+      });
+      expect(worker("chatterbox")?.posted.some((message) => message.type === "SET_REFERENCE")).toBe(false);
+    });
+
+    it("sends a cloned voice to the worker first and only then lets the surface generate", async () => {
+      const clip = await loadClip();
+      ScriptedWorker.referenceReply = "silent";
+      const { result, worker } = renderOrchestrator("chatterbox", withChatterbox({ voice: clip.id, temperature: 0.8, seed: null }));
+      await waitFor(() => expect(result.current.runtimes.chatterbox.modelState.ready).toBe(true));
+      await waitFor(() => expect(worker("chatterbox")?.posted.some((message) => message.type === "SET_REFERENCE")).toBe(true));
+      expect(result.current.runtimes.chatterbox.canGenerate).toBe(false);
+
+      act(() => worker("chatterbox")?.emit({ type: "REFERENCE_READY", referenceId: clip.id, digest: "d", durationSec: 5 } as never));
+      await waitFor(() => expect(result.current.runtimes.chatterbox.canGenerate).toBe(true));
+      act(() => result.current.runtimes.chatterbox.handleGenerate());
+
+      await waitFor(() => expect(worker("chatterbox")?.generations).toHaveLength(1));
+      const types = worker("chatterbox")?.posted.map((message) => message.type);
+      expect(types?.indexOf("SET_REFERENCE")).toBeLessThan(types?.indexOf("GENERATE") ?? -1);
+      expect(worker("chatterbox")?.generations[0]).toMatchObject({ referenceId: clip.id });
+      expect(worker("chatterbox")?.generations[0]).not.toHaveProperty("seed");
+    });
+
+    it("reports a clip the worker rejects and keeps the surface from generating", async () => {
+      const clip = await loadClip();
+      ScriptedWorker.referenceReply = "fail";
+      const { result } = renderOrchestrator("chatterbox", withChatterbox({ voice: clip.id, temperature: 0.8, seed: null }));
+
+      await waitFor(() => expect(result.current.runtimes.chatterbox.error).toBe("The reference clip is silent."));
+      expect(result.current.runtimes.chatterbox.canGenerate).toBe(false);
+    });
+
+    it("reports a chosen clip that is no longer loaded", async () => {
+      const { result } = renderOrchestrator("chatterbox", withChatterbox({ voice: "abc~Gone", temperature: 0.8, seed: null }));
+
+      await waitFor(() => expect(result.current.runtimes.chatterbox.error).toContain("no longer loaded"));
+      expect(result.current.runtimes.chatterbox.canGenerate).toBe(false);
+    });
+
+    it("synthesizes a request with its own clip and lets a seed override the settings", async () => {
+      const clip = await loadClip();
+      const { result, worker } = renderOrchestrator("kokoro");
+      await waitFor(() => expect(result.current.runtimes.kokoro.modelState.ready).toBe(true));
+
+      const pending = collect(result.current.runtimes.chatterbox.synthesize({
+        text: TEXT,
+        settings: { voice: clip.id, temperature: 1.1, seed: 3 },
+        tuning: TUNING,
+        seed: 99,
+      }));
+      await waitFor(() => expect(worker("chatterbox")?.generations).toHaveLength(1));
+      expect(worker("chatterbox")?.generations[0]).toMatchObject({ referenceId: clip.id, temperature: 1.1, seed: 99 });
+      act(() => worker("chatterbox")?.finishLatest(24_000));
+
+      expect(await pending).toHaveLength(1);
+      expect(worker("chatterbox")?.posted.filter((message) => message.type === "SET_REFERENCE")).toHaveLength(1);
+    });
   });
 });

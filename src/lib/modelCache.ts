@@ -3,6 +3,7 @@ import { MODELS } from "../constants";
 import type { ModelType } from "../types";
 import { KITTEN_CACHE_NAME, PARADEE_CACHE_NAME } from "./phonemeModels";
 import { PIPER_CACHE_NAME } from "./piperVoices";
+import { CHATTERBOX_DEFAULT_VOICE, CHATTERBOX_MODEL_ID } from "./chatterboxModel";
 import {
   clearPersistentCacheEntries,
   clearPersistentCacheStorage,
@@ -50,10 +51,16 @@ const OWN_CACHE_NAMES: Partial<Record<ModelType, string>> = {
   piper: PIPER_CACHE_NAME,
 };
 
+/** Chatterbox keeps its pinned files in the shared Transformers.js cache, under these repositories. */
+const EXTRA_MODEL_REPOS: Partial<Record<ModelType, readonly string[]>> = {
+  chatterbox: [CHATTERBOX_MODEL_ID, CHATTERBOX_DEFAULT_VOICE.modelId],
+};
+
 function getModelCacheUrlMarkers(model: ModelType): string[] {
-  if (!(model in MODELS)) return [];
-  const modelId = MODELS[model as keyof typeof MODELS].id;
-  return [modelId, encodeURIComponent(modelId)];
+  const modelIds = model in MODELS
+    ? [MODELS[model as keyof typeof MODELS].id]
+    : [...(EXTRA_MODEL_REPOS[model] ?? [])];
+  return modelIds.flatMap((modelId) => [modelId, encodeURIComponent(modelId)]);
 }
 
 function matchesModelCacheUrl(url: string, model: ModelType): boolean {

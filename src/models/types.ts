@@ -164,6 +164,8 @@ export interface EngineDescriptor<Settings = unknown, Live = Settings> {
   /** Short tag rendered beside desktop picker rows, e.g. "Local". */
   readonly badge?: string;
   readonly setupPage?: EngineSetupPage;
+  /** The engine's model cannot run without WebGPU (there is no WASM fallback). */
+  readonly requiresWebGPU?: boolean;
   /** The engine's model runs on the CPU only, so a WASM backend is not a fallback. */
   readonly wasmOnly?: boolean;
   /** Credits and licences to show; the voice details carry any per-voice attribution. */
@@ -178,6 +180,12 @@ export interface EngineDescriptor<Settings = unknown, Live = Settings> {
   detail(settings: Live): string;
   /** Null while an input that shapes the audio is not known yet. */
   signatureParts(context: EngineSignatureContext<Live>): EngineSignatureParts | null;
+  /**
+   * Extra GENERATE fields a browser worker reads beyond the text, voice and
+   * Creator tuning (Chatterbox's reference voice and sampling). Absent for
+   * engines whose worker needs nothing more.
+   */
+  workerFields?(settings: Live): Readonly<Record<string, unknown>>;
   /** The passages generation will produce, with the parameters the runtime uses. */
   previewChunks(text: string, context: EnginePreviewContext<Live>): TextChunk[];
 }

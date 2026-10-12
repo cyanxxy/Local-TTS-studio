@@ -83,7 +83,7 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
           supertonicState={supertonicState}
           modelStates={browserStates}
           visibleModels={browserSupport.supportedModels}
-          unavailableModels={browserSupport.unsupportedModelMessages}
+          unavailableModels={engines.unavailableModels}
           kokoroVoices={engines.kokoroVoices}
           voice={engines.voice}
           onVoiceChange={engines.changeVoice}

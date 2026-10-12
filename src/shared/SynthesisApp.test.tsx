@@ -6,7 +6,7 @@ import { SynthesisApp } from "./SynthesisApp";
 import { useGenerationControl } from "../hooks/useGenerationControl";
 import { useModelLoader } from "../hooks/useModelLoader";
 import type { AudioSegment } from "../hooks/useAudioPlayer";
-import type { ModelState } from "../types";
+import type { ModelState, ModelType } from "../types";
 import { getDefaultQwen3Profile, type Qwen3Profile } from "../../electron/qwen3Profiles";
 import { ENGINES, engineSignatureParts, type DesktopInlineEngineId } from "../models/registry";
 import type { PersistedEngineSettings } from "../lib/appState";
@@ -91,9 +91,9 @@ const mock = vi.hoisted(() => {
     },
     readerError: null as Error | null,
     modelLoader: {
-      states: { kokoro: readyState, supertonic: readyState },
+      states: { kokoro: readyState, supertonic: readyState } as Partial<Record<ModelType, ModelState>>,
       getWorker: vi.fn(() => null),
-      voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] as string[] },
+      voices: { kokoro: ["af_heart", "af_bella"], supertonic: [] as string[] } as Partial<Record<ModelType, string[]>>,
       getWorkerLease: vi.fn(() => null),
       acquireWorker: vi.fn(),
       hardRestartModel: vi.fn(),
@@ -322,6 +322,9 @@ vi.mock("../lib/browserSupport", () => ({
   getDefaultSupportedModel: () => mock.browserSupport.supportedModels[0],
   getUnsupportedModelMessage: (model: string) => mock.browserSupport.unsupportedModelMessages[model] ?? null,
   isModelSupportedInBrowser: (model: string) => mock.browserSupport.supportedModels.includes(model),
+  getWebGPUUnavailableModelMessages: (available: boolean | null) => (
+    available === false ? { chatterbox: "Chatterbox Turbo needs WebGPU, which this device does not provide." } : {}
+  ),
 }));
 
 vi.mock("../lib/webgpu", () => ({
@@ -645,6 +648,7 @@ function resetMockState() {
     kitten: ENGINES.kitten.defaultSettings,
     paradee: ENGINES.paradee.defaultSettings,
     piper: ENGINES.piper.defaultSettings,
+    chatterbox: ENGINES.chatterbox.defaultSettings,
     audio8: ENGINES.audio8.defaultSettings,
     supertonic3: ENGINES.supertonic3.defaultSettings,
     neutts: ENGINES.neutts.defaultSettings,
@@ -1278,6 +1282,25 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "studio-desktop-audio8" }));
     expect(screen.getByText("Audio8 · Native CPU")).toBeInTheDocument();
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());
+  });
+
+  it("shows Chatterbox's own settings in Studio and saves a change to them", async () => {
+    mock.browserSupport = { ...mock.browserSupport, supportedModels: ["kokoro", "chatterbox"] };
+    mock.initialAppState = { ...mock.initialAppState, model: "chatterbox" };
+    mock.modelLoader = {
+      ...mock.modelLoader,
+      states: { kokoro: mock.readyState, supertonic: mock.readyState, chatterbox: mock.readyState },
+      voices: { kokoro: [], supertonic: [], chatterbox: ["chatterbox-default"] },
+    };
+    render(<WebApp />);
+
+    const temperature = await screen.findByLabelText(/Variation/);
+    expect(temperature).toHaveValue("0.8");
+    fireEvent.change(temperature, { target: { value: "1.25" } });
+    expect(screen.getByLabelText(/Variation/)).toHaveValue("1.25");
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "12" } });
+    expect(screen.getByLabelText("Seed")).toHaveValue(12);
+    expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
   });
 
   it("names every browser model the build ships in the footer", () => {
