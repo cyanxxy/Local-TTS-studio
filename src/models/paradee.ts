@@ -44,7 +44,6 @@ export const paradeeEngine = {
   runtime: "browser-worker",
   targets: ["desktop"],
   picker: "browser",
-  badge: "Tiny",
   wasmOnly: true,
   capabilities,
   credits: [{

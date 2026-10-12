@@ -138,7 +138,6 @@ export const piperEngine = {
   runtime: "browser-worker",
   targets: ["desktop"],
   picker: "browser",
-  badge: "Voices",
   wasmOnly: true,
   capabilities,
   credits: [

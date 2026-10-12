@@ -1,8 +1,9 @@
 import { useState, useRef, useEffect, useId } from "react";
 import { ChevronDown, Check } from "lucide-react";
-import type { ModelType } from "../types";
+import type { ModelState, ModelType } from "../types";
 import { engineVoices } from "../models/registry";
 import type { EngineVoice } from "../models/types";
+import { PiperVoiceBrowser } from "./PiperVoiceBrowser";
 
 interface VoiceSelectorProps {
   activeModel: ModelType;
@@ -10,6 +11,8 @@ interface VoiceSelectorProps {
   onVoiceChange: (voice: string) => void;
   /** Voices the loaded Kokoro model reported; other engines list their own. */
   kokoroVoices: string[];
+  /** The active browser engine's load state; Piper reports its voice downloads through it. */
+  modelState?: ModelState;
 }
 
 export function VoiceSelector({
@@ -17,6 +20,7 @@ export function VoiceSelector({
   voice,
   onVoiceChange,
   kokoroVoices,
+  modelState,
 }: VoiceSelectorProps) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -40,6 +44,12 @@ export function VoiceSelector({
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  // Piper's twenty-odd voices need a browser of their own: grouped, filterable,
+  // with sizes, licences and attribution.
+  if (activeModel === "piper") {
+    return <PiperVoiceBrowser voice={voice} onVoiceChange={onVoiceChange} modelState={modelState} />;
+  }
 
   if (voices.length === 0) {
     return (
@@ -70,6 +80,7 @@ export function VoiceSelector({
               }`}
             >
               {entry.label}
+              {entry.detail && <span className="block text-2xs font-normal text-text-muted">{entry.detail}</span>}
             </button>
           ))}
         </div>

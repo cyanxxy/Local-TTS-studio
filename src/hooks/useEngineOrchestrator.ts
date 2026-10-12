@@ -29,6 +29,9 @@ export type Surface = "studio" | "reader";
 export interface OrchestratedEngineSettings {
   kokoro: { voice: string };
   supertonic: { voice: string; language: string };
+  kitten: { voice: string };
+  paradee: { voice: string };
+  piper: { voice: string };
   audio8: { voice: string };
   supertonic3: { voice: string; language: string };
 }
@@ -157,12 +160,34 @@ export function useEngineOrchestrator({
   const visibleEngineId: SurfaceEngineId | null = surface === null ? null : engineIds[surface];
   const selects = (engine: SurfaceEngineId) => studioEngineId === engine || readerEngineId === engine;
 
-  const { kokoro: kokoroSettings, supertonic: supertonicSettings } = engineSettings;
-  // Warms the Supertonic 2 worker with the voice it will speak first.
-  const preferredBrowserVoices = useMemo(() => ({ supertonic: supertonicSettings.voice }), [supertonicSettings.voice]);
+  const {
+    kokoro: kokoroSettings,
+    supertonic: supertonicSettings,
+    kitten: kittenSettings,
+    paradee: paradeeSettings,
+    piper: piperSettings,
+  } = engineSettings;
+  // Warms the Supertonic 2 worker, and downloads the Piper voice, the user
+  // will speak first.
+  const preferredBrowserVoices = useMemo(
+    () => ({ supertonic: supertonicSettings.voice, piper: piperSettings.voice }),
+    [piperSettings.voice, supertonicSettings.voice],
+  );
   const savedBrowserVoices = useMemo(
-    () => ({ kokoro: kokoroSettings.voice, supertonic: supertonicSettings.voice }),
-    [kokoroSettings.voice, supertonicSettings.voice],
+    () => ({
+      kokoro: kokoroSettings.voice,
+      supertonic: supertonicSettings.voice,
+      kitten: kittenSettings.voice,
+      paradee: paradeeSettings.voice,
+      piper: piperSettings.voice,
+    }),
+    [
+      kittenSettings.voice,
+      kokoroSettings.voice,
+      paradeeSettings.voice,
+      piperSettings.voice,
+      supertonicSettings.voice,
+    ],
   );
   const browser = useBrowserEngineRuntimes({
     activeModel,
@@ -272,6 +297,9 @@ export function useEngineOrchestrator({
   const surfaceEngineSettings = useMemo<SurfaceEngineSettings>(() => ({
     kokoro: { voice: voicesInUse.kokoro },
     supertonic: { voice: voicesInUse.supertonic, language: supertonicSettings.language },
+    kitten: { voice: voicesInUse.kitten },
+    paradee: { voice: voicesInUse.paradee },
+    piper: { voice: voicesInUse.piper },
     audio8: engineSettings.audio8,
     supertonic3: engineSettings.supertonic3,
     qwen3: qwen3Settings,

@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react";
 import {
   Check,
+  Info,
   Keyboard,
   Monitor,
   Moon,
@@ -19,6 +20,7 @@ import type {
   ReadingFont,
 } from "../lib/appPreferences";
 import { APP_SHORTCUT_GROUPS } from "../lib/appShortcuts";
+import { ModelCredits } from "./ModelCredits";
 
 interface AppSettingsDialogProps {
   open: boolean;
@@ -61,7 +63,14 @@ const READING_FONTS: Array<{ value: ReadingFont; label: string; family: string }
   { value: "georgia", label: "Georgia", family: 'Georgia, "Times New Roman", serif' },
 ];
 
-type SettingsSection = "appearance" | "shortcuts" | "models";
+type SettingsSection = "appearance" | "shortcuts" | "models" | "credits";
+
+const SECTION_TITLES: Record<SettingsSection, string> = {
+  appearance: "Appearance",
+  shortcuts: "Keyboard shortcuts",
+  models: "Optional models",
+  credits: "Credits",
+};
 
 function ShortcutKeys({ keys, label }: { keys: readonly string[]; label: string }) {
   return (
@@ -224,13 +233,20 @@ export function AppSettingsDialog({
                 <Sparkles size={15} /> Optional models
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => setSection("credits")}
+              className={`flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-base font-medium transition-colors ${section === "credits" ? "bg-accent-light text-accent" : "text-text-secondary hover:bg-text-primary/[0.07]"}`}
+            >
+              <Info size={15} /> Credits
+            </button>
           </nav>
         </aside>
 
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex items-center justify-between border-b border-border/70 px-4 py-3 sm:px-6 sm:py-4">
             <h2 id={titleId} className="font-display text-2xl font-semibold text-text-primary">
-              {section === "appearance" ? "Appearance" : section === "shortcuts" ? "Keyboard shortcuts" : "Optional models"}
+              {SECTION_TITLES[section]}
             </h2>
             <button
               type="button"
@@ -266,6 +282,13 @@ export function AppSettingsDialog({
                 Optional models
               </button>
             )}
+            <button
+              type="button"
+              onClick={() => setSection("credits")}
+              className={`min-w-fit flex-1 rounded-lg px-3 py-2 text-sm font-semibold ${section === "credits" ? "bg-accent-light text-accent" : "text-text-muted"}`}
+            >
+              Credits
+            </button>
           </div>
 
           <div className="min-h-0 flex-1 overflow-y-auto px-4 py-5 sm:px-6 sm:py-6">
@@ -423,6 +446,8 @@ export function AppSettingsDialog({
                   ))}
                 </div>
               </div>
+            ) : section === "credits" ? (
+              <ModelCredits idPrefix={`${titleId}-credits`} />
             ) : (
               <section aria-labelledby={`${titleId}-models`}>
                 <h4 id={`${titleId}-models`} className="text-sm font-semibold text-text-secondary">Navigation and model access</h4>

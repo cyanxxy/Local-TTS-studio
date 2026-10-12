@@ -24,6 +24,7 @@ import {
 import type { AppPage } from "../lib/appRouting";
 import { getUnsupportedModelMessage } from "../lib/browserSupport";
 import {
+  engineIsWasmOnly,
   getEngine,
   surfaceEngineSignatureParts,
   type EngineSettings,
@@ -76,8 +77,8 @@ export function useSynthesisSessionState({
 
   const [text, setText] = useState(initialState.text);
   const [engineSettings, setEngineSettings] = useState<AppEngineSettings>(() => {
-    const { kokoro, supertonic, audio8, supertonic3 } = getInitialEngineSettings();
-    return { kokoro, supertonic, audio8, supertonic3 };
+    const { kokoro, supertonic, kitten, paradee, piper, audio8, supertonic3 } = getInitialEngineSettings();
+    return { kokoro, supertonic, kitten, paradee, piper, audio8, supertonic3 };
   });
   const [quality, setQuality] = useState(initialState.quality);
   const [showPlayer, setShowPlayer] = useState(false);
@@ -385,6 +386,8 @@ export function useSynthesisSessionState({
     && visibleEngineId !== null
     && visibleEngineId !== "qwen3"
     && visibleEngineId !== "audio8"
+    // Paradee and Piper run on the CPU by design; there is no GPU path to miss.
+    && !engineIsWasmOnly(visibleEngineId)
     && ((webgpuStatus !== null && !webgpuStatus.available)
       || (visibleEngineId === "supertonic3" ? runtimes.supertonic3.modelState.backend === "wasm" : isUsingWasmFallback));
   const webgpuModeNote = showWasmBadge

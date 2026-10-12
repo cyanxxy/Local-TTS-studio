@@ -127,6 +127,18 @@ export function engineVoices(id: EngineId, context?: EngineVoiceContext): readon
   return TYPED_ENGINES[id].voices(context);
 }
 
+/** The label of `voice` for a browser engine, whatever else its settings hold. */
+export function browserEngineVoiceLabel(id: BrowserEngineId, voice: string): string {
+  const engine: AnyEngineDescriptor = ENGINES[id];
+  return engine.voiceLabel({ ...(engine.defaultSettings as object), voice });
+}
+
+/** Whether the engine's model only runs on the CPU, so a WASM backend is expected rather than a fallback. */
+export function engineIsWasmOnly(id: EngineId): boolean {
+  const engine: AnyEngineDescriptor = ENGINES[id];
+  return engine.wasmOnly === true;
+}
+
 export function engineVoiceLabel<Id extends EngineId>(id: Id, settings: EngineLiveSettings<Id>): string {
   return TYPED_ENGINES[id].voiceLabel(settings);
 }

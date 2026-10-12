@@ -17,14 +17,14 @@ export function StudioSurface() {
   const session = useSynthesisSession();
   const { creator, creatorEngineSupport, documents, engines, environment, player, studio } = session;
   const { browserSupport } = environment;
-  const { kokoro: kokoroState, supertonic: supertonicState } = engines.browser.states;
+  const { states: browserStates } = engines.browser;
+  const { kokoro: kokoroState, supertonic: supertonicState } = browserStates;
   const usesDesktopModel = studio.desktopModel !== null;
   const runtime = studio.runtime;
   const downloadStates = useMemo(() => ({
-    kokoro: kokoroState,
-    supertonic: supertonicState,
+    ...browserStates,
     ...(studio.desktopModel === "supertonic3" ? { supertonic3: engines.runtimes.supertonic3.modelState } : {}),
-  }), [engines.runtimes.supertonic3.modelState, kokoroState, studio.desktopModel, supertonicState]);
+  }), [browserStates, engines.runtimes.supertonic3.modelState, studio.desktopModel]);
   const hasAudio = player.state.totalDuration > 0;
 
   return (
@@ -54,6 +54,7 @@ export function StudioSurface() {
               desktopModelOptions={engines.desktopModelOptions.studio}
               kokoroState={kokoroState}
               supertonicState={supertonicState}
+              modelStates={browserStates}
               visibleModels={browserSupport.supportedModels}
               unavailableModels={browserSupport.unsupportedModelMessages}
             />
@@ -66,6 +67,7 @@ export function StudioSurface() {
                 voice={engines.voice}
                 onVoiceChange={engines.changeVoice}
                 kokoroVoices={engines.kokoroVoices}
+                modelState={browserStates[engines.activeModel]}
               />
             )}
 

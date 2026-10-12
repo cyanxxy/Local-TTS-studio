@@ -43,7 +43,6 @@ export const kittenEngine = {
   runtime: "browser-worker",
   targets: ["desktop"],
   picker: "browser",
-  badge: "Fast",
   capabilities,
   credits: [{
     name: "Kitten TTS Nano 0.8",

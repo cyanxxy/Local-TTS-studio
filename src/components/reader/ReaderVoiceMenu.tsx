@@ -30,6 +30,10 @@ interface ReaderVoiceMenuProps {
   desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
   supertonicState: ModelState;
+  /** The load state of the other browser engines (Kitten, Paradee, Piper). */
+  modelStates?: Partial<Record<ModelType, ModelState>>;
+  /** The selected browser engine's load state, for voice downloads. */
+  browserModelState?: ModelState;
   visibleModels?: readonly ModelType[];
   unavailableModels?: Partial<Record<ModelType, string>>;
   kokoroVoices: string[];
@@ -53,6 +57,8 @@ export function ReaderVoiceMenu({
   desktopModelSettings,
   kokoroState,
   supertonicState,
+  modelStates,
+  browserModelState,
   visibleModels,
   unavailableModels,
   kokoroVoices,
@@ -111,6 +117,7 @@ export function ReaderVoiceMenu({
               desktopModelOptions={desktopModelOptions}
               kokoroState={kokoroState}
               supertonicState={supertonicState}
+              modelStates={modelStates}
               visibleModels={visibleModels}
               unavailableModels={unavailableModels}
             />
@@ -123,6 +130,7 @@ export function ReaderVoiceMenu({
                 voice={voice}
                 onVoiceChange={onVoiceChange}
                 kokoroVoices={kokoroVoices}
+                modelState={browserModelState}
               />
             )}
 
