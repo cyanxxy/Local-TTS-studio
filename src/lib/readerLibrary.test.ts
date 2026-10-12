@@ -1,4 +1,4 @@
-import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import { IDBFactory, IDBKeyRange, IDBObjectStore } from "fake-indexeddb";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildReaderSections,
@@ -292,6 +292,35 @@ describe("readerLibrary", () => {
       await saveReaderDocument({ ...document, progress: { ...document.progress, textOffset: 1, updatedAt: 1 } });
       expect((await getReaderDocument("book"))?.progress.textOffset).toBe(1);
     });
+  });
+
+  it("checks a write's timestamp in the metadata store without reading the stored PCM", async () => {
+    const document = createReaderDocument({ id: "no-read", text: "No read before write." });
+    const section = buildReaderSections(document.text, document.chapters)[0];
+    const cache = (updatedAt: number): CachedReaderAudio => ({
+      cacheKey: createReaderAudioCacheKey(document.id, section.id),
+      documentId: document.id,
+      chapterId: section.chapterId,
+      sectionId: section.id,
+      signature: "sig",
+      chunks: [{ audio: new Float32Array([1, 2, 3]).buffer, samplingRate: 24_000, text: "t", index: 0, total: 1 }],
+      byteLength: 12,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      updatedAt,
+    });
+    await saveCachedReaderAudio(cache(100));
+
+    const get = vi.spyOn(IDBObjectStore.prototype, "get");
+    await saveCachedReaderAudio(cache(200));
+    await saveCachedReaderAudio(cache(150));
+    const stores = get.mock.contexts.map((store) => (store as { name: string }).name);
+    get.mockRestore();
+
+    expect(stores).toContain("chapter-audio-meta");
+    expect(stores).not.toContain("chapter-audio");
+    expect((await getCachedReaderAudio(document.id, section.id))?.updatedAt).toBe(200);
   });
 
   it("skips a corrupt document record without hiding healthy books", async () => {
