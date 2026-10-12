@@ -151,6 +151,20 @@ describe("parseNpz", () => {
     expect(() => parseNpz(zip(entries.map((entry) => ({ ...entry }))))).toThrow(message);
   });
 
+  it.each([
+    ["claims deflate in the central directory only", 10, 8],
+    ["declares a compressed size that differs from the size", 20, 7],
+  ])("rejects an entry whose central directory %s", (_label, field, value) => {
+    const archive = new Uint8Array(zip([{ name: "a.npy", data: npy([1]) }]));
+    const view = new DataView(archive.buffer);
+    const directory = view.getUint32(archive.length - 22 + 16, true);
+    // The local header still says stored, so only the central directory check can catch this.
+    if (field === 10) view.setUint16(directory + field, value, true);
+    else view.setUint32(directory + field, value, true);
+
+    expect(() => parseNpz(archive.buffer)).toThrow("a.npy is compressed; expected a stored entry");
+  });
+
   it("rejects truncated archives and missing end records", () => {
     expect(() => parseNpz(new ArrayBuffer(10))).toThrow("truncated");
     expect(() => parseNpz(new ArrayBuffer(64))).toThrow("no end of central directory");
