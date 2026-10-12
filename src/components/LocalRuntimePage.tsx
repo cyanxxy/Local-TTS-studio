@@ -11,6 +11,7 @@ import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import type { GenerationStats } from "../types";
 import { useAudioPlayer } from "../hooks/useAudioPlayer";
 import { scheduleNextUiFrame } from "../lib/uiScheduling";
+import { clearStagedReference, useStagedReference, type StagedReference } from "../lib/voiceLibrary/stagedReference";
 import {
   hasPrimaryShortcutModifier,
   isEditableShortcutTarget,
@@ -161,6 +162,22 @@ function LocalRuntimePageBody({
   const [referenceAudioGuidance, setReferenceAudioGuidance] = useState<StatusMessage>(null);
 
   const [qwen3ReferenceAudioGuidance, setQwen3ReferenceAudioGuidance] = useState<StatusMessage>(null);
+
+  // A reference the Voice Library sent here. It is taken during render, so the
+  // page never paints the old reference first, and then released.
+  const stagedNeutts = useStagedReference("neutts");
+  const [takenStaged, setTakenStaged] = useState<StagedReference | null>(null);
+  if (model === "neutts" && stagedNeutts && stagedNeutts !== takenStaged) {
+    setTakenStaged(stagedNeutts);
+    setReferenceText(stagedNeutts.transcript);
+    setReferenceAudioName(`${stagedNeutts.name} (Voice Library)`);
+    setReferenceWavBase64(stagedNeutts.wavBase64);
+    setReferenceCodesBase64(null);
+    setReferenceAudioGuidance({ tone: "success", text: "Reference loaded from the Voice Library." });
+  }
+  useEffect(() => {
+    if (takenStaged) clearStagedReference("neutts");
+  }, [takenStaged]);
 
   const [generateBusy, setGenerateBusy] = useState(false);
   const [generationProgress, setGenerationProgress] = useState<LocalTtsProgressEvent | null>(null);
