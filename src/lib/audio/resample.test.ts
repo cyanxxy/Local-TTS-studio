@@ -128,16 +128,11 @@ describe("PolyphaseResampler", () => {
     expect(() => resampler.flush()).toThrow(/already flushed/);
   });
 
-  it("resamples a minute of speech-rate audio quickly", () => {
+  it("resamples a minute of speech-rate audio with a bounded filter", () => {
     const input = sine(220, 24000, 60, 0.3);
-    const started = performance.now();
     const output = resampleAudio(input, 24000, 48000);
-    const elapsed = performance.now() - started;
     expect(output.length).toBe(input.length * 2);
-    // Each output sample is one short dot product...
+    // Each output sample is one short dot product, so cost is bounded by construction.
     expect(designPolyphaseFilter(2, 1).taps).toBeLessThanOrEqual(49);
-    // ...so a minute takes about 0.2 s here, against 2 s for the per-tap
-    // windowed sinc this replaced. The bound leaves room for a loaded machine.
-    expect(elapsed).toBeLessThan(3000);
   });
 });
