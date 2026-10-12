@@ -91,10 +91,8 @@ const PREVIEW_TEXT = [
 ].join("\n");
 
 // The current signature identity, without the version 1 inputs kept beside it.
-function withoutLegacy<Parts extends { legacy: unknown }>(parts: Parts | null) {
-  if (!parts) return null;
-  const { legacy: _legacy, ...current } = parts;
-  return current;
+function withoutLegacy<Parts extends { voice: string; tuning: object }>(parts: Parts | null) {
+  return parts && { voice: parts.voice, tuning: parts.tuning };
 }
 const engineSignatureParts: (...args: Parameters<typeof engineSignaturePartsWithLegacy>) => ReturnType<typeof withoutLegacy> = (
   ...args
