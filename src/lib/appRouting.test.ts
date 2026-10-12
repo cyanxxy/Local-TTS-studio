@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { getCanonicalPagePath, getPageFromPath, getPagePath, PAGE_PATH } from "./appRouting";
+import { SETUP_PAGE_ENGINE_IDS } from "../models/registry";
+import { getCanonicalPagePath, getPageFromPath, getPagePath, isSetupPage, PAGE_PATH, PAGE_TABS } from "./appRouting";
 
 describe("appRouting", () => {
   it("resolves supported paths to their pages", () => {
@@ -23,6 +24,19 @@ describe("appRouting", () => {
     expect(getCanonicalPagePath("/retired-local-runtime", true)).toBe(PAGE_PATH.studio);
     expect(getCanonicalPagePath("/qwen3", true)).toBe(PAGE_PATH.qwen3);
     expect(getCanonicalPagePath("/unknown", true)).toBe(PAGE_PATH.studio);
+  });
+
+  it("gives every engine setup page a desktop route and tab", () => {
+    expect(PAGE_TABS.map((tab) => tab.key)).toEqual(["studio", "reader", ...SETUP_PAGE_ENGINE_IDS]);
+    expect(PAGE_TABS.map((tab) => tab.label)).toEqual(["Studio", "Reader", "NeuTTS Nano", "Qwen3-TTS"]);
+    for (const page of SETUP_PAGE_ENGINE_IDS) {
+      expect(PAGE_PATH[page]).toBe(`/${page}`);
+      expect(getPageFromPath(PAGE_PATH[page], true)).toBe(page);
+      expect(getPageFromPath(PAGE_PATH[page], false)).toBe("studio");
+      expect(isSetupPage(page)).toBe(true);
+    }
+    expect(isSetupPage("studio")).toBe(false);
+    expect(isSetupPage("reader")).toBe(false);
   });
 
   it("scopes desktop routes under a base path", () => {

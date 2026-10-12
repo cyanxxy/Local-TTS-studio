@@ -113,9 +113,43 @@ export function useCreatorSettings({
     setCreatorPreset((current) => (current === "custom" ? current : "custom"));
   }, []);
 
-  const withCustomPreset = useCallback((action: () => void) => {
+  // Editing any one setting turns the preset into "custom". Each setter keeps
+  // its identity for the hook's lifetime, so memoized panels stay memoized.
+  const onSpeedChange = useCallback((value: number) => {
     markPresetAsCustom();
-    action();
+    setSpeed(value);
+  }, [markPresetAsCustom]);
+  const onPauseCommaChange = useCallback((value: number) => {
+    markPresetAsCustom();
+    setPauseCommaSec(value);
+  }, [markPresetAsCustom]);
+  const onPauseSentenceChange = useCallback((value: number) => {
+    markPresetAsCustom();
+    setPauseSentenceSec(value);
+  }, [markPresetAsCustom]);
+  const onPauseParagraphChange = useCallback((value: number) => {
+    markPresetAsCustom();
+    setPauseParagraphSec(value);
+  }, [markPresetAsCustom]);
+  const onPronunciationLexiconChange = useCallback((value: string) => {
+    markPresetAsCustom();
+    setPronunciationLexicon(value);
+  }, [markPresetAsCustom]);
+  const onExportFormatChange = useCallback((value: ExportAudioFormat) => {
+    markPresetAsCustom();
+    setExportFormat(value);
+  }, [markPresetAsCustom]);
+  const onExportSampleRateChange = useCallback((value: ExportSampleRate) => {
+    markPresetAsCustom();
+    setExportSampleRate(value);
+  }, [markPresetAsCustom]);
+  const onExportBitrateChange = useCallback((value: number) => {
+    markPresetAsCustom();
+    setExportBitrateKbps(value);
+  }, [markPresetAsCustom]);
+  const onMasteringEnabledChange = useCallback((value: boolean) => {
+    markPresetAsCustom();
+    setMasteringEnabled(value);
   }, [markPresetAsCustom]);
 
   const persistedState = useMemo<PersistedCreatorState>(() => ({
@@ -142,7 +176,7 @@ export function useCreatorSettings({
     speed,
   ]);
 
-  return {
+  return useMemo(() => ({
     creatorPreset,
     speed,
     pauseCommaSec,
@@ -153,14 +187,34 @@ export function useCreatorSettings({
     exportOptions,
     persistedState,
     onCreatorPresetChange: applyPreset,
-    onSpeedChange: (value: number) => withCustomPreset(() => setSpeed(value)),
-    onPauseCommaChange: (value: number) => withCustomPreset(() => setPauseCommaSec(value)),
-    onPauseSentenceChange: (value: number) => withCustomPreset(() => setPauseSentenceSec(value)),
-    onPauseParagraphChange: (value: number) => withCustomPreset(() => setPauseParagraphSec(value)),
-    onPronunciationLexiconChange: (value: string) => withCustomPreset(() => setPronunciationLexicon(value)),
-    onExportFormatChange: (value: ExportAudioFormat) => withCustomPreset(() => setExportFormat(value)),
-    onExportSampleRateChange: (value: ExportSampleRate) => withCustomPreset(() => setExportSampleRate(value)),
-    onExportBitrateChange: (value: number) => withCustomPreset(() => setExportBitrateKbps(value)),
-    onMasteringEnabledChange: (value: boolean) => withCustomPreset(() => setMasteringEnabled(value)),
-  };
+    onSpeedChange,
+    onPauseCommaChange,
+    onPauseSentenceChange,
+    onPauseParagraphChange,
+    onPronunciationLexiconChange,
+    onExportFormatChange,
+    onExportSampleRateChange,
+    onExportBitrateChange,
+    onMasteringEnabledChange,
+  }), [
+    applyPreset,
+    creatorPreset,
+    exportOptions,
+    generationSettings,
+    onExportBitrateChange,
+    onExportFormatChange,
+    onExportSampleRateChange,
+    onMasteringEnabledChange,
+    onPauseCommaChange,
+    onPauseParagraphChange,
+    onPauseSentenceChange,
+    onPronunciationLexiconChange,
+    onSpeedChange,
+    pauseCommaSec,
+    pauseParagraphSec,
+    pauseSentenceSec,
+    persistedState,
+    pronunciationLexicon,
+    speed,
+  ]);
 }

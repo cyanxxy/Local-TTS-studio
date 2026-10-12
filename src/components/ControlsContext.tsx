@@ -1,9 +1,10 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, type ReactNode } from "react";
-import type { ModelType } from "../types";
+import type { EngineQualityRange } from "../models/types";
 
 export interface ControlsContextValue {
-  activeModel: ModelType;
+  /** The active engine's quality range; null hides the slider. */
+  qualityRange: EngineQualityRange | null;
   quality: number;
   onQualityChange: (quality: number) => void;
   onGenerate: () => void;

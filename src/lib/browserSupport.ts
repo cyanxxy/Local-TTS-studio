@@ -1,4 +1,6 @@
 import type { ModelType } from "../types";
+import { BROWSER_ENGINE_IDS, getEngine } from "../models/registry";
+import type { EngineTarget } from "../models/types";
 
 interface NavigatorLike {
   userAgent?: string;
@@ -6,8 +8,13 @@ interface NavigatorLike {
   maxTouchPoints?: number;
 }
 
-const ALL_LOCAL_MODELS: readonly ModelType[] = ["kokoro", "supertonic"];
-const ELECTRON_BROWSER_MODELS: readonly ModelType[] = ["kokoro"];
+function browserModelsFor(target: EngineTarget): readonly ModelType[] {
+  return BROWSER_ENGINE_IDS.filter((id) => (getEngine(id).targets as readonly EngineTarget[]).includes(target));
+}
+
+const ALL_LOCAL_MODELS = browserModelsFor("web");
+// Electron replaces the legacy Supertonic 2 browser runtime with Supertonic 3.
+const ELECTRON_BROWSER_MODELS = browserModelsFor("desktop");
 
 export interface LocalBrowserSupport {
   isSupported: boolean;

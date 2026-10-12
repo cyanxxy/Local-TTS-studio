@@ -50,6 +50,8 @@ beforeEach(() => {
 
 afterEach(() => {
   delete window.electron;
+  // The Qwen3 provider persists its settings; keep each test's start fresh.
+  localStorage.clear();
 });
 
 describe("Qwen3InlineSettings", () => {

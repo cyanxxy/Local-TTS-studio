@@ -89,6 +89,14 @@ export const AUDIO_PLAYER_SCHEDULE_HORIZON_SECONDS = 30;
 // lazily from the retained Float32 PCM if the listener seeks back.
 export const AUDIO_PLAYER_RETAIN_BEHIND_SECONDS = 10;
 
+/**
+ * The playback speeds the speed picker offers. The player clamps to the same
+ * range, so a listed speed is always one the player will actually use.
+ */
+export const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+export const MIN_PLAYBACK_RATE = PLAYBACK_RATES[0];
+export const MAX_PLAYBACK_RATE = PLAYBACK_RATES[PLAYBACK_RATES.length - 1];
+
 
 export const PAUSE_MIN = 0;
 export const PAUSE_MAX = 1.2;

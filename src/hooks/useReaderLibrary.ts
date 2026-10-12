@@ -6,19 +6,26 @@ import {
   createReaderAudioCacheKey,
   createReaderBookmark,
   createReaderDocument,
+  createReaderHighlight,
   createReaderNote,
+  createReaderOffsetRebaser,
   getCachedReaderAudioByteLength,
+  isReaderHighlightColor,
   normalizeReaderDocumentRecord,
   normalizeReaderText,
   readerSectionAtOffset,
   rebaseReaderChapters,
-  rebaseReaderTextOffset,
+  rebaseReaderHighlights,
   structureTextChapters,
   type CachedReaderAudio,
   type ReaderDocumentInput,
   type ReaderDocumentRecord,
+  type ReaderHighlight,
+  type ReaderHighlightColor,
+  type ReaderHighlightInput,
   type ReaderNote,
   type ReaderSection,
+  type ReaderTextChangeHint,
 } from "../lib/readerDocument";
 import {
   deleteCachedReaderAudio,
@@ -41,6 +48,19 @@ interface ProgressUpdate {
   textOffset: number;
 }
 
+export interface UpdateActiveTextOptions {
+  /** Store the text exactly as given instead of normalizing it. */
+  preserveText?: boolean;
+  /** Keep the chapter structure until `finalizeActiveTextEdit` (an editor session is open). */
+  deferStructure?: boolean;
+  /** Where the edit falls, when the caller knows; see `ReaderTextChangeHint`. */
+  hint?: ReaderTextChangeHint;
+}
+
+function byReadingOrder(a: ReaderHighlight, b: ReaderHighlight): number {
+  return a.start - b.start || a.end - b.end;
+}
+
 export interface UseReaderLibraryReturn {
   documents: ReaderDocumentRecord[];
   activeDocument: ReaderDocumentRecord | null;
@@ -50,7 +70,7 @@ export interface UseReaderLibraryReturn {
   createDocument: (input: ReaderDocumentInput) => Promise<ReaderDocumentRecord>;
   openDocument: (id: string) => Promise<ReaderDocumentRecord>;
   deleteDocument: (id: string) => Promise<void>;
-  updateActiveText: (text: string, options?: { preserveText?: boolean; deferStructure?: boolean }) => void;
+  updateActiveText: (text: string, options?: UpdateActiveTextOptions) => void;
   finalizeActiveTextEdit: (documentId?: string) => void;
   updateActiveMetadata: (patch: Pick<Partial<ReaderDocumentRecord>, "title" | "author" | "description" | "language">) => void;
   updateProgress: (update: ProgressUpdate) => void;
@@ -59,6 +79,10 @@ export interface UseReaderLibraryReturn {
   addNote: (input: { text: string; quote: string; textOffset: number }) => void;
   updateNote: (noteId: string, text: string) => void;
   removeNote: (noteId: string) => void;
+  /** Highlights `[start, end)` of the active document; a range with no words in it is ignored. */
+  addHighlight: (input: ReaderHighlightInput) => void;
+  updateHighlight: (highlightId: string, patch: { color: ReaderHighlightColor }) => void;
+  removeHighlight: (highlightId: string) => void;
   saveAudio: (audio: CachedReaderAudio) => Promise<void>;
   loadAudio: (documentId: string, sectionId: string) => Promise<CachedReaderAudio | null>;
   clearAudio: (documentId: string, sectionId?: string) => Promise<void>;
@@ -416,7 +440,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
 
   const updateActiveText = useCallback((
     text: string,
-    { preserveText = false, deferStructure = false }: { preserveText?: boolean; deferStructure?: boolean } = {},
+    { preserveText = false, deferStructure = false, hint }: UpdateActiveTextOptions = {},
   ) => {
     const id = activeDocumentIdRef.current;
     if (!id) return;
@@ -424,7 +448,8 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     const nextText = preserveText ? text : normalizeReaderText(text);
     if (!current || current.text === nextText) return;
     const now = nextReaderDocumentUpdatedAt(current);
-    const rebaseOffset = (offset: number) => rebaseReaderTextOffset(current.text, nextText, offset);
+    // One scan finds the edit; the chapter rebase below reuses it.
+    const rebaseOffset = createReaderOffsetRebaser(current.text, nextText, hint);
     const next = {
       ...current,
       text: nextText,
@@ -449,6 +474,9 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
         ...note,
         textOffset: rebaseOffset(note.textOffset),
       })),
+      ...(current.highlights
+        ? { highlights: rebaseReaderHighlights(current.text, nextText, current.highlights, hint) }
+        : {}),
       updatedAt: now,
     };
     replaceDocument(next, false);
@@ -579,6 +607,43 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     });
   }, [replaceDocument]);
 
+  const addHighlight = useCallback((input: ReaderHighlightInput) => {
+    const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
+    if (!current) return;
+    const highlight = createReaderHighlight(current.text, input);
+    if (!highlight) return;
+    replaceDocument({
+      ...current,
+      highlights: [...(current.highlights ?? []), highlight].sort(byReadingOrder),
+      updatedAt: nextReaderDocumentUpdatedAt(current),
+    });
+  }, [replaceDocument]);
+
+  const updateHighlight = useCallback((highlightId: string, patch: { color: ReaderHighlightColor }) => {
+    const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
+    if (!current?.highlights || !isReaderHighlightColor(patch.color)) return;
+    const target = current.highlights.find((highlight) => highlight.id === highlightId);
+    if (!target || target.color === patch.color) return;
+    const updatedAt = nextReaderDocumentUpdatedAt(current);
+    replaceDocument({
+      ...current,
+      highlights: current.highlights.map((highlight) => highlight === target
+        ? { ...highlight, color: patch.color, updatedAt }
+        : highlight),
+      updatedAt,
+    });
+  }, [replaceDocument]);
+
+  const removeHighlight = useCallback((highlightId: string) => {
+    const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
+    if (!current?.highlights?.some((highlight) => highlight.id === highlightId)) return;
+    replaceDocument({
+      ...current,
+      highlights: current.highlights.filter((highlight) => highlight.id !== highlightId),
+      updatedAt: nextReaderDocumentUpdatedAt(current),
+    });
+  }, [replaceDocument]);
+
   const saveAudio = useCallback(async (audio: CachedReaderAudio) => {
     const normalized = rememberReaderAudio(memoryAudioRef.current, audio);
     if (persistent) await saveCachedReaderAudio(normalized);
@@ -604,7 +669,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     if (persistent) await deleteCachedReaderAudio(documentId, sectionId);
   }, [persistent]);
 
-  return {
+  return useMemo(() => ({
     documents,
     activeDocument,
     loading,
@@ -622,8 +687,35 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     addNote,
     updateNote,
     removeNote,
+    addHighlight,
+    updateHighlight,
+    removeHighlight,
     saveAudio,
     loadAudio,
     clearAudio,
-  };
+  }), [
+    activeDocument,
+    addBookmark,
+    addHighlight,
+    addNote,
+    clearAudio,
+    createDocument,
+    deleteDocument,
+    documents,
+    error,
+    finalizeActiveTextEdit,
+    loadAudio,
+    loading,
+    openDocument,
+    persistent,
+    removeBookmark,
+    removeHighlight,
+    removeNote,
+    saveAudio,
+    updateActiveMetadata,
+    updateActiveText,
+    updateHighlight,
+    updateNote,
+    updateProgress,
+  ]);
 }

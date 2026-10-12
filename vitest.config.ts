@@ -47,6 +47,8 @@ export default defineConfig({
         "src/lib/text/**/*.ts",
         "src/lib/textTuning.ts",
         "src/lib/textValidation.ts",
+        "src/shared/asyncChannel.ts",
+        "src/shared/synthesisQueue.ts",
         "src/workers/export.worker.ts",
       ],
       exclude: [

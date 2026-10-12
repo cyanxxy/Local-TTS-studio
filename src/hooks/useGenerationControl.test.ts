@@ -1,7 +1,8 @@
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
-import type { GenerationTuningSettings, WorkerInMessage, WorkerOutMessage } from "../types";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { GenerationTuningSettings, ModelType, WorkerInMessage, WorkerOutMessage } from "../types";
 import { useGenerationControl } from "./useGenerationControl";
+import { WORKER_ABORT_TIMEOUT_MS } from "./workerGeneration";
 import type { AudioSegment, UseAudioPlayerReturn } from "./useAudioPlayer";
 import type { UseTTSReturn } from "./useTTS";
 import { PlaybackClock } from "../lib/playbackClock";
@@ -54,8 +55,10 @@ function createPlayerMock(overrides: Partial<UseAudioPlayerReturn> = {}): UseAud
     downloadCaptions: vi.fn(),
     replaceSegment: vi.fn(),
     getAudioChunkCount: vi.fn(() => 0),
+    getContentEpoch: vi.fn(() => 0),
     truncateAudioChunks: vi.fn(),
     getAudioCacheSnapshot: vi.fn(() => []),
+    getPlaybackSnapshot: vi.fn(() => ({ playbackRate: 1, totalDuration: 0, synthesisComplete: false })),
     restoreAudioCache: vi.fn(),
     beginStream: vi.fn(),
     endStream: vi.fn(),
@@ -65,10 +68,11 @@ function createPlayerMock(overrides: Partial<UseAudioPlayerReturn> = {}): UseAud
   };
 }
 
-function createTtsMock(
-  overrides: Partial<Pick<UseTTSReturn, "cancel" | "generate" | "isGenerating">> = {},
-): Pick<UseTTSReturn, "cancel" | "generate" | "isGenerating"> {
+type TtsMock = Pick<UseTTSReturn, "abort" | "cancel" | "generate" | "isGenerating">;
+
+function createTtsMock(overrides: Partial<TtsMock> = {}): TtsMock {
   return {
+    abort: vi.fn(),
     cancel: vi.fn(),
     generate: vi.fn(),
     isGenerating: false,
@@ -103,41 +107,93 @@ function makeSegment(overrides: Partial<AudioSegment> = {}): AudioSegment {
   };
 }
 
-describe("useGenerationControl", () => {
-  it("cancels TTS only when forced or currently generating", () => {
-    const worker = new MockWorker();
-    const player = createPlayerMock();
-    const tts = createTtsMock({ isGenerating: false });
-    const setShowPlayer = vi.fn();
-    const kokoroWorker = { current: worker as unknown as Worker };
-    const supertonicWorker = { current: null as Worker | null };
-    const hardRestartModel = vi.fn();
 
-    const { result } = renderHook(() =>
+/** A `getWorker` over per-engine worker refs, read at call time. */
+function workerLookup(refs: Record<ModelType, { current: Worker | null }>) {
+  return (model: ModelType) => refs[model].current;
+}
+
+describe("useGenerationControl", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function render(options: {
+    tts: TtsMock;
+    worker?: MockWorker | null;
+    hardRestartModel?: () => void;
+    getWorker?: (model: ModelType) => Worker | null;
+  }) {
+    const kokoroWorker = { current: (options.worker ?? null) as unknown as Worker | null };
+    return renderHook(() =>
       useGenerationControl({
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker,
-        supertonicWorker,
-        hardRestartModel,
-        player,
-        setShowPlayer,
+        getWorker: options.getWorker ?? workerLookup({ kokoro: kokoroWorker, supertonic: { current: null } }),
+        hardRestartModel: options.hardRestartModel ?? vi.fn(),
+        player: createPlayerMock(),
+        setShowPlayer: vi.fn(),
         text: "Hello world",
-        tts,
+        tts: options.tts,
         voice: "af_heart",
       }),
     );
+  }
 
-    act(() => {
-      result.current.cancelActiveGeneration();
-    });
+  it("does nothing to the worker when nothing is generating", () => {
+    const tts = createTtsMock({ isGenerating: false });
+    const hardRestartModel = vi.fn();
+    const { result } = render({ tts, hardRestartModel });
+
+    act(() => result.current.cancelActiveGeneration());
+
+    expect(tts.abort).not.toHaveBeenCalled();
     expect(tts.cancel).not.toHaveBeenCalled();
+    expect(hardRestartModel).not.toHaveBeenCalled();
+  });
 
-    act(() => {
-      result.current.cancelActiveGeneration(true);
-    });
+  it("aborts a running generation softly, keeping the model loaded", () => {
+    const worker = new MockWorker();
+    const tts = createTtsMock({ isGenerating: true });
+    const hardRestartModel = vi.fn();
+    const { result } = render({ tts, worker, hardRestartModel });
+
+    act(() => result.current.handleStop());
+
+    expect(tts.abort).toHaveBeenCalledTimes(1);
+    expect(tts.cancel).not.toHaveBeenCalled();
+    expect(hardRestartModel).not.toHaveBeenCalled();
+  });
+
+  it("replaces a worker that never answered the abort, unless it was replaced already", () => {
+    const worker = new MockWorker();
+    const replacement = new MockWorker();
+    const current = { value: worker as unknown as Worker };
+    const tts = createTtsMock({ isGenerating: true });
+    const hardRestartModel = vi.fn();
+    const { result } = render({ tts, hardRestartModel, getWorker: () => current.value });
+    act(() => result.current.cancelActiveGeneration());
+    const onUnresponsive = vi.mocked(tts.abort).mock.calls[0][0];
+
+    onUnresponsive(worker as unknown as Worker);
+    expect(hardRestartModel).toHaveBeenCalledExactlyOnceWith("kokoro");
+
+    hardRestartModel.mockClear();
+    current.value = replacement as unknown as Worker;
+    onUnresponsive(worker as unknown as Worker);
+    expect(hardRestartModel).not.toHaveBeenCalled();
+  });
+
+  it("closes the worker and loads the model again only when the cancel is forced", () => {
+    const tts = createTtsMock({ isGenerating: false });
+    const hardRestartModel = vi.fn();
+    const { result } = render({ tts, hardRestartModel });
+
+    act(() => result.current.cancelActiveGeneration(true));
+
     expect(tts.cancel).toHaveBeenCalledTimes(1);
+    expect(tts.abort).not.toHaveBeenCalled();
     expect(hardRestartModel).toHaveBeenCalledWith("kokoro");
   });
 
@@ -150,8 +206,7 @@ describe("useGenerationControl", () => {
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker: { current: null },
-        supertonicWorker: { current: null },
+        getWorker: workerLookup({ kokoro: { current: null }, supertonic: { current: null } }),
         hardRestartModel,
         player,
         setShowPlayer: vi.fn(),
@@ -186,8 +241,7 @@ describe("useGenerationControl", () => {
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker,
-        supertonicWorker,
+        getWorker: workerLookup({ kokoro: kokoroWorker, supertonic: supertonicWorker }),
         hardRestartModel: vi.fn(),
         player,
         setShowPlayer,
@@ -270,8 +324,7 @@ describe("useGenerationControl", () => {
         activeModel: "kokoro",
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
-        kokoroWorker,
-        supertonicWorker,
+        getWorker: workerLookup({ kokoro: kokoroWorker, supertonic: supertonicWorker }),
         hardRestartModel: vi.fn(),
         player,
         setShowPlayer,
@@ -289,7 +342,8 @@ describe("useGenerationControl", () => {
     expect(result.current.isRetakingSegment).toBe(false);
   });
 
-  it("hard-restarts the worker that owns a cancelled retake", () => {
+  it("aborts a cancelled retake softly and replaces its worker only if it stays silent", () => {
+    vi.useFakeTimers();
     const worker = new MockWorker();
     const segment = makeSegment();
     const hardRestartModel = vi.fn();
@@ -299,8 +353,7 @@ describe("useGenerationControl", () => {
         canGenerate: true,
         generationSettings: BASE_SETTINGS,
         hardRestartModel,
-        kokoroWorker: { current: worker as unknown as Worker },
-        supertonicWorker: { current: null },
+        getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
         player: createPlayerMock({ segments: [segment] }),
         setShowPlayer: vi.fn(),
         text: "Hello world",
@@ -310,11 +363,43 @@ describe("useGenerationControl", () => {
     );
     act(() => result.current.handleRetakeSegment(segment.id));
 
+    const generationId = (worker.postedMessages[0] as { generationId: string }).generationId;
+
     act(() => result.current.cancelRetake(true));
 
-    expect(worker.postedMessages.at(-1)).toEqual({ type: "CANCEL" });
-    expect(hardRestartModel).toHaveBeenCalledOnce();
-    expect(hardRestartModel).toHaveBeenCalledWith("kokoro");
+    expect(worker.postedMessages.at(-1)).toEqual({ type: "ABORT", generationId });
+    expect(hardRestartModel).not.toHaveBeenCalled();
     expect(result.current.isRetakingSegment).toBe(false);
+    act(() => vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS));
+    expect(hardRestartModel).toHaveBeenCalledExactlyOnceWith("kokoro");
+  });
+
+  it("keeps the model loaded when the worker answers a retake's abort", () => {
+    vi.useFakeTimers();
+    const worker = new MockWorker();
+    const segment = makeSegment();
+    const hardRestartModel = vi.fn();
+    const { result } = renderHook(() =>
+      useGenerationControl({
+        activeModel: "kokoro",
+        canGenerate: true,
+        generationSettings: BASE_SETTINGS,
+        hardRestartModel,
+        getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
+        player: createPlayerMock({ segments: [segment] }),
+        setShowPlayer: vi.fn(),
+        text: "Hello world",
+        tts: createTtsMock(),
+        voice: "af_heart",
+      }),
+    );
+    act(() => result.current.handleRetakeSegment(segment.id));
+    const generationId = (worker.postedMessages[0] as { generationId: string }).generationId;
+    act(() => result.current.cancelRetake(true));
+
+    act(() => worker.emit({ type: "ABORTED", generationId }));
+    act(() => vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS * 2));
+
+    expect(hardRestartModel).not.toHaveBeenCalled();
   });
 });

@@ -208,6 +208,9 @@ describe("LocalRuntimePage", () => {
   afterEach(() => {
     delete window.electron;
     vi.restoreAllMocks();
+    // The Qwen3 provider persists its settings; one test's profile must not
+    // become the next test's starting profile.
+    localStorage.clear();
   });
 
   it("shows the native provider and immutable runtime revision", async () => {
@@ -219,6 +222,22 @@ describe("LocalRuntimePage", () => {
     expect(screen.getByRole("heading", { name: "Qwen model ready" })).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "Re-download model" })).toHaveLength(1);
     expect(screen.queryByText(/device map|dtype|attention|top-p|api_server|Candle/i)).not.toBeInTheDocument();
+  });
+
+  it("starts from a clean page when the model changes", async () => {
+    const view = renderPage();
+    expect(await screen.findByText("Provider: mlx")).toBeInTheDocument();
+    // The next model's probe stays pending, so only a reset can clear the old facts.
+    probe.mockReturnValue(new Promise(() => undefined));
+
+    view.rerender(
+      <Qwen3RuntimeProvider>
+        <LocalRuntimePage {...props("neutts")} />
+      </Qwen3RuntimeProvider>,
+    );
+
+    expect(screen.queryByText("Provider: mlx")).not.toBeInTheDocument();
+    await waitFor(() => expect(probe).toHaveBeenLastCalledWith(expect.objectContaining({ model: "neutts" })));
   });
 
   it("makes a dynamically resolved CPU fallback visible", async () => {
@@ -248,6 +267,28 @@ describe("LocalRuntimePage", () => {
     fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
 
     await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps one shortcut listener while the page re-renders", async () => {
+    const addListener = vi.spyOn(document, "addEventListener");
+    const keydownSubscriptions = () => addListener.mock.calls.filter(([type]) => type === "keydown").length;
+    renderPage();
+    await screen.findByRole("heading", { name: "Qwen model ready" });
+    const subscribed = keydownSubscriptions();
+
+    // Every keystroke re-renders the page and hands it a new player object.
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
+      target: { value: "A different sentence for the local runtime." },
+    });
+    fireEvent.change(screen.getByPlaceholderText("Type or paste text to synthesize…"), {
+      target: { value: "Another different sentence for the local runtime." },
+    });
+
+    expect(keydownSubscriptions()).toBe(subscribed);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Generate" })).toBeEnabled());
+    fireEvent.keyDown(document, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    addListener.mockRestore();
   });
 
   it("rejects oversized local-runtime text before IPC generation", async () => {

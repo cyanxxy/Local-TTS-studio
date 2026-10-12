@@ -19,12 +19,25 @@ import type {
   ExportSampleRate,
 } from "../types";
 
+/**
+ * The Creator controls the active engine reads. A control the engine ignores
+ * stays visible but disabled, with a note naming the engine, so a tweak is
+ * never silently dropped.
+ */
+export interface CreatorEngineSupport {
+  engineLabel: string;
+  speed: boolean;
+  pauses: boolean;
+  pronunciationLexicon: boolean;
+}
+
 interface CreatorToolsPanelProps {
   preset: CreatorPresetId;
   onPresetChange: (preset: CreatorPresetId) => void;
   speed: number;
   onSpeedChange: (value: number) => void;
-  speedDisabled?: boolean;
+  /** Omitted when every Creator control applies. */
+  engineSupport?: CreatorEngineSupport;
   pauseCommaSec: number;
   onPauseCommaSecChange: (value: number) => void;
   pauseSentenceSec: number;
@@ -71,7 +84,7 @@ export function CreatorToolsPanel({
   onPresetChange,
   speed,
   onSpeedChange,
-  speedDisabled = false,
+  engineSupport,
   pauseCommaSec,
   onPauseCommaSecChange,
   pauseSentenceSec,
@@ -98,8 +111,10 @@ export function CreatorToolsPanel({
   const commaPauseId = `${controlId}-comma-pause`;
   const sentencePauseId = `${controlId}-sentence-pause`;
   const paragraphPauseId = `${controlId}-paragraph-pause`;
+  const pauseNoteId = `${controlId}-pause-note`;
   const lexiconId = `${controlId}-lexicon`;
   const lexiconStatusId = `${controlId}-lexicon-status`;
+  const lexiconNoteId = `${controlId}-lexicon-note`;
   const previewId = `${controlId}-pronunciation-preview`;
   const formatId = `${controlId}-format`;
   const sampleRateId = `${controlId}-sample-rate`;
@@ -114,6 +129,10 @@ export function CreatorToolsPanel({
     () => applyPronunciationRules(pronunciationPreviewText, lexiconDiagnostics.rules),
     [lexiconDiagnostics.rules, pronunciationPreviewText],
   );
+  const speedDisabled = engineSupport ? !engineSupport.speed : false;
+  const pausesDisabled = engineSupport ? !engineSupport.pauses : false;
+  const lexiconDisabled = engineSupport ? !engineSupport.pronunciationLexicon : false;
+  const engineLabel = engineSupport?.engineLabel ?? "";
 
   return (
     <div className="glass rounded-[20px] overflow-hidden">
@@ -188,11 +207,12 @@ export function CreatorToolsPanel({
                 aria-valuetext={`${speed.toFixed(2)} times`}
                 aria-describedby={speedDisabled ? `${speedId}-note` : undefined}
                 disabled={speedDisabled}
+                className="disabled:cursor-not-allowed disabled:opacity-50"
                 onChange={(event) => onSpeedChange(parseFloat(event.target.value))}
               />
               {speedDisabled && (
                 <p id={`${speedId}-note`} className="mt-1 text-xs text-text-muted">
-                  Audio8 uses its model-native speaking rate.
+                  {engineLabel} uses its model-native speaking rate.
                 </p>
               )}
             </div>
@@ -215,6 +235,9 @@ export function CreatorToolsPanel({
                   step={PAUSE_STEP}
                   value={pauseCommaSec}
                   aria-valuetext={`${pauseCommaSec.toFixed(2)} seconds`}
+                  aria-describedby={pausesDisabled ? pauseNoteId : undefined}
+                  disabled={pausesDisabled}
+                  className="disabled:cursor-not-allowed disabled:opacity-50"
                   onChange={(event) => onPauseCommaSecChange(parseFloat(event.target.value))}
                 />
               </div>
@@ -235,6 +258,9 @@ export function CreatorToolsPanel({
                   step={PAUSE_STEP}
                   value={pauseSentenceSec}
                   aria-valuetext={`${pauseSentenceSec.toFixed(2)} seconds`}
+                  aria-describedby={pausesDisabled ? pauseNoteId : undefined}
+                  disabled={pausesDisabled}
+                  className="disabled:cursor-not-allowed disabled:opacity-50"
                   onChange={(event) => onPauseSentenceSecChange(parseFloat(event.target.value))}
                 />
               </div>
@@ -255,10 +281,18 @@ export function CreatorToolsPanel({
                   step={PAUSE_STEP}
                   value={pauseParagraphSec}
                   aria-valuetext={`${pauseParagraphSec.toFixed(2)} seconds`}
+                  aria-describedby={pausesDisabled ? pauseNoteId : undefined}
+                  disabled={pausesDisabled}
+                  className="disabled:cursor-not-allowed disabled:opacity-50"
                   onChange={(event) => onPauseParagraphSecChange(parseFloat(event.target.value))}
                 />
               </div>
             </div>
+            {pausesDisabled && (
+              <p id={pauseNoteId} className="text-xs text-text-muted">
+                {engineLabel} paces its own pauses, so these lengths are not applied.
+              </p>
+            )}
           </div>
 
           {/* Pronunciation */}
@@ -273,8 +307,9 @@ export function CreatorToolsPanel({
               {pronunciationLexicon.length > 0 && (
                 <button
                   type="button"
+                  disabled={lexiconDisabled}
                   onClick={() => onPronunciationLexiconChange("")}
-                  className="flex items-center gap-1 rounded-md px-1.5 py-1 text-2xs font-medium text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary active:scale-[0.98]"
+                  className="flex items-center gap-1 rounded-md px-1.5 py-1 text-2xs font-medium text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-text-muted"
                 >
                   <X size={11} aria-hidden="true" />
                   Clear rules
@@ -283,13 +318,19 @@ export function CreatorToolsPanel({
             </div>
             <textarea
               id={lexiconId}
-              className="w-full min-h-16 rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary resize-y placeholder:text-text-muted/50"
+              className="w-full min-h-16 rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary resize-y placeholder:text-text-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
               placeholder={`route=root\nGIF=jiff\nSQL=sequel`}
               value={pronunciationLexicon}
               aria-invalid={lexiconDiagnostics.issues.length > 0}
-              aria-describedby={lexiconStatusId}
+              aria-describedby={lexiconDisabled ? `${lexiconNoteId} ${lexiconStatusId}` : lexiconStatusId}
+              disabled={lexiconDisabled}
               onChange={(event) => onPronunciationLexiconChange(event.target.value)}
             />
+            {lexiconDisabled && (
+              <p id={lexiconNoteId} className="mt-1 text-xs text-text-muted">
+                {engineLabel} reads the script as written, so pronunciation rules are not applied.
+              </p>
+            )}
             <div id={lexiconStatusId} className="mt-1" aria-live="polite">
               {lexiconDiagnostics.issues.length > 0 ? (
                 <p className="text-xs text-danger">
@@ -313,9 +354,11 @@ export function CreatorToolsPanel({
               <input
                 id={previewId}
                 type="text"
+                disabled={lexiconDisabled}
+                aria-describedby={lexiconDisabled ? lexiconNoteId : undefined}
                 value={pronunciationPreviewText}
                 onChange={(event) => setPronunciationPreviewText(event.target.value)}
-                className="mt-1.5 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary placeholder:text-text-muted/50"
+                className="mt-1.5 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary placeholder:text-text-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
                 placeholder="Try a phrase before generating audio"
               />
               {pronunciationPreviewText.trim().length > 0 && (

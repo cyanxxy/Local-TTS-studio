@@ -99,4 +99,21 @@ describe("useCreatorSettings", () => {
     expect(result.current.creatorPreset).toBe("custom");
     expect(result.current.speed).toBe(INITIAL_STATE.speed);
   });
+
+  it("keeps its identity and every setter stable across renders until its state changes", () => {
+    const { result, rerender } = renderHook(() => useCreatorSettings({ initialState: INITIAL_STATE, quality: 5 }));
+    const initial = result.current;
+
+    rerender();
+    expect(result.current).toBe(initial);
+
+    act(() => result.current.onSpeedChange(1.1));
+    expect(result.current).not.toBe(initial);
+    expect(result.current.speed).toBe(1.1);
+    expect(result.current.creatorPreset).toBe("custom");
+    const setterNames = (Object.keys(initial) as Array<keyof typeof initial>)
+      .filter((key) => typeof initial[key] === "function");
+    expect(setterNames).toHaveLength(10);
+    for (const name of setterNames) expect(result.current[name], name).toBe(initial[name]);
+  });
 });

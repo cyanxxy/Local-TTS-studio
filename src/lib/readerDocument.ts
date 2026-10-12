@@ -168,13 +168,7 @@ export const READER_SECTION_TARGET_CHARS = 8_000;
 export const READER_SECTION_MIN_CHARS = 4_000;
 export const READER_SECTION_MAX_CHARS = 12_000;
 
-export interface EstimatedWordRange {
-  word: string;
-  start: number;
-  end: number;
-  startSec: number;
-  endSec: number;
-}
+export { estimateWordRanges, type EstimatedWordRange } from "./text/wordTiming";
 
 function createId(prefix: string): string {
   const randomId = globalThis.crypto?.randomUUID?.()
@@ -701,50 +695,6 @@ export function calculateReaderProgress(
   return 0;
 }
 
-/** Extra letter-equivalents of time for the pause that follows a word. */
-function trailingPauseWeight(word: string): number {
-  if (/[.!?…。？！]["'”’)\]]*$/u.test(word)) return 6;
-  if (/[,;:—–，；：]["'”’)\]]*$/u.test(word)) return 3;
-  return 0;
-}
-
-export function estimateWordRanges(
-  text: string,
-  textStart: number,
-  startSec: number,
-  endSec: number,
-): EstimatedWordRange[] {
-  const matches = [...text.matchAll(/\S+/g)];
-  if (matches.length === 0 || endSec <= startSec) return [];
-
-  // Speech time tracks letters, plus the pause a voice takes after a comma or
-  // a full stop. Without the pause weight the marker ran ahead of the voice
-  // after every sentence break inside a multi-sentence passage.
-  const weights = matches.map((match) => (
-    Math.max(1, match[0].replace(/[^\p{L}\p{N}]/gu, "").length) + trailingPauseWeight(match[0])
-  ));
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const duration = endSec - startSec;
-  let cursorSec = startSec;
-
-  return matches.map((match, index) => {
-    const word = match[0];
-    const relativeStart = match.index ?? 0;
-    const wordDuration = index === matches.length - 1
-      ? endSec - cursorSec
-      : duration * (weights[index] / totalWeight);
-    const range = {
-      word,
-      start: textStart + relativeStart,
-      end: textStart + relativeStart + word.length,
-      startSec: cursorSec,
-      endSec: index === matches.length - 1 ? endSec : cursorSec + wordDuration,
-    };
-    cursorSec = range.endSec;
-    return range;
-  });
-}
-
 export function createReaderBookmark(input: Omit<ReaderBookmark, "id" | "createdAt">): ReaderBookmark {
   return { ...input, id: createId("bookmark"), createdAt: Date.now() };
 }
@@ -898,35 +848,99 @@ export function rebaseReaderHighlights(
   });
 }
 
-export function buildAudioSignature(parts: {
-  text: string;
-  model: string;
+/**
+ * Version 2 hashes only the inputs the selected engine reads (see
+ * `EngineDescriptor.signatureParts`). Older entries carry no version prefix and
+ * never compare equal to a v2 signature; the Reader recognises them by
+ * recomputing `buildLegacyAudioSignature` from the same inputs and upgrades a
+ * match to v2 instead of discarding hours of generated audio.
+ */
+export const READER_AUDIO_SIGNATURE_VERSION = 2;
+
+/**
+ * The tuning inputs that shape an engine's audio, already narrowed to the ones
+ * it reads. An omitted field is one the engine ignores, so changing it can
+ * never invalidate cached audio.
+ */
+export interface AudioSignatureTuning {
+  speed?: number;
+  sentenceSpeedVariance?: number;
+  quality?: number;
+  language?: string;
+  pauseOverridesSec?: GenerationTuningSettings["pauseOverridesSec"];
+  pronunciationRules?: GenerationTuningSettings["pronunciationRules"];
+  emphasisStrength?: number;
+}
+
+/** What the version 1 signature hashed: the whole Creator tuning and quality, for every engine. */
+export interface LegacyAudioSignatureParts {
   voice: string;
   quality: number;
-  tuning?: GenerationTuningSettings;
+  tuning: GenerationTuningSettings;
+}
+
+/**
+ * The version 1 signature (`<length>-<hash>`, no prefix), kept only to
+ * recognise audio cached before version 2 existed.
+ */
+export function buildLegacyAudioSignature(parts: LegacyAudioSignatureParts & {
+  text: string;
+  model: string;
 }): string {
   let hash = 2166136261;
-  const tuning = parts.tuning;
-  const tuningKey = tuning
-    ? JSON.stringify({
-        speed: tuning.speed,
-        quality: tuning.quality,
-        language: tuning.language ?? "en",
-        pauseOverridesSec: {
-          none: tuning.pauseOverridesSec?.none ?? null,
-          comma: tuning.pauseOverridesSec?.comma ?? null,
-          sentence: tuning.pauseOverridesSec?.sentence ?? null,
-          paragraph: tuning.pauseOverridesSec?.paragraph ?? null,
-        },
-        sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
-        pronunciationRules: tuning.pronunciationRules ?? [],
-        emphasisStrength: tuning.emphasisStrength ?? null,
-      })
-    : "";
+  const { tuning } = parts;
+  const tuningKey = JSON.stringify({
+    speed: tuning.speed,
+    quality: tuning.quality,
+    language: tuning.language ?? "en",
+    pauseOverridesSec: {
+      none: tuning.pauseOverridesSec?.none ?? null,
+      comma: tuning.pauseOverridesSec?.comma ?? null,
+      sentence: tuning.pauseOverridesSec?.sentence ?? null,
+      paragraph: tuning.pauseOverridesSec?.paragraph ?? null,
+    },
+    sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
+    pronunciationRules: tuning.pronunciationRules ?? [],
+    emphasisStrength: tuning.emphasisStrength ?? null,
+  });
   const value = `${parts.model}\u0000${parts.voice}\u0000${parts.quality}\u0000${tuningKey}\u0000${parts.text}`;
   for (let index = 0; index < value.length; index += 1) {
     hash ^= value.charCodeAt(index);
     hash = Math.imul(hash, 16777619);
   }
   return `${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
+}
+
+export function buildAudioSignature(parts: {
+  text: string;
+  model: string;
+  voice: string;
+  tuning: AudioSignatureTuning;
+}): string {
+  let hash = 2166136261;
+  const { tuning } = parts;
+  // A fixed key order with null for anything absent keeps equal inputs equal
+  // regardless of how the caller assembled the object.
+  const tuningKey = JSON.stringify({
+    speed: tuning.speed ?? null,
+    sentenceSpeedVariance: tuning.sentenceSpeedVariance ?? null,
+    quality: tuning.quality ?? null,
+    language: tuning.language ?? null,
+    pauseOverridesSec: tuning.pauseOverridesSec
+      ? {
+          none: tuning.pauseOverridesSec.none ?? null,
+          comma: tuning.pauseOverridesSec.comma ?? null,
+          sentence: tuning.pauseOverridesSec.sentence ?? null,
+          paragraph: tuning.pauseOverridesSec.paragraph ?? null,
+        }
+      : null,
+    pronunciationRules: tuning.pronunciationRules?.map(({ from, to }) => ({ from, to })) ?? null,
+    emphasisStrength: tuning.emphasisStrength ?? null,
+  });
+  const value = `${parts.model}\u0000${parts.voice}\u0000${tuningKey}\u0000${parts.text}`;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `v${READER_AUDIO_SIGNATURE_VERSION}.${parts.text.length.toString(36)}-${(hash >>> 0).toString(36)}`;
 }

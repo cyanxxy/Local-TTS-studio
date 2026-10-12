@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
-import { MODELS } from "../constants";
 import { clearModelCache, clearModelCacheForModel, getModelCacheKeys } from "../lib/modelCache";
+import { getEngine } from "../models/registry";
 import type { ModelType } from "../types";
 
 type CacheStatus = { type: "success" | "error" | "info"; message: string } | null;
@@ -62,7 +62,7 @@ export function useModelCacheControls({
 
   const redownloadActiveModel = useCallback(async () => {
     setCacheBusy(true);
-    const modelLabel = activeModel === "kokoro" ? MODELS.kokoro.label : MODELS.supertonic.label;
+    const modelLabel = getEngine(activeModel).label;
     setCacheStatus({ type: "info", message: `Re-downloading ${modelLabel}…` });
     try {
       cancelActiveGeneration(true);

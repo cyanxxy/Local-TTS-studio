@@ -15,6 +15,7 @@ import {
   Square,
 } from "lucide-react";
 import type { GenerationStats } from "../types";
+import { PLAYBACK_RATES } from "../constants";
 import { usePlaybackSelector, usePlaybackTime, type PlaybackClock } from "../lib/playbackClock";
 
 type AudioPlayerVariant = "panel" | "dock";
@@ -64,8 +65,6 @@ interface AudioPlayerProps {
   onDownload: () => void;
   onStop?: () => void;
 }
-
-const PLAYBACK_RATES = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] as const;
 
 function formatPlaybackRate(rate: number): string {
   return `${rate.toFixed(2).replace(/\.?0+$/, "")}×`;

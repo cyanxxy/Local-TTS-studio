@@ -1,25 +1,21 @@
 import {
   getDefaultQwen3Profile,
+  getQwen3Profile,
   getQwen3Profiles,
   QWEN3_DEFAULT_SPEAKER,
   QWEN3_LANGUAGES,
   QWEN3_SPEAKER_NATIVE_LANGUAGES,
   QWEN3_SPEAKERS,
 } from "../../../electron/qwen3Profiles";
+import { NEUTTS_MODEL_OPTIONS } from "../../models/neutts";
+import { qwen3ProfileSupportsInstruct } from "../../models/qwen3";
 
 export interface LocalRuntimeOption {
   value: string;
   label: string;
 }
 
-export const NEUTTS_OPTIONS: LocalRuntimeOption[] = [
-  { value: "neuphonic/neutts-nano-q4-gguf", label: "English · neutts-nano · Q4 GGUF" },
-  { value: "neuphonic/neutts-air-q4-gguf", label: "English · neutts-air · Q4 GGUF · 0.7B" },
-  { value: "neuphonic/neutts-air-q8-gguf", label: "English · neutts-air · Q8 GGUF · 0.7B" },
-  { value: "neuphonic/neutts-nano-german-q4-gguf", label: "German · neutts-nano · Q4 GGUF" },
-  { value: "neuphonic/neutts-nano-french-q4-gguf", label: "French · neutts-nano · Q4 GGUF" },
-  { value: "neuphonic/neutts-nano-spanish-q4-gguf", label: "Spanish · neutts-nano · Q4 GGUF" },
-];
+export const NEUTTS_OPTIONS: LocalRuntimeOption[] = NEUTTS_MODEL_OPTIONS.map(({ value, label }) => ({ value, label }));
 
 const QWEN3_SPEAKER_OPTION_ORDER = [
   QWEN3_DEFAULT_SPEAKER,
@@ -60,9 +56,9 @@ export function qwen3UsesVoiceDesign(model: string): boolean {
  * Whether the model is conditioned on an `instruct` prompt. VoiceDesign needs
  * one; voice cloning has none; and upstream's 0.6B CustomVoice wrapper drops
  * it, as the bundled engine does, so the UI must not offer an ignored control.
+ * Decided from the pinned profile table, never from the repository name.
  */
 export function qwen3SupportsInstruct(model: string): boolean {
-  if (qwen3UsesVoiceClone(model)) return false;
-  if (qwen3UsesVoiceDesign(model)) return true;
-  return !model.includes("-0.6B-");
+  const profile = getQwen3Profile(model);
+  return profile ? qwen3ProfileSupportsInstruct(profile) : false;
 }
