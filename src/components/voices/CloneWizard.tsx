@@ -1,4 +1,4 @@
-import { useCallback, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, ArrowRight, Check, CheckCircle2, Mic, Play, Scissors, Square, Upload, XCircle } from "lucide-react";
 import { MAX_REFERENCE_WAV_BYTES, REFERENCE_TARGET_LABELS, referenceTargetNeedsTranscript, type ReferenceCheck, type ReferenceCloneTarget } from "../../lib/referenceAudio";
 import { downmixToMono } from "../../lib/pcmTransforms";
@@ -39,6 +39,8 @@ export interface CloneWizardProps {
   transcribe?: TranscribeClip;
   createRecorder?: UseMicRecorderOptions["createRecorder"];
   createAudio?: CreateAuditionAudio;
+  /** False while the wizard is hidden; a recording in progress is stopped, never left running unseen. */
+  active?: boolean;
 }
 
 function formatSeconds(value: number): string {
@@ -72,8 +74,7 @@ function CheckList({ checks }: { checks: readonly ReferenceCheck[] }) {
  * Instant Voice Cloning: record or choose a sample, trim it with feedback on
  * its quality for each engine, type what it says, and save it to the library.
  */
-export function CloneWizard({ library, onUse, transcribe, createRecorder, createAudio }: CloneWizardProps) {
-  const baseId = useId();
+export function CloneWizard({ library, onUse, transcribe, createRecorder, createAudio, active = true }: CloneWizardProps) {
   const [step, setStep] = useState(0);
   const [source, setSource] = useState<ClipSource | null>(null);
   const [range, setRange] = useState<TrimRange>({ startSec: 0, endSec: 0 });
@@ -94,6 +95,16 @@ export function CloneWizard({ library, onUse, transcribe, createRecorder, create
 
   const mic = useMicRecorder({ createRecorder });
   const audition = useAudition(createAudio);
+  const { state: micState, stop: stopMic } = mic;
+
+  // Hiding the wizard (another tab) must not leave the microphone open. The
+  // take so far is kept, so coming back offers "Use this recording".
+  useEffect(() => {
+    if (!active && (micState === "recording" || micState === "starting")) void stopMic();
+  }, [active, micState, stopMic]);
+
+  // A transcription still running when the wizard goes away is abandoned.
+  useEffect(() => () => transcribeAbort.current?.abort(), []);
 
   const settings = useMemo(() => ({ range, targets, transcript, normalize }), [normalize, range, targets, transcript]);
   const assessment = useMemo(
@@ -449,7 +460,7 @@ export function CloneWizard({ library, onUse, transcribe, createRecorder, create
             <ArrowLeft size={14} aria-hidden /> Back
           </button>
           {step < 3 && (
-            <button type="button" id={`${baseId}-next`} className={primaryButtonClass} disabled={!canAdvance} onClick={() => { audition.stop(); setStep(step + 1); }}>
+            <button type="button" className={primaryButtonClass} disabled={!canAdvance} onClick={() => { audition.stop(); setStep(step + 1); }}>
               Next <ArrowRight size={14} aria-hidden />
             </button>
           )}

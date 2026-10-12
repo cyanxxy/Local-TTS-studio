@@ -207,3 +207,15 @@ export function catalogFacets(voices: readonly CatalogVoice[]): CatalogFacets {
 export function cloneTargetEngine(target: VoiceCloneTarget): string {
   return CLONE_TARGET_ENGINE[target];
 }
+
+/**
+ * The user's saved voice presets as casting choices for Dialogue: presets of
+ * engines that can speak a turn, newest first. Cloned and designed voices need
+ * their reference audio loaded, so they are not offered here.
+ */
+export function dialoguePoolPresets(records: readonly VoiceRecord[], castableEngineIds: readonly string[]): VoicePreset[] {
+  return [...records]
+    .filter((record): record is Extract<VoiceRecord, { kind: "preset" }> => record.kind === "preset" && castableEngineIds.includes(record.preset.engineId))
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .map((record) => voicePresetFromRecord(record));
+}

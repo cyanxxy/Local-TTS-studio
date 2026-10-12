@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useVoiceLibrary } from "../../hooks/useVoiceLibrary";
@@ -52,6 +52,23 @@ describe("VoicesPage", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Library" }));
     fireEvent.click(screen.getByRole("tab", { name: "Design a voice" }));
     expect(screen.getByLabelText("Voice description")).toHaveValue("Kept while away");
+  });
+
+  it("stops the microphone when the Clone tab is left", async () => {
+    const stop = vi.fn(async () => ({ samples: new Float32Array(10), sampleRate: 10, durationSec: 1, wav: new Uint8Array(0), mode: "worklet" as const, stoppedBy: "user" as const }));
+    const createRecorder = (options: { onStateChange?: (state: "recording" | "idle") => void }) => ({
+      getState: () => "idle" as const,
+      getMode: () => null,
+      start: async () => options.onStateChange?.("recording"),
+      stop: async () => { options.onStateChange?.("idle"); return stop(); },
+      cancel: () => options.onStateChange?.("idle"),
+    });
+    render(<Harness createRecorder={createRecorder as never} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Clone a voice" }));
+    fireEvent.click(screen.getByRole("button", { name: /start recording/i }));
+    await screen.findByRole("button", { name: /stop recording/i });
+    fireEvent.click(screen.getByRole("tab", { name: "Library" }));
+    await waitFor(() => expect(stop).toHaveBeenCalledTimes(1));
   });
 
   it("moves between tabs with the arrow keys", () => {

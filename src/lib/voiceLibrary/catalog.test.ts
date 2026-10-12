@@ -7,6 +7,7 @@ import {
   inferGender,
   inferLanguage,
   libraryCatalogVoice,
+  dialoguePoolPresets,
 } from "./catalog";
 import type { ClonedVoiceRecord, DesignedVoiceRecord, PresetVoiceRecord } from "./types";
 
@@ -102,5 +103,16 @@ describe("library entries and filtering", () => {
     expect(facets.engines.map((engine) => engine.id)).toContain("qwen3");
     expect(facets.languages).toContain("English");
     expect([...facets.languages]).toEqual([...facets.languages].sort((a, b) => a.localeCompare(b)));
+  });
+});
+
+describe("dialoguePoolPresets", () => {
+  it("offers saved presets of castable engines, newest first, with their settings", () => {
+    const older: PresetVoiceRecord = { ...preset, id: "p0", name: "Older", updatedAt: 0 };
+    const newer: PresetVoiceRecord = { ...preset, id: "p2", name: "Newer", updatedAt: 9, preset: { engineId: "audio8", voiceId: "arthur", settings: { speed: 0.9 } } };
+    const pool = dialoguePoolPresets([older, clone, designed, preset, newer], ["kokoro", "audio8"]);
+    expect(pool.map((item) => item.label)).toEqual(["Newer", "Heart, brisk", "Older"]);
+    expect(pool[0]).toMatchObject({ engineId: "audio8", voiceId: "arthur", settings: { speed: 0.9 }, mode: "preset" });
+    expect(dialoguePoolPresets([older, newer], ["piper"])).toEqual([]);
   });
 });

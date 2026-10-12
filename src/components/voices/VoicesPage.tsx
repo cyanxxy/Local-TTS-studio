@@ -107,7 +107,7 @@ export function VoicesPage({
           />
         </div>
         <div role="tabpanel" id={`${baseId}-clone-panel`} aria-labelledby={`${baseId}-clone-tab`} hidden={tab !== "clone"}>
-          <CloneWizard library={library} onUse={applyRecord} transcribe={transcribe} createRecorder={createRecorder} createAudio={createAudio} />
+          <CloneWizard active={tab === "clone"} library={library} onUse={applyRecord} transcribe={transcribe} createRecorder={createRecorder} createAudio={createAudio} />
         </div>
         <div role="tabpanel" id={`${baseId}-design-panel`} aria-labelledby={`${baseId}-design-tab`} hidden={tab !== "design"}>
           <VoiceDesignPanel

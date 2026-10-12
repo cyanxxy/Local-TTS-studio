@@ -168,6 +168,33 @@ describe("CloneWizard", () => {
     expect(await screen.findByText(/Ready: My recording, 6\.0 s/)).toBeInTheDocument();
   });
 
+  it("stops recording when the wizard is hidden and keeps the take", async () => {
+    const samples = speech(4);
+    const recording: MicRecording = { samples, sampleRate: RATE, durationSec: 4, wav: encodeWavPcm16(samples, RATE), mode: "worklet", stoppedBy: "user" };
+    const createRecorder = fakeRecorder(recording);
+    const createAudio = () => new FakeAudio();
+    const view = renderWizard({ createRecorder, createAudio });
+    fireEvent.click(screen.getByRole("button", { name: /start recording/i }));
+    await screen.findByRole("button", { name: /stop recording/i });
+    view.rerender(<CloneWizard library={{ createVoice }} onUse={onUse} createAudio={createAudio} createRecorder={createRecorder} active={false} />);
+    await waitFor(() => expect(screen.queryByRole("button", { name: /stop recording/i })).toBeNull());
+    expect(await screen.findByRole("button", { name: "Use this recording" })).toBeInTheDocument();
+  });
+
+  it("abandons a transcription still running when the wizard unmounts", async () => {
+    let seen: AbortSignal | undefined;
+    const transcribe = vi.fn((_clip: unknown, signal: AbortSignal) => { seen = signal; return new Promise<string>(() => undefined); });
+    const view = renderWizard({ transcribe });
+    await chooseFile(wavFile(speech(7)));
+    fireEvent.click(await screen.findByRole("button", { name: /^next/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^next/i }));
+    fireEvent.click(screen.getByRole("button", { name: "Transcribe automatically" }));
+    await waitFor(() => expect(seen).toBeDefined());
+    expect(seen?.aborted).toBe(false);
+    view.unmount();
+    expect(seen?.aborted).toBe(true);
+  });
+
   it("explains a denied microphone", async () => {
     renderWizard({ createRecorder: fakeRecorder(new MicRecorderError("permission-denied", "Microphone access was denied.")) });
     fireEvent.click(screen.getByRole("button", { name: /start recording/i }));
