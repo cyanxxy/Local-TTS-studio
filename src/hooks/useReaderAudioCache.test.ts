@@ -107,7 +107,7 @@ function setup(overrides: {
     initialProps: {
       signatureParts: overrides.signatureParts === undefined ? parts : overrides.signatureParts,
       segments: player.segments,
-    },
+    } as { signatureParts: typeof parts | null; segments: ReaderSegment[]; complete?: boolean },
   });
   return { ...view, library, player, callbacks };
 }

@@ -12,6 +12,7 @@ import { useReaderLibrary } from "../hooks/useReaderLibrary";
 import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderSession } from "../hooks/useReaderSession";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
+import { useStudioAudioKeeper } from "../hooks/useStudioAudioKeeper";
 import {
   getInitialAppState,
   getInitialCreatorState,
@@ -241,6 +242,13 @@ export function useSynthesisSessionState({
     setImportError(null);
   }, []);
   const reportReaderError = useCallback((message: string) => setImportError(message), []);
+  // The Reader empties the shared player as it enters a section; Studio's
+  // unsaved audio is set aside first and put back when Studio returns.
+  const { keepStudioAudio } = useStudioAudioKeeper({ isStudioPage, player, setShowPlayer });
+  const retireAudioForReader = useCallback(() => {
+    keepStudioAudio();
+    retireAllAudio();
+  }, [keepStudioAudio, retireAllAudio]);
   const readerSession = useReaderSession({
     active: isReaderPage,
     library: readerLibrary,
@@ -251,7 +259,7 @@ export function useSynthesisSessionState({
     isGenerating: readerRuntime.isGenerating,
     generate: handleReaderGenerate,
     autoAdvance: readerViewPreferences.autoAdvance,
-    retireAllAudio,
+    retireAllAudio: retireAudioForReader,
     resetAudioForTextEdit,
     setShowPlayer,
     clearErrors: clearReaderErrors,
