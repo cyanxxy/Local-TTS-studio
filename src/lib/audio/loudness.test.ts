@@ -130,6 +130,26 @@ describe("TruePeakDetector", () => {
     peaks.forEach((peak, index) => expect(peak).toBeGreaterThanOrEqual(Math.abs(input[index])));
   });
 
+  it("finds at least the 4x peaks when oversampling more finely", () => {
+    const input = sine(10000, 24000, 0.05, 0.8);
+    const run = (detector: TruePeakDetector) => [...detector.process(input), ...detector.flush()];
+    const coarse = run(new TruePeakDetector(24000));
+    const fine = run(new TruePeakDetector(24000, { oversampling: 16 }));
+    expect(fine).toHaveLength(coarse.length);
+    expect(Math.max(...fine)).toBeGreaterThanOrEqual(Math.max(...coarse) - 1e-4);
+  });
+
+  it("skips interpolation only where the signal provably stays under ignoreBelow", () => {
+    const quiet = sine(1000, 24000, 0.05, 0.1);
+    const loud = sine(1000, 24000, 0.05, 0.9);
+    const run = (input: Float32Array, ignoreBelow: number) => {
+      const detector = new TruePeakDetector(24000, { ignoreBelow });
+      return [...detector.process(input), ...detector.flush()];
+    };
+    expect(run(quiet, 0.5)).toEqual(Array.from(quiet, Math.abs));
+    expect(run(loud, 0.5)).toEqual(run(loud, 0));
+  });
+
   it("rejects invalid sample rates", () => {
     expect(() => new TruePeakDetector(0)).toThrow(/positive integer/);
   });

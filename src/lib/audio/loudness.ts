@@ -6,7 +6,7 @@
  * Feed chunks of any size to `LoudnessMeter.process()`; filter state carries
  * across calls, so the result equals measuring the whole signal at once.
  */
-import { designPolyphaseFilter } from "./resample";
+import { designPolyphaseFilter, type PolyphaseFilterOptions } from "./resample";
 
 /** Mono gain offset of BS.1770: a full-scale 997 Hz sine reads -3.01 LUFS. */
 const LOUDNESS_OFFSET_DB = -0.691;
@@ -72,9 +72,22 @@ export function kWeightingCoefficients(sampleRate: number): [Biquad, Biquad] {
   return [shelf, highPass];
 }
 
+export interface TruePeakDetectorOptions {
+  /** Interpolation factor; 4 is the BS.1770 estimate, higher factors are used as a safety check. */
+  oversampling?: number;
+  filter?: PolyphaseFilterOptions;
+  /**
+   * Linear level at or below which the exact peak is not needed. A period
+   * whose interpolated values provably stay under it (by the filter's
+   * absolute coefficient sum) is reported as its own sample magnitude, which
+   * skips the interpolation for most of a quiet signal.
+   */
+  ignoreBelow?: number;
+}
+
 /**
  * Oversampled peak of each input sample period, streamed: the larger of the
- * sample itself and the three interpolated points that follow it (4x).
+ * sample itself and the interpolated points that follow it (4x by default).
  * Samples past the end of the stream count as silence.
  */
 export class TruePeakDetector {
@@ -83,23 +96,30 @@ export class TruePeakDetector {
   private readonly taps: number;
   private readonly lookahead: number;
   private readonly reach: number;
+  /** Largest absolute coefficient sum of any phase: interpolated values never exceed it times the local maximum. */
+  private readonly gainBound: number;
+  private readonly ignoreBelow: number;
   /** Input from absolute index `historyStart` on. */
   private history = new Float32Array(0);
   private historyStart = 0;
   /** Next input index whose peak is emitted. */
   private next = 0;
 
-  constructor(sampleRate: number) {
+  constructor(sampleRate: number, options: TruePeakDetectorOptions = {}) {
     if (!Number.isInteger(sampleRate) || sampleRate <= 0) {
       throw new RangeError(`Sample rate must be a positive integer; got ${sampleRate}.`);
     }
-    const filter = designPolyphaseFilter(TRUE_PEAK_OVERSAMPLING, 1, TRUE_PEAK_FILTER);
+    const oversampling = options.oversampling ?? TRUE_PEAK_OVERSAMPLING;
+    const filter = designPolyphaseFilter(oversampling, 1, options.filter ?? TRUE_PEAK_FILTER);
     this.taps = filter.taps;
-    // Phase 0 interpolates the sample itself, so only phases 1-3 are computed.
-    this.coefficients = [1, 2, 3].map((phase) => Float64Array.from(filter.coefficients.subarray(phase * filter.taps, (phase + 1) * filter.taps)));
-    this.offsets = [1, 2, 3].map((phase) => filter.offsets[phase]);
+    // Phase 0 interpolates the sample itself, so only the other phases are computed.
+    const phases = Array.from({ length: oversampling - 1 }, (_, index) => index + 1);
+    this.coefficients = phases.map((phase) => Float64Array.from(filter.coefficients.subarray(phase * filter.taps, (phase + 1) * filter.taps)));
+    this.offsets = phases.map((phase) => filter.offsets[phase]);
     this.lookahead = Math.max(...this.offsets.map((offset) => this.taps - 1 - offset));
     this.reach = Math.max(...this.offsets);
+    this.gainBound = Math.max(...this.coefficients.map((row) => row.reduce((sum, value) => sum + Math.abs(value), 0)));
+    this.ignoreBelow = options.ignoreBelow ?? 0;
   }
 
   /** Returns the peaks of the input samples that are now complete, in order. */
@@ -115,6 +135,18 @@ export class TruePeakDetector {
     return this.emit(this.historyStart + this.history.length);
   }
 
+  /** Largest magnitude among the samples any phase reads for `index`. */
+  private localMaximum(index: number): number {
+    const first = Math.max(this.historyStart, index - this.reach);
+    const last = Math.min(this.historyStart + this.history.length - 1, index + this.lookahead);
+    let maximum = 0;
+    for (let sample = first; sample <= last; sample += 1) {
+      const magnitude = Math.abs(this.history[sample - this.historyStart]);
+      if (magnitude > maximum) maximum = magnitude;
+    }
+    return maximum;
+  }
+
   /** Emits peaks for input indices below `end`. */
   private emit(end: number): Float32Array {
     const count = Math.max(0, end - this.next);
@@ -124,7 +156,11 @@ export class TruePeakDetector {
     for (let output = 0; output < count; output += 1) {
       const index = this.next + output;
       let peak = Math.abs(history[index - historyStart]);
-      for (let phase = 0; phase < 3; phase += 1) {
+      if (this.ignoreBelow > 0 && this.localMaximum(index) * this.gainBound <= this.ignoreBelow) {
+        peaks[output] = peak;
+        continue;
+      }
+      for (let phase = 0; phase < coefficients.length; phase += 1) {
         const first = index - offsets[phase];
         const row = coefficients[phase];
         let sum = 0;
