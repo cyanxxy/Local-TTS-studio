@@ -8,7 +8,11 @@ import type { Qwen3SynthesisSettings, SynthesisChunk, SynthesisRequest } from ".
 export type LocalTtsBridge = NonNullable<NonNullable<Window["electron"]>["localTts"]>;
 
 const LOCAL_MODEL = "qwen3";
-/** The pause the renderer restores between request sections; Rust only pauses within one request. */
+/**
+ * The pause the renderer restores between request sections; Rust only pauses
+ * within one request. A section that ends at an inline pause carries that
+ * pause's length instead (`Qwen3RequestSection.pauseAfterSec`).
+ */
 export const QWEN3_SECTION_JOIN_PAUSE_SEC = 0.2;
 const REFERENCE_CACHE_MISS = /reference cache entry was not found/i;
 
@@ -280,19 +284,19 @@ export async function* streamQwen3Synthesis(
         generated = yield* streamSection(context, sectionIndex, true, () => undefined);
       }
 
-      if (sectionIndex < plan.sections.length - 1) {
-        const section = plan.sections[sectionIndex];
+      const section = plan.sections[sectionIndex];
+      if (section.pauseAfterSec > 0) {
         const unitIndex = Math.max(section.unitStart, section.unitEnd - 1);
         const unit = plan.units[unitIndex];
         yield {
-          audio: new Float32Array(Math.max(1, Math.round(generated.sampleRate * QWEN3_SECTION_JOIN_PAUSE_SEC))),
+          audio: new Float32Array(Math.max(1, Math.round(generated.sampleRate * section.pauseAfterSec))),
           samplingRate: generated.sampleRate,
           text: unit?.text ?? section.text,
           index: unitIndex + 1,
           total: plan.units.length || 1,
           textStart: unit?.start ?? section.start,
           textEnd: unit?.end ?? section.end,
-          pauseAfterSec: QWEN3_SECTION_JOIN_PAUSE_SEC,
+          pauseAfterSec: section.pauseAfterSec,
           pauseKind: "sentence",
         };
       }
