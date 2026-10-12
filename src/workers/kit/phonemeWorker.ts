@@ -14,12 +14,14 @@ import { emitAudioChunk, resolveChunkPauseSec, type WordTiming } from "./emit";
 import type { GenerationTicket } from "./generation";
 import { createLoadProgress, type LoadProgress } from "./progress";
 import { generationMeta } from "./protocol";
-import { createWorkerRuntime, type GenerateMessage, type WorkerRuntime, type WorkerRuntimeOptions } from "./runtime";
+import { createWorkerRuntime, type GenerateMessage, type LoadMessage, type WorkerRuntime, type WorkerRuntimeOptions } from "./runtime";
 
 export interface PhonemeChunkAudio {
   audio: Float32Array;
   /** Offsets relative to the synthesized chunk text. */
   wordTimings?: WordTiming[];
+  /** For models whose sample rate depends on the voice; defaults to the model's. */
+  sampleRate?: number;
 }
 
 export interface LoadedPhonemeModel {
@@ -32,13 +34,19 @@ export interface LoadedPhonemeModel {
   dispose(): Promise<void>;
 }
 
+/** What a LOAD message asks of the engine. */
+export interface PhonemeLoadRequest {
+  /** The voice to have ready, for engines that download voices on demand. */
+  preferredVoice?: string;
+}
+
 export interface PhonemeEngine {
   /** Used in error messages, such as "Kitten TTS". */
   label: string;
   /** Pinned byte sizes of every file a cold load downloads, keyed like `progress.update`. */
-  expectedBytes: Readonly<Record<string, number>>;
+  expectedBytes(request: PhonemeLoadRequest): Readonly<Record<string, number>>;
   /** Download (or read from cache), create the session and warm it up. */
-  load(progress: LoadProgress): Promise<LoadedPhonemeModel>;
+  load(progress: LoadProgress, request: PhonemeLoadRequest): Promise<LoadedPhonemeModel>;
   /** Drop the model's downloaded files (LOAD with forceReload). */
   clearCache(): Promise<void>;
 }
@@ -90,7 +98,7 @@ export function startPhonemeWorker(engine: PhonemeEngine, options?: WorkerRuntim
   const runtime: WorkerRuntime = createWorkerRuntime({ load, generate }, options);
   const { port, generations } = runtime;
 
-  async function load({ forceReload = false }: { forceReload?: boolean }): Promise<void> {
+  async function load({ forceReload = false, preferredVoice }: LoadMessage): Promise<void> {
     if (model && !forceReload) {
       port.post({ type: "READY", voices: [...model.voices], backend: model.backend });
       return;
@@ -102,7 +110,7 @@ export function startPhonemeWorker(engine: PhonemeEngine, options?: WorkerRuntim
     const progress = createLoadProgress({
       report: (percent) => port.post({ type: "LOAD_PROGRESS", percent }),
       range: [0, LOAD_PROGRESS_MAX],
-      expectedBytes: engine.expectedBytes,
+      expectedBytes: engine.expectedBytes({ preferredVoice }),
     });
     try {
       // The runtime superseded the running generation when this reload
@@ -111,7 +119,7 @@ export function startPhonemeWorker(engine: PhonemeEngine, options?: WorkerRuntim
       await previous?.dispose().catch(() => undefined);
       if (forceReload) await engine.clearCache();
       progress.reset();
-      const loaded = await engine.load(progress);
+      const loaded = await engine.load(progress, { preferredVoice });
       model = loaded;
       port.post({ type: "LOAD_PROGRESS", percent: 100 });
       port.post({ type: "READY", voices: [...loaded.voices], backend: loaded.backend });
@@ -156,7 +164,7 @@ export function startPhonemeWorker(engine: PhonemeEngine, options?: WorkerRuntim
       emitAudioChunk(port, {
         generationId: message.generationId,
         audio: result.audio,
-        samplingRate: loaded.sampleRate,
+        samplingRate: result.sampleRate ?? loaded.sampleRate,
         text: chunk.text,
         index: emitted,
         total: dynamicTotal ? 0 : emitted + queue.length,

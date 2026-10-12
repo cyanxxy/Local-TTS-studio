@@ -28,7 +28,7 @@ const ALL_FILES = [MODEL_FILE, VOICES_FILE, CONFIG_FILE];
 
 const engine: PhonemeEngine = {
   label: LABEL,
-  expectedBytes: pinnedAssetSizes(KITTEN_ASSETS, ALL_FILES),
+  expectedBytes: () => pinnedAssetSizes(KITTEN_ASSETS, ALL_FILES),
   async load(progress) {
     configureStyleTtsWasm();
     const fetchFile = (file: string) => fetchPinnedAsset(KITTEN_ASSETS, file, { cacheName: KITTEN_CACHE_NAME, label: LABEL, progress });

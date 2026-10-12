@@ -39,7 +39,7 @@ interface Harness {
   transfers: Array<Transferable[] | undefined>;
   close: ReturnType<typeof vi.fn>;
   send(message: WorkerInMessage): void;
-  engine: PhonemeEngine & { load: ReturnType<typeof vi.fn>; clearCache: ReturnType<typeof vi.fn> };
+  engine: PhonemeEngine & { load: ReturnType<typeof vi.fn>; expectedBytes: ReturnType<typeof vi.fn>; clearCache: ReturnType<typeof vi.fn> };
   model: LoadedPhonemeModel & { synthesize: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> };
   ofType<T extends StyleTtsOutMessage["type"]>(type: T): Array<Extract<StyleTtsOutMessage, { type: T }>>;
 }
@@ -60,7 +60,7 @@ function createHarness(
   };
   const engine = {
     label: "Test TTS",
-    expectedBytes: { "model.bin": 100 },
+    expectedBytes: vi.fn(() => ({ "model.bin": 100 })),
     load: vi.fn(async (progress: LoadProgress) => {
       progress.update("model.bin", 50);
       progress.complete("model.bin");
@@ -107,6 +107,16 @@ describe("startPhonemeWorker loading", () => {
     expect(harness.ofType("LOAD_PROGRESS").map((message) => message.percent)).toEqual([0, 49.5, 99, 100]);
     expect(harness.ofType("READY")[0]).toEqual({ type: "READY", voices: ["A", "B"], backend: "wasm" });
     expect(harness.engine.load).toHaveBeenCalledOnce();
+  });
+
+  it("hands the preferred voice to the engine for its progress sizes and its load", async () => {
+    const harness = createHarness();
+
+    harness.send({ type: "LOAD", preferredVoice: "B" });
+    await vi.waitFor(() => expect(harness.ofType("READY")).toHaveLength(1));
+
+    expect(harness.engine.expectedBytes).toHaveBeenCalledWith({ preferredVoice: "B" });
+    expect(harness.engine.load).toHaveBeenCalledWith(expect.anything(), { preferredVoice: "B" });
   });
 
   it("reports load failures with the load scope", async () => {
@@ -161,6 +171,16 @@ describe("startPhonemeWorker generation", () => {
     expect(Array.from(chunks[1].audio)).toEqual([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0, 0, 0, 0, 0]);
     const chunkIndex = harness.messages.indexOf(chunks[0]);
     expect(harness.transfers[chunkIndex]).toEqual([chunks[0].audio.buffer]);
+  });
+
+  it("uses the sample rate a chunk reports instead of the model's", async () => {
+    const harness = createHarness(async () => ({ audio: new Float32Array(2), sampleRate: 16_000 }));
+    await loaded(harness);
+
+    harness.send(generate("Hello."));
+    await vi.waitFor(() => expect(harness.ofType("GENERATION_COMPLETE")).toHaveLength(1));
+
+    expect(harness.ofType("AUDIO_CHUNK")[0].samplingRate).toBe(16_000);
   });
 
   it("applies pronunciation rules, sentence speed and the requested voice", async () => {

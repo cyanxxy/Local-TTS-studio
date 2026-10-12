@@ -33,7 +33,7 @@ const ALL_FILES = [MODEL_FILE, CONFIG_FILE];
 
 const engine: PhonemeEngine = {
   label: LABEL,
-  expectedBytes: pinnedAssetSizes(PARADEE_ASSETS, ALL_FILES),
+  expectedBytes: () => pinnedAssetSizes(PARADEE_ASSETS, ALL_FILES),
   async load(progress) {
     configureStyleTtsWasm();
     const fetchFile = (file: string) => fetchPinnedAsset(PARADEE_ASSETS, file, { cacheName: PARADEE_CACHE_NAME, label: LABEL, progress });
