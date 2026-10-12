@@ -2,6 +2,42 @@
 
 This document keeps maintainer-facing architecture details out of the top-level README.
 
+```mermaid
+flowchart TD
+    IN["Text · EPUB · PDF · Office · Images · URL"]
+    CORE["Shared core<br/>spoken-text pipeline · generation · playback · export"]
+    WEB["Browser inference<br/>Web Workers · WebGPU → WASM"]
+    BRIDGE["Rust local bridge<br/>loopback WebSocket · desktop only"]
+    K["Kokoro-82M"]
+    S["Supertonic 2 / 3"]
+    P["Kitten · Paradee · Piper"]
+    C["Chatterbox Turbo<br/>WebGPU · desktop"]
+    N["NeuTTS Nano / Air"]
+    Q["Qwen3-TTS<br/>MLX · LibTorch"]
+    A["Audio8 TTS<br/>native ONNX Runtime · desktop"]
+    OUT["WAV · FLAC · MP3 · audiobook · SRT / VTT / JSON"]
+
+    IN --> CORE
+    CORE --> WEB
+    CORE --> BRIDGE
+    WEB --> K
+    WEB --> S
+    WEB --> P
+    WEB --> C
+    CORE --> A
+    BRIDGE --> N
+    BRIDGE --> Q
+    K --> OUT
+    S --> OUT
+    P --> OUT
+    C --> OUT
+    N --> OUT
+    Q --> OUT
+    A --> OUT
+```
+
+NeuTTS and Qwen3 run through `open-tts-local-bridge`, a compiled Rust binary that Electron keeps warm behind a per-launch loopback capability token (it protects local IPC and is not user or cloud authentication). Audio8 runs its ONNX graphs in an Electron-owned Node worker thread, and Supertonic 3 uses a renderer worker. Text passes through one spoken-text pipeline (cleanup, pronunciation, normalization, then pause tags) before any engine sees it, so those tools behave the same on every engine.
+
 ## Tech Stack
 
 - React 19 + TypeScript 6 in strict mode + Vite 8 + Tailwind CSS 4
@@ -49,7 +85,7 @@ src/
 2. Implement the runtime. A browser engine adds a worker under `src/workers/` built on `src/workers/kit` (see below) and a pinned manifest in `src/workers/manifests/` (generate it with `node scripts/pin-hf-assets.mjs --repo ... --revision ... --include ... --name ... --out ...`; `--check` verifies it). A native ONNX engine adds an `electron/nativeModels` descriptor and asset table, a worker built on `startNativeModelWorker`, and a client subclass of `NativeModelWorkerClient`. A Rust-bridge engine implements `ws::Backend` in the bridge, keeps its payload validation in a model-free `request.rs`, and adds that to `rust/bridge-policy-tests/src/lib.rs`.
 3. Provide an `EngineRuntime` (`src/shared/engineRuntime.ts`) and register it in the orchestrator (`useEngineOrchestrator`), plus its settings type in `EngineSynthesisSettings`.
 4. Add the new id to every exhaustive switch over engines, notably `src/lib/readerListening.ts` (the Reader listening profiles); these switches have no default branch, so TypeScript fails the build until the new id is handled.
-5. Add credits (the descriptor's `credits`) and the README model and credits tables, then run `npm run lint`, `npm run typecheck`, and the tests.
+5. Add credits (the descriptor's `credits`), the README model and credits tables, and the model table in `docs/user-guide.md`, then run `npm run lint`, `npm run typecheck`, and the tests.
 
 ### SynthesisApp shell and session
 

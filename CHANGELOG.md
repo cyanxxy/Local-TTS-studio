@@ -4,6 +4,28 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.9.1] - 2026-10-12
+
+### Fixed
+
+- Reader: EPUB chapters, HTML files, and web articles whose source wraps
+  paragraphs across lines no longer show and speak those wraps as line breaks.
+  Only `<br>` and preformatted text break a line. Re-import a book to pick up
+  the fix.
+- Local Rust bridge builds on macOS 27: the build, test, and lint scripts now
+  target the app's minimum macOS (26.0) as CI does, so MLX's Metal kernels
+  compile with the new Xcode and locally built packages still run on macOS 26.
+  `npm run doctor:desktop` now checks for Xcode's Metal Toolchain.
+- Tests: the Qwen model download tests wait for the download button to be
+  enabled before clicking it, so they no longer fail on slow CI runners.
+
+### Changed
+
+- Shortened the README to a one-screen overview with a single, freshly
+  captured Reader screenshot. Full feature, model, settings, shortcut, and
+  import details moved to `docs/user-guide.md`; setup, scripts, and packaging
+  moved to `docs/development.md`.
+
 ## [1.9.0] - 2026-10-12
 
 ### Added

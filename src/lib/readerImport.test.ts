@@ -264,6 +264,34 @@ describe("readerImport", () => {
     expect(occurrences(document.text, "inner paragraph")).toBe(1);
   });
 
+  it("flows source-wrapped paragraph lines and keeps only real line breaks", () => {
+    const document = parseEpubDocument(buildEpub({
+      chapters: [`
+        <p>
+Alice took down a jar from one of the
+shelves as she passed; it was labelled
+\t“ORANGE MARMALADE”.
+</p>
+        <p>A stanza line<br/>
+          and the next line.</p>
+        <pre>keep  this
+  layout</pre>`],
+    }), "wrapped.epub");
+    expect(document.text).toBe([
+      "Alice took down a jar from one of the shelves as she passed; it was labelled “ORANGE MARMALADE”.",
+      "A stanza line\nand the next line.",
+      "keep this\nlayout",
+    ].join("\n\n"));
+
+    const article = parseHtmlReaderDocument({
+      requestedUrl: "https://example.com/wrapped",
+      finalUrl: "https://example.com/wrapped",
+      contentType: "text/html",
+      html: "<html><body><article><p>One sentence\n  wrapped in the source.</p></article></body></html>",
+    });
+    expect(article.text).toContain("One sentence wrapped in the source.");
+  });
+
   it("skips embedded media, graphics and form controls, and reads math by its alttext", () => {
     const document = parseEpubDocument(buildEpub({
       chapters: [`
