@@ -237,6 +237,34 @@ describe("createChunkRemapper", () => {
     expect(remapper.map(chunk({ textStart: 0, textEnd: 6, samples: 40 })).audio).toHaveLength(2040);
   });
 
+  it("maps word timings to the written text and shifts them past the leading pause", () => {
+    const source = '<break time="1s"/>The GIF loads.';
+    const plan = buildSpeechPlan(source, rules(["GIF", "jif"]));
+    expect(plan.spoken).toBe("The jif loads.");
+    const timings = [
+      { start: 4, end: 7, startSec: 0.2, endSec: 0.5 },
+      { start: 8, end: 14, startSec: 0.5, endSec: 0.9 },
+    ];
+    const remapper = createChunkRemapper(plan);
+
+    const first = remapper.map({ ...chunk({ textStart: 0, textEnd: 14 }), wordTimings: timings });
+    expect(first.wordTimings?.map((timing) => source.slice(timing.start, timing.end))).toEqual(["GIF", "loads."]);
+    expect(first.wordTimings?.map((timing) => [timing.startSec, timing.endSec])).toEqual([[1.2, 1.5], [1.5, 1.9]]);
+
+    // Only the first chunk carries the pause, so later timings keep their own times.
+    const later = remapper.map({ ...chunk({ textStart: 0, textEnd: 14 }), wordTimings: timings });
+    expect(later.wordTimings?.map((timing) => timing.startSec)).toEqual([0.2, 0.5]);
+    const untimed = remapper.map(chunk({ textStart: 0, textEnd: 14 }));
+    expect(untimed).not.toHaveProperty("wordTimings");
+  });
+
+  it("maps word timings of a chunk that reports no range", () => {
+    const plan = buildSpeechPlan("GIF!", rules(["GIF", "jif"]));
+    const mapped = createChunkRemapper(plan).map({ ...chunk(), wordTimings: [{ start: 0, end: 3, startSec: 0, endSec: 0.2 }] });
+    expect(mapped.wordTimings).toEqual([{ start: 0, end: 3, startSec: 0, endSec: 0.2 }]);
+    expect(mapped.textStart).toBeUndefined();
+  });
+
   it("does not owe a leading pause when there is none", () => {
     const plan = buildSpeechPlan("GIF.", rules(["GIF", "jif"]));
     expect(createChunkRemapper(plan).map(chunk({ samples: 10 })).audio).toHaveLength(10);

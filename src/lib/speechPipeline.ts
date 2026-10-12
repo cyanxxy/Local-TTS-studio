@@ -261,6 +261,14 @@ export function buildSpeechPlan(
   };
 }
 
+/** A word an engine timed inside its chunk; `start`/`end` index the text it was given. */
+export interface RemappableWordTiming {
+  start: number;
+  end: number;
+  startSec: number;
+  endSec: number;
+}
+
 /** The fields of an audio chunk the remapper reads and rewrites. */
 export interface RemappableChunk {
   audio: Float32Array;
@@ -269,6 +277,8 @@ export interface RemappableChunk {
   textStart?: number;
   textEnd?: number;
   pauseAfterSec?: number;
+  /** Word timings from engines that measure them; remapped to the source with the rest. */
+  wordTimings?: readonly RemappableWordTiming[];
 }
 
 export interface ChunkRemapper {
@@ -321,15 +331,24 @@ export function createChunkRemapper(plan: SpeechPlan): ChunkRemapper {
           pauseAfterSec = boundary.seconds;
         }
       }
+      let leadSec = 0;
       if (leadingOwed) {
         leadingOwed = false;
-        audio = concatFloat32Arrays([createSilence(plan.leadingPauseSec, chunk.samplingRate), audio]);
+        leadSec = plan.leadingPauseSec;
+        audio = concatFloat32Arrays([createSilence(leadSec, chunk.samplingRate), audio]);
       }
-      if (!hasRange) return { ...chunk, audio, pauseAfterSec };
+      // Word timings point at the spoken text and start at the chunk's first sample.
+      const wordTimings = chunk.wordTimings?.map((timing) => {
+        const word = plan.toSourceRange({ start: timing.start, end: timing.end });
+        return { ...timing, start: word.start, end: word.end, startSec: timing.startSec + leadSec, endSec: timing.endSec + leadSec };
+      });
+      const timed = wordTimings ? { wordTimings } : {};
+      if (!hasRange) return { ...chunk, ...timed, audio, pauseAfterSec };
 
       const range = plan.toSourceRange({ start: spokenStart, end: spokenEnd });
       return {
         ...chunk,
+        ...timed,
         audio,
         pauseAfterSec,
         text: plan.source.slice(range.start, range.end),

@@ -315,6 +315,31 @@ describe("useEngineOrchestrator", () => {
       expect(forwarded.audio).toHaveLength(100 - 44 + 100);
     });
 
+    it("maps a running generation's chunks with the script it started from", async () => {
+      const { player, scheduleChunk } = fakePlayer();
+      const options: RenderOptions = { text: BREAKS, speech, player };
+      const { rerender } = renderOrchestrator(options);
+      const engineFacing = () => lastCall<{ player: UseAudioPlayerReturn }>(useBrowserEngineRuntimes).player;
+
+      engineFacing().beginStream();
+      const started = engineFacing();
+      // The dictionary changes while the first generation is still streaming.
+      options.speech = PLAIN_SPEECH;
+      rerender({ surface: "studio" });
+      expect(lastCall<{ text: string }>(useBrowserEngineRuntimes).text).toBe("GIF files are small.\n\nThe end.");
+
+      await started.scheduleChunk({
+        audio: new Float32Array(10), samplingRate: 100, text: "jif files are small.", index: 1, total: 2, textStart: 0, textEnd: 20,
+      });
+      await engineFacing().scheduleChunk({
+        audio: new Float32Array(10), samplingRate: 100, text: "GIF files are small.", index: 1, total: 2, textStart: 0, textEnd: 20,
+      });
+
+      const forwarded = scheduleChunk.mock.calls.map(([chunk]) => (chunk as { text: string }).text);
+      // The running generation still maps through its own plan; the next one maps through the new text.
+      expect(forwarded).toEqual(["GIF files are small.", "GIF files are small."]);
+    });
+
     it("regenerates a retaken passage from what the engine spoke for it", () => {
       renderOrchestrator({ text: BREAKS, speech });
       const { retakeText } = lastCall<{ retakeText: (segment: { text: string; textStart?: number; textEnd?: number }) => string }>(useBrowserEngineRuntimes);

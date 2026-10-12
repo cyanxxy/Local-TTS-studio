@@ -68,12 +68,16 @@ export function useSpeechPipeline({
   const remapper = useMemo(() => createChunkRemapper(plan), [plan]);
 
   const { beginStream, scheduleChunk } = player;
+  // A generation maps its chunks with the plan its text came from, even if the
+  // dictionary or the script changes while it runs.
+  const streamRemapperRef = useRef(remapper);
   const scheduleRemapped = useCallback(
-    (chunk: Parameters<typeof scheduleChunk>[0]) => scheduleChunk(remapper.map(chunk)),
-    [remapper, scheduleChunk],
+    (chunk: Parameters<typeof scheduleChunk>[0]) => scheduleChunk(streamRemapperRef.current.map(chunk)),
+    [scheduleChunk],
   );
   const beginRemappedStream = useCallback(() => {
     remapper.reset();
+    streamRemapperRef.current = remapper;
     beginStream();
   }, [beginStream, remapper]);
   const pipelinePlayer = useMemo<UseAudioPlayerReturn>(
