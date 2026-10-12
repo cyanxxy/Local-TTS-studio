@@ -31,15 +31,6 @@ export type ReaderLookaheadStatus =
   | "skipped"
   | "failed";
 
-/**
- * Qwen3 refuses a request that follows a finished one within this window, so a
- * look-ahead waits it out (with a margin) after the section that just played.
- */
-export const QWEN3_ADMISSION_WINDOW_MS = 500;
-export const READER_LOOKAHEAD_COOLDOWN_MS: Readonly<Partial<Record<SurfaceEngineId, number>>> = {
-  qwen3: QWEN3_ADMISSION_WINDOW_MS + 100,
-};
-
 /** A look-ahead may hold at most this much PCM; the rest of the memory cache stays for playback. */
 export const READER_LOOKAHEAD_MAX_BYTES = MAX_READER_AUDIO_MEMORY_CACHE_BYTES / 2;
 
@@ -50,6 +41,8 @@ interface Job {
   key: string;
   controller: AbortController;
   running: boolean;
+  /** Settles once the render has fully wound down, aborted or not. */
+  done: Promise<void>;
 }
 
 interface Options {
@@ -88,24 +81,8 @@ export interface ReaderLookahead {
   preempt: () => void;
   /** A render is in flight or still winding down, so the engine is not free yet. */
   isBusy: () => boolean;
-}
-
-function delay(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      window.clearTimeout(timer);
-      reject(signal.reason);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
+  /** Resolves once the current render (if any) has wound down. */
+  settled: () => Promise<void>;
 }
 
 /**
@@ -159,15 +136,7 @@ export function useReaderLookahead({
   const [outcome, setOutcome] = useState<{ key: string; status: ReaderLookaheadStatus } | null>(null);
   const jobRef = useRef<Job | null>(null);
   const finishedKeyRef = useRef<string | null>(null);
-  const engineFreedAtRef = useRef(0);
   const saveVersionRef = useRef(0);
-
-  // When the engine's own generation ends: Qwen3's admission window starts then.
-  const wasBusyRef = useRef(engineBusy);
-  useEffect(() => {
-    if (wasBusyRef.current && !engineBusy) engineFreedAtRef.current = Date.now();
-    wasBusyRef.current = engineBusy;
-  }, [engineBusy]);
 
   const render = useEffectEvent(async (job: Job) => {
     const { signal } = job.controller;
@@ -188,10 +157,6 @@ export function useReaderLookahead({
         finish("skipped");
         return;
       }
-      const cooldown = READER_LOOKAHEAD_COOLDOWN_MS[engineId] ?? 0;
-      const wait = cooldown - (Date.now() - engineFreedAtRef.current);
-      if (wait > 0) await delay(wait, signal);
-
       setOutcome({ key: job.key, status: "rendering" });
       const chunks = await collectSectionChunks(
         renderSection(nextSectionText, signal),
@@ -246,9 +211,9 @@ export function useReaderLookahead({
   useEffect(() => {
     if (key === null || !currentSectionPlaying || finishedKeyRef.current === key) return;
     if (jobRef.current?.key === key && !jobRef.current.controller.signal.aborted) return;
-    const job: Job = { key, controller: new AbortController(), running: true };
+    const job: Job = { key, controller: new AbortController(), running: true, done: Promise.resolve() };
     jobRef.current = job;
-    void render(job);
+    job.done = render(job);
   }, [currentSectionPlaying, key]);
 
   const preempt = useCallback(() => {
@@ -256,12 +221,14 @@ export function useReaderLookahead({
     if (job?.running) job.controller.abort(new DOMException("The look-ahead yielded to the engine.", "AbortError"));
   }, []);
   const isBusy = useCallback(() => jobRef.current?.running === true, []);
+  const settled = useCallback(() => jobRef.current?.done ?? Promise.resolve(), []);
 
   const status: ReaderLookaheadStatus = key === null
     ? "idle"
     : outcome?.key === key ? outcome.status : "waiting";
-  return useMemo(() => ({ status, sectionId: key === null ? null : nextSectionId, preempt, isBusy }), [
+  return useMemo(() => ({ status, sectionId: key === null ? null : nextSectionId, preempt, isBusy, settled }), [
     isBusy,
+    settled,
     key,
     nextSectionId,
     preempt,

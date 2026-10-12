@@ -85,6 +85,27 @@ function mergeGenerateResults(
   };
 }
 
+/** The main process's 500 ms admission window, plus a margin for the round trip. */
+export const QWEN3_ADMISSION_COOLDOWN_MS = 600;
+
+function waitFor(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => {
+      window.clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = window.setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 export function useQwen3LocalRuntime({
   enabled,
   retain = enabled,
@@ -647,9 +668,27 @@ export function useQwen3LocalRuntime({
     truncateAudioChunks,
   ]);
 
+  // The main process refuses a generation that starts within
+  // QWEN3_ADMISSION_WINDOW_MS of the last one that finished, so every caller of
+  // `synthesize` (look-ahead, audiobook export, previews) waits it out here
+  // instead of each pacing itself. The surface generation counts too.
+  const lastFinishedAtRef = useRef(0);
+  const wasGeneratingRef = useRef(false);
+  useEffect(() => {
+    if (wasGeneratingRef.current && !generateBusy) lastFinishedAtRef.current = Date.now();
+    wasGeneratingRef.current = generateBusy;
+  }, [generateBusy]);
+
   const synthesize = useCallback((request: SynthesisRequest<"qwen3">) => queue.enqueue((signal) => {
     if (!bridge) throw new Error(BRIDGE_MISSING);
-    return streamQwen3Synthesis(bridge, request, signal);
+    return (async function* () {
+      const wait = QWEN3_ADMISSION_COOLDOWN_MS - (Date.now() - lastFinishedAtRef.current);
+      if (wait > 0) await waitFor(wait, signal);
+      yield* streamQwen3Synthesis(bridge, request, signal);
+      // Only a request that completed starts the window; a cancelled or failed
+      // one clears it in the main process.
+      lastFinishedAtRef.current = Date.now();
+    })();
   }, request.signal), [bridge, queue]);
 
   const handleStop = useCallback(() => {

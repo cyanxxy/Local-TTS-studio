@@ -5,7 +5,6 @@ import type { CachedReaderAudio } from "../lib/readerDocument";
 import { createAbortError } from "../shared/asyncChannel";
 import type { SynthesisChunk, SynthesisRequest } from "../shared/engineRuntime";
 import {
-  QWEN3_ADMISSION_WINDOW_MS,
   READER_LOOKAHEAD_MAX_BYTES,
   useReaderLookahead,
 } from "./useReaderLookahead";
@@ -208,9 +207,14 @@ describe("useReaderLookahead", () => {
     await settle();
     expect(result.current.isBusy()).toBe(true);
 
-    act(() => result.current.preempt());
+    let settled = false;
+    act(() => {
+      result.current.preempt();
+      void result.current.settled().then(() => { settled = true; });
+    });
     expect(synthesis.requests[0].signal?.aborted).toBe(true);
     await settle();
+    expect(settled).toBe(true);
     expect(result.current.isBusy()).toBe(false);
   });
 
@@ -253,18 +257,5 @@ describe("useReaderLookahead", () => {
     rerender({ playing: true });
     await settle();
     expect(failing.synthesize).toHaveBeenCalledTimes(1);
-  });
-
-  it("waits out Qwen3's admission window after the engine's own generation", async () => {
-    const synthesis = controllableSynthesis([pcm(0.1)]);
-    const { rerender } = setup(synthesis, { engineId: "qwen3", engineBusy: true, playing: true });
-    await settle();
-    // The engine's generation ends: a request now would be refused.
-    rerender({ engineId: "qwen3", engineBusy: false, playing: true });
-    await settle();
-    expect(synthesis.synthesize).not.toHaveBeenCalled();
-    act(() => vi.advanceTimersByTime(QWEN3_ADMISSION_WINDOW_MS + 100));
-    await settle();
-    expect(synthesis.synthesize).toHaveBeenCalledTimes(1);
   });
 });

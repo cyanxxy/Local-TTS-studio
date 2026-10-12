@@ -308,11 +308,13 @@ export function useSynthesisSessionState({
   const lookaheadControlsRef = useRef<LookaheadControls>({
     preempt: () => undefined,
     isBusy: () => false,
+    settled: () => Promise.resolve(),
   });
   const { requestGenerate: requestReaderGenerate, cancelPending: cancelPendingReaderGenerate } = useGenerateAfterLookahead({
     controls: lookaheadControlsRef,
     canGenerate: readerRuntime.canGenerate,
     startGenerate: readerRuntime.handleGenerate,
+    scopeKey: `${readerLibrary.activeDocument?.id ?? ""}:${readerSections.activeSection?.id ?? ""}`,
   });
   const handleReaderGenerate = useCallback(() => {
     setExportError(null);
@@ -399,10 +401,10 @@ export function useSynthesisSessionState({
     library: readerLibrary,
     onFailure: (cause) => console.warn("Could not prepare the next part:", cause),
   });
-  const { preempt: preemptLookahead, isBusy: isLookaheadBusy } = readerLookahead;
+  const { preempt: preemptLookahead, isBusy: isLookaheadBusy, settled: lookaheadSettled } = readerLookahead;
   useEffect(() => {
-    lookaheadControlsRef.current = { preempt: preemptLookahead, isBusy: isLookaheadBusy };
-  }, [isLookaheadBusy, preemptLookahead]);
+    lookaheadControlsRef.current = { preempt: preemptLookahead, isBusy: isLookaheadBusy, settled: lookaheadSettled };
+  }, [isLookaheadBusy, lookaheadSettled, preemptLookahead]);
   const handleReaderRetakeSegment = useCallback((...args: Parameters<typeof browser.handleRetakeSegment>) => {
     preemptLookahead();
     browser.handleRetakeSegment(...args);
