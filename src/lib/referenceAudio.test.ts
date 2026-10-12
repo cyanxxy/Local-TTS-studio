@@ -12,6 +12,7 @@ import {
   referenceTargetNeedsTranscript,
   trimClip,
   type ReferenceCheckId,
+  type ReferenceCloneTarget,
   type ReferenceClipAnalysis,
 } from "./referenceAudio";
 import { decodeWav, encodeWavPcm16 } from "./wavCodec";
@@ -50,7 +51,7 @@ function clip(options: {
   return output;
 }
 
-function statusOf(analysis: ReferenceClipAnalysis, id: ReferenceCheckId, transcript?: string, target: "qwen3-base" | "neutts" = "qwen3-base") {
+function statusOf(analysis: ReferenceClipAnalysis, id: ReferenceCheckId, transcript?: string, target: ReferenceCloneTarget = "qwen3-base") {
   return assessReferenceClip(analysis, target, { transcript }).checks.find((check) => check.id === id);
 }
 
