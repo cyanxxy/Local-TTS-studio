@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { estimateWordRanges as sharedEstimateWordRanges } from "./text/wordTiming";
 import {
   buildAudioSignature,
   buildReaderSections,
@@ -61,6 +62,10 @@ describe("readerDocument", () => {
       notes: [],
     });
     expect(document.chapters).toHaveLength(1);
+  });
+
+  it("uses the one shared word-timing estimator for Reader highlighting", () => {
+    expect(estimateWordRanges).toBe(sharedEstimateWordRanges);
   });
 
   it("estimates weighted word timings while preserving source offsets", () => {

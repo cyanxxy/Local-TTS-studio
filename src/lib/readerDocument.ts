@@ -168,13 +168,7 @@ export const READER_SECTION_TARGET_CHARS = 8_000;
 export const READER_SECTION_MIN_CHARS = 4_000;
 export const READER_SECTION_MAX_CHARS = 12_000;
 
-export interface EstimatedWordRange {
-  word: string;
-  start: number;
-  end: number;
-  startSec: number;
-  endSec: number;
-}
+export { estimateWordRanges, type EstimatedWordRange } from "./text/wordTiming";
 
 function createId(prefix: string): string {
   const randomId = globalThis.crypto?.randomUUID?.()
@@ -699,50 +693,6 @@ export function calculateReaderProgress(
     return Math.max(0, Math.min(100, (textOffset / textLength) * 100));
   }
   return 0;
-}
-
-/** Extra letter-equivalents of time for the pause that follows a word. */
-function trailingPauseWeight(word: string): number {
-  if (/[.!?…。？！]["'”’)\]]*$/u.test(word)) return 6;
-  if (/[,;:—–，；：]["'”’)\]]*$/u.test(word)) return 3;
-  return 0;
-}
-
-export function estimateWordRanges(
-  text: string,
-  textStart: number,
-  startSec: number,
-  endSec: number,
-): EstimatedWordRange[] {
-  const matches = [...text.matchAll(/\S+/g)];
-  if (matches.length === 0 || endSec <= startSec) return [];
-
-  // Speech time tracks letters, plus the pause a voice takes after a comma or
-  // a full stop. Without the pause weight the marker ran ahead of the voice
-  // after every sentence break inside a multi-sentence passage.
-  const weights = matches.map((match) => (
-    Math.max(1, match[0].replace(/[^\p{L}\p{N}]/gu, "").length) + trailingPauseWeight(match[0])
-  ));
-  const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
-  const duration = endSec - startSec;
-  let cursorSec = startSec;
-
-  return matches.map((match, index) => {
-    const word = match[0];
-    const relativeStart = match.index ?? 0;
-    const wordDuration = index === matches.length - 1
-      ? endSec - cursorSec
-      : duration * (weights[index] / totalWeight);
-    const range = {
-      word,
-      start: textStart + relativeStart,
-      end: textStart + relativeStart + word.length,
-      startSec: cursorSec,
-      endSec: index === matches.length - 1 ? endSec : cursorSec + wordDuration,
-    };
-    cursorSec = range.endSec;
-    return range;
-  });
 }
 
 export function createReaderBookmark(input: Omit<ReaderBookmark, "id" | "createdAt">): ReaderBookmark {
