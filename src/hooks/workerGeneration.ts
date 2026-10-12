@@ -37,6 +37,20 @@ export function workerGenerateRequest(
   };
 }
 
+/** The generation most recently sent to each worker. */
+const latestGenerationIds = new WeakMap<Worker, string>();
+
+/**
+ * Posts a GENERATE and remembers it as the worker's newest generation, so a
+ * pending soft ABORT knows when newer work has queued behind the aborted one.
+ * Throws when the worker refuses the message.
+ */
+export function postWorkerGenerate(worker: Worker, message: Extract<WorkerInMessage, { type: "GENERATE" }>): void {
+  if (message.generationId === undefined) latestGenerationIds.delete(worker);
+  else latestGenerationIds.set(worker, message.generationId);
+  worker.postMessage(message);
+}
+
 /**
  * Posts one GENERATE to a synthesis worker and routes the worker's replies for
  * it to `observer`. Replies tagged with another generation are ignored, so this
@@ -91,7 +105,7 @@ export function observeWorkerGeneration(
   worker.addEventListener("error", handleWorkerError);
   worker.addEventListener("messageerror", handleWorkerError);
   try {
-    worker.postMessage({ type: "GENERATE", generationId, ...request } satisfies WorkerInMessage);
+    postWorkerGenerate(worker, { type: "GENERATE", generationId, ...request });
   } catch (error) {
     fail(error instanceof Error ? error.message : String(error));
   }
@@ -115,6 +129,12 @@ export const WORKER_ABORT_TIMEOUT_MS = 5_000;
  * does not run when the worker crashes meanwhile, because whoever owns the
  * worker already hears that. Callers should check that the worker is still
  * the one they use before replacing it, since it may have been replaced since.
+ *
+ * A GENERATE sent after the ABORT queues behind the aborted inference, so a
+ * worker that is slow to finish it is not stuck: once a newer generation has
+ * been posted (`postWorkerGenerate`), or the worker has answered for one, the
+ * timeout no longer replaces the worker. Aborting that newer generation
+ * starts a watch of its own.
  */
 export function abortWorkerGeneration(
   worker: Worker,
@@ -124,7 +144,8 @@ export function abortWorkerGeneration(
 ): void {
   const timer = setTimeout(() => {
     stopWatching();
-    onUnresponsive();
+    const newest = latestGenerationIds.get(worker);
+    if (newest === undefined || newest === generationId) onUnresponsive();
   }, timeoutMs);
   function stopWatching() {
     clearTimeout(timer);
@@ -134,7 +155,13 @@ export function abortWorkerGeneration(
   }
   function handleMessage(event: MessageEvent<WorkerOutMessage>) {
     const message = event.data;
-    if (message.type === "ABORTED" && message.generationId === generationId) stopWatching();
+    if (!("generationId" in message) || message.generationId === undefined) return;
+    // Another generation's ABORTED is not ours, but any other reply for another
+    // generation means the worker has left the aborted one behind.
+    const settled = message.type === "ABORTED"
+      ? message.generationId === generationId
+      : message.generationId !== generationId;
+    if (settled) stopWatching();
   }
 
   worker.addEventListener("message", handleMessage as EventListener);

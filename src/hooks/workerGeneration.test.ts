@@ -5,6 +5,7 @@ import {
   WORKER_ABORT_TIMEOUT_MS,
   abortWorkerGeneration,
   observeWorkerGeneration,
+  postWorkerGenerate,
   streamWorkerGeneration,
   workerEventMessage,
   workerGenerateRequest,
@@ -325,5 +326,66 @@ describe("abortWorkerGeneration", () => {
 
     expect(onUnresponsive).toHaveBeenCalledOnce();
     expect(worker.listeners).toBe(0);
+  });
+
+  describe("with a newer generation queued behind the aborted one", () => {
+    const generate = (worker: ListenerWorker, generationId: string) => postWorkerGenerate(
+      worker as unknown as Worker,
+      { type: "GENERATE", generationId, ...REQUEST },
+    );
+
+    it("keeps a slow but healthy worker after Stop then Generate", () => {
+      vi.useFakeTimers();
+      const worker = new ListenerWorker();
+      const onUnresponsive = vi.fn();
+      generate(worker, "gen-1");
+      abortWorkerGeneration(worker as unknown as Worker, "gen-1", onUnresponsive);
+      generate(worker, "gen-2");
+
+      // The aborted inference is still running past the soft-abort window.
+      vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS * 2);
+      expect(onUnresponsive).not.toHaveBeenCalled();
+      expect(worker.listeners).toBe(0);
+    });
+
+    it("stops watching once the worker answers for the newer generation", () => {
+      vi.useFakeTimers();
+      const worker = new ListenerWorker();
+      const onUnresponsive = vi.fn();
+      generate(worker, "gen-1");
+      abortWorkerGeneration(worker as unknown as Worker, "gen-1", onUnresponsive);
+      generate(worker, "gen-2");
+
+      worker.emit(chunk("gen-2", 0));
+      expect(worker.listeners).toBe(0);
+      vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS * 2);
+      expect(onUnresponsive).not.toHaveBeenCalled();
+    });
+
+    it("still replaces a worker that never answers an abort of the newest generation", () => {
+      vi.useFakeTimers();
+      const worker = new ListenerWorker();
+      const onUnresponsive = vi.fn();
+      generate(worker, "gen-1");
+      abortWorkerGeneration(worker as unknown as Worker, "gen-1", vi.fn());
+      generate(worker, "gen-2");
+      abortWorkerGeneration(worker as unknown as Worker, "gen-2", onUnresponsive);
+
+      vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS);
+      expect(onUnresponsive).toHaveBeenCalledOnce();
+    });
+
+    it("ignores worker messages that carry no generation", () => {
+      vi.useFakeTimers();
+      const worker = new ListenerWorker();
+      const onUnresponsive = vi.fn();
+      generate(worker, "gen-1");
+      abortWorkerGeneration(worker as unknown as Worker, "gen-1", onUnresponsive);
+
+      worker.emit({ type: "PROGRESS", progress: 0.5 } as unknown as WorkerOutMessage);
+      expect(worker.listeners).toBe(3);
+      vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS);
+      expect(onUnresponsive).toHaveBeenCalledOnce();
+    });
   });
 });

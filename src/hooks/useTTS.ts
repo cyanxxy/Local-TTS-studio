@@ -8,7 +8,7 @@ import type {
   WorkerOutMessage,
 } from "../types";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
-import { abortWorkerGeneration, workerEventMessage, workerGenerateRequest } from "./workerGeneration";
+import { abortWorkerGeneration, postWorkerGenerate, workerEventMessage, workerGenerateRequest } from "./workerGeneration";
 
 interface UseTTSOptions<Model extends string> {
   /** The worker that synthesizes `model`, or null while it is not running. */
@@ -235,13 +235,13 @@ export function useTTS<Model extends string>({
       worker.addEventListener("messageerror", handleWorkerMessageError as EventListener);
       listenerWorkerRef.current = worker;
 
-      const message: WorkerInMessage = {
+      const message = {
         type: "GENERATE",
         generationId,
         ...workerGenerateRequest(text, voice, settings),
-      };
+      } satisfies WorkerInMessage;
       try {
-        worker.postMessage(message);
+        postWorkerGenerate(worker, message);
       } catch (error) {
         failGeneration(error instanceof Error ? error.message : String(error));
       }
