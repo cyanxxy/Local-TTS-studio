@@ -746,6 +746,11 @@ function LocalRuntimePageBody({
       setNewAudioUrl(float32ChunksToWavUrl(completeChunks, sampleRate));
       endAudioStream();
       setGenerationProgress(null);
+      // A chunk-progress status may still be waiting for the next frame; drop it
+      // so it cannot overwrite this final status.
+      chunkStatusFlushCancelRef.current?.();
+      chunkStatusFlushCancelRef.current = null;
+      pendingChunkStatusRef.current = null;
       setStatus({
         tone: "success",
         text: formatGenerationStatus(generated),
@@ -759,6 +764,11 @@ function LocalRuntimePageBody({
       endAudioStream();
       clearGeneratedResult();
       setGenerationProgress(null);
+      // A chunk-progress status may still be waiting for the next frame; drop it
+      // so it cannot overwrite this final status.
+      chunkStatusFlushCancelRef.current?.();
+      chunkStatusFlushCancelRef.current = null;
+      pendingChunkStatusRef.current = null;
       const message = err instanceof Error ? err.message : String(err);
       setStatus({
         tone: /cancelled/i.test(message) ? "info" : "error",

@@ -388,6 +388,17 @@ describe("LocalRuntimePage", () => {
     }
   });
 
+  it("keeps the final status when generation finishes before the chunk status flushes", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
+    await waitFor(() => expect(generate).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    // Let any frame-coalesced chunk status flush; it must not replace the result.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    expect(screen.queryByText(/Received (streaming )?audio chunk/)).not.toBeInTheDocument();
+  });
+
   it("offers per-passage token limits and forwards an optional seed", async () => {
     renderPage();
     await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
