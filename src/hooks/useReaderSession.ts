@@ -30,6 +30,8 @@ interface Options {
   /** The engine the Reader synthesizes with, and the inputs that shape its audio (null while unknown). */
   engineId: SurfaceEngineId;
   signatureParts: EngineSignatureParts | null;
+  /** The book's own playback speed, used instead of the one a section was saved at. */
+  playbackRate?: number | null;
   /** The Reader engine is synthesizing. */
   isGenerating: boolean;
   /** Generates the active section with the Reader engine. */
@@ -90,6 +92,7 @@ export function useReaderSession({
   player,
   engineId,
   signatureParts,
+  playbackRate,
   isGenerating,
   generate,
   autoAdvance,
@@ -132,6 +135,7 @@ export function useReaderSession({
     sectionText: activeSectionText,
     engineId,
     signatureParts,
+    playbackRate,
     library,
     player,
     retireAllAudio,

@@ -1,3 +1,4 @@
+import { MAX_PLAYBACK_RATE, MIN_PLAYBACK_RATE } from "../constants";
 import type { GenerationTuningSettings } from "../types";
 
 export type ReaderDocumentSourceType = "text" | "file" | "epub" | "url";
@@ -98,6 +99,54 @@ export function isReaderDocumentCover(value: unknown): value is ReaderDocumentCo
     && READER_COVER_DATA_URL.test(dataUrl);
 }
 
+/**
+ * How a book is listened to, remembered per book: the engine, voice, language,
+ * quality step and speed it was last played with. Opening the book restores
+ * them. Only the inputs the Reader can change are kept; an engine's own
+ * settings pages (Qwen3 profiles, for one) stay global.
+ */
+export interface ReaderListeningProfile {
+  /** A Reader engine id (`SurfaceEngineId`). */
+  engine: string;
+  voice: string;
+  /** Set for engines conditioned on a language. */
+  language?: string;
+  /** Set for engines with a quality step. */
+  quality?: number;
+  playbackRate: number;
+  updatedAt: number;
+}
+
+export function normalizeReaderListeningProfile(value: unknown): ReaderListeningProfile | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const profile = value as Partial<ReaderListeningProfile>;
+  if (
+    typeof profile.engine !== "string"
+    || profile.engine.length === 0
+    || profile.engine.length > 64
+    || typeof profile.voice !== "string"
+    || profile.voice.length > 256
+    || typeof profile.playbackRate !== "number"
+    || !Number.isFinite(profile.playbackRate)
+    || typeof profile.updatedAt !== "number"
+    || !Number.isFinite(profile.updatedAt)
+  ) return undefined;
+  const language = typeof profile.language === "string" && profile.language.length <= 32
+    ? profile.language
+    : undefined;
+  const quality = typeof profile.quality === "number" && Number.isFinite(profile.quality)
+    ? profile.quality
+    : undefined;
+  return {
+    engine: profile.engine,
+    voice: profile.voice,
+    ...(language === undefined ? {} : { language }),
+    ...(quality === undefined ? {} : { quality }),
+    playbackRate: Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, profile.playbackRate)),
+    updatedAt: profile.updatedAt,
+  };
+}
+
 export interface ReaderDocumentRecord {
   id: string;
   title: string;
@@ -116,6 +165,8 @@ export interface ReaderDocumentRecord {
   highlights?: ReaderHighlight[];
   /** The book's cover, when its source had one. */
   cover?: ReaderDocumentCover;
+  /** How the book was last listened to; absent until the listener changes something. */
+  listening?: ReaderListeningProfile;
   createdAt: number;
   updatedAt: number;
   lastOpenedAt: number;
@@ -632,9 +683,10 @@ export function createReaderDocument(input: ReaderDocumentInput): ReaderDocument
 
 /** Add fields introduced by newer Reader versions without rewriting book text. */
 export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): ReaderDocumentRecord {
-  const { highlights, cover, ...record } = document;
+  const { highlights, cover, listening, ...record } = document;
   const chapters = normalizeReaderChapters(document.text, document.chapters ?? [], document.title);
   const sections = buildReaderSections(document.text, chapters);
+  const listeningProfile = normalizeReaderListeningProfile(listening);
   const progressOffset = Math.max(0, Math.min(document.text.length, document.progress?.textOffset ?? 0));
   const progressChapter = chapterAtOffset(chapters, progressOffset);
   const progressSection = sections.find((section) => section.id === document.progress?.sectionId)
@@ -665,6 +717,7 @@ export function normalizeReaderDocumentRecord(document: ReaderDocumentRecord): R
     // Records from before highlights existed stay without the field.
     ...(Array.isArray(highlights) ? { highlights: normalizeReaderHighlights(document.text, highlights) } : {}),
     ...(isReaderDocumentCover(cover) ? { cover } : {}),
+    ...(listeningProfile ? { listening: listeningProfile } : {}),
   };
 }
 

@@ -246,6 +246,8 @@ const mock = vi.hoisted(() => {
       finalizeActiveTextEdit: vi.fn(),
       updateActiveMetadata: vi.fn(),
       updateProgress: vi.fn(),
+      updateActiveListening: vi.fn(),
+      flushProgress: vi.fn(),
       addBookmark: vi.fn(),
       removeBookmark: vi.fn(),
       addNote: vi.fn(),
@@ -764,6 +766,8 @@ function resetMockState() {
     finalizeActiveTextEdit: vi.fn(),
     updateActiveMetadata: vi.fn(),
     updateProgress: vi.fn(),
+    updateActiveListening: vi.fn(),
+    flushProgress: vi.fn(),
     addBookmark: vi.fn(),
     removeBookmark: vi.fn(),
     addNote: vi.fn(),
@@ -986,6 +990,51 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("reader-desktop-voice")).toHaveTextContent("Clara");
     fireEvent.click(screen.getByRole("button", { name: "reader-generate" }));
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(2);
+  });
+
+  describe("per-book listening profile", () => {
+    const readerRoute = () => {
+      mock.routing = { ...mock.routing, activePage: "reader", isReaderPage: true, isStudioPage: false };
+    };
+    const desktopBridge = () => Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+
+    it("remembers the engine the listener picks for the open book", async () => {
+      desktopBridge();
+      readerRoute();
+      const document = createReaderDocument({ id: "profile-book", text: "A book to listen to. ".repeat(40) });
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "reader-desktop-audio8" }));
+
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenCalledWith(
+        expect.objectContaining({ engine: "audio8", voice: expect.any(String), playbackRate: expect.any(Number) }),
+      );
+    });
+
+    it("applies a book's remembered engine and speed when it opens", async () => {
+      desktopBridge();
+      readerRoute();
+      const base = createReaderDocument({ id: "profile-book", text: "A book to listen to. ".repeat(40) });
+      const document: ReaderDocumentRecord = {
+        ...base,
+        listening: { engine: "audio8", voice: "Clara", playbackRate: 1.5, updatedAt: 5 },
+      };
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+      expect(await screen.findByRole("button", { name: "reader-desktop-audio8-selected" })).toBeInTheDocument();
+      expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1.5);
+      await waitFor(() => expect(mock.persistAppState).toHaveBeenCalledWith(
+        expect.objectContaining({ desktopModels: expect.objectContaining({ reader: "audio8" }) }),
+      ));
+      await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalled());
+    });
   });
 
   it("keeps the browser model loaded across page switches and stops only the engine left behind", async () => {

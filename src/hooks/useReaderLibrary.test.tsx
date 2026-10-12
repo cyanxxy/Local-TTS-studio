@@ -47,8 +47,8 @@ function installFailingDesktopBridge(cause: Error) {
 // separately from the write it is waiting on.
 function installProgressDesktopBridge() {
   const seed = createReaderDocument({ id: "desktop-book", text: "A stored desktop book.", now: 100 });
-  const saveDocument = vi.fn(async (_document: unknown) => undefined);
-  const saveProgress = vi.fn(async (_documentId: string, _progress: unknown) => undefined);
+  const saveDocument = vi.fn<(document: unknown) => Promise<void>>(async () => undefined);
+  const saveProgress = vi.fn<(documentId: string, progress: unknown) => Promise<void>>(async () => undefined);
   window.electron = {
     isElectron: true,
     readerLibrary: {
@@ -324,6 +324,25 @@ describe("useReaderLibrary", () => {
       expect(stored?.progress.positionSec).toBe(3);
       expect(stored?.progress.textOffset).toBe(7);
     });
+  });
+
+  it("remembers a book's listening profile with the book and ignores an unchanged one", async () => {
+    const { result } = renderHook(() => useReaderLibrary("Original reader text."));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const profile = { engine: "kokoro", voice: "af_nova", playbackRate: 1.25 };
+
+    act(() => result.current.updateActiveListening(profile));
+    const saved = result.current.activeDocument!;
+    expect(saved.listening).toMatchObject(profile);
+    expect(saved.updatedAt).toBeGreaterThan(saved.createdAt - 1);
+
+    act(() => result.current.updateActiveListening(profile));
+    expect(result.current.activeDocument).toBe(saved);
+
+    await waitFor(async () => {
+      const stored = (await listReaderDocuments()).find((document) => document.id === saved.id);
+      expect(stored?.listening).toMatchObject(profile);
+    }, { timeout: 2_000 });
   });
 
   describe("progress persistence", () => {

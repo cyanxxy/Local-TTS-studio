@@ -23,6 +23,7 @@ import {
   type ReaderHighlight,
   type ReaderHighlightColor,
   type ReaderHighlightInput,
+  type ReaderListeningProfile,
   type ReaderNote,
   type ReaderSection,
   type ReaderTextChangeHint,
@@ -82,6 +83,8 @@ export interface UseReaderLibraryReturn {
   finalizeActiveTextEdit: (documentId?: string) => void;
   updateActiveMetadata: (patch: Pick<Partial<ReaderDocumentRecord>, "title" | "author" | "description" | "language">) => void;
   updateProgress: (update: ProgressUpdate) => void;
+  /** Remembers how the active book is listened to; see `ReaderListeningProfile`. */
+  updateActiveListening: (profile: Omit<ReaderListeningProfile, "updatedAt">) => void;
   /** Writes the active book's reading position now, ahead of the usual throttle. */
   flushProgress: () => void;
   addBookmark: (input: { label: string; textOffset: number; positionSec: number }) => void;
@@ -523,6 +526,23 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     scheduleDocumentPersist(current.id);
   }, [replaceDocument, scheduleDocumentPersist]);
 
+  const updateActiveListening = useCallback((profile: Omit<ReaderListeningProfile, "updatedAt">) => {
+    const current = documentsRef.current.find((document) => document.id === activeDocumentIdRef.current);
+    if (!current) return;
+    const previous = current.listening;
+    if (
+      previous
+      && previous.engine === profile.engine
+      && previous.voice === profile.voice
+      && previous.language === profile.language
+      && previous.quality === profile.quality
+      && previous.playbackRate === profile.playbackRate
+    ) return;
+    const updatedAt = nextReaderDocumentUpdatedAt(current);
+    replaceDocument({ ...current, listening: { ...profile, updatedAt }, updatedAt }, false);
+    scheduleDocumentPersist(current.id);
+  }, [replaceDocument, scheduleDocumentPersist]);
+
   const updateProgress = useCallback((update: ProgressUpdate) => {
     const id = activeDocumentIdRef.current;
     if (!id) return;
@@ -723,6 +743,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     finalizeActiveTextEdit,
     updateActiveMetadata,
     updateProgress,
+    updateActiveListening,
     flushProgress,
     addBookmark,
     removeBookmark,
@@ -759,6 +780,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     updateHighlight,
     updateNote,
     updateProgress,
+    updateActiveListening,
     flushProgress,
   ]);
 }

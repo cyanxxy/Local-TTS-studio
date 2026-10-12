@@ -9,6 +9,7 @@ import { useCreatorSettings } from "../hooks/useCreatorSettings";
 import { useDocumentImport } from "../hooks/useDocumentImport";
 import { useEngineOrchestrator } from "../hooks/useEngineOrchestrator";
 import { useReaderLibrary } from "../hooks/useReaderLibrary";
+import { useReaderListeningProfile, type SurfaceListeningProfile } from "../hooks/useReaderListeningProfile";
 import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderSession } from "../hooks/useReaderSession";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
@@ -23,9 +24,10 @@ import {
   type PersistedAppState,
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
-import { getUnsupportedModelMessage } from "../lib/browserSupport";
+import { getUnsupportedModelMessage, isModelSupportedInBrowser } from "../lib/browserSupport";
 import {
   getEngine,
+  isBrowserEngineId,
   surfaceEngineSignatureParts,
   type EngineSettings,
   type SurfaceEngineId,
@@ -145,8 +147,10 @@ export function useSynthesisSessionState({
     browser,
     surfaceEngineSettings,
     desktopModelOptions,
+    desktopEngineAvailability,
     retireAllAudio,
     selectBrowserModel,
+    selectDesktopModel,
     changeEngineInput,
   } = useEngineOrchestrator({
     surface: isReaderPage ? "reader" : isStudioPage ? "studio" : null,
@@ -169,6 +173,56 @@ export function useSynthesisSessionState({
   const voice = browser.voicesInUse[activeModel];
   const studioRuntime = runtimes[studioEngineId];
   const readerRuntime = runtimes[readerEngineId];
+
+  const patchEngineSettings = useCallback(<Id extends AppEngineId>(
+    engine: Id,
+    patch: Partial<AppEngineSettings[Id]>,
+  ) => {
+    setEngineSettings((current) => ({ ...current, [engine]: { ...current[engine], ...patch } }));
+  }, []);
+
+  const { setPlaybackRate } = player;
+  const isListeningEngineUsable = useCallback((engine: SurfaceEngineId) => (
+    isBrowserEngineId(engine)
+      ? isModelSupportedInBrowser(engine, browserSupport)
+      : desktopEngineAvailability[engine]
+  ), [browserSupport, desktopEngineAvailability]);
+  const applyListeningProfile = useCallback((profile: SurfaceListeningProfile) => {
+    const { engine } = profile;
+    if (engine !== readerEngineId) {
+      if (isBrowserEngineId(engine)) selectBrowserModel("reader", engine);
+      else selectDesktopModel("reader", engine);
+    }
+    switch (engine) {
+      case "kokoro":
+      case "audio8":
+        patchEngineSettings(engine, { voice: profile.voice });
+        break;
+      case "supertonic":
+        patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
+        break;
+      case "supertonic3":
+        patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
+        break;
+      case "qwen3":
+        break;
+    }
+    if (profile.quality !== undefined && getEngine(engine).capabilities.quality) setQuality(profile.quality);
+    setPlaybackRate(profile.playbackRate);
+  }, [patchEngineSettings, readerEngineId, selectBrowserModel, selectDesktopModel, setPlaybackRate]);
+  const readerListening = useReaderListeningProfile({
+    active: isReaderPage,
+    loading: readerLibrary.loading,
+    document: readerLibrary.activeDocument,
+    engineId: readerEngineId,
+    surfaceEngineSettings,
+    quality,
+    playbackRate: player.playbackRate,
+    isEngineUsable: isListeningEngineUsable,
+    apply: applyListeningProfile,
+    updateListening: readerLibrary.updateActiveListening,
+  });
+  const { remember: rememberListening } = readerListening;
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -199,7 +253,27 @@ export function useSynthesisSessionState({
 
   const handleReaderModelChange = useCallback((model: ModelType) => {
     selectBrowserModel("reader", model);
-  }, [selectBrowserModel]);
+    rememberListening({ engine: model });
+  }, [rememberListening, selectBrowserModel]);
+
+  const handleReaderPlaybackRateChange = useCallback((rate: number) => {
+    setPlaybackRate(rate);
+    rememberListening({ playbackRate: rate });
+  }, [rememberListening, setPlaybackRate]);
+
+  // A Reader choice is remembered for the open book. The pickers are shared
+  // with Studio, so only a change that reaches the Reader's own engine counts.
+  const readerEngineHas = useCallback((engine: SurfaceEngineId) => isReaderPage && readerEngineId === engine, [
+    isReaderPage,
+    readerEngineId,
+  ]);
+  const readerDesktopModelOptions = useMemo(() => desktopModelOptions.reader.map((option) => ({
+    ...option,
+    onSelect: () => {
+      option.onSelect();
+      rememberListening({ engine: option.key });
+    },
+  })), [desktopModelOptions.reader, rememberListening]);
 
   const resetAudioForTextEdit = useCallback(() => {
     const hasActiveAudioState = Object.values(runtimes).some((runtime) => runtime.isGenerating)
@@ -255,7 +329,10 @@ export function useSynthesisSessionState({
     sections: readerSections,
     player,
     engineId: readerEngineId,
-    signatureParts: readerSignatureParts,
+    // Held back until the book's remembered voice is in place, because a
+    // lookup under the wrong voice would discard the audio saved under its own.
+    signatureParts: readerListening.settled ? readerSignatureParts : null,
+    playbackRate: readerLibrary.activeDocument?.listening?.playbackRate ?? null,
     isGenerating: readerRuntime.isGenerating,
     generate: handleReaderGenerate,
     autoAdvance: readerViewPreferences.autoAdvance,
@@ -287,39 +364,37 @@ export function useSynthesisSessionState({
     setImportError,
   });
 
-  const patchEngineSettings = useCallback(<Id extends AppEngineId>(
-    engine: Id,
-    patch: Partial<AppEngineSettings[Id]>,
-  ) => {
-    setEngineSettings((current) => ({ ...current, [engine]: { ...current[engine], ...patch } }));
-  }, []);
-
   const handleVoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === voice) return;
     changeEngineInput(activeModel, () => patchEngineSettings(activeModel, { voice: nextVoice }));
-  }, [activeModel, changeEngineInput, patchEngineSettings, voice]);
+    if (readerEngineHas(activeModel)) rememberListening({ voice: nextVoice });
+  }, [activeModel, changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, voice]);
 
   const handleAudio8VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === audio8Voice) return;
     changeEngineInput("audio8", () => patchEngineSettings("audio8", { voice: nextVoice }));
-  }, [audio8Voice, changeEngineInput, patchEngineSettings]);
+    if (readerEngineHas("audio8")) rememberListening({ voice: nextVoice });
+  }, [audio8Voice, changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening]);
 
   const handleSupertonic3VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === supertonic3Voice) return;
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { voice: nextVoice }));
-  }, [changeEngineInput, patchEngineSettings, supertonic3Voice]);
+    if (readerEngineHas("supertonic3")) rememberListening({ voice: nextVoice });
+  }, [changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, supertonic3Voice]);
 
   // The language shapes Supertonic 2 audio like its voice does, so it goes
   // through the same save-then-clear path rather than being set directly.
   const handleSupertonicLanguageChange = useCallback((nextLanguage: string) => {
     if (nextLanguage === supertonicLanguage) return;
     changeEngineInput("supertonic", () => patchEngineSettings("supertonic", { language: nextLanguage }));
-  }, [changeEngineInput, patchEngineSettings, supertonicLanguage]);
+    if (readerEngineHas("supertonic")) rememberListening({ language: nextLanguage });
+  }, [changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, supertonicLanguage]);
 
   const handleSupertonic3LanguageChange = useCallback((nextLanguage: string) => {
     if (nextLanguage === supertonic3Language) return;
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { language: nextLanguage }));
-  }, [changeEngineInput, patchEngineSettings, supertonic3Language]);
+    if (readerEngineHas("supertonic3")) rememberListening({ language: nextLanguage });
+  }, [changeEngineInput, patchEngineSettings, readerEngineHas, rememberListening, supertonic3Language]);
 
   const handleQualityChange = useCallback((nextQuality: number) => {
     if (nextQuality === quality) return;
@@ -330,7 +405,8 @@ export function useSynthesisSessionState({
       return;
     }
     changeEngineInput(visibleEngineId, () => setQuality(nextQuality));
-  }, [changeEngineInput, quality, visibleEngineId]);
+    if (isReaderPage) rememberListening({ quality: nextQuality });
+  }, [changeEngineInput, isReaderPage, quality, rememberListening, visibleEngineId]);
 
   const handlePageNavigation = useCallback((page: AppPage) => {
     if (isReaderPage && page !== "reader") flushReaderAudio();
@@ -473,7 +549,7 @@ export function useSynthesisSessionState({
       runtimes,
       audio8,
       browser,
-      desktopModelOptions,
+      desktopModelOptions: { ...desktopModelOptions, reader: readerDesktopModelOptions },
       surfaceEngineSettings,
       voice,
       kokoroVoices: browser.voices.kokoro,
@@ -510,6 +586,7 @@ export function useSynthesisSessionState({
       desktopModel: readerDesktopModel,
       runtime: readerRuntime,
       changeModel: handleReaderModelChange,
+      setPlaybackRate: handleReaderPlaybackRateChange,
       generate: handleReaderGenerate,
       stop: handleReaderStop,
       retryLoad: handleReaderRetryLoad,

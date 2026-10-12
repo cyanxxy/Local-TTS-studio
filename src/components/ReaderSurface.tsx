@@ -101,7 +101,7 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
           clock={player.state.clock}
           totalDuration={player.state.totalDuration}
           playbackRate={player.state.playbackRate}
-          onPlaybackRateChange={player.state.setPlaybackRate}
+          onPlaybackRateChange={reader.setPlaybackRate}
           segments={player.state.segments}
           activeSegmentId={player.state.activeSegmentId}
           onTogglePlay={player.togglePlay}

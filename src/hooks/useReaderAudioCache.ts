@@ -70,6 +70,8 @@ interface Options {
    * while one of them is still unknown.
    */
   signatureParts: EngineSignatureParts | null;
+  /** Plays restored audio at this speed instead of the one it was saved at. */
+  playbackRate?: number | null;
   library: Pick<UseReaderLibraryReturn, "loadAudio" | "saveAudio" | "clearAudio">;
   player: Pick<
     UseAudioPlayerReturn,
@@ -134,6 +136,7 @@ export function useReaderAudioCache({
   sectionText,
   engineId,
   signatureParts,
+  playbackRate,
   library,
   player,
   retireAllAudio,
@@ -248,7 +251,7 @@ export function useReaderAudioCache({
   // record changes with every progress write, and the library's audio
   // functions change when its storage backend settles.)
   const enteredSection = useEffectEvent(() => ({ document, section }));
-  const currentSignature = useEffectEvent(() => ({ signature, legacySignature }));
+  const currentSignature = useEffectEvent(() => ({ signature, legacySignature, playbackRate }));
   const upgradeSectionAudio = useEffectEvent((cache: CachedReaderAudio, upgradedSignature: string) => {
     const updatedAt = Math.max(Date.now(), saveVersionRef.current + 1);
     saveVersionRef.current = updatedAt;
@@ -329,7 +332,7 @@ export function useReaderAudioCache({
           restoreAudioCache(cache.chunks, {
             // A saved 0 is meaningful (the user stopped or rewound).
             currentTime: Math.max(0, Math.min(maximumTime, preferredTime)),
-            playbackRate: cache.playbackRate,
+            playbackRate: latest.playbackRate ?? cache.playbackRate,
             synthesisComplete: cache.synthesisComplete === true,
           });
           showPlayer(cache.chunks.length > 0);
