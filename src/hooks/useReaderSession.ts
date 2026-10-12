@@ -32,6 +32,8 @@ interface Options {
   signatureParts: EngineSignatureParts | null;
   /** The book's own playback speed, used instead of the one a section was saved at. */
   playbackRate?: number | null;
+  /** Saved audio that fails the signature check is kept, not discarded; see `useReaderAudioCache`. */
+  keepMismatchedAudio?: boolean;
   /** The Reader engine is synthesizing. */
   isGenerating: boolean;
   /** Generates the active section with the Reader engine. */
@@ -95,6 +97,7 @@ export function useReaderSession({
   engineId,
   signatureParts,
   playbackRate,
+  keepMismatchedAudio,
   isGenerating,
   generate,
   autoAdvance,
@@ -138,6 +141,7 @@ export function useReaderSession({
     engineId,
     signatureParts,
     playbackRate,
+    keepMismatchedAudio,
     library,
     player,
     retireAllAudio,

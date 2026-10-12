@@ -567,6 +567,12 @@ describe("createReaderOffsetRebaser", () => {
 });
 
 describe("reader listening profile", () => {
+  it("keeps a speed on its own, without an engine or voice", () => {
+    const document = createReaderDocument({ id: "rate-only", text: "Text to listen to." });
+    expect(normalizeReaderDocumentRecord({ ...document, listening: { playbackRate: 1.5, updatedAt: 4 } }).listening)
+      .toEqual({ playbackRate: 1.5, updatedAt: 4 });
+  });
+
   const document = createReaderDocument({ id: "listening", text: "Text to listen to." });
 
   it("is absent from a book that has none and kept when valid", () => {
@@ -576,8 +582,13 @@ describe("reader listening profile", () => {
   });
 
   it("drops a malformed profile and clamps the speed to what the player offers", () => {
-    const damaged = { engine: 7, voice: "x", playbackRate: 1, updatedAt: 1 } as unknown as ReaderListeningProfile;
+    const damaged = { engine: 7, voice: "x", updatedAt: 1 } as unknown as ReaderListeningProfile;
     expect(normalizeReaderDocumentRecord({ ...document, listening: damaged })).not.toHaveProperty("listening");
+    // A voice without its engine, or an engine without its voice, says nothing usable.
+    expect(normalizeReaderDocumentRecord({ ...document, listening: { voice: "x", updatedAt: 1 } }))
+      .not.toHaveProperty("listening");
+    expect(normalizeReaderDocumentRecord({ ...document, listening: { engine: "kokoro", updatedAt: 1 } }))
+      .not.toHaveProperty("listening");
     const fast = { engine: "kokoro", voice: "x", playbackRate: 40, updatedAt: 1 };
     expect(normalizeReaderDocumentRecord({ ...document, listening: fast }).listening?.playbackRate).toBe(2);
   });

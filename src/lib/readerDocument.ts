@@ -106,43 +106,47 @@ export function isReaderDocumentCover(value: unknown): value is ReaderDocumentCo
  * settings pages (Qwen3 profiles, for one) stay global.
  */
 export interface ReaderListeningProfile {
-  /** A Reader engine id (`SurfaceEngineId`). */
-  engine: string;
-  voice: string;
+  /** A Reader engine id (`SurfaceEngineId`). Absent when only the speed was changed. */
+  engine?: string;
+  /** The voice of `engine`; only present with it. */
+  voice?: string;
   /** Set for engines conditioned on a language. */
   language?: string;
   /** Set for engines with a quality step. */
   quality?: number;
-  playbackRate: number;
+  /** A speed alone is a profile too: it must not pin the engine and voice that happen to be global. */
+  playbackRate?: number;
   updatedAt: number;
 }
 
 export function normalizeReaderListeningProfile(value: unknown): ReaderListeningProfile | undefined {
   if (typeof value !== "object" || value === null) return undefined;
   const profile = value as Partial<ReaderListeningProfile>;
-  if (
-    typeof profile.engine !== "string"
-    || profile.engine.length === 0
-    || profile.engine.length > 64
-    || typeof profile.voice !== "string"
-    || profile.voice.length > 256
-    || typeof profile.playbackRate !== "number"
-    || !Number.isFinite(profile.playbackRate)
-    || typeof profile.updatedAt !== "number"
-    || !Number.isFinite(profile.updatedAt)
-  ) return undefined;
+  if (typeof profile.updatedAt !== "number" || !Number.isFinite(profile.updatedAt)) return undefined;
+  const engine = typeof profile.engine === "string" && profile.engine.length > 0 && profile.engine.length <= 64
+    ? profile.engine
+    : undefined;
+  // A voice belongs to its engine.
+  const voice = engine !== undefined && typeof profile.voice === "string" && profile.voice.length <= 256
+    ? profile.voice
+    : undefined;
+  if (engine !== undefined && voice === undefined) return undefined;
   const language = typeof profile.language === "string" && profile.language.length <= 32
     ? profile.language
     : undefined;
   const quality = typeof profile.quality === "number" && Number.isFinite(profile.quality)
     ? profile.quality
     : undefined;
+  const playbackRate = typeof profile.playbackRate === "number" && Number.isFinite(profile.playbackRate)
+    ? Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, profile.playbackRate))
+    : undefined;
+  if (engine === undefined && playbackRate === undefined) return undefined;
   return {
-    engine: profile.engine,
-    voice: profile.voice,
+    ...(engine === undefined ? {} : { engine }),
+    ...(voice === undefined ? {} : { voice }),
     ...(language === undefined ? {} : { language }),
     ...(quality === undefined ? {} : { quality }),
-    playbackRate: Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, profile.playbackRate)),
+    ...(playbackRate === undefined ? {} : { playbackRate }),
     updatedAt: profile.updatedAt,
   };
 }

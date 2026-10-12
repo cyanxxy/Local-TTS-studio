@@ -72,6 +72,12 @@ interface Options {
   signatureParts: EngineSignatureParts | null;
   /** Plays restored audio at this speed instead of the one it was saved at. */
   playbackRate?: number | null;
+  /**
+   * The book's remembered voice is not what the Reader speaks with yet (its
+   * engine is still being detected, or applied), so audio that does not match
+   * the signature of the fallback voice may be exactly the book's own.
+   */
+  keepMismatchedAudio?: boolean;
   library: Pick<UseReaderLibraryReturn, "loadAudio" | "saveAudio" | "clearAudio">;
   player: Pick<
     UseAudioPlayerReturn,
@@ -137,6 +143,7 @@ export function useReaderAudioCache({
   engineId,
   signatureParts,
   playbackRate,
+  keepMismatchedAudio,
   library,
   player,
   retireAllAudio,
@@ -251,7 +258,7 @@ export function useReaderAudioCache({
   // record changes with every progress write, and the library's audio
   // functions change when its storage backend settles.)
   const enteredSection = useEffectEvent(() => ({ document, section }));
-  const currentSignature = useEffectEvent(() => ({ signature, legacySignature, playbackRate }));
+  const currentSignature = useEffectEvent(() => ({ signature, legacySignature, playbackRate, keepMismatchedAudio }));
   const upgradeSectionAudio = useEffectEvent((cache: CachedReaderAudio, upgradedSignature: string) => {
     const updatedAt = Math.max(Date.now(), saveVersionRef.current + 1);
     saveVersionRef.current = updatedAt;
@@ -340,7 +347,7 @@ export function useReaderAudioCache({
             window.setTimeout(() => void togglePlay(), 0);
           }
         } else {
-          if (cache) void clearSectionAudio(enteredDocument.id, enteredSectionValue.id);
+          if (cache && !latest.keepMismatchedAudio) void clearSectionAudio(enteredDocument.id, enteredSectionValue.id);
           if (continuation?.autoGenerate) {
             window.setTimeout(() => generateEnteredSection(), 0);
           }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { useAppEnvironment } from "../hooks/useAppEnvironment";
 import { useAppPreferences } from "../hooks/useAppPreferences";
@@ -12,7 +12,7 @@ import { useReaderLibrary } from "../hooks/useReaderLibrary";
 import { useAudiobookExport } from "../hooks/useAudiobookExport";
 import { useGenerateAfterLookahead, type LookaheadControls } from "../hooks/useGenerateAfterLookahead";
 import { useReaderLookahead } from "../hooks/useReaderLookahead";
-import { useReaderListeningProfile, type SurfaceListeningProfile } from "../hooks/useReaderListeningProfile";
+import { useReaderListeningProfile, type ListeningTarget } from "../hooks/useReaderListeningProfile";
 import { useReaderSections } from "../hooks/useReaderSections";
 import { useReaderSession } from "../hooks/useReaderSession";
 import { useReaderViewPreferences } from "../hooks/useReaderViewPreferences";
@@ -192,29 +192,44 @@ export function useSynthesisSessionState({
       ? isModelSupportedInBrowser(engine, browserSupport)
       : desktopEngineAvailability[engine]
   ), [browserSupport, desktopEngineAvailability]);
-  const applyListeningProfile = useCallback((profile: SurfaceListeningProfile) => {
-    const { engine } = profile;
-    if (engine !== readerEngineId) {
-      if (isBrowserEngineId(engine)) selectBrowserModel("reader", engine);
-      else selectDesktopModel("reader", engine);
+  // A book's remembered voice, quality and speed belong to the Reader. The
+  // values Studio had are set aside the first time the Reader changes them and
+  // put back when Studio is shown again or a book without a profile is opened.
+  const [studioGlobals, setStudioGlobals] = useState<{
+    engineSettings: AppEngineSettings;
+    quality: number;
+    playbackRate: number;
+  } | null>(null);
+  const currentPlaybackRate = player.playbackRate;
+  const setAsideStudioGlobals = useCallback(() => {
+    setStudioGlobals((current) => current ?? { engineSettings, quality, playbackRate: currentPlaybackRate });
+  }, [currentPlaybackRate, engineSettings, quality]);
+  const applyListeningProfile = useCallback(({ engine: profile, playbackRate: rate }: ListeningTarget) => {
+    setAsideStudioGlobals();
+    if (profile) {
+      const { engine } = profile;
+      if (engine !== readerEngineId) {
+        if (isBrowserEngineId(engine)) selectBrowserModel("reader", engine);
+        else selectDesktopModel("reader", engine);
+      }
+      switch (engine) {
+        case "kokoro":
+        case "audio8":
+          patchEngineSettings(engine, { voice: profile.voice });
+          break;
+        case "supertonic":
+          patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
+          break;
+        case "supertonic3":
+          patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
+          break;
+        case "qwen3":
+          break;
+      }
+      if (profile.quality !== undefined && getEngine(engine).capabilities.quality) setQuality(profile.quality);
     }
-    switch (engine) {
-      case "kokoro":
-      case "audio8":
-        patchEngineSettings(engine, { voice: profile.voice });
-        break;
-      case "supertonic":
-        patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
-        break;
-      case "supertonic3":
-        patchEngineSettings(engine, { voice: profile.voice, ...(profile.language ? { language: profile.language } : {}) });
-        break;
-      case "qwen3":
-        break;
-    }
-    if (profile.quality !== undefined && getEngine(engine).capabilities.quality) setQuality(profile.quality);
-    setPlaybackRate(profile.playbackRate);
-  }, [patchEngineSettings, readerEngineId, selectBrowserModel, selectDesktopModel, setPlaybackRate]);
+    if (rate !== null) setPlaybackRate(rate);
+  }, [patchEngineSettings, readerEngineId, selectBrowserModel, selectDesktopModel, setAsideStudioGlobals, setPlaybackRate]);
   const readerListening = useReaderListeningProfile({
     active: isReaderPage,
     loading: readerLibrary.loading,
@@ -227,22 +242,42 @@ export function useSynthesisSessionState({
     apply: applyListeningProfile,
     updateListening: readerLibrary.updateActiveListening,
   });
-  const { remember: rememberListening } = readerListening;
+  const { remember: rememberProfile } = readerListening;
+  const rememberListening = useCallback((change: Parameters<typeof rememberProfile>[0]) => {
+    if (!isReaderPage) return;
+    setAsideStudioGlobals();
+    rememberProfile(change);
+  }, [isReaderPage, rememberProfile, setAsideStudioGlobals]);
+
+  const putBackStudioGlobals = useEffectEvent(() => {
+    if (!studioGlobals) return;
+    setEngineSettings(studioGlobals.engineSettings);
+    setQuality(studioGlobals.quality);
+    setPlaybackRate(studioGlobals.playbackRate);
+    setStudioGlobals(null);
+  });
+  const readerBookHasProfile = readerLibrary.activeDocument?.listening !== undefined;
+  const readerBookId = readerLibrary.activeDocument?.id ?? null;
+  useEffect(() => {
+    if (isReaderPage && (readerBookHasProfile || readerLibrary.loading)) return;
+    const timer = window.setTimeout(() => putBackStudioGlobals(), 0);
+    return () => window.clearTimeout(timer);
+  }, [isReaderPage, readerBookHasProfile, readerBookId, readerLibrary.loading]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       const persisted: PersistedAppState = {
         model: activeModel,
         text,
-        quality,
+        quality: studioGlobals?.quality ?? quality,
         desktopModels: chosenDesktopModels,
       };
       persistAppState(persisted);
-      persistEngineSettings(engineSettings);
+      persistEngineSettings(studioGlobals?.engineSettings ?? engineSettings);
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeModel, chosenDesktopModels, engineSettings, quality, text]);
+  }, [activeModel, chosenDesktopModels, engineSettings, quality, studioGlobals, text]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -351,6 +386,7 @@ export function useSynthesisSessionState({
     // lookup under the wrong voice would discard the audio saved under its own.
     signatureParts: readerListening.settled ? readerSignatureParts : null,
     playbackRate: readerLibrary.activeDocument?.listening?.playbackRate ?? null,
+    keepMismatchedAudio: readerListening.pending,
     isGenerating: readerRuntime.isGenerating,
     generate: handleReaderGenerate,
     autoAdvance: readerViewPreferences.autoAdvance,

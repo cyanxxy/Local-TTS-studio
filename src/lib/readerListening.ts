@@ -56,8 +56,9 @@ export function buildListeningProfile(
 /** Whether a stored profile names an engine this build knows how to drive in a surface. */
 export function isSurfaceListeningEngine(profile: ReaderListeningProfile): profile is ReaderListeningProfile & {
   engine: SurfaceEngineId;
+  voice: string;
 } {
-  return isBrowserEngineId(profile.engine) || isDesktopInlineEngineId(profile.engine);
+  return (isBrowserEngineId(profile.engine) || isDesktopInlineEngineId(profile.engine)) && profile.voice !== undefined;
 }
 
 /**
@@ -66,7 +67,7 @@ export function isSurfaceListeningEngine(profile: ReaderListeningProfile): profi
  * of it, because it changes nothing audible about cached audio.
  */
 export function listeningMatches(
-  profile: ReaderListeningProfile & { engine: SurfaceEngineId },
+  profile: ReaderListeningProfile & { engine: SurfaceEngineId; voice: string },
   engine: SurfaceEngineId,
   settings: SurfaceEngineSettings,
   quality: number,

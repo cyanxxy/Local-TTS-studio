@@ -59,10 +59,11 @@ describe("useReaderListeningProfile", () => {
 
   it("is settled at once when the Reader already speaks the way the profile says", () => {
     const { result, apply } = setup({
-      document: withProfile({ engine: "kokoro", voice: "af_heart", playbackRate: 1.25, updatedAt: 1 }),
+      document: withProfile({ engine: "kokoro", voice: "af_heart", playbackRate: 1, updatedAt: 1 }),
       engineId: "kokoro",
     });
     expect(result.current.settled).toBe(true);
+    expect(result.current.pending).toBe(false);
     act(() => vi.advanceTimersByTime(10));
     expect(apply).not.toHaveBeenCalled();
   });
@@ -74,7 +75,7 @@ describe("useReaderListeningProfile", () => {
     expect(apply).not.toHaveBeenCalled();
 
     act(() => vi.advanceTimersByTime(1));
-    expect(apply).toHaveBeenCalledWith(profile);
+    expect(apply).toHaveBeenCalledWith({ engine: profile, playbackRate: 1.5 });
     expect(result.current.settled).toBe(true);
   });
 
@@ -96,6 +97,8 @@ describe("useReaderListeningProfile", () => {
       usable: false,
     });
     expect(result.current.settled).toBe(true);
+    // Not applied, but the book's audio is still its own: lookups must keep it.
+    expect(result.current.pending).toBe(true);
     act(() => vi.advanceTimersByTime(10));
     expect(apply).not.toHaveBeenCalled();
   });
@@ -107,7 +110,7 @@ describe("useReaderListeningProfile", () => {
     act(() => vi.advanceTimersByTime(1));
     rerender({ document: { ...withProfile(second), id: "other-book" }, engineId: "audio8" });
     act(() => vi.advanceTimersByTime(1));
-    expect(apply).toHaveBeenLastCalledWith(second);
+    expect(apply).toHaveBeenLastCalledWith({ engine: second, playbackRate: 1.25 });
   });
 
   it("remembers a change on the Reader page, filling in everything else from what is current", () => {
@@ -131,6 +134,38 @@ describe("useReaderListeningProfile", () => {
   it("builds on the stored profile when the engine is the same", () => {
     const { result, updateListening } = setup({
       document: withProfile({ engine: "kokoro", voice: "am_adam", playbackRate: 1.75, updatedAt: 1 }),
+      engineId: "kokoro",
+    });
+    act(() => result.current.remember({ voice: "af_nova" }));
+    expect(updateListening).toHaveBeenCalledWith(expect.objectContaining({
+      engine: "kokoro",
+      voice: "af_nova",
+      playbackRate: 1.75,
+    }));
+  });
+
+  it("remembers a speed alone without pinning the engine and voice that are global", () => {
+    const { result, updateListening } = setup({ document: withProfile(), engineId: "supertonic3" });
+    act(() => result.current.remember({ playbackRate: 1.5 }));
+    expect(updateListening).toHaveBeenCalledWith({ playbackRate: 1.5 });
+    expect(updateListening.mock.calls[0][0]).not.toHaveProperty("engine");
+    expect(updateListening.mock.calls[0][0]).not.toHaveProperty("voice");
+  });
+
+  it("applies a remembered speed on open, and only the speed", () => {
+    const { result, apply } = setup({
+      document: withProfile({ playbackRate: 1.75, updatedAt: 2 }),
+      engineId: "kokoro",
+    });
+    expect(result.current.settled).toBe(false);
+    act(() => vi.advanceTimersByTime(1));
+    expect(apply).toHaveBeenCalledWith({ engine: null, playbackRate: 1.75 });
+    expect(result.current.pending).toBe(false);
+  });
+
+  it("keeps a stored speed when a voice is chosen later", () => {
+    const { result, updateListening } = setup({
+      document: withProfile({ playbackRate: 1.75, updatedAt: 2 }),
       engineId: "kokoro",
     });
     act(() => result.current.remember({ voice: "af_nova" }));

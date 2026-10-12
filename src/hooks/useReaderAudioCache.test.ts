@@ -66,6 +66,7 @@ function setup(overrides: {
   loaded?: CachedReaderAudio | null;
   loadError?: Error;
   segments?: ReaderSegment[];
+  keepMismatchedAudio?: boolean;
 } = {}) {
   const library = {
     loadAudio: vi.fn(async () => {
@@ -99,6 +100,7 @@ function setup(overrides: {
       sectionText: document.text.slice(sections[0].start, sections[0].end),
       engineId: "kokoro",
       signatureParts: props.signatureParts,
+      keepMismatchedAudio: overrides.keepMismatchedAudio,
       library,
       player: { ...player, segments: props.segments, isSynthesisComplete: props.complete ?? false },
       ...callbacks,
@@ -182,6 +184,18 @@ describe("useReaderAudioCache", () => {
     await waitFor(() => expect(library.clearAudio).toHaveBeenCalledTimes(1));
     expect(player.restoreAudioCache).not.toHaveBeenCalled();
     expect(library.saveAudio).not.toHaveBeenCalled();
+  });
+
+  it("keeps audio saved under another signature while the book's remembered voice is pending", async () => {
+    const other = cachedAudio({ signature: "the-books-own-voice" });
+    const kept = setup({ loaded: other, keepMismatchedAudio: true });
+    await waitFor(() => expect(kept.library.loadAudio).toHaveBeenCalled());
+    await act(async () => { await Promise.resolve(); });
+    expect(kept.library.clearAudio).not.toHaveBeenCalled();
+    expect(kept.player.restoreAudioCache).not.toHaveBeenCalled();
+
+    const discarded = setup({ loaded: other });
+    await waitFor(() => expect(discarded.library.clearAudio).toHaveBeenCalled());
   });
 
   it("generates an unsaved section when the navigation asked to continue", async () => {

@@ -490,6 +490,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
     onModelChange,
     onVoiceChange,
     onQualityChange,
+    onPlaybackRateChange,
     onGenerate,
     onRetryLoad,
     onStop,
@@ -522,6 +523,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
     onModelChange: (model: "kokoro" | "supertonic") => void;
     onVoiceChange: (voice: string) => void;
     onQualityChange: (value: number) => void;
+    onPlaybackRateChange: (rate: number) => void;
     onGenerate: () => void;
     onRetryLoad: () => void;
     onStop: () => void;
@@ -587,6 +589,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
       <button type="button" onClick={() => onModelChange("supertonic")}>reader-model</button>
       <button type="button" onClick={() => onVoiceChange("af_bella")}>reader-voice</button>
       <button type="button" onClick={() => onQualityChange(6)}>reader-quality</button>
+      <button type="button" onClick={() => onPlaybackRateChange(1.5)}>reader-rate</button>
       <button type="button" onClick={onGenerate}>reader-generate</button>
       <button type="button" onClick={onRetryLoad}>reader-retry</button>
       <button type="button" onClick={onStop}>reader-stop</button>
@@ -1039,6 +1042,34 @@ describe("SynthesisApp", () => {
     const desktopBridge = () => Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
       configurable: true,
+    });
+
+    it("remembers a speed change alone, and keeps a Reader voice and speed out of Studio", async () => {
+      readerRoute();
+      const book = createReaderDocument({ id: "scoped-book", text: "A book to listen to. ".repeat(40) });
+      mock.readerLibrary.documents = [book];
+      mock.readerLibrary.activeDocument = book;
+      const view = render(<WebApp />);
+
+      fireEvent.click(await screen.findByRole("button", { name: "reader-rate" }));
+      expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1.5);
+      // Not pinned to the engine and voice that happen to be global.
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenCalledWith({ playbackRate: 1.5 });
+
+      fireEvent.click(screen.getByRole("button", { name: "reader-voice" }));
+      expect(mock.readerLibrary.updateActiveListening).toHaveBeenLastCalledWith(
+        expect.objectContaining({ engine: "kokoro", voice: "af_bella" }),
+      );
+      mock.persistEngineSettings.mockClear();
+      mock.player.setPlaybackRate.mockClear();
+
+      // Back in Studio, its own voice and speed return.
+      mock.routing = { ...mock.routing, activePage: "studio", isReaderPage: false, isStudioPage: true };
+      view.rerender(<WebApp />);
+      await waitFor(() => expect(mock.player.setPlaybackRate).toHaveBeenCalledWith(1));
+      await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+        expect.objectContaining({ kokoro: expect.objectContaining({ voice: mock.initialEngineSettings.kokoro.voice }) }),
+      ));
     });
 
     it("remembers the engine the listener picks for the open book", async () => {

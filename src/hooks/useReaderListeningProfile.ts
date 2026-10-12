@@ -8,7 +8,13 @@ import {
 import type { SurfaceEngineId, SurfaceEngineSettings } from "../models/registry";
 
 /** A stored profile whose engine this build can drive. */
-export type SurfaceListeningProfile = ReaderListeningProfile & { engine: SurfaceEngineId };
+export type SurfaceListeningProfile = ReaderListeningProfile & { engine: SurfaceEngineId; voice: string };
+
+/** What opening a book puts in place: the engine part, the speed, or both. */
+export interface ListeningTarget {
+  engine: SurfaceListeningProfile | null;
+  playbackRate: number | null;
+}
 
 /** The parts of a profile a listener can change. */
 export type ListeningChange = Partial<Omit<ReaderListeningProfile, "updatedAt" | "engine">> & {
@@ -29,7 +35,7 @@ interface Options {
   /** Whether the engine can run here (a desktop engine can be unavailable). */
   isEngineUsable: (engine: SurfaceEngineId) => boolean;
   /** Puts the Reader's engine, voice, language, quality and speed where the profile says. */
-  apply: (profile: SurfaceListeningProfile) => void;
+  apply: (target: ListeningTarget) => void;
   updateListening: (profile: Omit<ReaderListeningProfile, "updatedAt">) => void;
 }
 
@@ -40,6 +46,12 @@ export interface ReaderListening {
    * up a cached section under the wrong voice would discard it.
    */
   settled: boolean;
+  /**
+   * The book has a remembered engine or voice that is not what the Reader
+   * speaks with right now (still being applied, or its engine is not available
+   * yet). Audio saved for the book must not be discarded as stale meanwhile.
+   */
+  pending: boolean;
   /** Records a change the listener made on the Reader page for the open book. */
   remember: (change: ListeningChange) => void;
 }
@@ -65,41 +77,61 @@ export function useReaderListeningProfile({
   const documentId = document?.id ?? null;
   const stored = document?.listening;
   const profile = stored && isSurfaceListeningEngine(stored) ? stored : null;
-  const applicable = active && !loading && profile !== null && isEngineUsable(profile.engine);
-  const matches = profile === null
+  const targetRate = stored?.playbackRate ?? null;
+  const engineApplicable = active && !loading && profile !== null && isEngineUsable(profile.engine);
+  const engineMatches = profile === null
     || listeningMatches(profile, engineId, surfaceEngineSettings, quality);
-  const needsApply = applicable && !matches;
-  const key = documentId !== null && profile !== null ? `${documentId}:${profile.updatedAt}` : null;
+  const rateMatches = targetRate === null || targetRate === playbackRate;
+  const needsApply = active && !loading
+    && ((engineApplicable && !engineMatches) || (targetRate !== null && !rateMatches));
+  const key = documentId !== null && stored ? `${documentId}:${stored.updatedAt}` : null;
   // The profile that was last applied. Applying dispatches several state
   // changes at once; this marks the render after them as settled even if a
   // setting refused to move, so one stubborn input cannot hold the Reader.
   const [appliedKey, setAppliedKey] = useState<string | null>(null);
 
-  const applyProfile = useEffectEvent((target: SurfaceListeningProfile) => apply(target));
+  const applyProfile = useEffectEvent((target: ListeningTarget) => apply(target));
   useEffect(() => {
-    if (!needsApply || key === null || profile === null || appliedKey === key) return;
+    if (!needsApply || key === null || appliedKey === key) return;
     // Deferred past this commit's effects, so the Reader has already emptied
     // the player for the book it opened; applying earlier would let a change
     // of voice save the previous book's audio under the new one.
     const timer = window.setTimeout(() => {
-      applyProfile(profile);
+      applyProfile({
+        engine: engineApplicable && !engineMatches ? profile : null,
+        playbackRate: rateMatches ? null : targetRate,
+      });
       setAppliedKey(key);
     }, 0);
     return () => window.clearTimeout(timer);
-  }, [appliedKey, key, needsApply, profile]);
+  }, [appliedKey, engineApplicable, engineMatches, key, needsApply, profile, rateMatches, targetRate]);
 
   const settled = !needsApply || appliedKey === key;
+  // An engine that is not available yet (a desktop engine is detected after
+  // launch) is not applied, but the book's audio belongs to it all the same.
+  const pending = profile !== null && !engineMatches;
 
   const remember = useCallback((change: ListeningChange) => {
     if (!active || !document) return;
-    const engine = change.engine ?? engineId;
+    const { engine: changedEngine, playbackRate: changedRate, ...rest } = change;
+    const touchesEngine = changedEngine !== undefined || Object.keys(rest).length > 0;
+    if (!touchesEngine) {
+      // A speed alone is remembered alone: building a full profile here would
+      // pin the book to whatever engine and voice are global right now.
+      updateListening({ ...(stored ?? {}), playbackRate: changedRate });
+      return;
+    }
+    const engine = changedEngine ?? profile?.engine ?? engineId;
     const base = profile && profile.engine === engine
       ? profile
       : buildListeningProfile(engine, surfaceEngineSettings, quality, playbackRate, 0);
-    const { engine: _engine, ...rest } = change;
-    void _engine;
-    updateListening({ ...base, ...rest, engine });
-  }, [active, document, engineId, playbackRate, profile, quality, surfaceEngineSettings, updateListening]);
+    updateListening({
+      ...base,
+      ...rest,
+      engine,
+      playbackRate: changedRate ?? stored?.playbackRate ?? base.playbackRate,
+    });
+  }, [active, document, engineId, playbackRate, profile, quality, stored, surfaceEngineSettings, updateListening]);
 
-  return { settled, remember };
+  return { settled, pending, remember };
 }
