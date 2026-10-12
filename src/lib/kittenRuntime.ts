@@ -10,8 +10,7 @@
  * 600 samples each) out.
  */
 import * as ort from "onnxruntime-web";
-import type { InferenceBackend } from "../types";
-import { chunkWithConstraintsDetailed, type TextChunk } from "./chunking";
+import { chunkKittenText, KITTEN_CACHE_NAME, KITTEN_MAX_CHUNK_CHARACTERS } from "./phonemeModels";
 import { phonemizeKeepingPunctuation, spellOutCurrency, type EspeakPhonemize, type PhonemizedText } from "./espeakPhonemizer";
 import {
   KITTEN_STYLE_DIMENSION,
@@ -30,12 +29,9 @@ import {
   type WordTiming,
 } from "./styleTtsRuntime";
 
+export { chunkKittenText, KITTEN_CACHE_NAME, KITTEN_MAX_CHUNK_CHARACTERS };
 export const KITTEN_SAMPLE_RATE = STYLE_TTS_SAMPLE_RATE;
-/** Cache Storage for the pinned files; "transformers" keeps it inside the app's clear-cache contract. */
-export const KITTEN_CACHE_NAME = "transformers-cache-kitten-v1";
 export const KITTEN_FRAME_SAMPLES = 600;
-/** Upstream chunk_text's limit, which also keeps the style row inside the 400-row tables. */
-export const KITTEN_MAX_CHUNK_CHARACTERS = 400;
 
 // TextCleaner from onnx_model.py, character for character. The straight double
 // quote and the apostrophe each appear twice; as in the Python dict, the later
@@ -84,16 +80,6 @@ export function tokenizeKittenPhonemes(phonemes: string): KittenTokens {
   ids.push(END_ID, PAD_ID);
   phonemeOffsets.push(-1, -1);
   return { ids, phonemeOffsets };
-}
-
-/**
- * Plan a GENERATE text into chunks. The Reader's passage preview must use this
- * same function so its ranges match the worker's AUDIO_CHUNKs.
- */
-export function chunkKittenText(text: string, backend: InferenceBackend | null): TextChunk[] {
-  return chunkWithConstraintsDetailed(text, backend === "webgpu"
-    ? { minCharacters: 80, maxCharacters: KITTEN_MAX_CHUNK_CHARACTERS }
-    : { minCharacters: 40, maxCharacters: 240 });
 }
 
 /**
