@@ -22,7 +22,7 @@ import {
   type PersistedAppState,
 } from "../lib/appState";
 import type { AppPage } from "../lib/appRouting";
-import { getUnsupportedModelMessage, getWebGPUUnavailableModelMessages } from "../lib/browserSupport";
+import { getUnsupportedModelMessage, getWebGPUUnavailableModelMessages, withoutUnavailableModels } from "../lib/browserSupport";
 import {
   engineIsWasmOnly,
   getEngine,
@@ -60,6 +60,21 @@ export function useSynthesisSessionState({
   const environment = useAppEnvironment(enableDesktopRuntimes);
   const { desktopRuntimesAvailable, browserSupport, debugProfiling, webgpuStatus } = environment;
   const localInferenceSupported = browserSupport.isSupported;
+  // Why each browser model cannot run on this device. A model that needs WebGPU
+  // is ruled out once WebGPU is known to be missing, so no surface selects it
+  // and no worker is started for it.
+  const webgpuUnavailableModels = useMemo(
+    () => getWebGPUUnavailableModelMessages(webgpuStatus === null ? null : webgpuStatus.available),
+    [webgpuStatus],
+  );
+  const unavailableModels = useMemo(
+    () => ({ ...browserSupport.unsupportedModelMessages, ...webgpuUnavailableModels }),
+    [browserSupport.unsupportedModelMessages, webgpuUnavailableModels],
+  );
+  const runnableBrowserSupport = useMemo(
+    () => withoutUnavailableModels(browserSupport, unavailableModels),
+    [browserSupport, unavailableModels],
+  );
   const { preferences, updatePreferences, resetPreferences } = useAppPreferences();
   const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const qwen3Settings = useQwen3Runtime();
@@ -136,6 +151,7 @@ export function useSynthesisSessionState({
   const clearExportError = useCallback(() => setExportError(null), []);
   const {
     activeModel,
+    chosenModel,
     desktopModels: { studio: studioDesktopModel, reader: readerDesktopModel },
     chosenDesktopModels,
     engineIds: { studio: studioEngineId, reader: readerEngineId },
@@ -153,7 +169,7 @@ export function useSynthesisSessionState({
     desktopRuntimesAvailable,
     createSupertonic3Worker,
     enableDesktopRuntimes,
-    browserSupport,
+    browserSupport: runnableBrowserSupport,
     debugProfiling,
     initialState,
     text: synthesisText,
@@ -173,7 +189,7 @@ export function useSynthesisSessionState({
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       const persisted: PersistedAppState = {
-        model: activeModel,
+        model: chosenModel,
         text,
         quality,
         desktopModels: chosenDesktopModels,
@@ -183,7 +199,7 @@ export function useSynthesisSessionState({
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
-  }, [activeModel, chosenDesktopModels, engineSettings, quality, text]);
+  }, [chosenDesktopModels, chosenModel, engineSettings, quality, text]);
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
@@ -409,13 +425,9 @@ export function useSynthesisSessionState({
     ? webgpuStatus?.message ?? null
     : null;
   const showSingleThreadedNote = showWasmBadge && !window.crossOriginIsolated;
-  const unavailableModels = useMemo(() => ({
-    ...browserSupport.unsupportedModelMessages,
-    ...getWebGPUUnavailableModelMessages(webgpuStatus === null ? null : webgpuStatus.available),
-  }), [browserSupport.unsupportedModelMessages, webgpuStatus]);
+  // A chosen model the device cannot run explains itself while another runs in its place.
   const activeModelSupportMessage = getUnsupportedModelMessage(activeModel, browserSupport)
-    ?? unavailableModels[activeModel]
-    ?? null;
+    ?? (webgpuUnavailableModels[chosenModel] ?? null);
 
   const handleTogglePlayback = useCallback(() => void togglePlay(), [togglePlay]);
   useAppShortcuts({

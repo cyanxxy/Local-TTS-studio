@@ -115,3 +115,12 @@ export function getWebGPUUnavailableModelMessages(
     ]),
   );
 }
+
+/** `support` without the models in `unavailable`, which this device cannot run. */
+export function withoutUnavailableModels(
+  support: LocalBrowserSupport,
+  unavailable: Partial<Record<ModelType, string>>,
+): LocalBrowserSupport {
+  const supportedModels = support.supportedModels.filter((model) => !(model in unavailable));
+  return supportedModels.length === support.supportedModels.length ? support : { ...support, supportedModels };
+}

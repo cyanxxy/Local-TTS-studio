@@ -133,14 +133,18 @@ function createPlayer() {
   } as unknown as UseAudioPlayerReturn;
 }
 
-function renderOrchestrator(model: BrowserEngineId, engineSettings: OrchestratedEngineSettings = ENGINE_SETTINGS) {
+function renderOrchestrator(
+  model: BrowserEngineId,
+  engineSettings: OrchestratedEngineSettings = ENGINE_SETTINGS,
+  support: LocalBrowserSupport = SUPPORT,
+) {
   const player = createPlayer();
   const setShowPlayer = vi.fn();
-  const view = renderHook(() => useEngineOrchestrator({
+  const view = renderHook(({ browserSupport }: { browserSupport: LocalBrowserSupport }) => useEngineOrchestrator({
     surface: "studio",
     desktopRuntimesAvailable: false,
     enableDesktopRuntimes: false,
-    browserSupport: SUPPORT,
+    browserSupport,
     debugProfiling: false,
     initialState: { model, desktopModels: { studio: null, reader: null } },
     text: TEXT,
@@ -150,7 +154,7 @@ function renderOrchestrator(model: BrowserEngineId, engineSettings: Orchestrated
     setShowPlayer,
     beforeReaderAudioChange: vi.fn(),
     onEngineChange: vi.fn(),
-  }));
+  }), { initialProps: { browserSupport: support } });
   const worker = (engine: string) => ScriptedWorker.instances.filter((instance) => instance.engine === engine).at(-1);
   return { ...view, player, setShowPlayer, worker };
 }
@@ -257,6 +261,38 @@ describe("Kitten, Paradee and Piper through the engine orchestrator", () => {
 
     act(() => worker("piper")?.emit({ type: "LOAD_PROGRESS", percent: 100 }));
     expect(result.current.runtimes.piper.modelState).toMatchObject({ ready: true, loading: false, downloadProgress: 100, backend: "wasm" });
+  });
+
+  describe("a chosen engine the device cannot run", () => {
+    const WITHOUT_CHATTERBOX: LocalBrowserSupport = {
+      ...SUPPORT,
+      supportedModels: SUPPORT.supportedModels.filter((model) => model !== "chatterbox"),
+    };
+
+    it("runs the default engine instead, starts no worker for the chosen one, and keeps the choice", async () => {
+      const { result, rerender, worker } = renderOrchestrator("chatterbox", ENGINE_SETTINGS, WITHOUT_CHATTERBOX);
+
+      expect(result.current.activeModel).toBe("kokoro");
+      expect(result.current.chosenModel).toBe("chatterbox");
+      expect(result.current.engineIds).toEqual({ studio: "kokoro", reader: "kokoro" });
+      await waitFor(() => expect(result.current.runtimes.kokoro.modelState.ready).toBe(true));
+      expect(worker("chatterbox")).toBeUndefined();
+
+      // Once the device turns out to support it, the saved choice is what runs.
+      rerender({ browserSupport: SUPPORT });
+      expect(result.current.activeModel).toBe("chatterbox");
+      await waitFor(() => expect(result.current.runtimes.chatterbox.modelState.ready).toBe(true));
+      expect(worker("chatterbox")?.loads).toHaveLength(1);
+    });
+
+    it("does not select it when the picker asks for it", () => {
+      const { result, worker } = renderOrchestrator("kokoro", ENGINE_SETTINGS, WITHOUT_CHATTERBOX);
+
+      act(() => result.current.selectBrowserModel("studio", "chatterbox"));
+
+      expect(result.current.chosenModel).toBe("kokoro");
+      expect(worker("chatterbox")).toBeUndefined();
+    });
   });
 
   describe("chatterbox", () => {

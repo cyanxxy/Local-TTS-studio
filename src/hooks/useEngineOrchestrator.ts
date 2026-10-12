@@ -69,8 +69,10 @@ interface Options {
 }
 
 export interface UseEngineOrchestratorReturn {
-  /** The browser engine both surfaces fall back to. */
+  /** The browser engine both surfaces fall back to: the chosen one while this device can run it. */
   activeModel: BrowserEngineId;
+  /** The browser engine the user chose, runnable or not; this is what to persist. */
+  chosenModel: BrowserEngineId;
   /** Each surface's effective desktop engine: its saved choice while that engine is available. */
   desktopModels: Readonly<Record<Surface, DesktopInlineEngineId | null>>;
   /** Each surface's saved desktop engine, available or not, for persistence. */
@@ -136,11 +138,13 @@ export function useEngineOrchestrator({
     qwen3: qwen3Settings.available,
   }), [desktopRuntimesAvailable, qwen3Settings.available, supertonic3Available]);
 
-  const [activeModel, setActiveModel] = useState<BrowserEngineId>(() => (
-    isModelSupportedInBrowser(initialState.model, browserSupport)
-      ? initialState.model
-      : getDefaultSupportedModel(browserSupport)
-  ));
+  // The browser model the user chose, kept even while it cannot run (WebGPU
+  // missing, say) so it returns on a later launch. The model that actually
+  // runs is derived from what the device supports now.
+  const [chosenModel, setChosenModel] = useState<BrowserEngineId>(initialState.model);
+  const activeModel = isModelSupportedInBrowser(chosenModel, browserSupport)
+    ? chosenModel
+    : getDefaultSupportedModel(browserSupport);
   // The desktop engine each surface last chose, persisted across launches. A
   // surface uses it only while that engine is available and otherwise runs the
   // browser model, without forgetting the choice for when it returns.
@@ -289,7 +293,7 @@ export function useEngineOrchestrator({
     retireAllAudio();
     setChosenDesktopModels((current) => ({ ...current, [target]: null }));
     if (model !== activeModel) {
-      setActiveModel(model);
+      setChosenModel(model);
       loadModel(model);
     }
     onEngineChange();
@@ -362,6 +366,7 @@ export function useEngineOrchestrator({
 
   return {
     activeModel,
+    chosenModel,
     desktopModels,
     chosenDesktopModels,
     engineIds,

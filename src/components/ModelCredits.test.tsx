@@ -28,8 +28,9 @@ describe("ModelCredits", () => {
       "href",
       "https://creativecommons.org/licenses/by/4.0/",
     );
-    const libritts = PIPER_VOICES.find((voice) => voice.id === "en_US-libritts-high")!;
-    expect(piper).toHaveTextContent(libritts.attribution);
+    expect(piper).toHaveTextContent("by Heiga Zen, Viet Dang");
+    expect(piper).toHaveTextContent("trained from scratch on the train-clean-360 subset");
+    expect(piper).toHaveTextContent("so it is derived from it");
   });
 
   it("credits Chatterbox Turbo and says voice clips stay on the device", () => {

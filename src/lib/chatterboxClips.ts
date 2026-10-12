@@ -3,6 +3,7 @@ import {
   type ChatterboxWorkerOutMessage,
 } from "./chatterboxProtocol";
 import {
+  CHATTERBOX_SAMPLE_RATE,
   ChatterboxReferenceError,
   decodeChatterboxWav,
   digestChatterboxReference,
@@ -26,9 +27,13 @@ export interface ChatterboxClip {
   /** The engine `voice` value. */
   id: string;
   name: string;
-  /** What the worker will keep of the clip (at most 10 s). */
+  /** The length of the clip, at most 10 s. */
   durationSec: number;
-  /** Mono PCM as decoded; the worker resamples, trims and normalises it. */
+  /**
+   * Mono PCM already prepared for the model: resampled to 24 kHz, trimmed to
+   * the speech and its 10 s window, and level-normalised. The worker accepts
+   * it as is, and the full recording is not kept.
+   */
   audio: Float32Array;
   samplingRate: number;
 }
@@ -79,15 +84,14 @@ export async function addChatterboxClipFromWav(buffer: ArrayBuffer, name: string
   } catch {
     throw new ChatterboxReferenceError("That file is not a WAV recording this app can read.");
   }
-  // Prepared here only to validate; the worker prepares the clip again from the original.
   const prepared = prepareChatterboxReference(decoded.audio, decoded.samplingRate);
   const digest = await digestChatterboxReference(prepared.audio);
   const clip: ChatterboxClip = {
     id: chatterboxClipVoice(digest.slice(0, 16), name),
     name,
     durationSec: prepared.durationSec,
-    audio: decoded.audio,
-    samplingRate: decoded.samplingRate,
+    audio: prepared.audio,
+    samplingRate: CHATTERBOX_SAMPLE_RATE,
   };
   clips.set(clip.id, clip);
   publish();
@@ -128,7 +132,7 @@ export function ensureChatterboxReference(worker: Worker, referenceId: string): 
     const onError = () => settle(() => reject(new Error("Chatterbox stopped while loading the voice clip.")));
     worker.addEventListener("message", onMessage as EventListener);
     worker.addEventListener("error", onError);
-    // A copy: the transfer empties it, and the clip must stay for a replacement worker.
+    // A copy of the small prepared clip: the transfer empties it, and the clip must stay for a replacement worker.
     const audio = clip.audio.slice();
     worker.postMessage(
       { type: "SET_REFERENCE", referenceId, audio, samplingRate: clip.samplingRate },

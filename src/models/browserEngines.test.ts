@@ -10,6 +10,7 @@ import {
   joinPiperVoice,
   piperAccentLabel,
   piperEngine,
+  piperVoiceAttribution,
   piperQualityLabel,
   piperVoiceDownloadBytes,
   splitPiperVoice,
@@ -245,7 +246,15 @@ describe("Piper", () => {
       licenseUrl: "https://creativecommons.org/licenses/by/4.0/",
       sourceUrl: "https://www.openslr.org/60/",
     });
-    expect(libritts?.note).toBe(PIPER_VOICES.find((voice) => voice.id === LIBRITTS)?.attribution);
+    expect(libritts?.author).toContain("Heiga Zen");
+    expect(libritts?.note).toBe(piperVoiceAttribution(PIPER_VOICES.find((voice) => voice.id === LIBRITTS)!));
+    expect(libritts?.note).toContain("LibriTTS: A Corpus Derived from LibriSpeech for Text-to-Speech");
+    expect(libritts?.note).toContain("CC BY 4.0");
+    expect(libritts?.note).toContain("https://www.openslr.org/60/");
+    expect(libritts?.note).toContain("derived from it");
+    // Voices on other datasets keep the catalog's line.
+    const kristin = PIPER_VOICES.find((voice) => voice.id === "en_US-kristin-medium")!;
+    expect(piperVoiceAttribution(kristin)).toBe(kristin.attribution);
     // Every catalog voice appears in the credits by name, so none is used uncredited.
     const credited = datasets.map((credit) => credit.name).join(", ");
     for (const voice of PIPER_VOICES) expect(credited, voice.id).toContain(voice.name);

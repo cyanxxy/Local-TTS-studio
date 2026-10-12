@@ -97,7 +97,27 @@ function voiceEntry(voice: PiperVoiceEntry): EngineVoice {
   };
 }
 
-/** One credit per training dataset, with the catalog's own attribution line. */
+const LIBRITTS_URL = "https://www.openslr.org/60/";
+const LIBRITTS_AUTHORS = "Heiga Zen, Viet Dang, Rob Clark, Yu Zhang, Ron J. Weiss, Ye Jia, Zhifeng Chen and Yonghui Wu";
+
+/**
+ * Full CC BY 4.0 attribution for the LibriTTS voice: title, creators, source,
+ * licence, and that the voice is a model trained on (derived from) the corpus.
+ * The training facts are the voice's MODEL_CARD (trained from scratch on
+ * train-clean-360 of http://www.openslr.org/60/, CC BY 4.0).
+ */
+const LIBRITTS_ATTRIBUTION = `“LibriTTS: A Corpus Derived from LibriSpeech for Text-to-Speech” by ${LIBRITTS_AUTHORS} `
+  + `(${LIBRITTS_URL}) is licensed under CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). `
+  + "The LibriTTS voice in this app is a Piper speech model trained from scratch on the train-clean-360 subset of "
+  + "that corpus, so it is derived from it. The corpus recordings are not included or redistributed; "
+  + "the model was trained on them and generates new speech.";
+
+/** The attribution to show beside a voice: the full CC BY notice where the licence requires one. */
+export function piperVoiceAttribution(voice: PiperVoiceEntry): string {
+  return voice.datasetUrl?.replace(/^http:/, "https:") === LIBRITTS_URL ? LIBRITTS_ATTRIBUTION : voice.attribution;
+}
+
+/** One credit per training dataset, with its attribution. */
 function datasetCredits(): EngineCredit[] {
   const byDataset = new Map<string, PiperVoiceEntry[]>();
   for (const voice of PIPER_VOICES) {
@@ -106,13 +126,15 @@ function datasetCredits(): EngineCredit[] {
   }
   return [...byDataset.values()].map((voices) => {
     const [first] = voices;
+    const libritts = first.datasetUrl?.replace(/^http:/, "https:") === LIBRITTS_URL;
     return {
       name: [...new Set(voices.map((voice) => voice.name))].join(", "),
+      ...(libritts ? { author: LIBRITTS_AUTHORS } : {}),
       license: first.license.id,
       ...(first.license.url ? { licenseUrl: first.license.url } : {}),
       // The catalog records openslr.org with http, which the site also serves over https.
       sourceUrl: (first.datasetUrl ?? `https://huggingface.co/${PIPER_CATALOG.repo}`).replace(/^http:\/\//, "https://"),
-      note: first.attribution,
+      note: piperVoiceAttribution(first),
     };
   });
 }

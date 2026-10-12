@@ -34,7 +34,11 @@ describe("PiperVoiceBrowser", () => {
 
     const licence = screen.getByRole("link", { name: /CC-BY-4\.0/ });
     expect(licence).toHaveAttribute("href", "https://creativecommons.org/licenses/by/4.0/");
-    expect(screen.getByText(/LibriTTS: Piper voice .* licensed CC BY 4\.0/)).toBeInTheDocument();
+    const notice = screen.getByText(/LibriTTS: A Corpus Derived from LibriSpeech/);
+    expect(notice).toHaveTextContent("Heiga Zen");
+    expect(notice).toHaveTextContent("https://www.openslr.org/60/");
+    expect(notice).toHaveTextContent("licensed under CC BY 4.0");
+    expect(notice).toHaveTextContent("derived from it");
   });
 
   it("groups the catalog by accent, lists quality, size and licence, and picks a voice", () => {

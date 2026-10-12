@@ -74,6 +74,15 @@ describe("chatterbox clips", () => {
     unsubscribe();
   });
 
+  it("keeps only the prepared window of a long, high-rate recording", async () => {
+    const clip = await addChatterboxClipFromWav(wav(30, 48_000), "Long.wav");
+
+    expect(clip.samplingRate).toBe(24_000);
+    expect(clip.audio.length).toBeLessThanOrEqual(10 * 24_000);
+    expect(clip.durationSec).toBeLessThanOrEqual(10);
+    expect(clip.audio.length / clip.samplingRate).toBeCloseTo(clip.durationSec, 6);
+  });
+
   it("explains why a file cannot be a reference voice", async () => {
     await expect(addChatterboxClipFromWav(new ArrayBuffer(16), "notes.txt")).rejects.toThrow("not a WAV recording");
     await expect(addChatterboxClipFromWav(wav(1), "short.wav")).rejects.toBeInstanceOf(ChatterboxReferenceError);

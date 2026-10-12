@@ -3,6 +3,7 @@ import {
   getDefaultSupportedModel,
   getLocalBrowserSupport,
   getWebGPUUnavailableModelMessages,
+  withoutUnavailableModels,
   IOS_KOKORO_UNSUPPORTED_MESSAGE,
   IOS_PARTIAL_SUPPORT_MESSAGE,
   isIOSBrowser,
@@ -88,5 +89,16 @@ describe("browserSupport", () => {
     expect(getWebGPUUnavailableModelMessages(false)).toEqual({
       chatterbox: "Chatterbox Turbo needs WebGPU, which this device does not provide.",
     });
+  });
+
+  it("drops the models a device cannot run and keeps the rest of the support as it was", () => {
+    const support = getLocalBrowserSupport(undefined, true);
+
+    expect(withoutUnavailableModels(support, {})).toBe(support);
+    expect(withoutUnavailableModels(support, { chatterbox: "needs WebGPU" })).toEqual({
+      ...support,
+      supportedModels: ["kokoro", "kitten", "paradee", "piper"],
+    });
+    expect(withoutUnavailableModels(support, { supertonic: "not offered here" })).toBe(support);
   });
 });

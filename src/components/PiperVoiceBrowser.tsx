@@ -9,6 +9,7 @@ import {
 } from "../lib/piperVoices";
 import {
   joinPiperVoice,
+  piperVoiceAttribution,
   piperAccentLabel,
   piperQualityLabel,
   piperVoiceDownloadBytes,
@@ -178,7 +179,7 @@ export function PiperVoiceBrowser({ voice, onVoiceChange, modelState }: PiperVoi
               )
               : selected.license.id}
             <br />
-            {selected.attribution}
+            {piperVoiceAttribution(selected)}
           </p>
         </div>
       )}

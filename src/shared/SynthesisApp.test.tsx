@@ -319,9 +319,13 @@ vi.mock("../lib/appState", () => ({
 
 vi.mock("../lib/browserSupport", () => ({
   getLocalBrowserSupport: () => mock.browserSupport,
-  getDefaultSupportedModel: () => mock.browserSupport.supportedModels[0],
+  getDefaultSupportedModel: (support: { supportedModels: readonly string[] }) => support.supportedModels[0],
   getUnsupportedModelMessage: (model: string) => mock.browserSupport.unsupportedModelMessages[model] ?? null,
-  isModelSupportedInBrowser: (model: string) => mock.browserSupport.supportedModels.includes(model),
+  isModelSupportedInBrowser: (model: string, support: { supportedModels: readonly string[] }) => support.supportedModels.includes(model),
+  withoutUnavailableModels: (
+    support: { supportedModels: readonly string[] },
+    unavailable: Record<string, string>,
+  ) => ({ ...support, supportedModels: support.supportedModels.filter((model) => !(model in unavailable)) }),
   getWebGPUUnavailableModelMessages: (available: boolean | null) => (
     available === false ? { chatterbox: "Chatterbox Turbo needs WebGPU, which this device does not provide." } : {}
   ),
@@ -1320,6 +1324,7 @@ describe("SynthesisApp", () => {
   it("shows Chatterbox's own settings in Studio and saves a change to them", async () => {
     mock.browserSupport = { ...mock.browserSupport, supportedModels: ["kokoro", "chatterbox"] };
     mock.initialAppState = { ...mock.initialAppState, model: "chatterbox" };
+    mock.getWebGPUStatus.mockResolvedValue({ available: true, reason: null, message: null });
     mock.modelLoader = {
       ...mock.modelLoader,
       states: { kokoro: mock.readyState, supertonic: mock.readyState, chatterbox: mock.readyState },
@@ -1349,6 +1354,26 @@ describe("SynthesisApp", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "script" }), { target: { value: "Hello " } });
     fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
     expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("Hello [laugh]");
+  });
+
+  it("runs the default model when the saved Chatterbox cannot run without WebGPU, and keeps the saved choice", async () => {
+    mock.browserSupport = { ...mock.browserSupport, supportedModels: ["kokoro", "chatterbox"] };
+    mock.initialAppState = { ...mock.initialAppState, model: "chatterbox" };
+    mock.getWebGPUStatus.mockResolvedValue({ available: false, reason: null, message: "No GPU available" });
+    mock.modelLoader = {
+      ...mock.modelLoader,
+      states: { kokoro: mock.readyState, supertonic: mock.readyState, chatterbox: mock.readyState },
+    };
+    render(<WebApp />);
+
+    await waitFor(() => expect(screen.getByText("No GPU available")).toBeInTheDocument());
+    await waitFor(() => expect(mock.persistAppState).toHaveBeenCalled());
+
+    // Kokoro runs in its place, so Chatterbox's own controls are absent...
+    expect(screen.queryByLabelText(/Variation/)).not.toBeInTheDocument();
+    expect(mock.modelLoader.loadModel).not.toHaveBeenCalledWith("chatterbox");
+    // ...but the saved choice survives for a later launch.
+    expect(mock.persistAppState.mock.calls.every(([state]) => state.model === "chatterbox")).toBe(true);
   });
 
   it("names every browser model the build ships in the footer", () => {
