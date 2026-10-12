@@ -179,6 +179,25 @@ describe("ReaderLibraryDatabase", () => {
       expect(database.getDocument("book")).not.toHaveProperty("progress.textOffset");
     });
 
+    it("stores only the known fields and bounds ids", () => {
+      database.saveDocument(createDocument("book", 100));
+      database.saveProgress("book", { ...progress(500), extra: "x".repeat(100_000) });
+      const raw = new DatabaseSync(path.join(directory, "reader-library.sqlite3"));
+      const row = raw.prepare("SELECT progress_json FROM document_progress").get() as { progress_json: string };
+      raw.close();
+      expect(Object.keys(JSON.parse(row.progress_json)).sort()).toEqual(
+        ["chapterId", "percent", "positionSec", "sectionId", "textOffset", "totalDurationSec", "updatedAt"],
+      );
+      expect(() => database.saveProgress("book", { ...progress(600), sectionId: "s".repeat(600) })).toThrow(TypeError);
+    });
+
+    it("does not let a future-dated row block later writes", () => {
+      database.saveDocument(createDocument("book", 100));
+      database.saveProgress("book", progress(Date.now() + 10 * 365 * 24 * 3600 * 1000, 90));
+      database.saveProgress("book", progress(Date.now() + 5000, 91));
+      expect(database.getDocument("book")?.progress).toMatchObject({ textOffset: 91 });
+    });
+
     it("rejects malformed progress", () => {
       database.saveDocument(createDocument("book", 100));
       expect(() => database.saveProgress("book", { updatedAt: "x" })).toThrow(TypeError);

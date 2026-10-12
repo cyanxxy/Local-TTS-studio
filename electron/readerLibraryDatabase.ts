@@ -216,14 +216,30 @@ function parseCachedAudio(value: unknown): {
   return { audio, chunks, metadataJson };
 }
 
+/** A progress timestamp may lead the clock only by the renderer's monotonic bumps. */
+const MAX_PROGRESS_FUTURE_MS = 2_000;
+
+function optionalId(value: unknown, label: string): string | null {
+  if (value === null || value === undefined) return null;
+  return requiredString(value, label, 512);
+}
+
+/**
+ * Keeps only the known progress fields, so the row cannot grow with whatever a
+ * caller attaches. A timestamp from the far future would win every later
+ * comparison and block real writes, so it is clamped to just ahead of now.
+ */
 function parseProgress(value: unknown): Record<string, unknown> {
   if (!isRecord(value)) throw new TypeError("Reader progress must be an object.");
-  finiteNumber(value.updatedAt, "Reader progress updatedAt");
-  finiteNumber(value.positionSec, "Reader progress positionSec");
-  finiteNumber(value.totalDurationSec, "Reader progress totalDurationSec");
-  finiteNumber(value.textOffset, "Reader progress textOffset");
-  finiteNumber(value.percent, "Reader progress percent");
-  return value;
+  return {
+    positionSec: finiteNumber(value.positionSec, "Reader progress positionSec"),
+    totalDurationSec: finiteNumber(value.totalDurationSec, "Reader progress totalDurationSec"),
+    textOffset: finiteNumber(value.textOffset, "Reader progress textOffset"),
+    chapterId: optionalId(value.chapterId, "Reader progress chapterId"),
+    sectionId: optionalId(value.sectionId, "Reader progress sectionId"),
+    percent: finiteNumber(value.percent, "Reader progress percent"),
+    updatedAt: Math.min(finiteNumber(value.updatedAt, "Reader progress updatedAt"), Date.now() + MAX_PROGRESS_FUTURE_MS),
+  };
 }
 
 /**
