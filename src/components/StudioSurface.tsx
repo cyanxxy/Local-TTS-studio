@@ -1,13 +1,20 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { AudioLines, MessagesSquare } from "lucide-react";
+import { useGenerationHistory } from "../hooks/useGenerationHistory";
+import { useStudioHistory } from "../hooks/useStudioHistory";
+import { useStudioTakes } from "../hooks/useStudioTakes";
 import { getEngine } from "../models/registry";
 import { useSynthesisSession } from "../shared/synthesisSessionContext";
 import { AudioPlayer } from "./AudioPlayer";
 import { Controls } from "./Controls";
 import { ControlsProvider } from "./ControlsContext";
 import { CreatorToolsPanel } from "./CreatorToolsPanel";
+import { DialogueStudio } from "./DialogueStudio";
 import { DownloadProgress } from "./DownloadProgress";
 import { ModelToggle } from "./ModelToggle";
 import { SettingsPanel } from "./SettingsPanel";
+import { StudioHistoryPanel } from "./StudioHistoryPanel";
+import { StudioTakesPanel } from "./StudioTakesPanel";
 import { TextInput } from "./TextInput";
 import { VoiceSelector } from "./VoiceSelector";
 import { renderSurfaceEngineSettings } from "./surfaceEngineSettings";
@@ -26,12 +33,37 @@ export function StudioSurface() {
     ...(studio.desktopModel === "supertonic3" ? { supertonic3: engines.runtimes.supertonic3.modelState } : {}),
   }), [engines.runtimes.supertonic3.modelState, kokoroState, studio.desktopModel, supertonicState]);
   const hasAudio = player.state.totalDuration > 0;
+  const [mode, setMode] = useState<"single" | "dialogue">("single");
+  const history = useGenerationHistory();
+  const historyActions = useStudioHistory({ session, history });
+  const takes = useStudioTakes(session);
 
   return (
     <>
       <DownloadProgress states={downloadStates} />
 
-      <div className="mt-6 surface rounded-[24px]">
+      <div role="group" aria-label="Studio mode" className="mt-6 flex w-fit gap-1 rounded-full bg-text-primary/[0.06] p-1">
+        {([
+          { id: "single", label: "Single voice", Icon: AudioLines },
+          { id: "dialogue", label: "Dialogue", Icon: MessagesSquare },
+        ] as const).map(({ id, label, Icon }) => (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={mode === id}
+            onClick={() => setMode(id)}
+            className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
+              mode === id ? "bg-panel text-text-primary shadow-glass-sm" : "text-text-secondary hover:text-text-primary"
+            }`}
+          >
+            <Icon size={13} aria-hidden="true" />
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {mode === "dialogue" ? <DialogueStudio /> : (
+      <div className="mt-4 surface rounded-[24px]">
         <div className="grid grid-cols-1 md:grid-cols-5">
           {/* Left: text input */}
           <div className="flex min-h-[320px] flex-col border-border/40 p-4 sm:min-h-[360px] sm:p-6 md:col-span-3 md:border-r">
@@ -115,8 +147,19 @@ export function StudioSurface() {
           </div>
         )}
       </div>
+      )}
 
-      {!usesDesktopModel && (
+      {mode === "single" && (
+        <div className="mt-4">
+          <StudioTakesPanel
+            takes={takes}
+            disabled={runtime.isGenerating}
+            activeSegmentId={player.state.activeSegmentId}
+          />
+        </div>
+      )}
+
+      {mode === "single" && !usesDesktopModel && (
         <div className="mt-4">
           <SettingsPanel
             activeModel={engines.activeModel}
@@ -124,6 +167,23 @@ export function StudioSurface() {
             status={engines.browser.cacheStatus}
             onClearCache={engines.browser.clearCache}
             onRedownloadActive={engines.browser.redownloadActiveModel}
+          />
+        </div>
+      )}
+
+      {mode === "single" && (
+        <div className="mt-4">
+          <StudioHistoryPanel
+            entries={history.entries}
+            usage={history.usage}
+            loading={history.loading}
+            error={historyActions.error ?? history.error}
+            onReplay={(id) => void historyActions.replay(id)}
+            onDownload={(entry) => void historyActions.download(entry)}
+            onReuse={(id) => void historyActions.reuse(id)}
+            onSetFavorite={history.setFavorite}
+            onDelete={history.deleteEntry}
+            onClear={history.clear}
           />
         </div>
       )}
