@@ -496,6 +496,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
     onNavigateToOffset,
     onEditStart,
     onEditEnd,
+    onAutoAdvanceHoldChange,
     canGenerate,
     isGenerating,
     modelReady,
@@ -527,6 +528,7 @@ vi.mock("../components/AdvancedReaderPage", () => {
     onNavigateToOffset?: (offset: number, positionSec?: number) => void;
     onEditStart?: () => void;
     onEditEnd?: () => void;
+    onAutoAdvanceHoldChange?: (held: boolean) => void;
     canGenerate?: boolean;
     isGenerating?: boolean;
     modelReady?: boolean;
@@ -562,6 +564,9 @@ vi.mock("../components/AdvancedReaderPage", () => {
       )}
       <button type="button" onClick={() => onTextChange("Reader text with enough length.")}>reader-text</button>
       <button type="button" onClick={onEditStart}>reader-edit-start</button>
+      {onAutoAdvanceHoldChange && (
+        <button type="button" onClick={() => onAutoAdvanceHoldChange(true)}>reader-hold-continuation</button>
+      )}
       <button
         type="button"
         onClick={() => {
@@ -933,7 +938,12 @@ describe("SynthesisApp", () => {
     fireEvent.click(screen.getByRole("button", { name: "reader-text" }));
     expect(mock.readerLibrary.updateActiveText).toHaveBeenCalledWith(
       "Reader text with enough length.",
-      { preserveText: true, deferStructure: false },
+      {
+        preserveText: true,
+        deferStructure: false,
+        // The section is the whole document, so the hint spans all of it.
+        hint: { start: 0, previousEnd: readerDocument.text.length, nextEnd: "Reader text with enough length.".length },
+      },
     );
 
     mock.routing = {
@@ -1355,7 +1365,16 @@ describe("SynthesisApp", () => {
     const normalizedDraft = "CHAPTER REPLACED\n\n\nDraft ending.   ";
     expect(mock.readerLibrary.updateActiveText).toHaveBeenCalledWith(
       `${before}${normalizedDraft}${after}`,
-      { preserveText: true, deferStructure: true },
+      {
+        preserveText: true,
+        deferStructure: true,
+        // Only the span the draft replaced needs scanning for annotations.
+        hint: {
+          start: before.length,
+          previousEnd: text.length - after.length,
+          nextEnd: before.length + normalizedDraft.length,
+        },
+      },
     );
     expect(mock.readerLibrary.clearAudio).toHaveBeenCalledWith(document.id, originalSectionRecord.id);
     expect(mock.readerLibrary.finalizeActiveTextEdit).toHaveBeenCalledWith(document.id);
@@ -1740,6 +1759,89 @@ describe("SynthesisApp", () => {
       byteLength: cachedAudio.byteLength,
       synthesisComplete: true,
     }));
+  });
+
+  describe("automatic continuation at a section's end", () => {
+    async function finishFirstSection(hold: boolean) {
+      mock.player.isSynthesisComplete = true;
+      mock.getWebGPUStatus.mockReturnValue(new Promise(() => {}));
+      localStorage.setItem("open-tts-reader-view-v1", JSON.stringify({ autoAdvance: true }));
+      mock.routing = {
+        activePage: "reader",
+        availableTabs: [
+          { key: "studio", label: "Studio" },
+          { key: "reader", label: "Reader" },
+        ],
+        isReaderPage: true,
+        isStudioPage: false,
+        navigateToPage: vi.fn(),
+      };
+      const document = createReaderDocument({
+        id: "held-reader",
+        text: "A long chapter keeps its sections apart. ".repeat(900),
+      });
+      const sections = buildReaderSections(document.text, document.chapters);
+      mock.readerLibrary.documents = [document];
+      mock.readerLibrary.activeDocument = document;
+      mock.playerClock.set(3);
+      mock.player.totalDuration = 4;
+      mock.player.activeSegmentId = "ending-segment";
+      mock.player.segments = [{
+        id: "ending-segment",
+        text: "ending range",
+        startSec: 0,
+        endSec: 4,
+        index: 1,
+        total: 1,
+        textStart: 0,
+        textEnd: sections[0].end - sections[0].start,
+      }];
+      mock.player.getAudioCacheSnapshot.mockReturnValue([]);
+
+      const view = render(<WebApp />);
+      await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[0].id));
+      // The sleep timer reports that the next section must not start by itself.
+      if (hold) fireEvent.click(screen.getByRole("button", { name: "reader-hold-continuation" }));
+      mock.readerLibrary.updateProgress.mockClear();
+      act(() => mock.playerClock.set(4));
+      await waitFor(() => expect(mock.readerLibrary.updateProgress).toHaveBeenCalledWith(
+        expect.objectContaining({ textOffset: sections[1].start, positionSec: 0 }),
+      ));
+
+      // The library applies the page turn, and the next section is entered
+      // with nothing saved for it.
+      mock.player.segments = [];
+      mock.player.totalDuration = 0;
+      mock.playerClock.set(0);
+      const turned = {
+        ...document,
+        progress: {
+          ...document.progress,
+          textOffset: sections[1].start,
+          chapterId: sections[1].chapterId,
+          sectionId: sections[1].id,
+          positionSec: 0,
+        },
+      };
+      mock.readerLibrary.activeDocument = turned;
+      mock.readerLibrary.documents = [turned];
+      view.rerender(<WebApp />);
+      await waitFor(() => expect(mock.readerLibrary.loadAudio).toHaveBeenCalledWith(document.id, sections[1].id));
+      // The restore effect starts playback and generation on a zero timer.
+      await new Promise((resolve) => window.setTimeout(resolve, 20));
+    }
+
+    it("generates the next section by itself", async () => {
+      await finishFirstSection(false);
+      expect(mock.generation.handleGenerate).toHaveBeenCalledTimes(1);
+    });
+
+    it("turns the page without playing or generating the next section while the sleep timer holds it", async () => {
+      mock.player.togglePlay.mockClear();
+      await finishFirstSection(true);
+      expect(mock.generation.handleGenerate).not.toHaveBeenCalled();
+      expect(mock.player.togglePlay).not.toHaveBeenCalled();
+    });
   });
 
   it("keeps incomplete section playback from skipping unread text", async () => {
