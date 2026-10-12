@@ -122,6 +122,20 @@ export interface EngineLink {
   readonly href: string;
 }
 
+/** Who made an engine's model and the terms it is used under, for the credits screen. */
+export interface EngineCredit {
+  /** The model or voice set, e.g. "Kitten TTS Nano 0.8". */
+  readonly name: string;
+  /** Who made it, e.g. "KittenML"; omitted when the source does not name anyone. */
+  readonly author?: string;
+  /** The licence the weights are used under, e.g. "Apache-2.0". */
+  readonly license: string;
+  readonly licenseUrl?: string;
+  readonly sourceUrl: string;
+  /** What else a user should know, e.g. that eSpeak NG phonemizes the text. */
+  readonly note?: string;
+}
+
 /** A desktop page dedicated to setting up and exercising one engine. */
 export interface EngineSetupPage {
   readonly tabLabel: string;
@@ -150,6 +164,10 @@ export interface EngineDescriptor<Settings = unknown, Live = Settings> {
   /** Short tag rendered beside desktop picker rows, e.g. "Local". */
   readonly badge?: string;
   readonly setupPage?: EngineSetupPage;
+  /** The engine's model runs on the CPU only, so a WASM backend is not a fallback. */
+  readonly wasmOnly?: boolean;
+  /** Credits and licences to show; the voice details carry any per-voice attribution. */
+  readonly credits?: readonly EngineCredit[];
   readonly capabilities: EngineCapabilities;
   readonly defaultSettings: Settings;
   /** Validates untrusted (stored) input, falling back field by field to defaults. */

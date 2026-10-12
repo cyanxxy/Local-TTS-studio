@@ -1,7 +1,10 @@
 import type { TextChunk } from "../lib/chunking";
 import { audio8Engine } from "./audio8";
+import { kittenEngine } from "./kitten";
 import { kokoroEngine } from "./kokoro";
 import { neuttsEngine } from "./neutts";
+import { paradeeEngine } from "./paradee";
+import { piperEngine } from "./piper";
 import { qwen3Engine } from "./qwen3";
 import { supertonicEngine } from "./supertonic";
 import { supertonic3Engine } from "./supertonic3";
@@ -30,6 +33,9 @@ import type {
 export const ENGINES = defineEngineRegistry({
   kokoro: kokoroEngine,
   supertonic: supertonicEngine,
+  kitten: kittenEngine,
+  paradee: paradeeEngine,
+  piper: piperEngine,
   audio8: audio8Engine,
   supertonic3: supertonic3Engine,
   neutts: neuttsEngine,
@@ -142,6 +148,20 @@ export function enginePreviewChunks<Id extends EngineId>(
   context: EnginePreviewContext<EngineLiveSettings<Id>>,
 ): TextChunk[] {
   return TYPED_ENGINES[id].previewChunks(text, context);
+}
+
+/**
+ * The passages a browser engine's worker will generate for `text`. Browser
+ * engines plan their chunks from the backend and quality alone, so the preview
+ * needs no engine settings.
+ */
+export function browserEnginePreviewChunks(
+  id: BrowserEngineId,
+  text: string,
+  context: Omit<EnginePreviewContext<unknown>, "settings">,
+): TextChunk[] {
+  const engine: AnyEngineDescriptor = ENGINES[id];
+  return engine.previewChunks(text, { ...context, settings: engine.defaultSettings });
 }
 
 /** `engineVoiceLabel` for whichever engine a surface selected. */

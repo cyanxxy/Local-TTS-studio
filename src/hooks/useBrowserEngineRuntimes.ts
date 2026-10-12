@@ -3,10 +3,10 @@ import { MIN_TEXT_LENGTH } from "../constants";
 import type { LocalBrowserSupport } from "../lib/browserSupport";
 import { hasMinimumSynthesisText } from "../lib/textValidation";
 import { resolveKokoroVoice } from "../lib/voices";
-import { ENGINES, type BrowserEngineId } from "../models/registry";
+import { BROWSER_ENGINE_IDS, ENGINES, type BrowserEngineId } from "../models/registry";
 import type { EngineRuntime, SynthesisChunk, SynthesisRequest } from "../shared/engineRuntime";
 import type { SynthesisQueue } from "../shared/synthesisQueue";
-import type { ChunkPauseKind, GenerationStats, GenerationTuningSettings, ModelState } from "../types";
+import type { ChunkPauseKind, GenerationStats, GenerationTuningSettings } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useGenerationControl } from "./useGenerationControl";
 import { useModelCacheControls } from "./useModelCacheControls";
@@ -63,11 +63,12 @@ const IDLE_STATS: GenerationStats = {
 const noop = () => undefined;
 
 /**
- * Kokoro and Supertonic 2 as engine runtimes. The two share one surface
- * generation path (the worker pool, `useTTS` and `useGenerationControl`), which
- * drives whichever is `activeModel`; the other engine's surface fields are idle
- * and its controls do nothing. Either engine can `synthesize` at any time: a
- * request loads its engine's worker on demand and holds it while it runs.
+ * The browser engines (Kokoro, Supertonic 2, Kitten, Paradee, Piper) as engine
+ * runtimes. They share one surface generation path (the worker pool, `useTTS`
+ * and `useGenerationControl`), which drives whichever is `activeModel`; every
+ * other engine's surface fields are idle and its controls do nothing. Any
+ * engine can `synthesize` at any time: a request loads its engine's worker on
+ * demand and holds it while it runs.
  */
 export function useBrowserEngineRuntimes({
   activeModel,
@@ -124,10 +125,11 @@ export function useBrowserEngineRuntimes({
     if (kokoroVoices.length === 0) return savedKokoroVoice;
     return resolveKokoroVoice(savedKokoroVoice, kokoroVoices) ?? savedKokoroVoice;
   }, [kokoroVoices, savedKokoroVoice]);
-  const supertonicVoice = savedVoices.supertonic;
+  // Only Kokoro's catalogue depends on what its model reported; every other
+  // engine's saved voice was validated against its own fixed catalogue.
   const voicesInUse = useMemo(
-    () => ({ kokoro: kokoroVoice, supertonic: supertonicVoice }),
-    [kokoroVoice, supertonicVoice],
+    () => ({ ...savedVoices, kokoro: kokoroVoice }),
+    [kokoroVoice, savedVoices],
   );
   const voice = voicesInUse[activeModel];
 
@@ -166,9 +168,15 @@ export function useBrowserEngineRuntimes({
   // Only the active engine's queue ever meets the surface generation.
   const kokoroQueue = useSynthesisQueue(activeModel === "kokoro" && isGenerationBusy);
   const supertonicQueue = useSynthesisQueue(activeModel === "supertonic" && isGenerationBusy);
+  const kittenQueue = useSynthesisQueue(activeModel === "kitten" && isGenerationBusy);
+  const paradeeQueue = useSynthesisQueue(activeModel === "paradee" && isGenerationBusy);
+  const piperQueue = useSynthesisQueue(activeModel === "piper" && isGenerationBusy);
   const queues: { readonly [Id in BrowserEngineId]: UseSynthesisQueueReturn } = {
     kokoro: kokoroQueue,
     supertonic: supertonicQueue,
+    kitten: kittenQueue,
+    paradee: paradeeQueue,
+    piper: piperQueue,
   };
   const activeQueue = queues[activeModel];
 
@@ -232,17 +240,35 @@ export function useBrowserEngineRuntimes({
 
   const kokoroQueueInstance = kokoroQueue.queue;
   const supertonicQueueInstance = supertonicQueue.queue;
-  const synthesizeKokoro = useCallback(
-    (request: SynthesisRequest<"kokoro">) => synthesizeWith("kokoro", kokoroQueueInstance, request),
-    [kokoroQueueInstance, synthesizeWith],
-  );
-  const synthesizeSupertonic = useCallback(
-    (request: SynthesisRequest<"supertonic">) => synthesizeWith("supertonic", supertonicQueueInstance, request),
-    [supertonicQueueInstance, synthesizeWith],
-  );
+  const kittenQueueInstance = kittenQueue.queue;
+  const paradeeQueueInstance = paradeeQueue.queue;
+  const piperQueueInstance = piperQueue.queue;
+  const synthesizers = useMemo(() => {
+    const queueInstances: { readonly [Id in BrowserEngineId]: SynthesisQueue<SynthesisChunk> } = {
+      kokoro: kokoroQueueInstance,
+      supertonic: supertonicQueueInstance,
+      kitten: kittenQueueInstance,
+      paradee: paradeeQueueInstance,
+      piper: piperQueueInstance,
+    };
+    return Object.fromEntries(BROWSER_ENGINE_IDS.map((model) => [
+      model,
+      (request: SynthesisRequest<BrowserEngineId>) => synthesizeWith(
+        model,
+        queueInstances[model],
+        // The request carries the settings of the engine it is made on.
+        request as SynthesisRequest<typeof model>,
+      ),
+    ])) as { readonly [Id in BrowserEngineId]: EngineRuntime<Id>["synthesize"] };
+  }, [
+    kittenQueueInstance,
+    kokoroQueueInstance,
+    paradeeQueueInstance,
+    piperQueueInstance,
+    supertonicQueueInstance,
+    synthesizeWith,
+  ]);
 
-  const kokoroState = states.kokoro;
-  const supertonicState = states.supertonic;
   const surfaceError = tts.error ?? retakeError;
   const runtimes = useMemo<BrowserEngineRuntimeMap>(() => {
     const surface = {
@@ -269,14 +295,14 @@ export function useBrowserEngineRuntimes({
       cancelActiveGeneration: noop,
       resetGeneratedAudio: noop,
     };
-    const fields = (model: BrowserEngineId, modelState: ModelState) => ({
+    // Each entry pairs an engine's id with its own state and synthesize, which
+    // the mapped type cannot see through a loop over the ids.
+    return Object.fromEntries(BROWSER_ENGINE_IDS.map((model) => [model, {
+      id: model,
       ...(model === activeModel ? surface : idle),
-      modelState,
-    });
-    return {
-      kokoro: { id: "kokoro", ...fields("kokoro", kokoroState), synthesize: synthesizeKokoro },
-      supertonic: { id: "supertonic", ...fields("supertonic", supertonicState), synthesize: synthesizeSupertonic },
-    };
+      modelState: states[model],
+      synthesize: synthesizers[model],
+    }])) as unknown as BrowserEngineRuntimeMap;
   }, [
     activeModel,
     canGenerate,
@@ -284,13 +310,11 @@ export function useBrowserEngineRuntimes({
     handleGenerate,
     handleStop,
     isGenerationBusy,
-    kokoroState,
     resetGeneratedAudio,
     retryActiveModelLoad,
-    supertonicState,
+    states,
     surfaceError,
-    synthesizeKokoro,
-    synthesizeSupertonic,
+    synthesizers,
     tts.generationProgress,
     tts.stats,
   ]);
