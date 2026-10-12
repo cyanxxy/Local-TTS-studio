@@ -54,6 +54,8 @@ export interface ReaderSession extends ReaderSections {
   audioSignature: string | null;
   /** Saves the active section's audio now; call before anything replaces it. */
   flushAudio: () => void;
+  /** Turns to `section` and plays it, generating it first when it has no saved audio. */
+  playSection: (section: ReaderSection) => void;
   /** Moves the reading position, turning to the section that holds it. */
   navigateToOffset: (textOffset: number, positionSec?: number) => void;
   startSectionEdit: () => void;
@@ -170,6 +172,10 @@ export function useReaderSession({
     navigate(textOffset, positionSec);
   }, [navigate]);
 
+  const playSection = useCallback((target: ReaderSection) => {
+    navigate(target.start, 0, { autoPlay: true, autoGenerate: true });
+  }, [navigate]);
+
   const advance = useCallback((next: ReaderSection, continuation: ReaderAdvance | null) => {
     navigate(next.start, 0, continuation ?? undefined);
   }, [navigate]);
@@ -264,6 +270,7 @@ export function useReaderSession({
     document,
     audioSignature: audioCache.signature,
     flushAudio: flush,
+    playSection,
     navigateToOffset,
     startSectionEdit,
     changeSectionText,
@@ -282,6 +289,7 @@ export function useReaderSession({
     navigateToOffset,
     newDocument,
     openDocument,
+    playSection,
     readerSections,
     setAutoAdvanceHold,
     startSectionEdit,

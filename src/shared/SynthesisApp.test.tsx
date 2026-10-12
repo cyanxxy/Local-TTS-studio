@@ -260,6 +260,11 @@ const mock = vi.hoisted(() => {
   };
 });
 
+// The OS media session is covered by its own tests; jsdom cannot play media.
+vi.mock("../hooks/useReaderMediaSession", () => ({
+  useReaderMediaSession: vi.fn(),
+}));
+
 vi.mock("../hooks/useAppRouting", () => ({
   useAppRouting: () => mock.routing,
 }));

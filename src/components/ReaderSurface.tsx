@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
+import { useReaderMediaSession } from "../hooks/useReaderMediaSession";
 import { getEngine, surfaceEngineVoiceLabel } from "../models/registry";
 import { lazyWithRetry } from "../shared/lazyWithRetry";
 import { useSynthesisSession } from "../shared/synthesisSessionContext";
@@ -26,6 +27,16 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
   const { browserSupport } = environment;
   const { kokoro: kokoroState, supertonic: supertonicState } = engines.browser.states;
   const readerEngine = getEngine(reader.engineId);
+  useReaderMediaSession({
+    active: routing.isReaderPage,
+    document: readerSession.document,
+    chapter: readerSession.activeChapter,
+    section: readerSession.activeSection,
+    previousSection: readerSession.previousSection,
+    nextSection: readerSession.nextSection,
+    player: player.state,
+    playSection: readerSession.playSection,
+  });
 
   return (
     <SurfaceErrorBoundary name="The Reader" resetKeys={[routing.activePage]}>
