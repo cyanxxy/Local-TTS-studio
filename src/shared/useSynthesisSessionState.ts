@@ -451,6 +451,7 @@ export function useSynthesisSessionState({
     player: {
       state: player,
       show: showPlayer,
+      setShow: setShowPlayer,
       activeSegmentNumber: activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null,
       togglePlay,
       skipBackward: handleSkipBackward,
