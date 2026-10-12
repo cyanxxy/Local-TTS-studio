@@ -130,6 +130,10 @@ const FIXTURES: Record<string, readonly Fixture[]> = {
     ["Feb. 5, 2024 and 5 Sept. 2023", "February fifth, twenty twenty-four and the fifth of September twenty twenty-three"],
     ["Meet 3 Jan. Then go. Meet 3 Jan. and go.", "Meet the third of January. Then go. Meet the third of January and go."],
     ["May 2024 and Dec. 2023", "May twenty twenty-four and December twenty twenty-three"],
+    ["on the 21st of May", "on the twenty-first of May"],
+    ["on The 21st of May 2024", "on The twenty-first of May twenty twenty-four"],
+    ["the 5th May and 21st May", "the fifth of May and the twenty-first of May"],
+    ["May 21st and the 21 May", "May twenty-first and the twenty-first of May"],
     ["February 30 and 31 June", "February thirty and thirty-one June"],
   ],
   abbreviations: [
@@ -207,6 +211,7 @@ const UNCHANGED: readonly string[] = [
 /** [input, expected, region] */
 const REGIONAL: readonly (readonly [string, string, string])[] = [
   ["On 3/4/2024.", "On the third of April, twenty twenty-four.", "GB"],
+  ["On the 3/4/2024.", "On the third of April, twenty twenty-four.", "GB"],
   ["On 3/4/2024.", "On the third of April, twenty twenty-four.", "au"],
   ["On 3/4/2024.", "On March fourth, twenty twenty-four.", "US"],
   ["4/13/2024 and 13/4/2024", "the thirteenth of April, twenty twenty-four and the thirteenth of April, twenty twenty-four", "IE"],

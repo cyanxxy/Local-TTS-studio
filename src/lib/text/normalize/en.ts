@@ -136,6 +136,13 @@ function spokenDate(day: number, month: number, year: number, dayFirst: boolean)
     : `${monthName} ${dayWords}, ${yearWords}`;
 }
 
+const THE_BEFORE = new RegExp(`(?<![\\p{L}\\p{N}_])the${SPACE}+$`, "iu");
+
+/** Drops the spoken "the " of a day-first date when the source already has the article ("on the 21st of May"). */
+function withoutDuplicateThe(text: string, start: number, spoken: string): string {
+  return spoken.startsWith("the ") && THE_BEFORE.test(text.slice(0, start)) ? spoken.slice(4) : spoken;
+}
+
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const SLASH_DATE = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
 
@@ -226,7 +233,11 @@ function scanMonthDates(scan: Scan): void {
     const month = monthNumber(match, 5);
     if (!isDayOfMonth(match[2], match[3], month, match[8])) continue;
     const [dayStart, dayEnd] = groupSpan(match, 1);
-    const dayWords = `the ${ordinalToWords(match[2])}${match[4] === undefined ? " of" : ""}`;
+    const dayWords = withoutDuplicateThe(
+      text,
+      dayStart,
+      `the ${ordinalToWords(match[2])}${match[4] === undefined ? " of" : ""}`,
+    );
     take(scan, match.index, match.index + match[0].length, [
       { start: dayStart, end: dayEnd, replacement: dayWords, reason: "dates" },
       ...monthPieces(text, match, 6),
@@ -664,7 +675,8 @@ function readNumber(scan: Scan, raw: string, start: number, end: number): Piece 
   if (time) return readTime(text, start, end, time);
   const date = readNumericDate(raw, scan.dayFirst);
   if (date !== undefined) {
-    return date === null || at(GLUED_AFTER, text, end) ? undefined : { start, end, replacement: date, reason: "dates" };
+    if (date === null || at(GLUED_AFTER, text, end)) return undefined;
+    return { start, end, replacement: withoutDuplicateThe(text, start, date), reason: "dates" };
   }
   const quantity = readQuantity(text, raw, start);
   if (!quantity) return undefined;
