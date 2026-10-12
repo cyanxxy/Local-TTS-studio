@@ -316,7 +316,10 @@ describe("LocalRuntimePage", () => {
     downloadQwen3Model.mockReturnValue(new Promise((resolve) => { finishDownload = resolve; }));
 
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Download Qwen model" }));
+    const downloadButton = await screen.findByRole("button", { name: "Download Qwen model" });
+    // The button renders disabled while the first setup check is running.
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    fireEvent.click(downloadButton);
     act(() => {
       downloadProgressListener?.({
         modelRepo: CUSTOM_REPO,
@@ -357,7 +360,10 @@ describe("LocalRuntimePage", () => {
     downloadQwen3Model.mockRejectedValue(new Error("Network connection was interrupted."));
 
     renderPage();
-    fireEvent.click(await screen.findByRole("button", { name: "Download Qwen model" }));
+    const downloadButton = await screen.findByRole("button", { name: "Download Qwen model" });
+    // The button renders disabled while the first setup check is running.
+    await waitFor(() => expect(downloadButton).toBeEnabled());
+    fireEvent.click(downloadButton);
 
     expect(await screen.findByText("Model setup failed")).toBeInTheDocument();
     expect(screen.getByText("Network connection was interrupted.")).toBeInTheDocument();
