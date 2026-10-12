@@ -6,11 +6,13 @@ import { gitBlobSha1 } from "./scripts/pin-hf-assets.mjs";
 import {
   attributionFor,
   buildCatalog,
+  checkLineage,
   classifyLicense,
   diffCatalogs,
   displayName,
   listVoicePaths,
   parseArgs,
+  parseLineage,
   parseModelCard,
   parseRenderedCatalog,
   regenerateCommand,
@@ -42,9 +44,10 @@ describe("pin-piper-voices arguments", () => {
 describe("MODEL_CARD license classification", () => {
   it("reads the dataset URL and license line", () => {
     expect(parseModelCard("# Card\n\n## Dataset\n\n* URL: https://librivox.org\n* License: public domain\nMore text.\n"))
-      .toEqual({ datasetUrl: "https://librivox.org", licenseText: "public domain" });
-    expect(parseModelCard("## Dataset\n* License: CC0\n")).toEqual({ datasetUrl: null, licenseText: "CC0" });
-    expect(parseModelCard("nothing here")).toEqual({ datasetUrl: null, licenseText: null });
+      .toEqual({ datasetUrl: "https://librivox.org", licenseText: "public domain", lineage: { kind: "unknown" } });
+    expect(parseModelCard("## Dataset\n* License: CC0\n\nTrained from scratch.\n"))
+      .toEqual({ datasetUrl: null, licenseText: "CC0", lineage: { kind: "scratch" } });
+    expect(parseModelCard("nothing here")).toEqual({ datasetUrl: null, licenseText: null, lineage: { kind: "unknown" } });
   });
 
   it.each([
@@ -75,6 +78,109 @@ describe("MODEL_CARD license classification", () => {
     null,
   ])("rejects %j", (text) => {
     expect(classifyLicense(text)).toBeNull();
+  });
+});
+
+describe("fine-tune lineage", () => {
+  it.each([
+    ["Finetuned from U.S. English Ryan voice (low quality).", { kind: "base", speaker: "ryan", quality: "low" }],
+    ["Finetuned from U.S. English lessac voice (medium quality).", { kind: "base", speaker: "lessac", quality: "medium" }],
+    ["Fine-tuned from English lessac medium on train-clean-360.", { kind: "base", speaker: "lessac", quality: "medium" }],
+    ["US English male voice. Finetuned from Kristin (above) on medium quality settings for an additional 600 epochs.", { kind: "base", speaker: "kristin", quality: null }],
+    ["Finetuned for an additional 1000 epochs from an unreleased voice which had 2500 epochs.", { kind: "base", speaker: "an", quality: null }],
+    ["Finetuned somehow, details lost.", { kind: "unknown" }],
+    ["Trained from scratch on medium quality settings for 640 epochs.", { kind: "scratch" }],
+    ["Trained from scratch.", { kind: "scratch" }],
+    ["Single speaker.", { kind: "unknown" }],
+  ])("reads %j", (text, lineage) => {
+    expect(parseLineage(text)).toEqual(lineage);
+  });
+});
+
+/** Voices of a fixture repository: speaker -> [dataset license, lineage sentence]. */
+function lineageRepository(cards: Record<string, [license: string, lineage: string]>) {
+  const voices = Object.keys(cards).map((speaker) => ({
+    id: `en_US-${speaker}-medium`,
+    speaker,
+    quality: "medium",
+    file: `en/en_US/${speaker}/medium/en_US-${speaker}-medium.onnx`,
+  }));
+  const readCard = async (voice: { speaker: string }) => {
+    const [license, lineage] = cards[voice.speaker];
+    return parseModelCard(`## Dataset\n* License: ${license}\n\n${lineage}\n`);
+  };
+  return { voices, readCard, start: (speaker: string) => voices.find((voice) => voice.speaker === speaker)! };
+}
+
+describe("checkLineage", () => {
+  it("accepts voices trained from scratch and chains of permissive fine-tunes", async () => {
+    const { voices, readCard, start } = lineageRepository({
+      root: ["public domain", "Trained from scratch."],
+      middle: ["CC0", "Finetuned from U.S. English root voice (medium quality)."],
+      leaf: ["CC BY 4.0", "Finetuned from middle (above) on medium quality settings."],
+    });
+
+    expect(await checkLineage(start("root"), voices, readCard)).toBeNull();
+    expect(await checkLineage(start("leaf"), voices, readCard)).toBeNull();
+  });
+
+  it("rejects a voice fine-tuned from an ancestor with a restricted license, however far up", async () => {
+    const { voices, readCard, start } = lineageRepository({
+      nc: ["CC BY-NC-SA 4.0", "Trained from scratch."],
+      middle: ["CC0", "Finetuned from U.S. English nc voice (medium quality)."],
+      leaf: ["public domain", "Finetuned from U.S. English middle voice (medium quality)."],
+    });
+
+    expect(await checkLineage(start("middle"), voices, readCard))
+      .toBe('en_US-middle-medium was fine-tuned from en_US-nc-medium, whose dataset license "CC BY-NC-SA 4.0" is not permissive or not stated');
+    expect(await checkLineage(start("leaf"), voices, readCard)).toContain("en_US-nc-medium");
+  });
+
+  it("rejects an ancestor whose license is unknown, a named licensee grant included", async () => {
+    const { voices, readCard, start } = lineageRepository({
+      named: ["https://example.org/licensee-only.html", "Trained from scratch."],
+      seeUrl: ["See URL", "Trained from scratch."],
+      a: ["CC0", "Finetuned from U.S. English named voice (medium quality)."],
+      b: ["CC0", "Finetuned from U.S. English seeUrl voice (medium quality)."],
+    });
+
+    expect(await checkLineage(start("a"), voices, readCard)).toContain("licensee-only.html");
+    expect(await checkLineage(start("b"), voices, readCard)).toContain('"See URL"');
+  });
+
+  it("fails closed on a base outside the repository and on a card that names no lineage", async () => {
+    const { voices, readCard, start } = lineageRepository({
+      orphan: ["CC0", "Finetuned for 1000 epochs from an unreleased voice."],
+      silent: ["CC0", "A voice."],
+      child: ["CC0", "Finetuned from silent (above)."],
+    });
+
+    expect(await checkLineage(start("orphan"), voices, readCard)).toContain('fine-tuned from "an", which is not a voice of the repository');
+    expect(await checkLineage(start("silent"), voices, readCard)).toContain("does not say what it was trained from");
+    expect(await checkLineage(start("child"), voices, readCard)).toContain("en_US-silent-medium's MODEL_CARD does not say");
+  });
+
+  it("requires every quality of a base given without one, and survives a cycle", async () => {
+    const files = ["low", "high"].map((quality) => ({ id: `en_US-base-${quality}`, speaker: "base", quality, file: `en/en_US/base/${quality}/x.onnx` }));
+    const child = { id: "en_US-child-medium", speaker: "child", quality: "medium", file: "en/en_US/child/medium/x.onnx" };
+    const cards: Record<string, string> = {
+      "en_US-base-low": "* License: CC0\nTrained from scratch.",
+      "en_US-base-high": "* License: CC BY-NC 4.0\nTrained from scratch.",
+      "en_US-child-medium": "* License: CC0\nFinetuned from base voice.",
+    };
+    const readCard = async (voice: { id: string }) => parseModelCard(cards[voice.id]);
+
+    expect(await checkLineage(child, [child, ...files], readCard)).toContain("en_US-base-high");
+
+    const loop = [
+      { id: "en_US-a-medium", speaker: "a", quality: "medium", file: "en/en_US/a/medium/x.onnx" },
+      { id: "en_US-b-medium", speaker: "b", quality: "medium", file: "en/en_US/b/medium/x.onnx" },
+    ];
+    const loopCards: Record<string, string> = {
+      "en_US-a-medium": "* License: CC0\nFinetuned from b voice.",
+      "en_US-b-medium": "* License: CC0\nFinetuned from a voice.",
+    };
+    expect(await checkLineage(loop[0], loop, async (voice: { id: string }) => parseModelCard(loopCards[voice.id]))).toBeNull();
   });
 });
 
@@ -114,14 +220,18 @@ function voiceConfig(overrides: Record<string, unknown> = {}) {
 }
 
 const FILES = new Map<string, Uint8Array>([
-  ["en/en_US/good/medium/MODEL_CARD", encoder.encode("## Dataset\n* URL: https://example.org/good\n* License: CC0\n")],
+  ["en/en_US/good/medium/MODEL_CARD", encoder.encode("## Dataset\n* URL: https://example.org/good\n* License: CC0\n\nTrained from scratch.\n")],
   ["en/en_US/good/medium/en_US-good-medium.onnx.json", voiceConfig({ num_speakers: 4 })],
-  ["en/en_US/nc/medium/MODEL_CARD", encoder.encode("## Dataset\n* License: CC BY-NC-SA 4.0\n")],
+  ["en/en_US/nc/medium/MODEL_CARD", encoder.encode("## Dataset\n* License: CC BY-NC-SA 4.0\n\nTrained from scratch.\n")],
   ["en/en_US/nc/medium/en_US-nc-medium.onnx.json", voiceConfig()],
-  ["en/en_US/german/medium/MODEL_CARD", encoder.encode("## Dataset\n* License: public domain\n")],
+  ["en/en_US/german/medium/MODEL_CARD", encoder.encode("## Dataset\n* License: public domain\n\nTrained from scratch.\n")],
   ["en/en_US/german/medium/en_US-german-medium.onnx.json", voiceConfig({ espeak: { voice: "de" } })],
-  ["en/en_US/old/low/MODEL_CARD", encoder.encode("## Dataset\n* License: public domain\n")],
+  ["en/en_US/old/low/MODEL_CARD", encoder.encode("## Dataset\n* License: public domain\n\nFinetuned from U.S. English good voice (medium quality).\n")],
   ["en/en_US/old/low/en_US-old-low.onnx.json", voiceConfig({ phoneme_type: undefined, audio: { sample_rate: 16_000 } })],
+  ["en/en_US/heir/medium/MODEL_CARD", encoder.encode("## Dataset\n* License: CC0\n\nFinetuned from U.S. English nc voice (medium quality).\n")],
+  ["en/en_US/heir/medium/en_US-heir-medium.onnx.json", voiceConfig()],
+  ["en/en_US/ghost/medium/MODEL_CARD", encoder.encode("## Dataset\n* License: CC0\n")],
+  ["en/en_US/ghost/medium/en_US-ghost-medium.onnx.json", voiceConfig()],
 ]);
 
 function revisionInfo() {
@@ -140,6 +250,8 @@ function revisionInfo() {
       graph("en/en_US/nc/medium/en_US-nc-medium.onnx", 100),
       graph("en/en_US/german/medium/en_US-german-medium.onnx", 100),
       graph("en/en_US/old/low/en_US-old-low.onnx", 100),
+      graph("en/en_US/heir/medium/en_US-heir-medium.onnx", 100),
+      graph("en/en_US/ghost/medium/en_US-ghost-medium.onnx", 100),
       ...[...FILES.keys()].map(small),
     ],
   };
@@ -153,6 +265,7 @@ describe("buildCatalog", () => {
     const { catalog, excluded } = await buildCatalog(revisionInfo(), options, fetchBytes);
 
     expect(catalog.voices.map((voice: { id: string }) => voice.id)).toEqual(["en_US-good-medium", "en_US-old-low"]);
+    // old-low is kept because its only ancestor, good-medium, is permissive.
     expect(catalog.voices[0]).toEqual({
       id: "en_US-good-medium",
       name: "Good",
@@ -171,6 +284,11 @@ describe("buildCatalog", () => {
     expect(catalog.voices[1]).toMatchObject({ sampleRate: 16_000, numSpeakers: 1, datasetUrl: null });
     expect(excluded).toEqual([
       { id: "en_US-german-medium", reason: "needs a non-English phonemizer" },
+      { id: "en_US-ghost-medium", reason: "en_US-ghost-medium's MODEL_CARD does not say what it was trained from" },
+      {
+        id: "en_US-heir-medium",
+        reason: 'en_US-heir-medium was fine-tuned from en_US-nc-medium, whose dataset license "CC BY-NC-SA 4.0" is not permissive or not stated',
+      },
       { id: "en_US-nc-medium", reason: 'dataset license "CC BY-NC-SA 4.0" is not permissive or not stated' },
     ]);
     expect(Object.keys(catalog.files)).toEqual([

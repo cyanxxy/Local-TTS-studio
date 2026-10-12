@@ -2,7 +2,10 @@
 // of the chosen locales whose dataset license is permissive, with the exact
 // size and SHA-256 of its graph and config, read from the Hub API at an
 // immutable commit. Voices whose license is unknown ("See URL"), share-alike
-// or non-commercial are left out, and each exclusion is reported.
+// or non-commercial are left out, and each exclusion is reported. A voice that
+// was fine-tuned from another voice also needs every ancestor to be
+// permissive (followed transitively through the MODEL_CARD "Finetuned from"
+// lines); an ancestor that cannot be identified excludes the voice.
 //
 //   node scripts/pin-piper-voices.mjs \
 //     --revision c10ece1aade47bb51c153c893d14e5bf8e5b7117 \
@@ -15,7 +18,9 @@
 // Configs without a phoneme_type predate the field and use eSpeak.
 //
 // A voice's license comes from the "License:" line of its MODEL_CARD, which
-// describes the training dataset (the repository itself is MIT). With --check
+// describes the training dataset (the repository itself is MIT). A card that
+// says neither "Trained from scratch" nor "Finetuned from ..." has an unknown
+// lineage and its voice is left out. With --check
 // the catalog at --out is compared with a fresh query and the script exits
 // with status 1 when they differ. This script talks to the network, so it is
 // a maintainer tool and stays out of CI.
@@ -90,11 +95,29 @@ export function parseArgs(argv) {
 /**
  * Reads the Dataset section of a MODEL_CARD.
  * @param {string} text
- * @returns {{ datasetUrl: string | null, licenseText: string | null }}
+ * @returns {{ datasetUrl: string | null, licenseText: string | null, lineage: ReturnType<typeof parseLineage> }}
  */
 export function parseModelCard(text) {
   const field = (name) => new RegExp(`^\\s*\\*\\s*${name}:\\s*(.+?)\\s*$`, "im").exec(text)?.[1] ?? null;
-  return { datasetUrl: field("URL"), licenseText: field("License") };
+  return { datasetUrl: field("URL"), licenseText: field("License"), lineage: parseLineage(text) };
+}
+
+const FINETUNE_FROM = /fine-?tuned?\b[^.\n]*?\bfrom\s+(?:(?:U\.S\.|US|UK|GB)\s+)?(?:English\s+)?(\S+?)(?:\s+voice)?(?=[\s.,(]|$)(?:\s*\((x_low|low|medium|high)\s+quality\))?(?:\s+(x_low|low|medium|high)\b)?/i;
+
+/**
+ * Where a voice's weights come from: "scratch", a "base" voice it was
+ * fine-tuned from (speaker name, and quality when the card gives one), or
+ * "unknown" when the card says neither. A fine-tune statement wins over a
+ * "from scratch" one, since the stricter reading is the safe one.
+ * @param {string} text
+ * @returns {{ kind: "scratch" } | { kind: "base", speaker: string, quality: string | null } | { kind: "unknown" }}
+ */
+export function parseLineage(text) {
+  const base = FINETUNE_FROM.exec(text);
+  if (base) return { kind: "base", speaker: base[1].toLowerCase(), quality: (base[2] ?? base[3] ?? null)?.toLowerCase() ?? null };
+  if (/\bfine-?tun/i.test(text)) return { kind: "unknown" };
+  if (/\btrained from scratch\b/i.test(text)) return { kind: "scratch" };
+  return { kind: "unknown" };
 }
 
 /**
@@ -129,6 +152,44 @@ export function attributionFor(name, license, datasetUrl) {
 }
 
 /**
+ * Checks every ancestor of a voice, following "Finetuned from" statements
+ * until a voice trained from scratch. A base given without a quality stands for
+ * all of that speaker's qualities, and a speaker present in several locales for
+ * all of them, so the strictest reading applies. Fails closed: an ancestor
+ * that is not in the repository, has an unknown lineage or a license outside
+ * the allow-list yields a reason.
+ * @param {{ id: string, speaker: string, quality: string, file: string }} start
+ * @param {Array<{ id: string, speaker: string, quality: string, file: string }>} everyVoice every voice of the revision, whatever its locale
+ * @param {(voice: { id: string, speaker: string, quality: string, file: string }) => Promise<ReturnType<typeof parseModelCard>>} readCard
+ * @returns {Promise<string | null>} why the lineage is not acceptable, or null
+ */
+export async function checkLineage(start, everyVoice, readCard) {
+  const seen = new Set([start.id]);
+  const pending = [start];
+  while (pending.length > 0) {
+    const voice = pending.pop();
+    const { lineage } = await readCard(voice);
+    if (lineage.kind === "scratch") continue;
+    if (lineage.kind === "unknown") return `${voice.id}'s MODEL_CARD does not say what it was trained from`;
+    const bases = everyVoice.filter((candidate) => candidate.speaker.toLowerCase() === lineage.speaker
+      && (lineage.quality === null || candidate.quality === lineage.quality));
+    if (bases.length === 0) {
+      return `${voice.id} was fine-tuned from "${lineage.speaker}${lineage.quality ? ` (${lineage.quality})` : ""}", which is not a voice of the repository`;
+    }
+    for (const base of bases) {
+      if (seen.has(base.id)) continue;
+      seen.add(base.id);
+      const card = await readCard(base);
+      if (!classifyLicense(card.licenseText)) {
+        return `${voice.id} was fine-tuned from ${base.id}, whose dataset license ${JSON.stringify(card.licenseText)} is not permissive or not stated`;
+      }
+      pending.push(base);
+    }
+  }
+  return null;
+}
+
+/**
  * The voice graphs of `locales` in a revision's file list.
  * @param {readonly string[]} paths
  * @param {readonly string[]} locales
@@ -157,15 +218,22 @@ export async function buildCatalog(info, options, fetchBytes) {
     if (!cache.has(file)) cache.set(file, await fetchBytes(file));
     return cache.get(file);
   };
-  const candidates = listVoicePaths(info.siblings.map((entry) => entry.rfilename), options.locales);
+  const paths = info.siblings.map((entry) => entry.rfilename);
+  const candidates = listVoicePaths(paths, options.locales);
+  const everyVoice = listVoicePaths(paths, [...new Set(paths.map((file) => VOICE_PATH.exec(file)?.groups?.locale).filter(Boolean))]);
+  const readCard = async (voice) => parseModelCard(decoder.decode(await cachedBytes(`${path.posix.dirname(voice.file)}/MODEL_CARD`)));
   const voices = [];
   const excluded = [];
   for (const candidate of candidates) {
-    const directory = path.posix.dirname(candidate.file);
-    const card = parseModelCard(decoder.decode(await cachedBytes(`${directory}/MODEL_CARD`)));
+    const card = await readCard(candidate);
     const license = classifyLicense(card.licenseText);
     if (!license) {
       excluded.push({ id: candidate.id, reason: `dataset license ${JSON.stringify(card.licenseText)} is not permissive or not stated` });
+      continue;
+    }
+    const lineageProblem = await checkLineage(candidate, everyVoice, readCard);
+    if (lineageProblem) {
+      excluded.push({ id: candidate.id, reason: lineageProblem });
       continue;
     }
     const config = JSON.parse(decoder.decode(await cachedBytes(`${candidate.file}.json`)));

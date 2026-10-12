@@ -42,7 +42,7 @@ describe("the Piper catalog", () => {
   it("includes the default voice and none of the known non-permissive datasets", () => {
     expect(findPiperVoice(PIPER_DEFAULT_VOICE)).toBeDefined();
     const names = PIPER_VOICES.map((voice) => voice.name.toLowerCase());
-    for (const excluded of ["ryan", "lessac", "amy", "hfc_female", "semaine"]) expect(names).not.toContain(excluded);
+    for (const excluded of ["ryan", "lessac", "amy", "hfc_female", "semaine", "kathleen", "alba", "aru", "vctk", "joe", "mike", "sam", "reza ibrahim", "libritts-r"]) expect(names).not.toContain(excluded);
   });
 });
 

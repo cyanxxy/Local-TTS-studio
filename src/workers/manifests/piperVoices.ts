@@ -8,22 +8,6 @@ export const PIPER_CATALOG = {
   "revision": "c10ece1aade47bb51c153c893d14e5bf8e5b7117",
   "license": "mit",
   "files": {
-    "en/en_GB/alba/medium/en_GB-alba-medium.onnx": {
-      "byteLength": 63201294,
-      "sha256": "401369c4a81d09fdd86c32c5c864440811dbdcc66466cde2d64f7133a66ad03b"
-    },
-    "en/en_GB/alba/medium/en_GB-alba-medium.onnx.json": {
-      "byteLength": 4888,
-      "sha256": "aa965a2f02ecced632c2694e1fc72bbff6d65f265fab567ca945918c73dd89f4"
-    },
-    "en/en_GB/aru/medium/en_GB-aru-medium.onnx": {
-      "byteLength": 76754097,
-      "sha256": "9e74d089a8563f8b2446426d01becb046cd3c3bfbafe1a20fd03a9a79bd82619"
-    },
-    "en/en_GB/aru/medium/en_GB-aru-medium.onnx.json": {
-      "byteLength": 5048,
-      "sha256": "00529fabf0e79f29a9cb10fda5b60f9b7cf80671faac2b316e13af20e7816d5e"
-    },
     "en/en_GB/cori/high/en_GB-cori-high.onnx": {
       "byteLength": 114219352,
       "sha256": "470b4dd634c98f8a4850d7626ffc3dfc90774628eeef6605a6dd8f88f30a5903"
@@ -40,30 +24,6 @@ export const PIPER_CATALOG = {
       "byteLength": 4966,
       "sha256": "e262c16d7f192f69d4edd6b4ef8a5915379e67495fcc402f1ab15eeb33da3d36"
     },
-    "en/en_GB/vctk/medium/en_GB-vctk-medium.onnx": {
-      "byteLength": 76952753,
-      "sha256": "4e9fc85ab9009385319fc6bae7f55577f8a2d7ee77fd9159a5500eb6531f41e6"
-    },
-    "en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json": {
-      "byteLength": 6637,
-      "sha256": "7f85e6391ed0f7f46e4abd19345929a16be931a0c9945086f96692dce2087fa8"
-    },
-    "en/en_US/bryce/medium/en_US-bryce-medium.onnx": {
-      "byteLength": 63531379,
-      "sha256": "dc9caa6c313199ffb5ac698b6e542fa6cba388aeaf2731e25262e33b9810aef1"
-    },
-    "en/en_US/bryce/medium/en_US-bryce-medium.onnx.json": {
-      "byteLength": 4966,
-      "sha256": "7ceb1bc4af6d4e41b6d1edbb86c67e91e01eaa71f66db4cd0ae92ac704d415be"
-    },
-    "en/en_US/joe/medium/en_US-joe-medium.onnx": {
-      "byteLength": 63201294,
-      "sha256": "58afce0321b8d9c46d7cdf9c16500cc55a793b4220212dba6b70fb788b3baf06"
-    },
-    "en/en_US/joe/medium/en_US-joe-medium.onnx.json": {
-      "byteLength": 4794,
-      "sha256": "3d6d5410b3795cb1950595247ef8f06190719e6fdbfa3a2356d8ec368e1aad33"
-    },
     "en/en_US/john/medium/en_US-john-medium.onnx": {
       "byteLength": 63531379,
       "sha256": "789c6c875726e627ddee93d51d8727859abe9c091c3d141591f4b83c2072e988"
@@ -71,14 +31,6 @@ export const PIPER_CATALOG = {
     "en/en_US/john/medium/en_US-john-medium.onnx.json": {
       "byteLength": 4965,
       "sha256": "af60f177b6b550f3d7a302720c0fb89e7f94a82b5dca464775ef63b1c69ba09a"
-    },
-    "en/en_US/kathleen/low/en_US-kathleen-low.onnx": {
-      "byteLength": 63104526,
-      "sha256": "87adf17f5326bc0782282147a8b9788406236245f0f9b0e68dacb651bc1de8b6"
-    },
-    "en/en_US/kathleen/low/en_US-kathleen-low.onnx.json": {
-      "byteLength": 4169,
-      "sha256": "39ebab88416edce0f63781754651788620cb97b9bb73ddf3c01f28e29a648feb"
     },
     "en/en_US/kristin/medium/en_US-kristin-medium.onnx": {
       "byteLength": 63531379,
@@ -96,14 +48,6 @@ export const PIPER_CATALOG = {
       "byteLength": 20163,
       "sha256": "2efdc6d7f954588b8180132cbd9b8001933fdd00932c92bc92fd0d2028a9eb3d"
     },
-    "en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx": {
-      "byteLength": 78580914,
-      "sha256": "10bb85e071d616fcf4071f369f1799d0491492ab3c5d552ec19fb548fac13195"
-    },
-    "en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx.json": {
-      "byteLength": 20123,
-      "sha256": "b471dc60d2d8335e819c393d196d6fbf792817f40051257b269878505bc9afb3"
-    },
     "en/en_US/ljspeech/high/en_US-ljspeech-high.onnx": {
       "byteLength": 114199011,
       "sha256": "5d4f08ba6a2a48c44592eed3ce56bf85e9de3dd4e20df90541ae68a8310c029a"
@@ -120,14 +64,6 @@ export const PIPER_CATALOG = {
       "byteLength": 4972,
       "sha256": "141d612cc0a95ed7efc1ca936b845c2364967f2e9217c5dbfcf69fc4d6c65860"
     },
-    "en/en_US/mike/medium/en_US-mike-medium.onnx": {
-      "byteLength": 63221984,
-      "sha256": "3157e69e2c580cab297483f4b301ee975a4590c17d35a9757e33347d0e90fae2"
-    },
-    "en/en_US/mike/medium/en_US-mike-medium.onnx.json": {
-      "byteLength": 5439,
-      "sha256": "0a2538c0b1e06a6cab7c46b97c79abd5e6a34a6c05b74b9376874c7099d81dad"
-    },
     "en/en_US/norman/medium/en_US-norman-medium.onnx": {
       "byteLength": 63531379,
       "sha256": "b9739443232a80a59c7d18810dd856899bf16a7964725f5ab81ea49b1351cb71"
@@ -135,61 +71,9 @@ export const PIPER_CATALOG = {
     "en/en_US/norman/medium/en_US-norman-medium.onnx.json": {
       "byteLength": 4968,
       "sha256": "6c2db7f558a4a8deb9fe822583c1c5105f6c4e834dd0f9de8ad17a888ee9fe1d"
-    },
-    "en/en_US/reza_ibrahim/medium/en_US-reza_ibrahim-medium.onnx": {
-      "byteLength": 63511038,
-      "sha256": "99f0c31464a2120831ca87d079e10a9a2b3e426cc1ee662d80ff9042df15cd3c"
-    },
-    "en/en_US/reza_ibrahim/medium/en_US-reza_ibrahim-medium.onnx.json": {
-      "byteLength": 4976,
-      "sha256": "465ddf1702917fe617b7d69ed81301d6a2f39f083a754bd1cf6db8955d09a381"
-    },
-    "en/en_US/sam/medium/en_US-sam-medium.onnx": {
-      "byteLength": 62950044,
-      "sha256": "56417b3b4afe8ec6bb4cabf06e17d67261fdd5bf334592abcfc80052fba11163"
-    },
-    "en/en_US/sam/medium/en_US-sam-medium.onnx.json": {
-      "byteLength": 5040,
-      "sha256": "8c7fb47f19683b0b81037c5564f9a5ad4699a9da685e0e5da0a72fd3c3f5c1c4"
     }
   },
   "voices": [
-    {
-      "id": "en_GB-alba-medium",
-      "name": "Alba",
-      "locale": "en_GB",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 1,
-      "espeakVoice": "en-gb-x-rp",
-      "model": "en/en_GB/alba/medium/en_GB-alba-medium.onnx",
-      "config": "en/en_GB/alba/medium/en_GB-alba-medium.onnx.json",
-      "license": {
-        "id": "CC-BY-4.0",
-        "url": "https://creativecommons.org/licenses/by/4.0/"
-      },
-      "datasetUrl": "https://datashare.ed.ac.uk/handle/10283/3270",
-      "attribution": "Alba: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://datashare.ed.ac.uk/handle/10283/3270, licensed CC BY 4.0."
-    },
-    {
-      "id": "en_GB-aru-medium",
-      "name": "Aru",
-      "locale": "en_GB",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 12,
-      "espeakVoice": "en-gb-x-rp",
-      "model": "en/en_GB/aru/medium/en_GB-aru-medium.onnx",
-      "config": "en/en_GB/aru/medium/en_GB-aru-medium.onnx.json",
-      "license": {
-        "id": "CC-BY-4.0",
-        "url": "https://creativecommons.org/licenses/by/4.0/"
-      },
-      "datasetUrl": "https://www.liverpool.ac.uk/architecture/research/acoustics-research-unit/speech-corpus/",
-      "attribution": "Aru: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://www.liverpool.ac.uk/architecture/research/acoustics-research-unit/speech-corpus/, licensed CC BY 4.0."
-    },
     {
       "id": "en_GB-cori-medium",
       "name": "Cori",
@@ -227,60 +111,6 @@ export const PIPER_CATALOG = {
       "attribution": "Cori: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://librivox.org, in the public domain."
     },
     {
-      "id": "en_GB-vctk-medium",
-      "name": "VCTK",
-      "locale": "en_GB",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 109,
-      "espeakVoice": "en-gb-x-rp",
-      "model": "en/en_GB/vctk/medium/en_GB-vctk-medium.onnx",
-      "config": "en/en_GB/vctk/medium/en_GB-vctk-medium.onnx.json",
-      "license": {
-        "id": "CC-BY-4.0",
-        "url": "https://creativecommons.org/licenses/by/4.0/"
-      },
-      "datasetUrl": "https://datashare.ed.ac.uk/handle/10283/3443",
-      "attribution": "VCTK: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://datashare.ed.ac.uk/handle/10283/3443, licensed CC BY 4.0."
-    },
-    {
-      "id": "en_US-bryce-medium",
-      "name": "Bryce",
-      "locale": "en_US",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 1,
-      "espeakVoice": "en",
-      "model": "en/en_US/bryce/medium/en_US-bryce-medium.onnx",
-      "config": "en/en_US/bryce/medium/en_US-bryce-medium.onnx.json",
-      "license": {
-        "id": "public-domain",
-        "url": null
-      },
-      "datasetUrl": null,
-      "attribution": "Bryce: Piper voice (rhasspy/piper-voices, MIT) trained on a public domain dataset, in the public domain."
-    },
-    {
-      "id": "en_US-joe-medium",
-      "name": "Joe",
-      "locale": "en_US",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 1,
-      "espeakVoice": "en-us",
-      "model": "en/en_US/joe/medium/en_US-joe-medium.onnx",
-      "config": "en/en_US/joe/medium/en_US-joe-medium.onnx.json",
-      "license": {
-        "id": "CC0-1.0",
-        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
-      },
-      "datasetUrl": "https://github.com/OHF-Voice/voice-datasets",
-      "attribution": "Joe: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://github.com/OHF-Voice/voice-datasets, licensed CC0 1.0."
-    },
-    {
       "id": "en_US-john-medium",
       "name": "John",
       "locale": "en_US",
@@ -297,24 +127,6 @@ export const PIPER_CATALOG = {
       },
       "datasetUrl": "https://librivox.org",
       "attribution": "John: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://librivox.org, in the public domain."
-    },
-    {
-      "id": "en_US-kathleen-low",
-      "name": "Kathleen",
-      "locale": "en_US",
-      "language": "en",
-      "quality": "low",
-      "sampleRate": 16000,
-      "numSpeakers": 1,
-      "espeakVoice": "en-us",
-      "model": "en/en_US/kathleen/low/en_US-kathleen-low.onnx",
-      "config": "en/en_US/kathleen/low/en_US-kathleen-low.onnx.json",
-      "license": {
-        "id": "CC0-1.0",
-        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
-      },
-      "datasetUrl": "https://github.com/rhasspy/dataset-voice-kathleen",
-      "attribution": "Kathleen: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://github.com/rhasspy/dataset-voice-kathleen, licensed CC0 1.0."
     },
     {
       "id": "en_US-kristin-medium",
@@ -353,24 +165,6 @@ export const PIPER_CATALOG = {
       "attribution": "LibriTTS: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at http://www.openslr.org/60/, licensed CC BY 4.0."
     },
     {
-      "id": "en_US-libritts_r-medium",
-      "name": "LibriTTS-R",
-      "locale": "en_US",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 904,
-      "espeakVoice": "en-us",
-      "model": "en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx",
-      "config": "en/en_US/libritts_r/medium/en_US-libritts_r-medium.onnx.json",
-      "license": {
-        "id": "CC-BY-4.0",
-        "url": "https://creativecommons.org/licenses/by/4.0/"
-      },
-      "datasetUrl": "http://www.openslr.org/141/",
-      "attribution": "LibriTTS-R: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at http://www.openslr.org/141/, licensed CC BY 4.0."
-    },
-    {
       "id": "en_US-ljspeech-medium",
       "name": "LJSpeech",
       "locale": "en_US",
@@ -407,24 +201,6 @@ export const PIPER_CATALOG = {
       "attribution": "LJSpeech: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://keithito.com/LJ-Speech-Dataset/, in the public domain."
     },
     {
-      "id": "en_US-mike-medium",
-      "name": "Mike",
-      "locale": "en_US",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 1,
-      "espeakVoice": "en-us",
-      "model": "en/en_US/mike/medium/en_US-mike-medium.onnx",
-      "config": "en/en_US/mike/medium/en_US-mike-medium.onnx.json",
-      "license": {
-        "id": "CC0-1.0",
-        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
-      },
-      "datasetUrl": "https://github.com/OHF-Voice/voice-datasets",
-      "attribution": "Mike: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://github.com/OHF-Voice/voice-datasets, licensed CC0 1.0."
-    },
-    {
       "id": "en_US-norman-medium",
       "name": "Norman",
       "locale": "en_US",
@@ -441,42 +217,6 @@ export const PIPER_CATALOG = {
       },
       "datasetUrl": "https://librivox.org",
       "attribution": "Norman: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://librivox.org, in the public domain."
-    },
-    {
-      "id": "en_US-reza_ibrahim-medium",
-      "name": "Reza Ibrahim",
-      "locale": "en_US",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 1,
-      "espeakVoice": "en-us",
-      "model": "en/en_US/reza_ibrahim/medium/en_US-reza_ibrahim-medium.onnx",
-      "config": "en/en_US/reza_ibrahim/medium/en_US-reza_ibrahim-medium.onnx.json",
-      "license": {
-        "id": "CC0-1.0",
-        "url": "https://creativecommons.org/publicdomain/zero/1.0/"
-      },
-      "datasetUrl": "https://huggingface.co/datasets/mah92/Hedayatfar-Persian-Quran-Audio-Dataset",
-      "attribution": "Reza Ibrahim: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://huggingface.co/datasets/mah92/Hedayatfar-Persian-Quran-Audio-Dataset, licensed CC0 1.0."
-    },
-    {
-      "id": "en_US-sam-medium",
-      "name": "Sam",
-      "locale": "en_US",
-      "language": "en",
-      "quality": "medium",
-      "sampleRate": 22050,
-      "numSpeakers": 1,
-      "espeakVoice": "en-us",
-      "model": "en/en_US/sam/medium/en_US-sam-medium.onnx",
-      "config": "en/en_US/sam/medium/en_US-sam-medium.onnx.json",
-      "license": {
-        "id": "Apache-2.0",
-        "url": "https://www.apache.org/licenses/LICENSE-2.0"
-      },
-      "datasetUrl": "https://github.com/Sam-Accenture-Non-Binary-Voice/non-binary-voice-files",
-      "attribution": "Sam: Piper voice (rhasspy/piper-voices, MIT) trained on the dataset at https://github.com/Sam-Accenture-Non-Binary-Voice/non-binary-voice-files, licensed Apache License 2.0."
     }
   ]
 } as const satisfies PiperCatalog;
