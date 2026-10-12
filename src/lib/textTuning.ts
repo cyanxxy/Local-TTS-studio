@@ -18,10 +18,11 @@ export interface PronunciationMatchRule {
   from: string;
   to: string;
   /**
-   * `true` matches the exact case, `false` ignores case. When omitted, a rule
-   * whose `from` contains an uppercase letter is case-sensitive, so "US" never
-   * rewrites "us", while an all-lowercase rule such as "route" still matches
-   * "Route" at the start of a sentence.
+   * `true` matches the exact case, `false` ignores case. When omitted (which
+   * is every stored version 1 rule), `isAcronymRule(from)` decides: an
+   * all-caps acronym such as "US" is case-sensitive so it never rewrites "us",
+   * and anything else, "route", "Kokoro" or "Open TTS", ignores case as
+   * version 1 rules always did.
    */
   caseSensitive?: boolean;
   /**
@@ -52,7 +53,18 @@ const WORD_CHAR = "[\\p{L}\\p{M}\\p{N}_]";
 // match anywhere.
 const UNSPACED_SCRIPT_CHAR = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Thai}\p{Script=Lao}\p{Script=Khmer}\p{Script=Myanmar}]/u;
 const WORD_EDGE_CHAR = /[\p{L}\p{M}\p{N}_]/u;
-const UPPERCASE_LETTER = /\p{Lu}/u;
+const UPPERCASE_LETTER = /\p{Lu}/gu;
+const LOWERCASE_LETTER = /\p{Ll}/u;
+
+/**
+ * True when `from` is an all-caps acronym: two or more uppercase letters and
+ * no lowercase ones ("US", "NASA", "U.S."). This is the case policy for rules
+ * that do not say whether they are case-sensitive.
+ */
+export function isAcronymRule(from: string): boolean {
+  const text = from.trim();
+  return !LOWERCASE_LETTER.test(text) && (text.match(UPPERCASE_LETTER)?.length ?? 0) >= 2;
+}
 
 function needsBoundary(edgeChar: string): boolean {
   return WORD_EDGE_CHAR.test(edgeChar) && !UNSPACED_SCRIPT_CHAR.test(edgeChar);
@@ -63,7 +75,7 @@ function compileRule(rule: PronunciationMatchRule): CompiledRule | null {
   const to = rule.to.trim();
   if (!from || !to) return null;
 
-  const caseSensitive = rule.caseSensitive ?? UPPERCASE_LETTER.test(from);
+  const caseSensitive = rule.caseSensitive ?? isAcronymRule(from);
   const chars = Array.from(from);
   const wordScope = (rule.scope ?? "word") === "word";
   const before = wordScope && needsBoundary(chars[0]) ? `(?<!${WORD_CHAR})` : "";

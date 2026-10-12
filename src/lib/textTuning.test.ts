@@ -3,6 +3,7 @@ import {
   applyEmphasisMarkup,
   applyPronunciationRules,
   compilePronunciationMatcher,
+  isAcronymRule,
   resolveChunkPauseSeconds,
   resolvePauseSeconds,
   resolveSentenceSpeed,
@@ -54,6 +55,18 @@ describe("textTuning", () => {
     expect(applyPronunciationRules("Route one, route two, ROUTE three.", [{ from: "route", to: "root" }])).toBe(
       "root one, root two, root three.",
     );
+  });
+
+  it("keeps matching stored rules with capitals case-insensitively unless they are acronyms", () => {
+    expect(applyPronunciationRules("KOKORO, kokoro and Kokoro", [{ from: "Kokoro", to: "koh-koh-roh" }])).toBe(
+      "koh-koh-roh, koh-koh-roh and koh-koh-roh",
+    );
+    expect(applyPronunciationRules("open tts", [{ from: "Open TTS", to: "open tee tee ess" }])).toBe("open tee tee ess");
+  });
+
+  it("treats only all-caps text with two or more capitals as an acronym", () => {
+    for (const acronym of ["US", "NASA", " TTS ", "U.S.", "A4B"]) expect(isAcronymRule(acronym)).toBe(true);
+    for (const other of ["I", "A4", "iOS", "Kokoro", "Open TTS", "route", "", "42"]) expect(isAcronymRule(other)).toBe(false);
   });
 
   it("honors an explicit case option", () => {

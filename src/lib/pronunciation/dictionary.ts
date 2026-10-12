@@ -12,7 +12,7 @@
  * the input.
  */
 import type { PronunciationRule } from "../../types";
-import type { PronunciationMatchRule, PronunciationRuleScope } from "../textTuning";
+import { isAcronymRule, type PronunciationMatchRule, type PronunciationRuleScope } from "../textTuning";
 
 export const PRONUNCIATION_DICTIONARY_VERSION = 2;
 /** `format` tag of the native JSON exchange file. */
@@ -32,7 +32,11 @@ export const MAX_DICTIONARY_FILE_CHARS = 4 * 1024 * 1024;
 export type PhonemeAlphabet = "ipa";
 
 interface RuleOptions {
-  /** See `PronunciationMatchRule.caseSensitive`; omitted means the automatic policy. */
+  /**
+   * See `PronunciationMatchRule.caseSensitive`. Omitted means the automatic
+   * policy (all-caps acronyms are case-sensitive, everything else is not);
+   * converted version 1 rules store the result explicitly.
+   */
   caseSensitive?: boolean;
   /** See `PronunciationMatchRule.scope`; omitted means "word". */
   scope?: PronunciationRuleScope;
@@ -207,8 +211,10 @@ export function createPronunciationDictionary(input: CreateDictionaryInput): Pro
 
 /**
  * Converts the legacy single lexicon (version 1 `from=to` rules) into a v2
- * dictionary of alias rules with the automatic case policy, which is how the
- * lexicon has always matched. Empty rules are dropped.
+ * dictionary of alias rules. Version 1 rules always ignored case, so each
+ * converted rule keeps doing so unless its `from` is an all-caps acronym of
+ * two or more letters ("US" must not rewrite "us"); that outcome is stored as
+ * an explicit `caseSensitive`. Empty rules are dropped.
  */
 export function dictionaryFromLegacyRules(
   rules: readonly PronunciationRule[],
@@ -219,7 +225,8 @@ export function dictionaryFromLegacyRules(
     id: options.id,
     rules: rules
       .map((rule) => ({ type: "alias" as const, from: rule.from.trim(), to: rule.to.trim() }))
-      .filter((rule) => rule.from && rule.to),
+      .filter((rule) => rule.from && rule.to)
+      .map((rule) => ({ ...rule, caseSensitive: isAcronymRule(rule.from) })),
   });
 }
 

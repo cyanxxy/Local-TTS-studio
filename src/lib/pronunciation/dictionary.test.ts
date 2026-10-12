@@ -115,9 +115,26 @@ describe("createPronunciationDictionary and dictionaryFromLegacyRules", () => {
       id: "quick",
       name: "Quick rules",
       enabled: true,
-      rules: [{ type: "alias", from: "GIF", to: "jif" }],
+      rules: [{ type: "alias", from: "GIF", to: "jif", caseSensitive: true }],
     });
     expect(dictionaryFromLegacyRules([])).toMatchObject({ name: "Quick rules", rules: [] });
+  });
+
+  it("keeps stored rules matching case-insensitively unless they are all-caps acronyms", () => {
+    const legacy = [
+      { from: "Kokoro", to: "koh-koh-roh" },
+      { from: "Open TTS", to: "open tee tee ess" },
+      { from: "route", to: "root" },
+      { from: "I", to: "eye" },
+      { from: "US", to: "United States" },
+    ];
+    const migrated = dictionaryFromLegacyRules(legacy);
+    expect(migrated.rules.map((rule) => [rule.from, rule.caseSensitive])).toEqual([
+      ["Kokoro", false], ["Open TTS", false], ["route", false], ["I", false], ["US", true],
+    ]);
+    const text = "KOKORO and kokoro, open tts, ROUTE, us and US, i";
+    expect(compilePronunciationMatcher(flattenPronunciationDictionaries([migrated]).rules).apply(text))
+      .toBe("koh-koh-roh and koh-koh-roh, open tee tee ess, root, us and United States, eye");
   });
 });
 
