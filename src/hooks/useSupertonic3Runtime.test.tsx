@@ -252,7 +252,7 @@ describe("useSupertonic3Runtime", () => {
       try {
         for await (const chunk of result.current.synthesize({
           text: "A preview line.",
-          settings: { voice: "M1", language: "en" },
+          settings: { voice: "M1", language: "en", seed: null },
           tuning: { speed: 1, quality: 5 },
         })) void chunk;
       } catch (error) {
@@ -283,6 +283,61 @@ describe("useSupertonic3Runtime", () => {
     })));
     return { ...view, workers, player };
   }
+
+  it("seeds the surface generation only when the settings carry a seed", async () => {
+    const { result, rerender } = (() => {
+      const worker = new FakeWorker();
+      const view = renderHook(
+        (props: { seed: number | null }) => useSupertonic3Runtime({
+          ...baseOptions,
+          seed: props.seed,
+          createWorker: () => worker as unknown as Worker,
+          player: createPlayer(),
+        }),
+        { initialProps: { seed: 21 as number | null } },
+      );
+      act(() => worker.dispatchEvent(new MessageEvent("message", { data: { type: "READY", voices: ["M1"], backend: "wasm" } })));
+      return view;
+    })();
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+
+    act(() => result.current.handleGenerate());
+    expect(ttsState.generate.mock.calls.at(-1)?.[4]).toEqual({ seed: 21 });
+
+    ttsState.isGenerating = false;
+    rerender({ seed: null });
+    act(() => result.current.handleGenerate());
+    expect(ttsState.generate.mock.calls.at(-1)?.[4]).toBeUndefined();
+  });
+
+  it.each([
+    ["the request's own seed over the settings'", 7, 42, 42],
+    ["the settings' seed when the request has none", 7, undefined, 7],
+    ["no seed at all when neither is set", null, undefined, undefined],
+  ] as const)("synthesizes with %s", async (_label, settingsSeed, requestSeed, expected) => {
+    const { result, workers } = readyRuntime();
+    const controller = new AbortController();
+    const request = (async () => {
+      try {
+        for await (const chunk of result.current.synthesize({
+          text: "A preview line.",
+          settings: { voice: "M1", language: "en", seed: settingsSeed },
+          tuning: { speed: 1, quality: 5 },
+          seed: requestSeed,
+          signal: controller.signal,
+        })) void chunk;
+      } catch {
+        // Aborted below once the GENERATE has been sent.
+      }
+    })();
+
+    await waitFor(() => expect(workers[0].postMessage.mock.calls.some(([message]) => message.type === "GENERATE")).toBe(true));
+    const sent = workers[0].postMessage.mock.calls.map(([message]) => message).find((message) => message.type === "GENERATE");
+    if (expected === undefined) expect(sent).not.toHaveProperty("seed");
+    else expect(sent).toMatchObject({ seed: expected });
+    controller.abort();
+    await request;
+  });
 
   it("stops a generation softly, keeping the worker and its model", () => {
     const { result, workers, player } = readyRuntime();
@@ -341,7 +396,7 @@ describe("useSupertonic3Runtime", () => {
       try {
         for await (const chunk of result.current.synthesize({
           text: "A preview line.",
-          settings: { voice: "M1", language: "en" },
+          settings: { voice: "M1", language: "en", seed: null },
           tuning: { speed: 1, quality: 5 },
         })) void chunk;
       } catch {

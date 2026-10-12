@@ -297,6 +297,15 @@ export function useSynthesisSessionState({
     changeEngineInput("audio8", () => patchEngineSettings("audio8", { voice: nextVoice }));
   }, [audio8Voice, changeEngineInput, patchEngineSettings]);
 
+  // Seed and temperature shape the audio, so they save-then-clear like the voice.
+  const handleAudio8SamplingChange = useCallback((patch: Partial<Pick<AppEngineSettings["audio8"], "seed" | "temperature">>) => {
+    changeEngineInput("audio8", () => patchEngineSettings("audio8", patch));
+  }, [changeEngineInput, patchEngineSettings]);
+
+  const handleSupertonic3SeedChange = useCallback((seed: number | null) => {
+    changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { seed }));
+  }, [changeEngineInput, patchEngineSettings]);
+
   const handleSupertonic3VoiceChange = useCallback((nextVoice: string) => {
     if (nextVoice === supertonic3Voice) return;
     changeEngineInput("supertonic3", () => patchEngineSettings("supertonic3", { voice: nextVoice }));
@@ -490,6 +499,8 @@ export function useSynthesisSessionState({
       changeVoice: handleVoiceChange,
       audio8Voice,
       changeAudio8Voice: handleAudio8VoiceChange,
+      audio8Settings: engineSettings.audio8,
+      changeAudio8Sampling: handleAudio8SamplingChange,
       unavailableModels,
       chatterbox: engineSettings.chatterbox,
       changeChatterbox: handleChatterboxChange,
@@ -497,6 +508,8 @@ export function useSynthesisSessionState({
       changeSupertonicLanguage: handleSupertonicLanguageChange,
       supertonic3Voice,
       supertonic3Language,
+      supertonic3Seed: engineSettings.supertonic3.seed,
+      changeSupertonic3Seed: handleSupertonic3SeedChange,
       changeSupertonic3Voice: handleSupertonic3VoiceChange,
       changeSupertonic3Language: handleSupertonic3LanguageChange,
     },

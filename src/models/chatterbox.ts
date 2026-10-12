@@ -3,7 +3,7 @@ import { CHATTERBOX_TAG_TOKENS } from "../lib/chatterboxTags";
 import { chunkChatterboxText } from "../lib/phonemeModels";
 import { CHATTERBOX_TURBO_ASSETS } from "../workers/manifests/chatterbox";
 import { CHATTERBOX_DEFAULT_VOICE_ASSETS } from "../workers/manifests/chatterboxDefaultVoice";
-import { asRecord, clampFinite } from "./settings";
+import { asRecord, clampFinite, MAX_SEED, parseSeed } from "./settings";
 import { audibleTuning } from "./signature";
 import type { EngineCapabilities, EngineDescriptor } from "./types";
 
@@ -22,7 +22,7 @@ export interface ChatterboxSettings {
 
 const CHATTERBOX_PARAMS = "350M";
 export const CHATTERBOX_TEMPERATURE_RANGE = { min: 0, max: 2, step: 0.05, default: 0.8 } as const;
-export const CHATTERBOX_MAX_SEED = 0xffff_ffff;
+export const CHATTERBOX_MAX_SEED = MAX_SEED;
 const MAX_VOICE_LENGTH = 200;
 const CLIP_NAME_SEPARATOR = "~";
 
@@ -75,7 +75,7 @@ function parseChatterboxSettings(raw: unknown): ChatterboxSettings {
       CHATTERBOX_TEMPERATURE_RANGE.max,
       CHATTERBOX_TEMPERATURE_RANGE.default,
     ),
-    seed: typeof seed === "number" && Number.isInteger(seed) && seed >= 0 && seed <= CHATTERBOX_MAX_SEED ? seed : null,
+    seed: parseSeed(seed),
   };
 }
 

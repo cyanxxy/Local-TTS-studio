@@ -49,8 +49,8 @@ const ENGINE_SETTINGS: OrchestratedEngineSettings = {
   paradee: { voice: SETUP.paradee.voice },
   piper: { voice: SETUP.piper.voice },
   chatterbox: { voice: "chatterbox-default", temperature: 0.8, seed: null },
-  audio8: { voice: "clara" },
-  supertonic3: { voice: "M1", language: "en" },
+  audio8: { voice: "clara", seed: null, temperature: null },
+  supertonic3: { voice: "M1", language: "en", seed: null },
 };
 
 class ScriptedWorker extends EventTarget {

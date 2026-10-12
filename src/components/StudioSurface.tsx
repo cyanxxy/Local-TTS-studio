@@ -26,6 +26,9 @@ export function StudioSurface() {
     ...(studio.desktopModel === "supertonic3" ? { supertonic3: engines.runtimes.supertonic3.modelState } : {}),
   }), [browserStates, engines.runtimes.supertonic3.modelState, studio.desktopModel]);
   const hasAudio = player.state.totalDuration > 0;
+  const { changeText, text: script } = studio;
+  // Tags go at the end; the user moves them where they belong.
+  const insertTag = (tag: string) => changeText(`${script}${/(^|\s)$/.test(script) ? "" : " "}${tag}`);
 
   return (
     <>
@@ -59,7 +62,7 @@ export function StudioSurface() {
               unavailableModels={engines.unavailableModels}
             />
 
-            {renderSurfaceEngineSettings(session, studio.desktopModel)}
+            {renderSurfaceEngineSettings(session, studio.desktopModel, insertTag)}
 
             {!usesDesktopModel && (
               <VoiceSelector

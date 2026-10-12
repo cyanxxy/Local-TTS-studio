@@ -62,6 +62,24 @@ describe("ChatterboxInlineSettings", () => {
     await vi.waitFor(() => expect(screen.getByRole("button", { name: "Copy [laugh]" }).querySelector(".lucide-check")).not.toBeNull());
   });
 
+  it("adds a tag to the script when the host can, with a space after a word", () => {
+    const onInsertTag = vi.fn();
+    render(
+      <ChatterboxInlineSettings
+        settings={chatterboxEngine.defaultSettings}
+        onChange={vi.fn()}
+        modelState={READY}
+        onInsertTag={onInsertTag}
+      />,
+    );
+
+    expect(screen.getByText(/add it to the end of the script/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
+
+    expect(onInsertTag).toHaveBeenCalledWith("[laugh]");
+    expect(screen.queryByRole("button", { name: "Copy [laugh]" })).not.toBeInTheDocument();
+  });
+
   it("copes with a clipboard that refuses or is missing", async () => {
     vi.stubGlobal("navigator", { clipboard: { writeText: vi.fn(async () => { throw new Error("denied"); }) } });
     const { unmount } = render(<ChatterboxInlineSettings settings={chatterboxEngine.defaultSettings} onChange={vi.fn()} modelState={READY} />);

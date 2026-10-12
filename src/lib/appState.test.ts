@@ -65,7 +65,7 @@ describe("appState", () => {
     expect(getInitialEngineSettings()).toMatchObject({
       kokoro: { voice: "custom_kokoro" },
       supertonic: { voice: "Male 2", language: "en" },
-      audio8: { voice: "iris" },
+      audio8: { voice: "iris", seed: null, temperature: null },
       supertonic3: ENGINES.supertonic3.defaultSettings,
       qwen3: ENGINES.qwen3.defaultSettings,
     });
@@ -78,7 +78,7 @@ describe("appState", () => {
     expect(getInitialEngineSettings()).toMatchObject({
       kokoro: { voice: "bf_emma" },
       supertonic: { voice: "Male 2" },
-      audio8: { voice: "iris" },
+      audio8: { voice: "iris", seed: null, temperature: null },
     });
   });
 
@@ -126,7 +126,7 @@ describe("appState", () => {
     });
     persistEngineSettings({
       supertonic: { voice: "Male 3", language: "fr" },
-      supertonic3: { voice: "F4", language: "ja" },
+      supertonic3: { voice: "F4", language: "ja", seed: null },
     });
     persistEngineSettings({
       qwen3: { ...ENGINES.qwen3.defaultSettings, speaker: "Ryan", seed: 42 },
@@ -142,7 +142,7 @@ describe("appState", () => {
     // The second write kept the engines the first one stored.
     expect(getInitialEngineSettings()).toMatchObject({
       supertonic: { voice: "Male 3", language: "fr" },
-      supertonic3: { voice: "F4", language: "ja" },
+      supertonic3: { voice: "F4", language: "ja", seed: null },
       qwen3: { speaker: "Ryan", seed: 42 },
     });
   });
@@ -327,7 +327,7 @@ describe("appState", () => {
     });
 
     expect(() => persistAppState({ model: "kokoro" })).not.toThrow();
-    expect(() => persistEngineSettings({ audio8: { voice: "iris" } })).not.toThrow();
+    expect(() => persistEngineSettings({ audio8: { voice: "iris", seed: null, temperature: null } })).not.toThrow();
     expect(() => persistCreatorState({ preset: "youtube-long" })).not.toThrow();
   });
 });

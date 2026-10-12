@@ -231,6 +231,10 @@ interface Audio8Bridge {
     requestId: string;
     text: string;
     voice: string;
+    /** Unsigned 32-bit sampling seed; omitted for a fresh one. */
+    seed?: number;
+    /** Sampling temperature, 0.1 to 1; omitted for the model's own. */
+    temperature?: number;
   }) => Promise<Audio8GenerateResult>;
   cancel: (request: { requestId: string }) => Promise<{ cancelled: boolean }>;
   getCacheInfo: () => Promise<LocalTtsCacheInfo>;

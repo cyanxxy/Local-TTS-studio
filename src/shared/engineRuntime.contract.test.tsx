@@ -142,7 +142,7 @@ function audio8Harness(): Harness {
   }));
   return {
     runtime: () => view.result.current,
-    synthesize: (signal) => view.result.current.synthesize({ text: TEXT, settings: { voice: "clara" }, tuning: TUNING, signal }),
+    synthesize: (signal) => view.result.current.synthesize({ text: TEXT, settings: { voice: "clara", seed: null, temperature: null }, tuning: TUNING, signal }),
     started: () => generate.calls.length,
     complete: () => generate.calls.at(-1)?.resolve({ sampleRate: 24_000, elapsedSec: 0.1, audio: new Float32Array(8).buffer }),
     fail: (message) => generate.calls.at(-1)?.reject(new Error(message)),
@@ -250,7 +250,7 @@ function supertonic3Harness(): Harness {
   const worker = () => ScriptedWorker.instances.at(-1);
   return {
     runtime: () => view.result.current,
-    synthesize: (signal) => view.result.current.synthesize({ text: TEXT, settings: { voice: "M2", language: "ko" }, tuning: TUNING, signal }),
+    synthesize: (signal) => view.result.current.synthesize({ text: TEXT, settings: { voice: "M2", language: "ko", seed: null }, tuning: TUNING, signal }),
     started: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.generations.length, 0),
     complete: () => worker()?.completeLatest(),
     fail: (message) => worker()?.failLatest(message),

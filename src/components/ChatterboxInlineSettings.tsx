@@ -1,9 +1,9 @@
 import { useId, useState } from "react";
-import { Check, Copy, X } from "lucide-react";
+import { Check, Copy, Plus } from "lucide-react";
+import { SeedField } from "./SeedField";
 import { CHATTERBOX_TAG_TOKENS } from "../lib/chatterboxTags";
 import {
   CHATTERBOX_DOWNLOAD_BYTES,
-  CHATTERBOX_MAX_SEED,
   CHATTERBOX_TEMPERATURE_RANGE,
   type ChatterboxSettings,
 } from "../models/chatterbox";
@@ -13,19 +13,24 @@ interface ChatterboxInlineSettingsProps {
   settings: ChatterboxSettings;
   onChange: (patch: Partial<Pick<ChatterboxSettings, "temperature" | "seed">>) => void;
   modelState: ModelState;
+  /** Adds a tag to the script. Without it (the Reader) a tag is copied for pasting instead. */
+  onInsertTag?: (tag: string) => void;
 }
 
 /**
  * Chatterbox's sampling controls and tags, with the plain facts about its cost:
  * a large first-use download and generation slower than playback.
  */
-export function ChatterboxInlineSettings({ settings, onChange, modelState }: ChatterboxInlineSettingsProps) {
+export function ChatterboxInlineSettings({ settings, onChange, modelState, onInsertTag }: ChatterboxInlineSettingsProps) {
   const temperatureId = useId();
-  const seedId = useId();
   const [copied, setCopied] = useState<string | null>(null);
   const downloadLabel = `${(CHATTERBOX_DOWNLOAD_BYTES / 1e9).toFixed(1)} GB`;
 
-  const copyTag = (tag: string) => {
+  const chooseTag = (tag: string) => {
+    if (onInsertTag) {
+      onInsertTag(tag);
+      return;
+    }
     void navigator.clipboard?.writeText(tag).then(() => setCopied(tag), () => setCopied(null));
   };
 
@@ -57,55 +62,27 @@ export function ChatterboxInlineSettings({ settings, onChange, modelState }: Cha
         </div>
       </div>
 
-      <div>
-        <label htmlFor={seedId} className="text-xs font-medium text-text-secondary">Seed</label>
-        <div className="mt-1 flex items-center gap-2">
-          <input
-            id={seedId}
-            type="number"
-            min={0}
-            max={CHATTERBOX_MAX_SEED}
-            step={1}
-            placeholder="Random each time"
-            value={settings.seed ?? ""}
-            onChange={(event) => {
-              const next = event.target.valueAsNumber;
-              onChange({ seed: Number.isInteger(next) && next >= 0 && next <= CHATTERBOX_MAX_SEED ? next : null });
-            }}
-            className="w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-1.5 text-sm text-text-primary"
-          />
-          {settings.seed !== null && (
-            <button
-              type="button"
-              aria-label="Use a random seed"
-              title="Use a random seed"
-              onClick={() => onChange({ seed: null })}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-muted hover:text-text-primary"
-            >
-              <X size={14} aria-hidden="true" />
-            </button>
-          )}
-        </div>
-        <p className="mt-1 text-2xs leading-4 text-text-muted">A fixed seed repeats the same delivery for the same text and voice.</p>
-      </div>
+      <SeedField seed={settings.seed} onChange={(seed) => onChange({ seed })} />
 
       <div>
         <p className="text-xs font-medium text-text-secondary">Expression tags</p>
         <p className="mt-0.5 text-2xs leading-4 text-text-muted">
           Type a tag in square brackets where it should happen, for example “That is hilarious [laugh]”. Any other
-          bracketed direction is skipped, not read aloud. Select a tag to copy it.
+          bracketed direction is skipped, not read aloud. {onInsertTag ? "Select a tag to add it to the end of the script." : "Select a tag to copy it."}
         </p>
         <ul className="mt-2 flex flex-wrap gap-1.5" aria-label="Supported tags">
           {CHATTERBOX_TAG_TOKENS.map((tag) => (
             <li key={tag}>
               <button
                 type="button"
-                onClick={() => copyTag(tag)}
-                aria-label={`Copy ${tag}`}
+                onClick={() => chooseTag(tag)}
+                aria-label={`${onInsertTag ? "Add" : "Copy"} ${tag}`}
                 className="flex items-center gap-1 rounded-full border border-border bg-text-primary/[0.03] px-2 py-0.5 font-mono text-2xs text-text-secondary transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary"
               >
                 {tag}
-                {copied === tag
+                {onInsertTag
+                  ? <Plus size={10} aria-hidden="true" className="opacity-50" />
+                  : copied === tag
                   ? <Check size={10} aria-hidden="true" className="text-success" />
                   : <Copy size={10} aria-hidden="true" className="opacity-50" />}
               </button>

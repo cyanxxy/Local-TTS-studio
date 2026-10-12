@@ -12,6 +12,8 @@ interface Options {
   active: boolean;
   text: string;
   voice: string;
+  /** Sampling for the surface generation; null fields leave the model's own. */
+  sampling?: { seed: number | null; temperature: number | null };
   generationSettings: GenerationTuningSettings;
   player: UseAudioPlayerReturn;
   setShowPlayer: (show: boolean) => void;
@@ -46,7 +48,7 @@ const INITIAL_STATS: GenerationStats = { firstLatency: null, processingTime: 0, 
 const BRIDGE_MISSING = "Audio8 local inference requires the Electron app.";
 const BRIDGE_MISSING_STATE: ModelState = { ...INITIAL_STATE, error: BRIDGE_MISSING };
 
-export function useAudio8Runtime({ active, text, voice, generationSettings, player, setShowPlayer }: Options): Audio8Runtime {
+export function useAudio8Runtime({ active, text, voice, sampling, generationSettings, player, setShowPlayer }: Options): Audio8Runtime {
   const [modelState, setModelState] = useState<ModelState>(INITIAL_STATE);
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgress, setGenerationProgress] = useState(0);
@@ -199,7 +201,7 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
       try {
         const passages = streamAudio8Synthesis(
           bridge,
-          { text, voice, tuning: generationSettings },
+          { text, voice, tuning: generationSettings, sampling },
           generation.signal,
           (requestId, chunkIndex, chunkCount) => {
             generationAttempt.current = { requestId, chunkIndex, chunkCount };
@@ -240,6 +242,7 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
     generationSettings,
     holdForeground,
     resetPlayer,
+    sampling,
     scheduleChunk,
     setShowPlayer,
     text,
@@ -250,7 +253,15 @@ export function useAudio8Runtime({ active, text, voice, generationSettings, play
     if (!bridge) throw new Error(BRIDGE_MISSING);
     return streamAudio8Synthesis(
       bridge,
-      { text: request.text, voice: request.settings.voice, tuning: request.tuning },
+      {
+        text: request.text,
+        voice: request.settings.voice,
+        tuning: request.tuning,
+        sampling: {
+          seed: request.seed ?? request.settings.seed,
+          temperature: request.settings.temperature,
+        },
+      },
       signal,
     );
   }, request.signal), [bridge, queue]);

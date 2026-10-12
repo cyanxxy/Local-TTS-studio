@@ -1024,7 +1024,7 @@ describe("SynthesisApp", () => {
   });
 
   it("restores and persists the selected Audio8 voice", async () => {
-    mock.initialEngineSettings = { ...mock.initialEngineSettings, audio8: { voice: "iris" } };
+    mock.initialEngineSettings = { ...mock.initialEngineSettings, audio8: { voice: "iris", seed: null, temperature: null } };
     Object.defineProperty(window, "electron", {
       value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
       configurable: true,
@@ -1034,7 +1034,7 @@ describe("SynthesisApp", () => {
 
     expect(screen.getByRole("button", { name: /IrisEnglish/i })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ audio8: { voice: "iris" } }),
+      expect.objectContaining({ audio8: { voice: "iris", seed: null, temperature: null } }),
     ));
   });
 
@@ -1100,7 +1100,7 @@ describe("SynthesisApp", () => {
     mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "supertonic3", reader: null } };
     mock.initialEngineSettings = {
       ...mock.initialEngineSettings,
-      supertonic3: { voice: "F2", language: "ja" },
+      supertonic3: { voice: "F2", language: "ja", seed: null },
     };
     const worker = {
       addEventListener: vi.fn(),
@@ -1114,10 +1114,43 @@ describe("SynthesisApp", () => {
     expect(screen.getByLabelText("Supertonic 3 language")).toHaveValue("ja");
     fireEvent.change(screen.getByLabelText("Supertonic 3 language"), { target: { value: "de" } });
     await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
-      expect.objectContaining({ supertonic3: { voice: "F2", language: "de" } }),
+      expect.objectContaining({ supertonic3: { voice: "F2", language: "de", seed: null } }),
     ));
     // Qwen3's settings are persisted by its own provider, never by Studio.
     expect(mock.persistEngineSettings.mock.calls.every(([settings]) => !("qwen3" in settings))).toBe(true);
+  });
+
+  it("saves a Supertonic 3 seed with its other settings", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "supertonic3", reader: null } };
+    const worker = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      postMessage: vi.fn(),
+      terminate: vi.fn(),
+    } as unknown as Worker;
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" createSupertonic3Worker={() => worker} />);
+
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "314" } });
+
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ supertonic3: expect.objectContaining({ seed: 314 }) }),
+    ));
+  });
+
+  it("saves Audio8's temperature and seed with its voice", async () => {
+    mock.initialAppState = { ...mock.initialAppState, desktopModels: { studio: "audio8", reader: null } };
+    Object.defineProperty(window, "electron", {
+      value: { isElectron: true, platform: "darwin", arch: "arm64", localTts: mock.localTts },
+      configurable: true,
+    });
+    render(<SynthesisApp enableDesktopRuntimes routeBasePath="/desktop" />);
+
+    fireEvent.change(screen.getByLabelText(/Variation/), { target: { value: "0.4" } });
+    fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "8" } });
+
+    await waitFor(() => expect(mock.persistEngineSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ audio8: { voice: "clara", seed: 8, temperature: 0.4 } }),
+    ));
   });
 
   it("shows the Audio8 cache row and clears it from the inline settings", async () => {
@@ -1301,6 +1334,21 @@ describe("SynthesisApp", () => {
     fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "12" } });
     expect(screen.getByLabelText("Seed")).toHaveValue(12);
     expect(mock.generation.cancelActiveGeneration).toHaveBeenCalled();
+
+    // A tag lands at the end of the script, after a space.
+    const script = (screen.getByRole("textbox", { name: "script" }) as HTMLTextAreaElement).value;
+    fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue(`${script} [laugh]`);
+    fireEvent.click(screen.getByRole("button", { name: "Add [sigh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue(`${script} [laugh] [sigh]`);
+
+    // Into an empty script, or one that already ends in a space, no extra space is added.
+    fireEvent.change(screen.getByRole("textbox", { name: "script" }), { target: { value: "" } });
+    fireEvent.click(screen.getByRole("button", { name: "Add [sigh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("[sigh]");
+    fireEvent.change(screen.getByRole("textbox", { name: "script" }), { target: { value: "Hello " } });
+    fireEvent.click(screen.getByRole("button", { name: "Add [laugh]" }));
+    expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("Hello [laugh]");
   });
 
   it("names every browser model the build ships in the footer", () => {

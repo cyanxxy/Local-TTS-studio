@@ -6,7 +6,9 @@ import {
   type LocalBrowserSupport,
 } from "../lib/browserSupport";
 import type { InitialAppState } from "../lib/appState";
+import type { Audio8Settings } from "../models/audio8";
 import type { ChatterboxSettings } from "../models/chatterbox";
+import type { Supertonic3Settings } from "../models/supertonic3";
 import {
   browserEngineWorkerFields,
   isBrowserEngineId,
@@ -35,8 +37,8 @@ export interface OrchestratedEngineSettings {
   paradee: { voice: string };
   piper: { voice: string };
   chatterbox: ChatterboxSettings;
-  audio8: { voice: string };
-  supertonic3: { voice: string; language: string };
+  audio8: Audio8Settings;
+  supertonic3: Supertonic3Settings;
 }
 
 interface Options {
@@ -234,14 +236,21 @@ export function useEngineOrchestrator({
     text,
     voice: engineSettings.supertonic3.voice,
     language: engineSettings.supertonic3.language,
+    seed: engineSettings.supertonic3.seed,
     generationSettings,
     player,
     setShowPlayer,
   });
+  const { seed: audio8Seed, temperature: audio8Temperature } = engineSettings.audio8;
+  const audio8Sampling = useMemo(
+    () => ({ seed: audio8Seed, temperature: audio8Temperature }),
+    [audio8Seed, audio8Temperature],
+  );
   const audio8 = useAudio8Runtime({
     active: visibleEngineId === "audio8",
     text,
     voice: engineSettings.audio8.voice,
+    sampling: audio8Sampling,
     generationSettings,
     player,
     setShowPlayer,
