@@ -17,6 +17,7 @@ const ttsState = vi.hoisted(() => ({
   error: null as string | null,
   generate: vi.fn(),
   cancel: vi.fn(),
+  abort: vi.fn(),
 }));
 
 vi.mock("./useTTS", () => ({ useTTS: () => ttsState }));
@@ -51,6 +52,7 @@ describe("useSupertonic3Runtime", () => {
     ttsState.isGenerating = false;
     ttsState.generate.mockReset();
     ttsState.cancel.mockReset();
+    ttsState.abort.mockReset();
     baseOptions.setShowPlayer.mockReset();
   });
 
@@ -267,25 +269,55 @@ describe("useSupertonic3Runtime", () => {
     expect(failure).toEqual(new Error("still offline"));
   });
 
-  it("hard-stops compute and recreates the worker when generation is cancelled", async () => {
+  function readyRuntime() {
     const workers: FakeWorker[] = [];
     const createWorker = vi.fn(() => {
       const worker = new FakeWorker();
       workers.push(worker);
       return worker as unknown as Worker;
     });
-    const { result } = renderHook(() => useSupertonic3Runtime({
-      ...baseOptions,
-      createWorker,
-      player: createPlayer(),
-    }));
+    const player = createPlayer();
+    const view = renderHook(() => useSupertonic3Runtime({ ...baseOptions, createWorker, player }));
     act(() => workers[0].dispatchEvent(new MessageEvent("message", {
       data: { type: "READY", voices: ["M1"], backend: "wasm" },
     })));
+    return { ...view, workers, player };
+  }
+
+  it("stops a generation softly, keeping the worker and its model", () => {
+    const { result, workers, player } = readyRuntime();
     ttsState.isGenerating = true;
 
     act(() => result.current.handleStop());
 
+    expect(ttsState.abort).toHaveBeenCalledOnce();
+    expect(ttsState.cancel).not.toHaveBeenCalled();
+    expect(workers[0].terminate).not.toHaveBeenCalled();
+    expect(workers).toHaveLength(1);
+    expect(player.stopAll).toHaveBeenCalledOnce();
+  });
+
+  it("only stops playback when nothing is generating", () => {
+    const { result, workers, player } = readyRuntime();
+
+    act(() => result.current.handleStop());
+
+    expect(ttsState.abort).not.toHaveBeenCalled();
+    expect(workers[0].terminate).not.toHaveBeenCalled();
+    expect(player.stopAll).toHaveBeenCalledOnce();
+  });
+
+  it("replaces a worker that never answers the abort, and leaves a replaced one alone", async () => {
+    const { result, workers } = readyRuntime();
+    ttsState.isGenerating = true;
+    act(() => result.current.handleStop());
+    const onUnresponsive = ttsState.abort.mock.calls[0][0] as (worker: Worker) => void;
+
+    // A worker that is no longer the runtime's own is none of its business.
+    act(() => onUnresponsive(new FakeWorker() as unknown as Worker));
+    expect(workers[0].terminate).not.toHaveBeenCalled();
+
+    act(() => onUnresponsive(workers[0] as unknown as Worker));
     expect(ttsState.cancel).toHaveBeenCalledOnce();
     expect(workers[0].terminate).toHaveBeenCalledOnce();
     await waitFor(() => expect(workers).toHaveLength(2));

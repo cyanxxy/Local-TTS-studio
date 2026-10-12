@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GenerationTuningSettings, ModelType, WorkerInMessage, WorkerOutMessage } from "../types";
 import { useTTS } from "./useTTS";
+import { WORKER_ABORT_TIMEOUT_MS } from "./workerGeneration";
 
 class MockWorker {
   public postedMessages: WorkerInMessage[] = [];
@@ -206,6 +207,54 @@ describe("useTTS", () => {
     expect(worker.postedMessages.at(-1)).toEqual({ type: "CANCEL" });
     expect(result.current.isGenerating).toBe(false);
     expect(worker.listenerCount()).toBe(0);
+  });
+
+  it("aborts the active generation softly and reports a worker that never answers", () => {
+    vi.useFakeTimers();
+    const worker = new MockWorker();
+    const { result } = renderHook(() => useTTS({
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
+      onAudioChunk: vi.fn(),
+      onComplete: vi.fn(),
+    }));
+    const onUnresponsive = vi.fn();
+
+    // Nothing is running, so nothing is aborted.
+    act(() => result.current.abort(onUnresponsive));
+    expect(worker.postedMessages).toEqual([]);
+
+    act(() => result.current.generate("Hello", "kokoro", "af_heart", SETTINGS));
+    const generation = worker.postedMessages[0];
+    const generationId = generation.type === "GENERATE" ? generation.generationId : undefined;
+    act(() => result.current.abort(onUnresponsive));
+
+    expect(worker.postedMessages.at(-1)).toEqual({ type: "ABORT", generationId });
+    expect(worker.postedMessages.some((message) => message.type === "CANCEL")).toBe(false);
+    expect(result.current.isGenerating).toBe(false);
+    act(() => vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS));
+    expect(onUnresponsive).toHaveBeenCalledExactlyOnceWith(worker);
+    vi.useRealTimers();
+  });
+
+  it("does not report an abort the worker answered", () => {
+    vi.useFakeTimers();
+    const worker = new MockWorker();
+    const { result } = renderHook(() => useTTS({
+      getWorker: workerLookup({ kokoro: { current: worker as unknown as Worker }, supertonic: { current: null } }),
+      onAudioChunk: vi.fn(),
+      onComplete: vi.fn(),
+    }));
+    const onUnresponsive = vi.fn();
+    act(() => result.current.generate("Hello", "kokoro", "af_heart", SETTINGS));
+    const generation = worker.postedMessages[0];
+    const generationId = generation.type === "GENERATE" ? generation.generationId : undefined;
+    act(() => result.current.abort(onUnresponsive));
+
+    act(() => worker.emit({ type: "ABORTED", generationId }));
+    act(() => vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS * 2));
+
+    expect(onUnresponsive).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it("keeps its identity across renders until its state changes", () => {

@@ -1,14 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { concatFloat32Arrays } from "../lib/audio";
-import type {
-  GenerationTuningSettings,
-  ModelType,
-  WorkerInMessage,
-} from "../types";
+import type { GenerationTuningSettings, ModelType } from "../types";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import type { UseModelLoaderReturn } from "./useModelLoader";
 import type { UseTTSReturn } from "./useTTS";
-import { observeWorkerGeneration, workerGenerateRequest } from "./workerGeneration";
+import { abortWorkerGeneration, observeWorkerGeneration, workerGenerateRequest } from "./workerGeneration";
 
 interface UseGenerationControlOptions {
   activeModel: ModelType;
@@ -19,7 +15,7 @@ interface UseGenerationControlOptions {
   player: UseAudioPlayerReturn;
   setShowPlayer: (showPlayer: boolean) => void;
   text: string;
-  tts: Pick<UseTTSReturn, "cancel" | "generate" | "isGenerating">;
+  tts: Pick<UseTTSReturn, "abort" | "cancel" | "generate" | "isGenerating">;
   voice: string;
 }
 
@@ -39,6 +35,7 @@ interface UseGenerationControlReturn {
 interface ActiveRetake {
   worker: Worker;
   model: ModelType;
+  generationId: string;
   detach: () => void;
 }
 
@@ -65,7 +62,7 @@ export function useGenerationControl({
     segments,
     stopAll,
   } = player;
-  const { cancel: cancelTts, generate: generateTts, isGenerating: isTtsGenerating } = tts;
+  const { abort: abortTts, cancel: cancelTts, generate: generateTts, isGenerating: isTtsGenerating } = tts;
 
   const retakeRef = useRef<ActiveRetake | null>(null);
   const retakeGenerationSeqRef = useRef(0);
@@ -86,14 +83,19 @@ export function useGenerationControl({
     }
   }, [endStream, isTtsGenerating]);
 
+  // A worker that does not answer a soft abort is replaced, unless it already was.
+  const restartIfStillCurrent = useCallback((model: ModelType, worker: Worker) => {
+    if (getWorker(model) === worker) hardRestartModel(model);
+  }, [getWorker, hardRestartModel]);
+
   const cancelRetake = useCallback((notifyWorker: boolean) => {
     const retake = retakeRef.current;
     if (notifyWorker && retake) {
-      retake.worker.postMessage({ type: "CANCEL" } satisfies WorkerInMessage);
-      hardRestartModel(retake.model);
+      const { generationId, model, worker } = retake;
+      abortWorkerGeneration(worker, generationId, () => restartIfStillCurrent(model, worker));
     }
     clearRetakeListener();
-  }, [clearRetakeListener, hardRestartModel]);
+  }, [clearRetakeListener, restartIfStillCurrent]);
 
   const resetGeneratedAudio = useCallback(() => {
     setRetakeError(null);
@@ -101,14 +103,18 @@ export function useGenerationControl({
     setShowPlayer(false);
   }, [resetPlayer, setShowPlayer]);
 
+  // Stopping keeps the model loaded: the worker aborts the generation and is
+  // ready for the next. Only a forced cancel (the model itself is suspect)
+  // closes the worker and loads the model again.
   const cancelActiveGeneration = useCallback((forceCancelTts: boolean = false) => {
-    const hadRetake = retakeRef.current !== null;
     cancelRetake(true);
-    if (forceCancelTts || isTtsGenerating) {
+    if (forceCancelTts) {
       cancelTts();
-      if (!hadRetake) hardRestartModel(activeModel);
+      hardRestartModel(activeModel);
+    } else if (isTtsGenerating) {
+      abortTts((worker) => restartIfStillCurrent(activeModel, worker));
     }
-  }, [activeModel, cancelRetake, cancelTts, hardRestartModel, isTtsGenerating]);
+  }, [abortTts, activeModel, cancelRetake, cancelTts, hardRestartModel, isTtsGenerating, restartIfStillCurrent]);
 
   const isGenerationBusy = isTtsGenerating || isRetakingSegment;
 
@@ -155,7 +161,7 @@ export function useGenerationControl({
     const generationId = `retake-${retakeGenerationSeqRef.current}`;
 
     const chunks: Array<{ audio: Float32Array; samplingRate: number }> = [];
-    const retake: ActiveRetake = { worker, model: activeModel, detach: () => undefined };
+    const retake: ActiveRetake = { worker, model: activeModel, generationId, detach: () => undefined };
     retakeRef.current = retake;
     setIsRetakingSegment(true);
     retake.detach = observeWorkerGeneration(worker, generationId, {

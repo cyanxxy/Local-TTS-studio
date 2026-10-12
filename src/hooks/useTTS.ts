@@ -8,7 +8,7 @@ import type {
   WorkerOutMessage,
 } from "../types";
 import { scheduleNextUiFrame, type CancelScheduledUiFlush } from "../lib/uiScheduling";
-import { workerEventMessage, workerGenerateRequest } from "./workerGeneration";
+import { abortWorkerGeneration, workerEventMessage, workerGenerateRequest } from "./workerGeneration";
 
 interface UseTTSOptions<Model extends string> {
   /** The worker that synthesizes `model`, or null while it is not running. */
@@ -33,7 +33,14 @@ export interface UseTTSReturn<Model extends string = ModelType> {
   stats: GenerationStats;
   generationProgress: number;
   generate: (text: string, model: Model, voice: string, settings: GenerationTuningSettings) => void;
+  /** Hard stop: closes the worker, which must then be replaced and its model loaded again. */
   cancel: () => void;
+  /**
+   * Soft stop: ends the generation and keeps the worker and its model. When
+   * the worker does not answer in time, `onUnresponsive` runs with that
+   * worker, for the caller to replace if it still uses it.
+   */
+  abort: (onUnresponsive: (worker: Worker) => void) => void;
 }
 
 const INITIAL_STATS: GenerationStats = {
@@ -64,6 +71,7 @@ export function useTTS<Model extends string>({
   const inputCharsRef = useRef(1);
   const generatedAudioSecsRef = useRef(0);
   const activeWorkerRef = useRef<Worker | null>(null);
+  const activeGenerationIdRef = useRef<string | null>(null);
   const listenerWorkerRef = useRef<Worker | null>(null);
   const listenerRef = useRef<((e: MessageEvent<WorkerOutMessage>) => void) | null>(null);
   const errorListenerRef = useRef<((event: Event) => void) | null>(null);
@@ -126,6 +134,7 @@ export function useTTS<Model extends string>({
     messageErrorListenerRef.current = null;
     listenerWorkerRef.current = null;
     activeWorkerRef.current = null;
+    activeGenerationIdRef.current = null;
   }, [discardGenerationUiFlush]);
 
   useEffect(() => cleanup, [cleanup]);
@@ -150,6 +159,7 @@ export function useTTS<Model extends string>({
       activeWorkerRef.current = worker;
       generationSeqRef.current += 1;
       const generationId = `browser-${generationSeqRef.current}`;
+      activeGenerationIdRef.current = generationId;
 
       const handleMessage = (e: MessageEvent<WorkerOutMessage>) => {
         const msg = e.data;
@@ -247,6 +257,16 @@ export function useTTS<Model extends string>({
     cleanup();
   }, [cleanup]);
 
+  const abort = useCallback((onUnresponsive: (worker: Worker) => void) => {
+    const worker = activeWorkerRef.current;
+    const generationId = activeGenerationIdRef.current;
+    if (worker && generationId) {
+      abortWorkerGeneration(worker, generationId, () => onUnresponsive(worker));
+    }
+    setIsGenerating(false);
+    cleanup();
+  }, [cleanup]);
+
   return useMemo(() => ({
     isGenerating,
     error,
@@ -254,5 +274,6 @@ export function useTTS<Model extends string>({
     generationProgress,
     generate,
     cancel,
-  }), [cancel, error, generate, generationProgress, isGenerating, stats]);
+    abort,
+  }), [abort, cancel, error, generate, generationProgress, isGenerating, stats]);
 }

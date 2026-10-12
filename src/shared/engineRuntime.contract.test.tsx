@@ -69,6 +69,7 @@ interface Harness {
 class ScriptedWorker extends EventTarget {
   static instances: ScriptedWorker[] = [];
   generations: string[] = [];
+  aborts: string[] = [];
   terminate = vi.fn();
   onmessage: ((event: MessageEvent<WorkerOutMessage>) => void) | null = null;
   readonly url: string;
@@ -84,6 +85,11 @@ class ScriptedWorker extends EventTarget {
       queueMicrotask(() => this.emit({ type: "READY", voices: ["af_heart"], backend: "wasm" }));
     } else if (message.type === "GENERATE" && message.generationId) {
       this.generations.push(message.generationId);
+    } else if (message.type === "ABORT" && message.generationId) {
+      // Like the real worker, which answers once the aborted inference settles.
+      const { generationId } = message;
+      this.aborts.push(generationId);
+      queueMicrotask(() => this.emit({ type: "ABORTED", generationId }));
     }
   }
 
@@ -247,7 +253,7 @@ function supertonic3Harness(): Harness {
     started: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.generations.length, 0),
     complete: () => worker()?.completeLatest(),
     fail: (message) => worker()?.failLatest(message),
-    stops: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.terminate.mock.calls.length, 0),
+    stops: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.terminate.mock.calls.length + instance.aborts.length, 0),
     ready: async () => {
       view.rerender({ active: true });
       await waitFor(() => expect(view.result.current.modelState.ready).toBe(true));
@@ -297,7 +303,7 @@ function browserHarness(engine: "kokoro" | "supertonic"): Harness {
     started: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.generations.length, 0),
     complete: () => worker()?.completeLatest(),
     fail: (message) => worker()?.failLatest(message),
-    stops: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.terminate.mock.calls.length, 0),
+    stops: () => ScriptedWorker.instances.reduce((count, instance) => count + instance.terminate.mock.calls.length + instance.aborts.length, 0),
     ready: () => waitFor(() => expect(view.result.current.runtimes.kokoro.modelState.ready).toBe(true)),
     unmount: view.unmount,
     playerMethods: methods,
@@ -406,6 +412,27 @@ describe.each(HARNESSES)("%s EngineRuntime contract", (engine, createHarness) =>
     await next.finished;
     expect(next.error()).toBeUndefined();
   });
+
+  it.skipIf(!["kokoro", "supertonic", "supertonic3"].includes(engine))(
+    "aborts a stopped request on its worker without closing the worker or reloading the model",
+    async () => {
+      const controller = new AbortController();
+      const running = track(harness.synthesize(controller.signal));
+      await waitFor(() => expect(harness.started()).toBe(1));
+
+      act(() => controller.abort(new Error("Preview closed.")));
+      await running.finished;
+
+      const workers = ScriptedWorker.instances;
+      expect(workers.flatMap((worker) => worker.aborts)).toHaveLength(1);
+      expect(workers.flatMap((worker) => worker.terminate.mock.calls)).toHaveLength(0);
+      const count = workers.length;
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      expect(ScriptedWorker.instances).toHaveLength(count);
+    },
+  );
 
   it("drops a queued request whose signal aborts before its turn", async () => {
     const controller = new AbortController();

@@ -217,10 +217,10 @@ export function useBrowserEngineRuntimes({
         ),
         signal,
         lifetime: held.lifetime,
-        stop: () => {
-          // Released first so the restart only respawns a worker something needs.
-          held.release();
-          hardRestartModel(model);
+        // The hold is released as the request unwinds, so the restart only
+        // respawns a worker something needs, and only one still current.
+        onUnresponsive: () => {
+          if (getWorker(model) === held.worker) hardRestartModel(model);
         },
         failureMessage: `${label} worker failed.`,
         stoppedMessage: `${label} stopped before the request finished.`,
@@ -228,7 +228,7 @@ export function useBrowserEngineRuntimes({
     } finally {
       held.release();
     }
-  })(), request.signal), [acquireWorker, hardRestartModel]);
+  })(), request.signal), [acquireWorker, getWorker, hardRestartModel]);
 
   const kokoroQueueInstance = kokoroQueue.queue;
   const supertonicQueueInstance = supertonicQueue.queue;

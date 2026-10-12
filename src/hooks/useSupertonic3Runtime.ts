@@ -96,6 +96,7 @@ export function useSupertonic3Runtime({
   const getWorker = useCallback(() => workerRef.current, []);
   const tts = useTTS({ getWorker, onAudioChunk, onComplete });
   const cancelTts = tts.cancel;
+  const abortTts = tts.abort;
   const generateTts = tts.generate;
   const { queue, busy: synthesisBusy, holdForeground } = useSynthesisQueue(tts.isGenerating);
 
@@ -291,15 +292,21 @@ export function useSupertonic3Runtime({
     text,
     voice,
   ]);
+  // A worker that does not answer a soft abort is replaced, unless it
+  // already was. Stopping otherwise keeps the model loaded.
+  const replaceUnresponsiveWorker = useCallback((worker: Worker) => {
+    if (workerRef.current === worker) hardCancelGeneration(activeRef.current);
+  }, [hardCancelGeneration]);
+  const abortGeneration = useCallback(() => {
+    abortTts(replaceUnresponsiveWorker);
+  }, [abortTts, replaceUnresponsiveWorker]);
   const handleStop = useCallback(() => {
-    hardCancelGeneration(true);
+    if (tts.isGenerating) abortGeneration();
     stopAll();
-  }, [hardCancelGeneration, stopAll]);
+  }, [abortGeneration, stopAll, tts.isGenerating]);
   const cancelActiveGeneration = useCallback(() => {
-    if (tts.isGenerating) {
-      hardCancelGeneration(activeRef.current);
-    }
-  }, [hardCancelGeneration, tts.isGenerating]);
+    if (tts.isGenerating) abortGeneration();
+  }, [abortGeneration, tts.isGenerating]);
   const resetGeneratedAudio = useCallback(() => {
     streamStartedRef.current = false;
     cancelActiveGeneration();
@@ -395,10 +402,8 @@ export function useSupertonic3Runtime({
           }),
           signal,
           lifetime: hold.lifetime,
-          stop: () => {
-            hold.release();
-            hardCancelGeneration(activeRef.current);
-          },
+          // The hold is released as the request unwinds.
+          onUnresponsive: () => replaceUnresponsiveWorker(hold.worker),
           failureMessage: "Supertonic 3 worker failed.",
           stoppedMessage: "Supertonic 3 stopped before the request finished.",
         });
@@ -406,7 +411,7 @@ export function useSupertonic3Runtime({
         hold.release();
       }
     })()
-  ), request.signal), [hardCancelGeneration, holdWorker, queue]);
+  ), request.signal), [holdWorker, queue, replaceUnresponsiveWorker]);
 
   return useMemo(() => ({
     id: "supertonic3",

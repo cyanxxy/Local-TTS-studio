@@ -1,7 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SynthesisChunk } from "../shared/engineRuntime";
 import type { WorkerInMessage, WorkerOutMessage } from "../types";
 import {
+  WORKER_ABORT_TIMEOUT_MS,
+  abortWorkerGeneration,
   observeWorkerGeneration,
   streamWorkerGeneration,
   workerEventMessage,
@@ -150,7 +152,7 @@ describe("observeWorkerGeneration", () => {
 
 describe("streamWorkerGeneration", () => {
   function stream(worker: ListenerWorker, overrides: Partial<Parameters<typeof streamWorkerGeneration>[0]> = {}) {
-    const stop = vi.fn();
+    const onUnresponsive = vi.fn();
     const controller = new AbortController();
     const lifetime = new AbortController();
     const iterable = streamWorkerGeneration({
@@ -159,17 +161,17 @@ describe("streamWorkerGeneration", () => {
       request: REQUEST,
       signal: controller.signal,
       lifetime: lifetime.signal,
-      stop,
+      onUnresponsive,
       failureMessage: "Kokoro worker failed.",
       stoppedMessage: "Kokoro stopped before the request finished.",
       ...overrides,
     });
-    return { iterable, stop, controller, lifetime };
+    return { iterable, onUnresponsive, controller, lifetime };
   }
 
   it("yields each chunk as the player would schedule it and ends on completion", async () => {
     const worker = new ListenerWorker();
-    const { iterable, stop } = stream(worker);
+    const { iterable, onUnresponsive } = stream(worker);
     const result = collect(iterable);
 
     worker.emit(chunk("request-1", 1));
@@ -189,7 +191,8 @@ describe("streamWorkerGeneration", () => {
       pauseAfterSec: 0.1,
       pauseKind: "sentence",
     });
-    expect(stop).not.toHaveBeenCalled();
+    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(worker.posted.map((message) => message.type)).toEqual(["GENERATE"]);
     expect(worker.listeners).toBe(0);
   });
 
@@ -204,22 +207,25 @@ describe("streamWorkerGeneration", () => {
     expect(worker.listeners).toBe(0);
   });
 
-  it("stops the worker and rejects with the signal's reason when aborted", async () => {
+  it("aborts the generation softly and rejects with the signal's reason when aborted", async () => {
     const worker = new ListenerWorker();
-    const { iterable, stop, controller } = stream(worker);
+    const { iterable, onUnresponsive, controller } = stream(worker);
     const result = collect(iterable);
     worker.emit(chunk("request-1", 1));
 
     controller.abort(new Error("Preview closed."));
 
     await expect(result).rejects.toThrow("Preview closed.");
-    expect(stop).toHaveBeenCalledOnce();
+    expect(worker.posted.at(-1)).toEqual({ type: "ABORT", generationId: "request-1" });
+    expect(worker.posted.some((message) => message.type === "CANCEL")).toBe(false);
+    worker.emit({ type: "ABORTED", generationId: "request-1" });
+    expect(onUnresponsive).not.toHaveBeenCalled();
     expect(worker.listeners).toBe(0);
   });
 
-  it("stops the worker when the reader breaks off early", async () => {
+  it("aborts softly when the reader breaks off early", async () => {
     const worker = new ListenerWorker();
-    const { iterable, stop } = stream(worker);
+    const { iterable, onUnresponsive } = stream(worker);
     worker.emit(chunk("request-1", 1));
 
     for await (const entry of iterable) {
@@ -227,19 +233,22 @@ describe("streamWorkerGeneration", () => {
       break;
     }
 
-    expect(stop).toHaveBeenCalledOnce();
+    expect(worker.posted.at(-1)).toEqual({ type: "ABORT", generationId: "request-1" });
+    worker.emit({ type: "ABORTED", generationId: "request-1" });
+    expect(onUnresponsive).not.toHaveBeenCalled();
     expect(worker.listeners).toBe(0);
   });
 
   it("fails without stopping anything when the pool retires the worker", async () => {
     const worker = new ListenerWorker();
-    const { iterable, stop, lifetime } = stream(worker);
+    const { iterable, onUnresponsive, lifetime } = stream(worker);
     const result = collect(iterable);
 
     lifetime.abort();
 
     await expect(result).rejects.toThrow("Kokoro stopped before the request finished.");
-    expect(stop).not.toHaveBeenCalled();
+    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(worker.posted.map((message) => message.type)).toEqual(["GENERATE"]);
     expect(worker.listeners).toBe(0);
   });
 
@@ -254,6 +263,67 @@ describe("streamWorkerGeneration", () => {
     await expect(collect(stream(worker, { lifetime: retired.signal }).iterable))
       .rejects.toThrow("Kokoro stopped before the request finished.");
     expect(worker.posted).toEqual([]);
+    expect(worker.listeners).toBe(0);
+  });
+});
+
+describe("abortWorkerGeneration", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("posts one ABORT and stops watching once the generation's ABORTED arrives", () => {
+    vi.useFakeTimers();
+    const worker = new ListenerWorker();
+    const onUnresponsive = vi.fn();
+    abortWorkerGeneration(worker as unknown as Worker, "gen-1", onUnresponsive);
+
+    expect(worker.posted).toEqual([{ type: "ABORT", generationId: "gen-1" }]);
+    // Another generation's answer is not ours.
+    worker.emit({ type: "ABORTED", generationId: "gen-0" });
+    expect(worker.listeners).toBe(3);
+    worker.emit({ type: "ABORTED", generationId: "gen-1" });
+    expect(worker.listeners).toBe(0);
+    vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS * 2);
+    expect(onUnresponsive).not.toHaveBeenCalled();
+  });
+
+  it("reports a worker that never answers, once", () => {
+    vi.useFakeTimers();
+    const worker = new ListenerWorker();
+    const onUnresponsive = vi.fn();
+    abortWorkerGeneration(worker as unknown as Worker, "gen-1", onUnresponsive);
+
+    vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS - 1);
+    expect(onUnresponsive).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onUnresponsive).toHaveBeenCalledOnce();
+    expect(worker.listeners).toBe(0);
+    worker.emit({ type: "ABORTED", generationId: "gen-1" });
+    expect(onUnresponsive).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a worker that crashed meanwhile to its owner", () => {
+    vi.useFakeTimers();
+    const worker = new ListenerWorker();
+    const onUnresponsive = vi.fn();
+    abortWorkerGeneration(worker as unknown as Worker, "gen-1", onUnresponsive);
+
+    worker.dispatchEvent(new Event("error"));
+    vi.advanceTimersByTime(WORKER_ABORT_TIMEOUT_MS * 2);
+    expect(onUnresponsive).not.toHaveBeenCalled();
+    expect(worker.listeners).toBe(0);
+  });
+
+  it("reports a worker that refuses the message at once", () => {
+    const worker = new ListenerWorker();
+    worker.postMessage = () => {
+      throw new Error("closed");
+    };
+    const onUnresponsive = vi.fn();
+    abortWorkerGeneration(worker as unknown as Worker, "gen-1", onUnresponsive);
+
+    expect(onUnresponsive).toHaveBeenCalledOnce();
     expect(worker.listeners).toBe(0);
   });
 });

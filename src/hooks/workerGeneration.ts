@@ -98,6 +98,56 @@ export function observeWorkerGeneration(
   return detach;
 }
 
+/**
+ * How long a soft ABORT may go unanswered. A worker normally answers as soon
+ * as its in-flight inference returns; one that never does is stuck (a GPU
+ * call that does not come back) and is replaced instead.
+ */
+export const WORKER_ABORT_TIMEOUT_MS = 5_000;
+
+/**
+ * Stops `generationId` on `worker` without closing it or unloading its model,
+ * so the next GENERATE starts without a reload. The worker answers with
+ * ABORTED once the generation has settled.
+ *
+ * `onUnresponsive` runs when no ABORTED arrives within `timeoutMs`, or when
+ * the worker refuses the message: the caller then replaces the worker. It
+ * does not run when the worker crashes meanwhile, because whoever owns the
+ * worker already hears that. Callers should check that the worker is still
+ * the one they use before replacing it, since it may have been replaced since.
+ */
+export function abortWorkerGeneration(
+  worker: Worker,
+  generationId: string,
+  onUnresponsive: () => void,
+  timeoutMs = WORKER_ABORT_TIMEOUT_MS,
+): void {
+  const timer = setTimeout(() => {
+    stopWatching();
+    onUnresponsive();
+  }, timeoutMs);
+  function stopWatching() {
+    clearTimeout(timer);
+    worker.removeEventListener("message", handleMessage as EventListener);
+    worker.removeEventListener("error", stopWatching);
+    worker.removeEventListener("messageerror", stopWatching);
+  }
+  function handleMessage(event: MessageEvent<WorkerOutMessage>) {
+    const message = event.data;
+    if (message.type === "ABORTED" && message.generationId === generationId) stopWatching();
+  }
+
+  worker.addEventListener("message", handleMessage as EventListener);
+  worker.addEventListener("error", stopWatching);
+  worker.addEventListener("messageerror", stopWatching);
+  try {
+    worker.postMessage({ type: "ABORT", generationId } satisfies WorkerInMessage);
+  } catch {
+    stopWatching();
+    onUnresponsive();
+  }
+}
+
 interface StreamWorkerGenerationOptions {
   worker: Worker;
   generationId: string;
@@ -106,11 +156,11 @@ interface StreamWorkerGenerationOptions {
   /** Aborts when the worker is terminated or replaced; the request then fails. */
   lifetime: AbortSignal;
   /**
-   * Stops the worker's generation after `signal` aborts. Workers support no
-   * per-generation abort yet, so today this hard-restarts the worker; a soft
-   * abort message can replace that here without touching any caller.
+   * Runs when the worker does not answer the soft ABORT sent after `signal`
+   * aborts (or the consumer stops reading). The caller replaces the worker,
+   * unless something else has already done so.
    */
-  stop: () => void;
+  onUnresponsive: () => void;
   /** Used when a worker crash gives no reason of its own. */
   failureMessage: string;
   /** The error when the worker goes away mid-request. */
@@ -124,7 +174,7 @@ export function streamWorkerGeneration({
   request,
   signal,
   lifetime,
-  stop,
+  onUnresponsive,
   failureMessage,
   stoppedMessage,
 }: StreamWorkerGenerationOptions): AsyncIterable<SynthesisChunk> {
@@ -139,7 +189,7 @@ export function streamWorkerGeneration({
   const stopWorker = () => {
     if (finished) return;
     finish();
-    stop();
+    abortWorkerGeneration(worker, generationId, onUnresponsive);
   };
   const channel = createAsyncChannel<SynthesisChunk>({ onReturn: stopWorker });
   function onAbort() {
