@@ -118,6 +118,9 @@
       "identity": null,
       "hardenedRuntime": false,
       "notarize": false,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Open TTS records your microphone only when you record a voice sample for voice cloning."
+      },
       "entitlements": "build/entitlements.mac.plist",
       "entitlementsInherit": "build/entitlements.mac.inherit.plist",
       "files": [
