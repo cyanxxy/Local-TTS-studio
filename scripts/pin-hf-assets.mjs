@@ -12,7 +12,9 @@
 // Git LFS files are pinned by the SHA-256 of their content (lfs.sha256).
 // Regular git files are pinned by their git blob SHA-1 (blobId) unless
 // --sha256 is given, which downloads them, checks the blob SHA-1, and records
-// a SHA-256 instead. LFS content is never downloaded. With --check the
+// a SHA-256 instead. LFS content is never downloaded. Each --license adds a
+// license id to an allow-list: the repository card's license at the pinned
+// commit must be on it, and is recorded in the manifest. With --check the
 // manifest at --out is compared with a fresh query and the script exits with
 // status 1 when they differ. This script talks to the network, so it is a
 // maintainer tool and stays out of CI.
@@ -34,12 +36,13 @@ const DEFAULT_MANIFEST_DIR = path.join(rootDir, "src", "workers", "manifests");
 
 /**
  * @typedef {{ byteLength: number, sha256?: string, gitBlobSha1?: string }} PinnedFile
- * @typedef {{ repo: string, revision: string, files: Record<string, PinnedFile> }} PinnedManifest
+ * @typedef {{ repo: string, revision: string, license?: string, files: Record<string, PinnedFile> }} PinnedManifest
  * @typedef {{
  *   repo: string,
  *   revision: string,
  *   include: string[],
  *   exclude: string[],
+ *   licenses: string[],
  *   name: string,
  *   out: string | null,
  *   check: boolean,
@@ -57,6 +60,7 @@ export function parseArgs(argv) {
     revision: "",
     include: [],
     exclude: [],
+    licenses: [],
     name: "PINNED_ASSETS",
     out: null,
     check: false,
@@ -91,6 +95,7 @@ export function parseArgs(argv) {
     else if ((value = readValue("--revision")) !== null) options.revision = value;
     else if ((value = readValue("--include")) !== null) options.include.push(value);
     else if ((value = readValue("--exclude")) !== null) options.exclude.push(value);
+    else if ((value = readValue("--license")) !== null) options.licenses.push(value);
     else if ((value = readValue("--name")) !== null) options.name = value;
     else if ((value = readValue("--out")) !== null) options.out = value;
     else throw new Error(`Unknown option: ${arg}`);
@@ -179,6 +184,11 @@ export async function buildManifest(info, options, fetchBytes = null) {
   if (info.sha !== options.revision) {
     throw new Error(`The Hub resolved ${options.revision} to ${String(info.sha)}; pin the exact commit.`);
   }
+  const licenses = options.licenses ?? [];
+  const license = info.cardData?.license;
+  if (licenses.length > 0 && !licenses.includes(license)) {
+    throw new Error(`${options.repo} is licensed ${JSON.stringify(license ?? null)}, which is not one of --license ${licenses.join(", ")}.`);
+  }
 
   const siblings = new Map(info.siblings.map((entry) => [entry.rfilename, entry]));
   const selected = selectFiles([...siblings.keys()], options);
@@ -215,7 +225,12 @@ export async function buildManifest(info, options, fetchBytes = null) {
     files[file] = { byteLength: entry.size, sha256: createHash("sha256").update(bytes).digest("hex") };
   }
 
-  return { repo: options.repo, revision: options.revision, files };
+  return {
+    repo: options.repo,
+    revision: options.revision,
+    ...(licenses.length > 0 ? { license } : {}),
+    files,
+  };
 }
 
 export function regenerateCommand(options) {
@@ -226,6 +241,7 @@ export function regenerateCommand(options) {
     `--revision ${options.revision}`,
     ...options.include.map((glob) => `--include ${quote(glob)}`),
     ...options.exclude.map((glob) => `--exclude ${quote(glob)}`),
+    ...(options.licenses ?? []).map((license) => `--license ${quote(license)}`),
     ...(options.sha256 ? ["--sha256"] : []),
     `--name ${options.name}`,
     ...(options.out ? [`--out ${quote(options.out)}`] : []),
@@ -279,7 +295,7 @@ export function parseRenderedManifest(text) {
  */
 export function diffManifests(previous, next) {
   const differences = [];
-  for (const field of ["repo", "revision"]) {
+  for (const field of ["repo", "revision", "license"]) {
     if (previous[field] !== next[field]) {
       differences.push(`${field}: ${String(previous[field])} -> ${String(next[field])}`);
     }

@@ -34,7 +34,12 @@ function desktopShellFallbackPlugin(): Plugin {
 }
 
 export default defineConfig({
-  plugins: [kokoroOnnxWasmAssetPlugin(rootDir), desktopShellFallbackPlugin(), react(), tailwindcss()],
+  plugins: [
+    kokoroOnnxWasmAssetPlugin(rootDir),
+    desktopShellFallbackPlugin(),
+    react(),
+    tailwindcss(),
+  ],
   server: {
     port: 5173,
     strictPort: true,
