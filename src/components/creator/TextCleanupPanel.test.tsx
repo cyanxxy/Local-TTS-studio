@@ -1,7 +1,6 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { TextDiffPart } from "../../lib/text/textEdits";
-import { TextCleanupPanel, condenseDiff } from "./TextCleanupPanel";
+import { TextCleanupPanel } from "./TextCleanupPanel";
 
 const MESSY = "The **launch** went well [1]. See https://example.com/page 😀 !!!";
 
@@ -75,45 +74,5 @@ describe("TextCleanupPanel", () => {
 
     render(<TextCleanupPanel text="Just [1] one." onTextChange={() => {}} />);
     expect(screen.getByText(/1 change: 1 citations\./)).toBeInTheDocument();
-  });
-});
-
-describe("condenseDiff", () => {
-  const equal = (text: string): TextDiffPart => ({ type: "equal", text, sourceStart: 0 });
-  const removed = (text: string): TextDiffPart => ({ type: "removed", text, sourceStart: 0 });
-  const inserted = (text: string): TextDiffPart => ({ type: "inserted", text, sourceStart: 0 });
-  const long = "x".repeat(100);
-
-  it("keeps short text whole and trims the sides of long text that touch a change", () => {
-    expect(condenseDiff([equal("short "), removed("[1]"), equal(" tail")]).shown).toEqual([
-      { type: "equal", text: "short " },
-      { type: "removed", text: "[1]" },
-      { type: "equal", text: " tail" },
-    ]);
-
-    const { shown } = condenseDiff([equal(long), removed("a"), equal(long), inserted("b"), equal(long)]);
-    expect(shown.map((part) => part.text)).toEqual([
-      `… ${"x".repeat(24)}`,
-      "a",
-      `${"x".repeat(24)} … ${"x".repeat(24)}`,
-      "b",
-      `${"x".repeat(24)} …`,
-    ]);
-  });
-
-  it("starts a change at the beginning of the script and treats a removal with its replacement as one", () => {
-    const { shown, hiddenChanges } = condenseDiff([removed("a"), inserted("b"), equal(" rest")]);
-    expect(shown.map((part) => part.type)).toEqual(["removed", "inserted", "equal"]);
-    expect(hiddenChanges).toBe(0);
-  });
-
-  it("shows the first twelve changes and counts the rest", () => {
-    const parts: TextDiffPart[] = [];
-    for (let index = 0; index < 15; index += 1) parts.push(removed(`r${index}`), equal(" "));
-    parts.push(removed("last"), inserted("swap"));
-    const { shown, hiddenChanges } = condenseDiff(parts);
-    expect(shown.filter((part) => part.type === "removed")).toHaveLength(12);
-    expect(hiddenChanges).toBe(4);
-    expect(condenseDiff([equal(long)]).shown).toEqual([{ type: "equal", text: `${"x".repeat(24)} …` }]);
   });
 });

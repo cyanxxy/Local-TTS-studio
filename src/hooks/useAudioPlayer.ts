@@ -72,6 +72,8 @@ export interface UseAudioPlayerReturn {
   downloadCaptions: (format: CaptionExportFormat, style?: CaptionStyle) => void;
   replaceSegment: (segmentId: string, replacement: AudioChunkData) => void;
   getAudioChunkCount: () => number;
+  /** The sample rate the engine produced the buffered audio at, or null while there is none. */
+  getSourceSampleRate: () => number | null;
   /**
    * Increments whenever the buffered audio is replaced wholesale (a reset or a
    * restored cache). A runtime that generated the current audio can compare
@@ -861,6 +863,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   }), []);
 
   const getAudioChunkCount = useCallback(() => allChunksRef.current.length, []);
+  const getSourceSampleRate = useCallback(() => allChunksRef.current[0]?.samplingRate ?? null, []);
   const getContentEpoch = useCallback(() => contentEpochRef.current, []);
 
   const truncateAudioChunks = useCallback((count: number) => {
@@ -1079,6 +1082,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     downloadCaptions,
     replaceSegment,
     getAudioChunkCount,
+    getSourceSampleRate,
     getContentEpoch,
     truncateAudioChunks,
     getAudioCacheSnapshot,
@@ -1098,6 +1102,7 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     error,
     getAudioCacheSnapshot,
     getAudioChunkCount,
+    getSourceSampleRate,
     getContentEpoch,
     getCurrentTime,
     getPlaybackSnapshot,

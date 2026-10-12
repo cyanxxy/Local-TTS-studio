@@ -117,10 +117,11 @@ const mock = vi.hoisted(() => {
       skip: vi.fn(),
       jumpToSegment: vi.fn(),
       setPlaybackRate: vi.fn(),
-      download: vi.fn(async () => {}),
+      download: vi.fn(async () => null),
       downloadCaptions: vi.fn(),
       replaceSegment: vi.fn(),
       getAudioChunkCount: vi.fn(() => 0),
+      getSourceSampleRate: vi.fn(() => null),
       getContentEpoch: vi.fn(() => 0),
       truncateAudioChunks: vi.fn(),
       getAudioCacheSnapshot: vi.fn((): CachedReaderAudio["chunks"] => []),
@@ -152,7 +153,11 @@ const mock = vi.hoisted(() => {
       pauseCommaSec: 0.1,
       pauseSentenceSec: 0.2,
       pauseParagraphSec: 0.3,
-      pronunciationLexicon: "",
+      dictionaries: [] as never[],
+      normalizeSpeech: false,
+      cleanupOnSpeak: false,
+      speechSettings: { dictionaries: [] as never[], normalize: false, cleanup: false },
+      captionStyle: "readable",
       generationSettings: {
         speed: 1,
         quality: 5,
@@ -174,7 +179,7 @@ const mock = vi.hoisted(() => {
       onPauseCommaChange: vi.fn(),
       onPauseSentenceChange: vi.fn(),
       onPauseParagraphChange: vi.fn(),
-      onPronunciationLexiconChange: vi.fn(),
+      onDictionariesChange: vi.fn(),
       onExportFormatChange: vi.fn(),
       onExportSampleRateChange: vi.fn(),
       onExportBitrateChange: vi.fn(),
@@ -431,19 +436,17 @@ vi.mock("../components/SettingsPanel", () => ({
 }));
 
 vi.mock("../components/CreatorToolsPanel", () => ({
-  CreatorToolsPanel: ({ onDownloadAudio, onDownloadCaptions, engineSupport }: {
-    onDownloadAudio: () => void;
+  CreatorToolsPanel: ({ audioExport, onDownloadCaptions, engineSupport }: {
+    audioExport: { start: () => void };
     onDownloadCaptions: (format: "srt" | "vtt" | "json") => void;
-    engineSupport?: { engineLabel: string; speed: boolean; pauses: boolean; pronunciationLexicon: boolean };
+    engineSupport?: { engineLabel: string; speed: boolean; pauses: boolean; normalization: boolean; speechLanguage?: string };
   }) => (
     <div>
       <div data-testid="creator-engine">{engineSupport?.engineLabel ?? "none"}</div>
       <div data-testid="creator-speed-disabled">{String(engineSupport ? !engineSupport.speed : false)}</div>
       <div data-testid="creator-pauses-disabled">{String(engineSupport ? !engineSupport.pauses : false)}</div>
-      <div data-testid="creator-lexicon-disabled">
-        {String(engineSupport ? !engineSupport.pronunciationLexicon : false)}
-      </div>
-      <button type="button" onClick={onDownloadAudio}>creator-audio</button>
+      <div data-testid="creator-language">{engineSupport?.speechLanguage ?? "default"}</div>
+      <button type="button" onClick={audioExport.start}>creator-audio</button>
       <button type="button" onClick={() => onDownloadCaptions("vtt")}>creator-vtt</button>
     </div>
   ),
@@ -674,9 +677,10 @@ function resetMockState() {
     seek: vi.fn(),
     skip: vi.fn(),
     jumpToSegment: vi.fn(),
-    download: vi.fn(async () => {}),
+    download: vi.fn(async () => null),
     downloadCaptions: vi.fn(),
     getAudioChunkCount: vi.fn(() => 0),
+    getSourceSampleRate: vi.fn(() => null),
     getContentEpoch: vi.fn(() => 0),
     truncateAudioChunks: vi.fn(),
     getAudioCacheSnapshot: vi.fn(() => []),
@@ -840,6 +844,13 @@ function showOptionalDesktopModels() {
   }));
 }
 
+/** What every export request carries: cancel, progress and a descriptive file name. */
+const exportRequest = {
+  signal: expect.any(AbortSignal),
+  fileName: expect.stringMatching(/^.+-\d{8}-\d{6}$/),
+  onProgress: expect.any(Function),
+};
+
 describe("SynthesisApp", () => {
   beforeEach(() => {
     localStorage.clear();
@@ -894,8 +905,8 @@ describe("SynthesisApp", () => {
     expect(mock.generation.handleStop).toHaveBeenCalled();
     expect(mock.cache.clearCache).toHaveBeenCalled();
     expect(mock.cache.redownloadActiveModel).toHaveBeenCalled();
-    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions);
-    expect(mock.player.downloadCaptions).toHaveBeenCalledWith("vtt");
+    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions, exportRequest);
+    expect(mock.player.downloadCaptions).toHaveBeenCalledWith("vtt", "readable");
     expect(screen.getByTestId("audio-player")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "toggle-play" }));
@@ -970,7 +981,7 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("creator-engine")).toHaveTextContent("Audio8 TTS");
     expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("true");
     expect(screen.getByTestId("creator-pauses-disabled")).toHaveTextContent("false");
-    expect(screen.getByTestId("creator-lexicon-disabled")).toHaveTextContent("false");
+    expect(screen.getByTestId("creator-language")).toHaveTextContent("default");
     fireEvent.click(screen.getByRole("button", { name: "generate" }));
     expect(mock.audio8Runtime.handleGenerate).toHaveBeenCalledTimes(1);
 
@@ -1592,7 +1603,7 @@ describe("SynthesisApp", () => {
     expect(mock.modelLoader.loadModel).toHaveBeenCalledWith("supertonic");
     expect(mock.cache.retryActiveModelLoad).toHaveBeenCalled();
     expect(mock.generation.handleStop).toHaveBeenCalled();
-    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions);
+    expect(mock.player.download).toHaveBeenCalledWith(mock.creator.exportOptions, exportRequest);
     expect(mock.generation.handleRetakeSegment).toHaveBeenCalledWith("seg-1");
     expect(mock.player.jumpToSegment).toHaveBeenCalledWith("seg-1");
     expect(mock.player.jumpToSegment).not.toHaveBeenCalledWith("");
@@ -2735,7 +2746,8 @@ describe("SynthesisApp", () => {
     expect(screen.getByTestId("creator-engine")).toHaveTextContent("Qwen3-TTS");
     expect(screen.getByTestId("creator-speed-disabled")).toHaveTextContent("true");
     expect(screen.getByTestId("creator-pauses-disabled")).toHaveTextContent("true");
-    expect(screen.getByTestId("creator-lexicon-disabled")).toHaveTextContent("true");
+    // The pipeline reads Qwen3's language setting, so its dictionary and normalization follow it.
+    expect(screen.getByTestId("creator-language")).toHaveTextContent("en");
     fireEvent.click(screen.getByRole("button", { name: "Serena" }));
     expect(screen.getByRole("button", { name: "Serena" })).toHaveAttribute("aria-pressed", "true");
     await waitFor(() => expect(mock.localTts.getQwen3Setup).toHaveBeenCalled());

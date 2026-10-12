@@ -6,6 +6,7 @@ import { cleanupText } from "../../lib/text/cleanup";
 import { isSpeechNormalizationSupported } from "../../lib/text/normalize";
 import type { BreakAwareChunk } from "../../lib/text/speechMarkup";
 import type { PronunciationMatchRule } from "../../lib/textTuning";
+import { formatEstimate } from "../../lib/creator/display";
 
 interface ScriptPreflightProps {
   text: string;
@@ -24,15 +25,6 @@ interface ScriptPreflightProps {
 
 const MAX_LISTED_PASSAGES = 40;
 const MAX_MAPPED_PASSAGES = 200;
-
-/** m:ss, or h:mm:ss from an hour on. */
-export function formatEstimate(seconds: number): string {
-  const total = Math.max(0, Math.round(seconds));
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const rest = String(total % 60).padStart(2, "0");
-  return hours > 0 ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}` : `${minutes}:${rest}`;
-}
 
 function formatPause(seconds: number): string {
   return seconds < 1 ? `${Math.round(seconds * 1000)} ms` : `${Math.round(seconds * 10) / 10} s`;

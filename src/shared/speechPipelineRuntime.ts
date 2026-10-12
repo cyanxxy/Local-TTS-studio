@@ -111,14 +111,15 @@ async function* remapChunks(
  * is cleared: applying them twice could rewrite a replacement.
  */
 export function withSpeechPipeline<Id extends SurfaceEngineId>(
+  id: Id,
   runtime: EngineRuntime<Id>,
   resolveSettings: (id: Id) => SpeechPipelineSettings,
 ): EngineRuntime<Id> {
-  const boundary = speechBreakBoundary(runtime.id);
+  const boundary = speechBreakBoundary(id);
   return {
     ...runtime,
     synthesize: (request: SynthesisRequest<Id>) => {
-      const plan = buildSpeechPlan(request.text, resolveSettings(runtime.id), boundary);
+      const plan = buildSpeechPlan(request.text, resolveSettings(id), boundary);
       const inner = runtime.synthesize({
         ...request,
         text: plan.spoken,
@@ -134,8 +135,8 @@ export function withSpeechPipelineAll(
   runtimes: EngineRuntimeMap,
   resolveSettings: (id: SurfaceEngineId) => SpeechPipelineSettings,
 ): EngineRuntimeMap {
-  const all = Object.values(runtimes) as unknown as Array<EngineRuntime<SurfaceEngineId>>;
+  const entries = Object.entries(runtimes) as unknown as Array<[SurfaceEngineId, EngineRuntime<SurfaceEngineId>]>;
   return Object.fromEntries(
-    all.map((runtime) => [runtime.id, withSpeechPipeline(runtime, resolveSettings)]),
+    entries.map(([id, runtime]) => [id, withSpeechPipeline(id, runtime, resolveSettings)]),
   ) as unknown as EngineRuntimeMap;
 }

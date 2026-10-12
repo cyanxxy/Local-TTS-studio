@@ -682,7 +682,7 @@ describe("useAudioPlayer", () => {
     const cues = async (style?: "readable" | "short" | "passage") => {
       downloadBlobSpy.mockClear();
       act(() => result.current.downloadCaptions("srt", style));
-      const [blob] = downloadBlobSpy.mock.calls[0] as [Blob];
+      const [blob] = downloadBlobSpy.mock.calls[0] as unknown as [Blob];
       return (await blob.text()).trim().split(/\n\n/).length;
     };
     expect(await cues()).toBe(1);

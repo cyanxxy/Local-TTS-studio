@@ -1,5 +1,5 @@
 import { useId, useMemo, useState } from "react";
-import { ChevronDown, Download, FileCode2, FileJson, Subtitles, X } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import {
   CREATOR_PRESETS,
   PAUSE_MAX,
@@ -9,67 +9,49 @@ import {
   SPEED_MIN,
   SPEED_STEP,
 } from "../constants";
-import { analyzePronunciationLexicon } from "../lib/appState";
-import { applyPronunciationRules } from "../lib/textTuning";
-import type {
-  AudioExportOptions,
-  CaptionExportFormat,
-  CreatorPresetId,
-  ExportAudioFormat,
-  ExportSampleRate,
-} from "../types";
+import type { UseAudioExportReturn } from "../hooks/useAudioExport";
+import type { UseCreatorSettingsReturn } from "../hooks/useCreatorSettings";
+import { buildSpeechPlan } from "../lib/speechPipeline";
+import type { BreakAwareChunk } from "../lib/text/speechMarkup";
+import { resolveSpeechPipelineSettings } from "../shared/speechPipelineRuntime";
+import type { CaptionExportFormat, CreatorPresetId } from "../types";
+import { ExportSettings } from "./creator/ExportSettings";
+import { PronunciationDictionaryEditor } from "./creator/PronunciationDictionaryEditor";
+import { ScriptPreflight } from "./creator/ScriptPreflight";
+import { TextCleanupPanel } from "./creator/TextCleanupPanel";
+import { checkboxLabelClass, fieldClass } from "./creator/creatorStyles";
 
 /**
- * The Creator controls the active engine reads. A control the engine ignores
- * stays visible but disabled, with a note naming the engine, so a tweak is
- * never silently dropped.
+ * What the active engine does with the Creator controls. A control the engine
+ * ignores stays visible but disabled, with a note naming the engine, so a
+ * tweak is never silently dropped.
  */
 export interface CreatorEngineSupport {
   engineLabel: string;
   speed: boolean;
   pauses: boolean;
-  pronunciationLexicon: boolean;
+  /** The language the speech pipeline treats the engine as speaking; undefined means English. */
+  speechLanguage: string | undefined;
+  /** The engine's language has a text normalizer. */
+  normalization: boolean;
+  /** The engine reads IPA phonemes; when false a phoneme rule speaks its alias. */
+  phonemes: boolean;
+  /** The engine's chunker, so the preflight splits the script as generation will. */
+  chunkScript: (text: string) => BreakAwareChunk[];
 }
 
 interface CreatorToolsPanelProps {
-  preset: CreatorPresetId;
-  onPresetChange: (preset: CreatorPresetId) => void;
-  speed: number;
-  onSpeedChange: (value: number) => void;
-  /** Omitted when every Creator control applies. */
-  engineSupport?: CreatorEngineSupport;
-  pauseCommaSec: number;
-  onPauseCommaSecChange: (value: number) => void;
-  pauseSentenceSec: number;
-  onPauseSentenceSecChange: (value: number) => void;
-  pauseParagraphSec: number;
-  onPauseParagraphSecChange: (value: number) => void;
-  pronunciationLexicon: string;
-  onPronunciationLexiconChange: (value: string) => void;
-  exportOptions: AudioExportOptions;
-  onExportFormatChange: (format: ExportAudioFormat) => void;
-  onExportSampleRateChange: (rate: ExportSampleRate) => void;
-  onExportBitrateKbpsChange: (bitrate: number) => void;
-  onMasteringEnabledChange: (enabled: boolean) => void;
+  creator: UseCreatorSettingsReturn;
+  engineSupport: CreatorEngineSupport;
+  /** The Studio script. */
+  script: string;
+  onScriptChange: (script: string) => void;
+  /** The sample rate of the generated audio, or null while there is none. */
+  sourceSampleRate: number | null;
   hasAudio: boolean;
-  onDownloadAudio: () => void;
+  audioExport: UseAudioExportReturn;
   onDownloadCaptions: (format: CaptionExportFormat) => void;
 }
-
-const EXPORT_FORMAT_OPTIONS: Array<{ value: ExportAudioFormat; label: string }> = [
-  { value: "wav-pcm24", label: "WAV 24-bit" },
-  { value: "wav-pcm16", label: "WAV 16-bit" },
-  { value: "wav-f32", label: "WAV 32-bit float" },
-  { value: "mp3", label: "MP3" },
-];
-
-const EXPORT_SAMPLE_RATE_OPTIONS: Array<{ value: ExportSampleRate; label: string }> = [
-  { value: "source", label: "Source" },
-  { value: 44100, label: "44.1 kHz" },
-  { value: 48000, label: "48 kHz" },
-];
-
-const BITRATE_OPTIONS = [128, 192, 256, 320] as const;
 
 function SectionLabel({ children }: { children: React.ReactNode }) {
   return (
@@ -80,29 +62,17 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
 }
 
 export function CreatorToolsPanel({
-  preset,
-  onPresetChange,
-  speed,
-  onSpeedChange,
+  creator,
   engineSupport,
-  pauseCommaSec,
-  onPauseCommaSecChange,
-  pauseSentenceSec,
-  onPauseSentenceSecChange,
-  pauseParagraphSec,
-  onPauseParagraphSecChange,
-  pronunciationLexicon,
-  onPronunciationLexiconChange,
-  exportOptions,
-  onExportFormatChange,
-  onExportSampleRateChange,
-  onExportBitrateKbpsChange,
-  onMasteringEnabledChange,
+  script,
+  onScriptChange,
+  sourceSampleRate,
   hasAudio,
-  onDownloadAudio,
+  audioExport,
   onDownloadCaptions,
 }: CreatorToolsPanelProps) {
   const [open, setOpen] = useState(false);
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const [pronunciationPreviewText, setPronunciationPreviewText] = useState("");
   const controlId = useId();
   const panelId = `${controlId}-panel`;
@@ -112,27 +82,34 @@ export function CreatorToolsPanel({
   const sentencePauseId = `${controlId}-sentence-pause`;
   const paragraphPauseId = `${controlId}-paragraph-pause`;
   const pauseNoteId = `${controlId}-pause-note`;
-  const lexiconId = `${controlId}-lexicon`;
-  const lexiconStatusId = `${controlId}-lexicon-status`;
-  const lexiconNoteId = `${controlId}-lexicon-note`;
+  const normalizeId = `${controlId}-normalize`;
+  const normalizeNoteId = `${controlId}-normalize-note`;
+  const cleanupId = `${controlId}-cleanup-on-speak`;
   const previewId = `${controlId}-pronunciation-preview`;
-  const formatId = `${controlId}-format`;
-  const sampleRateId = `${controlId}-sample-rate`;
-  const bitrateId = `${controlId}-bitrate`;
-  const masteringId = `${controlId}-mastering`;
-  const downloadStatusId = `${controlId}-download-status`;
-  const lexiconDiagnostics = useMemo(
-    () => analyzePronunciationLexicon(pronunciationLexicon),
-    [pronunciationLexicon],
+  const {
+    creatorPreset: preset,
+    speed,
+    pauseCommaSec,
+    pauseSentenceSec,
+    pauseParagraphSec,
+    dictionaries,
+    normalizeSpeech,
+    cleanupOnSpeak,
+    generationSettings,
+    speechSettings,
+  } = creator;
+  const speechPipeline = useMemo(
+    () => resolveSpeechPipelineSettings(speechSettings, engineSupport.speechLanguage),
+    [engineSupport.speechLanguage, speechSettings],
   );
   const pronunciationPreview = useMemo(
-    () => applyPronunciationRules(pronunciationPreviewText, lexiconDiagnostics.rules),
-    [lexiconDiagnostics.rules, pronunciationPreviewText],
+    () => (pronunciationPreviewText.trim() ? buildSpeechPlan(pronunciationPreviewText, speechPipeline).spoken : ""),
+    [pronunciationPreviewText, speechPipeline],
   );
-  const speedDisabled = engineSupport ? !engineSupport.speed : false;
-  const pausesDisabled = engineSupport ? !engineSupport.pauses : false;
-  const lexiconDisabled = engineSupport ? !engineSupport.pronunciationLexicon : false;
-  const engineLabel = engineSupport?.engineLabel ?? "";
+  const speedDisabled = !engineSupport.speed;
+  const pausesDisabled = !engineSupport.pauses;
+  const normalizationDisabled = !engineSupport.normalization;
+  const engineLabel = engineSupport.engineLabel;
 
   return (
     <div className="glass rounded-[20px] overflow-hidden">
@@ -170,7 +147,7 @@ export function CreatorToolsPanel({
               id={presetId}
               className="mt-2 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
               value={preset}
-              onChange={(event) => onPresetChange(event.target.value as CreatorPresetId)}
+              onChange={(event) => creator.onCreatorPresetChange(event.target.value as CreatorPresetId)}
             >
               <option value="custom">Custom</option>
               {Object.values(CREATOR_PRESETS).map((presetItem) => (
@@ -208,7 +185,7 @@ export function CreatorToolsPanel({
                 aria-describedby={speedDisabled ? `${speedId}-note` : undefined}
                 disabled={speedDisabled}
                 className="disabled:cursor-not-allowed disabled:opacity-50"
-                onChange={(event) => onSpeedChange(parseFloat(event.target.value))}
+                onChange={(event) => creator.onSpeedChange(parseFloat(event.target.value))}
               />
               {speedDisabled && (
                 <p id={`${speedId}-note`} className="mt-1 text-xs text-text-muted">
@@ -218,150 +195,138 @@ export function CreatorToolsPanel({
             </div>
 
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-              <div>
-                <div className="flex items-baseline justify-between mb-1">
-                  <label htmlFor={commaPauseId} className="text-xs font-medium text-text-secondary">
-                    Comma pause
-                  </label>
-                  <span aria-hidden="true" className="font-mono text-xs text-text-muted">
-                    {pauseCommaSec.toFixed(2)}s
-                  </span>
+              {([
+                { id: commaPauseId, label: "Comma pause", value: pauseCommaSec, onChange: creator.onPauseCommaChange },
+                { id: sentencePauseId, label: "Sentence pause", value: pauseSentenceSec, onChange: creator.onPauseSentenceChange },
+                { id: paragraphPauseId, label: "Paragraph pause", value: pauseParagraphSec, onChange: creator.onPauseParagraphChange },
+              ] as const).map(({ id, label, value, onChange }) => (
+                <div key={id}>
+                  <div className="flex items-baseline justify-between mb-1">
+                    <label htmlFor={id} className="text-xs font-medium text-text-secondary">
+                      {label}
+                    </label>
+                    <span aria-hidden="true" className="font-mono text-xs text-text-muted">
+                      {value.toFixed(2)}s
+                    </span>
+                  </div>
+                  <input
+                    id={id}
+                    type="range"
+                    min={PAUSE_MIN}
+                    max={PAUSE_MAX}
+                    step={PAUSE_STEP}
+                    value={value}
+                    aria-valuetext={`${value.toFixed(2)} seconds`}
+                    aria-describedby={pausesDisabled ? pauseNoteId : undefined}
+                    disabled={pausesDisabled}
+                    className="disabled:cursor-not-allowed disabled:opacity-50"
+                    onChange={(event) => onChange(parseFloat(event.target.value))}
+                  />
                 </div>
-                <input
-                  id={commaPauseId}
-                  type="range"
-                  min={PAUSE_MIN}
-                  max={PAUSE_MAX}
-                  step={PAUSE_STEP}
-                  value={pauseCommaSec}
-                  aria-valuetext={`${pauseCommaSec.toFixed(2)} seconds`}
-                  aria-describedby={pausesDisabled ? pauseNoteId : undefined}
-                  disabled={pausesDisabled}
-                  className="disabled:cursor-not-allowed disabled:opacity-50"
-                  onChange={(event) => onPauseCommaSecChange(parseFloat(event.target.value))}
-                />
-              </div>
-              <div>
-                <div className="flex items-baseline justify-between mb-1">
-                  <label htmlFor={sentencePauseId} className="text-xs font-medium text-text-secondary">
-                    Sentence pause
-                  </label>
-                  <span aria-hidden="true" className="font-mono text-xs text-text-muted">
-                    {pauseSentenceSec.toFixed(2)}s
-                  </span>
-                </div>
-                <input
-                  id={sentencePauseId}
-                  type="range"
-                  min={PAUSE_MIN}
-                  max={PAUSE_MAX}
-                  step={PAUSE_STEP}
-                  value={pauseSentenceSec}
-                  aria-valuetext={`${pauseSentenceSec.toFixed(2)} seconds`}
-                  aria-describedby={pausesDisabled ? pauseNoteId : undefined}
-                  disabled={pausesDisabled}
-                  className="disabled:cursor-not-allowed disabled:opacity-50"
-                  onChange={(event) => onPauseSentenceSecChange(parseFloat(event.target.value))}
-                />
-              </div>
-              <div>
-                <div className="flex items-baseline justify-between mb-1">
-                  <label htmlFor={paragraphPauseId} className="text-xs font-medium text-text-secondary">
-                    Paragraph pause
-                  </label>
-                  <span aria-hidden="true" className="font-mono text-xs text-text-muted">
-                    {pauseParagraphSec.toFixed(2)}s
-                  </span>
-                </div>
-                <input
-                  id={paragraphPauseId}
-                  type="range"
-                  min={PAUSE_MIN}
-                  max={PAUSE_MAX}
-                  step={PAUSE_STEP}
-                  value={pauseParagraphSec}
-                  aria-valuetext={`${pauseParagraphSec.toFixed(2)} seconds`}
-                  aria-describedby={pausesDisabled ? pauseNoteId : undefined}
-                  disabled={pausesDisabled}
-                  className="disabled:cursor-not-allowed disabled:opacity-50"
-                  onChange={(event) => onPauseParagraphSecChange(parseFloat(event.target.value))}
-                />
-              </div>
+              ))}
             </div>
             {pausesDisabled && (
               <p id={pauseNoteId} className="text-xs text-text-muted">
-                {engineLabel} paces its own pauses, so these lengths are not applied.
+                {engineLabel} paces its own pauses, so these lengths are not applied. Pauses you write into the script,
+                such as <code className="font-mono">{'<break time="1s"/>'}</code>, still are.
               </p>
             )}
           </div>
 
-          {/* Pronunciation */}
-          <div>
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <label
-                htmlFor={lexiconId}
-                className="text-xs font-semibold text-text-secondary"
-              >
-                Pronunciation
+          {/* Script */}
+          <div className="border-t border-black/5 pt-4 space-y-3">
+            <SectionLabel>Script</SectionLabel>
+
+            <div>
+              <label htmlFor={normalizeId} className={checkboxLabelClass}>
+                <input
+                  id={normalizeId}
+                  type="checkbox"
+                  checked={normalizeSpeech}
+                  disabled={normalizationDisabled}
+                  aria-describedby={normalizationDisabled ? normalizeNoteId : undefined}
+                  onChange={(event) => creator.onNormalizeSpeechChange(event.target.checked)}
+                  className="mt-0.5 accent-accent disabled:cursor-not-allowed"
+                />
+                Read numbers, dates, prices and abbreviations as words
               </label>
-              {pronunciationLexicon.length > 0 && (
-                <button
-                  type="button"
-                  disabled={lexiconDisabled}
-                  onClick={() => onPronunciationLexiconChange("")}
-                  className="flex items-center gap-1 rounded-md px-1.5 py-1 text-2xs font-medium text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-text-muted"
-                >
-                  <X size={11} aria-hidden="true" />
-                  Clear rules
-                </button>
-              )}
-            </div>
-            <textarea
-              id={lexiconId}
-              className="w-full min-h-16 rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary resize-y placeholder:text-text-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
-              placeholder={`route=root\nGIF=jiff\nSQL=sequel`}
-              value={pronunciationLexicon}
-              aria-invalid={lexiconDiagnostics.issues.length > 0}
-              aria-describedby={lexiconDisabled ? `${lexiconNoteId} ${lexiconStatusId}` : lexiconStatusId}
-              disabled={lexiconDisabled}
-              onChange={(event) => onPronunciationLexiconChange(event.target.value)}
-            />
-            {lexiconDisabled && (
-              <p id={lexiconNoteId} className="mt-1 text-xs text-text-muted">
-                {engineLabel} reads the script as written, so pronunciation rules are not applied.
+              <p id={normalizeNoteId} className="mt-1 pl-6 text-xs text-text-muted">
+                {normalizationDisabled
+                  ? `This works for English only, and ${engineLabel} is set to another language.`
+                  : "English only. Turn it off to have the engine read the text exactly as written."}
               </p>
-            )}
-            <div id={lexiconStatusId} className="mt-1" aria-live="polite">
-              {lexiconDiagnostics.issues.length > 0 ? (
-                <p className="text-xs text-danger">
-                  {lexiconDiagnostics.issues.length === 1 ? "Invalid rule" : "Invalid rules"} on {" "}
-                  {lexiconDiagnostics.issues.map((issue) => `line ${issue.line}`).join(", ")}.
-                  {" "}Use word=replacement.
-                </p>
-              ) : (
-                <p className="text-xs text-text-muted">
-                  {lexiconDiagnostics.rules.length > 0
-                    ? `${lexiconDiagnostics.rules.length} active ${lexiconDiagnostics.rules.length === 1 ? "rule" : "rules"}.`
-                    : "One rule per line: word=replacement"}
-                </p>
+            </div>
+
+            <label htmlFor={cleanupId} className={checkboxLabelClass}>
+              <input
+                id={cleanupId}
+                type="checkbox"
+                checked={cleanupOnSpeak}
+                onChange={(event) => creator.onCleanupOnSpeakChange(event.target.checked)}
+                className="mt-0.5 accent-accent"
+              />
+              Skip citations, links, emoji and Markdown when speaking
+            </label>
+
+            <p className="text-xs text-text-muted">
+              Add a pause anywhere with <code className="font-mono">{'<break time="1.5s"/>'}</code> or{" "}
+              <code className="font-mono">[pause 500ms]</code>, or use the Pause button under the script. Pauses are
+              silent, last up to 10 seconds and are never read aloud.
+            </p>
+
+            <div>
+              <button
+                type="button"
+                aria-expanded={cleanupOpen}
+                onClick={() => setCleanupOpen((value) => !value)}
+                className="flex w-full items-center justify-between rounded-lg border border-border bg-text-primary/[0.04] px-3 py-2 text-left text-xs font-semibold text-text-secondary hover:bg-text-primary/[0.07]"
+              >
+                Clean up the script
+                <ChevronDown size={14} aria-hidden="true" className={`transition-transform ${cleanupOpen ? "rotate-180" : ""}`} />
+              </button>
+              {cleanupOpen && (
+                <div className="mt-2">
+                  <TextCleanupPanel text={script} onTextChange={onScriptChange} />
+                </div>
               )}
             </div>
 
-            <div className="mt-3 rounded-xl border border-border bg-text-primary/[0.03] p-3">
+            <ScriptPreflight
+              text={script}
+              chunkScript={engineSupport.chunkScript}
+              engineLabel={engineLabel}
+              rules={speechPipeline.rules}
+              normalize={normalizeSpeech}
+              cleanup={cleanupOnSpeak}
+              speechLanguage={engineSupport.speechLanguage}
+              pauseOverridesSec={generationSettings.pauseOverridesSec ?? {}}
+              speed={engineSupport.speed ? speed : 1}
+            />
+          </div>
+
+          {/* Pronunciation */}
+          <div className="border-t border-black/5 pt-4 space-y-3">
+            <SectionLabel>Pronunciation</SectionLabel>
+            <PronunciationDictionaryEditor
+              dictionaries={dictionaries}
+              onChange={creator.onDictionariesChange}
+              phonemesSupported={engineSupport.phonemes}
+              engineLabel={engineLabel}
+            />
+
+            <div className="rounded-xl border border-border bg-text-primary/[0.03] p-3">
               <label htmlFor={previewId} className="text-xs font-medium text-text-secondary">
                 Test pronunciation rules
               </label>
               <input
                 id={previewId}
                 type="text"
-                disabled={lexiconDisabled}
-                aria-describedby={lexiconDisabled ? lexiconNoteId : undefined}
                 value={pronunciationPreviewText}
                 onChange={(event) => setPronunciationPreviewText(event.target.value)}
-                className="mt-1.5 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-sm text-text-primary placeholder:text-text-muted/50 disabled:cursor-not-allowed disabled:opacity-50"
+                className={`${fieldClass} mt-1.5 text-sm`}
                 placeholder="Try a phrase before generating audio"
               />
-              {pronunciationPreviewText.trim().length > 0 && (
+              {pronunciationPreview && (
                 <div className="mt-2" aria-live="polite">
                   <div className="text-xs font-semibold text-text-secondary">
                     Spoken as
@@ -377,146 +342,13 @@ export function CreatorToolsPanel({
           {/* Export */}
           <div className="border-t border-black/5 pt-4 space-y-3">
             <SectionLabel>Export</SectionLabel>
-
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-              <div>
-                <label htmlFor={formatId} className="text-xs font-medium text-text-secondary">
-                  Format
-                </label>
-                <select
-                  id={formatId}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
-                  value={exportOptions.format}
-                  onChange={(event) => onExportFormatChange(event.target.value as ExportAudioFormat)}
-                >
-                  {EXPORT_FORMAT_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div>
-                <label htmlFor={sampleRateId} className="text-xs font-medium text-text-secondary">
-                  Sample Rate
-                </label>
-                <select
-                  id={sampleRateId}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
-                  value={String(exportOptions.sampleRate)}
-                  onChange={(event) => {
-                    const raw = event.target.value;
-                    const parsed = raw === "source" ? "source" : Number(raw);
-                    onExportSampleRateChange(parsed as ExportSampleRate);
-                  }}
-                >
-                  {EXPORT_SAMPLE_RATE_OPTIONS.map((option) => (
-                    <option key={String(option.value)} value={String(option.value)}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            {exportOptions.format === "mp3" && (
-              <div className="max-w-full sm:max-w-[50%]">
-                <label htmlFor={bitrateId} className="text-xs font-medium text-text-secondary">
-                  Bitrate
-                </label>
-                <select
-                  id={bitrateId}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
-                  value={exportOptions.bitrateKbps}
-                  onChange={(event) => onExportBitrateKbpsChange(parseInt(event.target.value, 10))}
-                >
-                  {BITRATE_OPTIONS.map((value) => (
-                    <option key={value} value={value}>
-                      {value} kbps
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
-
-            <label
-              htmlFor={masteringId}
-              className="flex cursor-pointer items-start gap-2 text-sm text-text-secondary select-none"
-            >
-              <input
-                id={masteringId}
-                type="checkbox"
-                checked={exportOptions.mastering.enabled}
-                onChange={(event) => onMasteringEnabledChange(event.target.checked)}
-                className="accent-accent"
-              />
-              Normalize loudness for voiceover
-            </label>
-
-            <div className="grid grid-cols-2 gap-2 pt-1 sm:grid-cols-4">
-              <button
-                type="button"
-                onClick={onDownloadAudio}
-                disabled={!hasAudio}
-                aria-describedby={!hasAudio ? downloadStatusId : undefined}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium transition-colors ${
-                  hasAudio
-                    ? "glass-accent text-white"
-                    : "bg-border text-text-muted cursor-not-allowed"
-                }`}
-              >
-                <Download size={12} aria-hidden="true" />
-                Audio
-              </button>
-              <button
-                type="button"
-                onClick={() => onDownloadCaptions("srt")}
-                disabled={!hasAudio}
-                aria-describedby={!hasAudio ? downloadStatusId : undefined}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
-                  hasAudio
-                    ? "border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
-                    : "border-border text-text-muted cursor-not-allowed"
-                }`}
-              >
-                <Subtitles size={12} aria-hidden="true" />
-                SRT
-              </button>
-              <button
-                type="button"
-                onClick={() => onDownloadCaptions("vtt")}
-                disabled={!hasAudio}
-                aria-describedby={!hasAudio ? downloadStatusId : undefined}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
-                  hasAudio
-                    ? "border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
-                    : "border-border text-text-muted cursor-not-allowed"
-                }`}
-              >
-                <FileCode2 size={12} aria-hidden="true" />
-                VTT
-              </button>
-              <button
-                type="button"
-                onClick={() => onDownloadCaptions("json")}
-                disabled={!hasAudio}
-                aria-describedby={!hasAudio ? downloadStatusId : undefined}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg text-xs font-medium border transition-colors ${
-                  hasAudio
-                    ? "border-border bg-text-primary/[0.04] text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
-                    : "border-border text-text-muted cursor-not-allowed"
-                }`}
-              >
-                <FileJson size={12} aria-hidden="true" />
-                JSON
-              </button>
-            </div>
-            {!hasAudio && (
-              <p id={downloadStatusId} className="text-xs text-text-muted" aria-live="polite">
-                Generate audio to enable downloads.
-              </p>
-            )}
+            <ExportSettings
+              creator={creator}
+              sourceSampleRate={sourceSampleRate}
+              hasAudio={hasAudio}
+              audioExport={audioExport}
+              onDownloadCaptions={onDownloadCaptions}
+            />
           </div>
         </div>
       )}

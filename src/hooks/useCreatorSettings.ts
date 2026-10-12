@@ -22,7 +22,7 @@ export interface CreatorSpeechSettings {
   cleanup: boolean;
 }
 
-interface UseCreatorSettingsReturn {
+export interface UseCreatorSettingsReturn {
   creatorPreset: CreatorPresetId;
   speed: number;
   pauseCommaSec: number;

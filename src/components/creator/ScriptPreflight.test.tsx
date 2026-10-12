@@ -1,7 +1,7 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { chunkForKokoroDetailed } from "../../lib/chunking";
-import { ScriptPreflight, formatEstimate } from "./ScriptPreflight";
+import { ScriptPreflight } from "./ScriptPreflight";
 
 const chunkScript = (text: string) => chunkForKokoroDetailed(text, { backend: "wasm" });
 
@@ -24,15 +24,6 @@ function renderPreflight(overrides: Partial<React.ComponentProps<typeof ScriptPr
 function open() {
   fireEvent.click(screen.getByRole("button", { name: /Script preflight/ }));
 }
-
-describe("formatEstimate", () => {
-  it("formats minutes and hours", () => {
-    expect(formatEstimate(0)).toBe("0:00");
-    expect(formatEstimate(65.4)).toBe("1:05");
-    expect(formatEstimate(3725)).toBe("1:02:05");
-    expect(formatEstimate(-3)).toBe("0:00");
-  });
-});
 
 describe("ScriptPreflight", () => {
   it("stays closed, and does no work, until opened", () => {

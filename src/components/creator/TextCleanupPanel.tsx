@@ -6,7 +6,8 @@ import {
   cleanupText,
   type TextCleanupAction,
 } from "../../lib/text/cleanup";
-import { buildTextDiff, type TextDiffPart } from "../../lib/text/textEdits";
+import { condenseDiff } from "../../lib/creator/display";
+import { buildTextDiff } from "../../lib/text/textEdits";
 import { accentButtonClass, checkboxLabelClass, selectClass, subtleButtonClass } from "./creatorStyles";
 
 interface TextCleanupPanelProps {
@@ -25,48 +26,6 @@ const ACTION_LABELS: Record<TextCleanupAction, { label: string; hint: string }> 
   repeatedPunctuation: { label: "Repeated punctuation", hint: "!!!, ??? and ,," },
   whitespace: { label: "Extra spaces", hint: "Runs of spaces and blank lines" },
 };
-
-const CONTEXT_CHARS = 24;
-const MAX_CHANGES_SHOWN = 12;
-
-interface PreviewPart {
-  type: TextDiffPart["type"];
-  text: string;
-}
-
-/**
- * The diff reduced to its changes with a little text around each, so a long
- * script previews briefly. Consecutive removals and insertions are one change.
- */
-export function condenseDiff(parts: readonly TextDiffPart[]): { shown: PreviewPart[]; hiddenChanges: number } {
-  const shown: PreviewPart[] = [];
-  let changes = 0;
-  let hiddenChanges = 0;
-  parts.forEach((part, index) => {
-    const startsChange = part.type !== "equal" && (index === 0 || parts[index - 1].type === "equal");
-    if (startsChange) changes += 1;
-    if (part.type !== "equal") {
-      if (changes <= MAX_CHANGES_SHOWN) shown.push({ type: part.type, text: part.text });
-      else if (startsChange) hiddenChanges += 1;
-      return;
-    }
-    if (changes > MAX_CHANGES_SHOWN) return;
-    // Only the sides that touch a change are kept: not the start of the script before the first one, nor its end after the last.
-    const touchesPrevious = index > 0;
-    const touchesNext = index < parts.length - 1;
-    const text = part.text;
-    if (text.length <= CONTEXT_CHARS * 2) {
-      shown.push({ type: "equal", text });
-    } else if (touchesPrevious && touchesNext) {
-      shown.push({ type: "equal", text: `${text.slice(0, CONTEXT_CHARS)} … ${text.slice(-CONTEXT_CHARS)}` });
-    } else if (touchesNext) {
-      shown.push({ type: "equal", text: `… ${text.slice(-CONTEXT_CHARS)}` });
-    } else {
-      shown.push({ type: "equal", text: `${text.slice(0, CONTEXT_CHARS)} …` });
-    }
-  });
-  return { shown, hiddenChanges };
-}
 
 /** One-click cleanup of the script, previewed as a diff before anything changes. */
 export function TextCleanupPanel({ text, onTextChange }: TextCleanupPanelProps) {
