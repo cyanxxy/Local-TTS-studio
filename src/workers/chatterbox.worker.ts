@@ -9,6 +9,7 @@
  * follow src/lib/chatterboxProtocol.ts.
  */
 import { env } from "@huggingface/transformers";
+import { canInitializeWebGPU } from "../lib/webgpu";
 import type { InferenceBackend, WorkerInMessage } from "../types";
 import {
   createChatterboxAssetGuard,
@@ -78,6 +79,7 @@ interface RenderedChunk {
   chunk: TextChunk;
   text: string;
   spokenCharacters: number;
+  digitCount: number;
   tagCount: number;
 }
 
@@ -241,8 +243,13 @@ async function loadModel(message: LoadMessage): Promise<void> {
   const dtype = CHATTERBOX_DTYPE;
   const progress = createModelLoadProgress(dtype);
   let downloadError: unknown = null;
+  let webgpuUnavailable = false;
   try {
     const loaded = await loadWithBackendFallback<ChatterboxRuntime>({
+      async probeWebGPU() {
+        webgpuUnavailable = !(await canInitializeWebGPU().catch(() => false));
+        return !webgpuUnavailable;
+      },
       // The WASM execution provider cannot run the quantized graphs (see resolveChatterboxDtype).
       backends: ["webgpu"],
       failureMessage: "Failed to load Chatterbox Turbo.",
@@ -270,7 +277,8 @@ async function loadModel(message: LoadMessage): Promise<void> {
     });
     runtime = loaded.instance;
   } catch (error) {
-    if (downloadError) throw error;
+    // Out-of-memory, a non-finite warm-up and the like keep their real cause.
+    if (downloadError || !webgpuUnavailable) throw error;
     throw new Error(`Chatterbox Turbo needs WebGPU: ${errorMessage(error)}`, { cause: error });
   } finally {
     // Later default-voice reloads must not post load progress mid-generation.
@@ -320,6 +328,7 @@ function renderChunks(message: ChatterboxGenerateMessage): { chunks: RenderedChu
       chunk,
       text: normalizeChatterboxPunctuation(rendered.text),
       spokenCharacters: rendered.spokenCharacters,
+      digitCount: rendered.digitCount,
       tagCount: rendered.tags.length,
     });
   }
@@ -355,12 +364,14 @@ async function generate(sharedMessage: GenerateMessage, ticket: GenerationTicket
   let skipped = 0;
   let firstFailure: unknown = null;
 
-  for (const [index, { chunk, text, spokenCharacters, tagCount }] of chunks.entries()) {
+  for (const [index, { chunk, text, spokenCharacters, digitCount, tagCount }] of chunks.entries()) {
     if (!ticket.isCurrent()) return;
-    const maxNewTokens = getChatterboxTokenBudget(spokenCharacters, tagCount);
+    const maxNewTokens = getChatterboxTokenBudget(spokenCharacters, tagCount, digitCount);
     let audio: Float32Array | null = null;
     try {
-      for (let attempt = 0; attempt < 2 && !audio; attempt += 1) {
+      // Greedy decoding ignores the seed, so a retry would replay the runaway.
+      const attempts = sampling.temperature > 0 ? 2 : 1;
+      for (let attempt = 0; attempt < attempts && !audio; attempt += 1) {
         const result = await activeRuntime.synthesize(text, conditioning, {
           maxNewTokens,
           sampling: chunkSampling(sampling, index, attempt),

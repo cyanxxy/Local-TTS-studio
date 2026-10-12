@@ -58,6 +58,7 @@ describe("renderChatterboxText", () => {
   it("counts only letters and digits outside tags as spoken", () => {
     expect(renderChatterboxText("[laugh]").spokenCharacters).toBe(0);
     expect(renderChatterboxText("[laugh] ok 42!").spokenCharacters).toBe(4);
+    expect(renderChatterboxText("[laugh] ok 42!").digitCount).toBe(2);
   });
 
   it("runs the speech transform on prose only, never on tag spellings", () => {

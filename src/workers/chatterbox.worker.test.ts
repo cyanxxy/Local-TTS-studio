@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChatterboxWorkerInMessage } from "../lib/chatterboxProtocol";
-import type { ChatterboxConditioning, ChatterboxRuntime, ChatterboxSynthesisResult } from "../lib/chatterboxRuntime";
+import { getChatterboxTokenBudget, type ChatterboxConditioning, type ChatterboxRuntime, type ChatterboxSynthesisResult } from "../lib/chatterboxRuntime";
 import { encodeWavPcm16 } from "../lib/wavCodec";
 
 type Posted = Record<string, unknown> & { type: string };
@@ -210,6 +210,14 @@ describe("chatterbox.worker", () => {
       expect(error.message).toBe("Chatterbox Turbo onnx/x.onnx failed integrity verification.");
     });
 
+    it("reports an out-of-memory load failure with its real cause", async () => {
+      const { load, ofType } = await loadWorker({ loadError: new Error("Out of memory") });
+      await load();
+      const [error] = ofType("ERROR");
+      expect(error.message).toBe("Out of memory");
+      expect(error.message).not.toContain("needs WebGPU");
+    });
+
     it("disposes a runtime whose warm-up fails and reports the error", async () => {
       const { load, ofType, runtime } = await loadWorker({
         synthesize: async () => ({ audio: new Float32Array(0), reachedStop: true, speechTokens: 0 }),
@@ -343,6 +351,26 @@ describe("chatterbox.worker", () => {
       const seeds = runtime.synthesize.mock.calls.map((call) => call[2].sampling.seed);
       expect(seeds).toHaveLength(2);
       expect(seeds[0]).not.toBe(seeds[1]);
+    });
+
+    it("does not retry a runaway chunk under greedy decoding, which ignores the seed", async () => {
+      const { load, dispatch, waitFor, ofType, runtime } = await loadWorker();
+      await load();
+      runtime.synthesize.mockClear();
+      runtime.synthesize.mockResolvedValue({ audio: new Float32Array(100).fill(0.5), reachedStop: false, speechTokens: 1000 });
+      dispatch({ type: "GENERATE", generationId: "g1", text: "Hello there.", seed: 9, temperature: 0 });
+      await waitFor(() => ofType("ERROR").length === 1);
+      expect(runtime.synthesize).toHaveBeenCalledTimes(1);
+    });
+
+    it("gives a digit-heavy chunk a larger token budget than the same count of letters", async () => {
+      const { load, dispatch, waitFor, ofType, runtime } = await loadWorker();
+      await load();
+      runtime.synthesize.mockClear();
+      dispatch({ type: "GENERATE", generationId: "g1", text: "Call 0612345678 now." });
+      await waitFor(() => ofType("GENERATION_COMPLETE").length === 1);
+      const { maxNewTokens } = runtime.synthesize.mock.calls[0][2];
+      expect(maxNewTokens).toBeGreaterThan(getChatterboxTokenBudget(14, 0));
     });
 
     it("skips a chunk that never finishes, completes the rest, then reports the error", async () => {

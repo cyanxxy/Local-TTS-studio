@@ -138,6 +138,12 @@ describe("getChatterboxTokenBudget", () => {
     expect(getChatterboxTokenBudget(40, 2)).toBe(220);
     expect(getChatterboxTokenBudget(10_000, 0)).toBe(CHATTERBOX_MAX_NEW_TOKENS);
     expect(getChatterboxTokenBudget(-5, -5)).toBe(75);
+    expect(getChatterboxTokenBudget(-5, 0, 9)).toBe(75);
+  });
+
+  it("weights digits above letters so number-heavy chunks keep headroom", () => {
+    expect(getChatterboxTokenBudget(20, 0, 20)).toBeGreaterThan(getChatterboxTokenBudget(20, 0));
+    expect(getChatterboxTokenBudget(20, 0, 99)).toBe(getChatterboxTokenBudget(20, 0, 20));
   });
 });
 

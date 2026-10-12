@@ -67,6 +67,7 @@ const MAX_TAG_CONTENT_LENGTH = 64;
 const TAG_PATTERN = new RegExp(`\\[\\[[^\\[\\]\\n]+\\]\\]|\\[([^\\[\\]\\n]{1,${MAX_TAG_CONTENT_LENGTH}})\\]`, "g");
 // GPT-2 control tokens such as <|endoftext|> would end the prompt early.
 const SPECIAL_TOKEN_PATTERN = /<\|[^|<>\n]{0,64}\|>/g;
+const DIGIT = /\p{N}/gu;
 const SPOKEN_CHARACTER = /[\p{L}\p{N}]/gu;
 
 export type ChatterboxTextSpan =
@@ -82,6 +83,8 @@ export interface RenderedChatterboxText {
   removedTags: string[];
   /** Letters and digits outside tags; zero means nothing would be spoken. */
   spokenCharacters: number;
+  /** Digits among spokenCharacters; they need a larger token budget. */
+  digitCount: number;
 }
 
 export function normalizeChatterboxTagName(name: string): ChatterboxTagToken | null {
@@ -114,6 +117,7 @@ export function renderChatterboxText(
   const tags: ChatterboxTagToken[] = [];
   const removedTags: string[] = [];
   let spokenCharacters = 0;
+  let digitCount = 0;
   const parts: string[] = [];
 
   for (const span of parseChatterboxTags(text)) {
@@ -130,6 +134,7 @@ export function renderChatterboxText(
     const speech = transformSpeech(span.text.replace(SPECIAL_TOKEN_PATTERN, " "))
       .replace(SPECIAL_TOKEN_PATTERN, " ");
     spokenCharacters += speech.match(SPOKEN_CHARACTER)?.length ?? 0;
+    digitCount += speech.match(DIGIT)?.length ?? 0;
     parts.push(speech);
   }
 
@@ -137,7 +142,7 @@ export function renderChatterboxText(
     .replace(/\s+/g, " ")
     .replace(/ ([,.!?;:])/g, "$1")
     .trim();
-  return { text: rendered, tags, removedTags, spokenCharacters };
+  return { text: rendered, tags, removedTags, spokenCharacters, digitCount };
 }
 
 const PUNCTUATION_REPLACEMENTS: ReadonlyArray<readonly [string, string]> = [

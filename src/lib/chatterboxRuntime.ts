@@ -22,6 +22,7 @@ const TRAILING_SILENCE_TOKENS = 3;
 // Measured about 1.4-1.5 speech tokens per character at 25 tokens per second;
 // a non-speech tag such as [laugh] adds up to about two seconds.
 const TOKENS_PER_SPOKEN_CHARACTER = 3;
+const EXTRA_TOKENS_PER_DIGIT = 9;
 const TOKENS_PER_TAG = 50;
 const MIN_TOKEN_BUDGET = 75;
 
@@ -118,8 +119,12 @@ export const CHATTERBOX_DTYPE: ChatterboxDtype = {
 };
 
 /** Speech-token budget for one chunk; exceeding it means the model never stopped. */
-export function getChatterboxTokenBudget(spokenCharacters: number, tagCount: number): number {
-  const estimate = (Math.max(0, spokenCharacters) * TOKENS_PER_SPOKEN_CHARACTER) + (Math.max(0, tagCount) * TOKENS_PER_TAG);
+export function getChatterboxTokenBudget(spokenCharacters: number, tagCount: number, digitCount = 0): number {
+  // Numbers are read out as words ("2024" is several syllables), so each digit
+  // costs more speech tokens than a letter.
+  const digits = Math.min(Math.max(0, digitCount), Math.max(0, spokenCharacters));
+  const estimate = (Math.max(0, spokenCharacters) * TOKENS_PER_SPOKEN_CHARACTER)
+    + (digits * EXTRA_TOKENS_PER_DIGIT) + (Math.max(0, tagCount) * TOKENS_PER_TAG);
   return Math.round(clamp(estimate, MIN_TOKEN_BUDGET, CHATTERBOX_MAX_NEW_TOKENS));
 }
 
