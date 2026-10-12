@@ -1,0 +1,148 @@
+import { describe, expect, it, vi } from "vitest";
+import type { LocalTtsQwen3Setup } from "../../electron";
+import { getQwen3Profiles } from "../../../electron/qwen3Profiles";
+import type { Qwen3RuntimeSettings } from "../../contexts/Qwen3RuntimeContext";
+import type { SurfaceEngineSettings } from "../../models/registry";
+import { PresetRequestError, buildPresetRequest, isSurfaceEngine, type PresetRequestContext } from "./presetRequest";
+import type { VoicePreset } from "./types";
+
+const profiles = getQwen3Profiles("darwin", "arm64");
+const byMode = (mode: string, parameters?: string) =>
+  profiles.find((profile) => profile.mode === mode && (!parameters || profile.parameters === parameters))!;
+const customVoice = byMode("customVoice", "1.7B");
+const base = byMode("voiceClone");
+const design = byMode("voiceDesign");
+
+function setupOf(...installedProfiles: Array<{ repo: string }>): LocalTtsQwen3Setup {
+  return {
+    provider: "mlx",
+    recommendedModelRepo: customVoice.repo,
+    recommendedModelDir: "/models/x",
+    profiles: profiles.map((profile) => ({
+      ...profile,
+      platforms: profile.platforms,
+      modelDir: `/models/${profile.repo.split("/")[1]}`,
+      readiness: installedProfiles.some((entry) => entry.repo === profile.repo) ? "verified" : "missing",
+    })),
+  } as LocalTtsQwen3Setup;
+}
+
+function context(overrides: Partial<PresetRequestContext> = {}): PresetRequestContext {
+  const qwen3 = {
+    profile: customVoice,
+    modelPath: "/models/live",
+    readiness: "verified",
+    speaker: "Aiden",
+    language: "English",
+    instruct: "",
+    temperature: 0.9,
+    topK: 50,
+    maxNewTokens: 384,
+    seed: null,
+    referenceAudioName: "",
+    referenceAudioBase64: null,
+    referenceAudioSignature: "",
+    referenceAudioDurationSec: null,
+    referenceText: "",
+  } as Qwen3RuntimeSettings;
+  return {
+    tuning: { speed: 1, quality: 5 },
+    engineSettings: {
+      kokoro: { voice: "af_heart" },
+      supertonic: { voice: "F1", language: "en" },
+      audio8: { voice: "clara" },
+      supertonic3: { voice: "M1", language: "en" },
+      qwen3,
+    } as SurfaceEngineSettings,
+    qwen3Profiles: profiles,
+    qwen3Setup: setupOf(customVoice, base, design),
+    loadVoiceAudio: vi.fn(async () => ({ wav: new Uint8Array([1, 2, 3]), transcript: "Said clip.", sha256: "f".repeat(64) })),
+    ...overrides,
+  };
+}
+
+const preset = (overrides: Partial<VoicePreset>): VoicePreset => ({ engineId: "kokoro", voiceId: "bm_george", settings: {}, ...overrides });
+
+describe("buildPresetRequest", () => {
+  it("builds simple engine requests with the preset's voice, speed and seed", async () => {
+    const result = await buildPresetRequest("Hi.", preset({ settings: { speed: 1.25, seed: 9 } }), context());
+    expect(result).toEqual({
+      engineId: "kokoro",
+      request: { text: "Hi.", settings: { voice: "bm_george" }, tuning: { speed: 1.25, quality: 5 }, seed: 9 },
+    });
+    expect((await buildPresetRequest("Hi.", preset({ engineId: "audio8", voiceId: "arthur" }), context())).request.settings)
+      .toEqual({ voice: "arthur" });
+  });
+
+  it("keeps an engine's current language unless the preset names one", async () => {
+    const keep = await buildPresetRequest("Hi.", preset({ engineId: "supertonic3", voiceId: "F2" }), context());
+    expect(keep.request.settings).toEqual({ voice: "F2", language: "en" });
+    const override = await buildPresetRequest("Hola.", preset({ engineId: "supertonic", voiceId: "M2", settings: { language: "es" } }), context());
+    expect(override.request.settings).toEqual({ voice: "M2", language: "es" });
+  });
+
+  it("renders a Qwen3 preset speaker with the CustomVoice profile and its instruction", async () => {
+    const { request } = await buildPresetRequest(
+      "Hi.",
+      preset({ engineId: "qwen3", voiceId: "Ryan", settings: { instruction: "Calm.", seed: 3, language: "English" } }),
+      context(),
+    );
+    expect(request.settings).toMatchObject({
+      profile: { repo: customVoice.repo },
+      modelPath: "/models/live",
+      speaker: "Ryan",
+      instruct: "Calm.",
+      seed: 3,
+      referenceAudioBase64: null,
+    });
+  });
+
+  it("finds an installed profile of the right mode and its model directory", async () => {
+    const { request } = await buildPresetRequest(
+      "Preview.",
+      preset({ engineId: "qwen3", voiceId: "voice-design", mode: "voiceDesign", settings: { instruction: "A low voice.", seed: 5 } }),
+      context(),
+    );
+    expect(request.settings).toMatchObject({
+      profile: { mode: "voiceDesign" },
+      modelPath: `/models/${design.repo.split("/")[1]}`,
+      instruct: "A low voice.",
+      seed: 5,
+    });
+  });
+
+  it("sends a clone's reference clip, transcript and a signature that identifies the clip", async () => {
+    const loadVoiceAudio = vi.fn(async () => ({ wav: new Uint8Array([1, 2, 3]), transcript: "Said clip.", sha256: "f".repeat(64) }));
+    const { request } = await buildPresetRequest(
+      "Hello.",
+      preset({ engineId: "qwen3", voiceId: "library:c1", mode: "voiceClone", libraryVoiceId: "c1", settings: { language: "English" } }),
+      context({ loadVoiceAudio }),
+    );
+    expect(loadVoiceAudio).toHaveBeenCalledWith("c1");
+    expect(request.settings).toMatchObject({
+      profile: { mode: "voiceClone" },
+      referenceAudioBase64: "AQID",
+      referenceAudioSignature: "f".repeat(64),
+      referenceText: "Said clip.",
+      instruct: "",
+    });
+  });
+
+  it("explains what is missing instead of failing inside the bridge", async () => {
+    const noModel = context({ qwen3Setup: setupOf(customVoice) });
+    await expect(buildPresetRequest("Hi.", preset({ engineId: "qwen3", voiceId: "x", mode: "voiceDesign" }), noModel))
+      .rejects.toThrow(/Install a Qwen3 VoiceDesign model/);
+    await expect(buildPresetRequest("Hi.", preset({ engineId: "qwen3", voiceId: "x", mode: "voiceClone" }), context()))
+      .rejects.toThrow(/no saved reference/);
+    const missingAudio = context({ loadVoiceAudio: async () => null });
+    await expect(buildPresetRequest("Hi.", preset({ engineId: "qwen3", voiceId: "x", mode: "voiceClone", libraryVoiceId: "gone" }), missingAudio))
+      .rejects.toBeInstanceOf(PresetRequestError);
+  });
+
+  it("refuses engines without a surface runtime", async () => {
+    await expect(buildPresetRequest("Hi.", preset({ engineId: "neutts" }), context())).rejects.toThrow(/own page/);
+    expect(isSurfaceEngine("kokoro")).toBe(true);
+    expect(isSurfaceEngine("neutts")).toBe(false);
+    expect(isSurfaceEngine("nonsense")).toBe(false);
+  });
+});
