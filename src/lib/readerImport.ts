@@ -128,6 +128,10 @@ interface ExtractedBlock {
 function extractBlocks(root: Element): ExtractedBlock[] {
   const blocks: ExtractedBlock[] = [];
   const walk = (owner: Element) => {
+    // Source line wrapping is insignificant whitespace in markup, so only <br>
+    // (and <pre> content) may break a line; otherwise a hard-wrapped EPUB
+    // paragraph would render and speak as a stack of short lines.
+    const preformatted = owner.closest("pre") !== null;
     let buffer = "";
     const flush = () => {
       const text = cleanText(buffer);
@@ -137,7 +141,8 @@ function extractBlocks(root: Element): ExtractedBlock[] {
     const visit = (node: Node) => {
       for (const child of node.childNodes) {
         if (child.nodeType === Node.TEXT_NODE || child.nodeType === Node.CDATA_SECTION_NODE) {
-          buffer += (child as CharacterData).data;
+          const data = (child as CharacterData).data;
+          buffer += preformatted ? data : data.replace(/[ \t\n\r\f]+/g, " ");
           continue;
         }
         if (child.nodeType !== Node.ELEMENT_NODE) continue;

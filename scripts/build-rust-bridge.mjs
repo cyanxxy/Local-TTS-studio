@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveRustTargetDir } from "./rust-target-dir.mjs";
+import { resolveRustTargetDir, rustBuildEnv } from "./rust-target-dir.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const crateDir = path.join(rootDir, "rust", "local-tts-bridge");
@@ -35,7 +35,7 @@ if (process.platform === "win32" && process.arch !== "x64") {
 
 execFileSync("cargo", ["build", "--locked", "--release", "--manifest-path", manifestPath], {
   cwd: rootDir,
-  env: { ...process.env, CARGO_TARGET_DIR: targetDir },
+  env: rustBuildEnv(rootDir),
   stdio: "inherit",
 });
 

@@ -75,6 +75,12 @@ function checkDesktopRequirements() {
       requireTool(tool, "Run: brew install automake autoconf libtool");
     }
     requireTool("glibtool", "Run: brew install libtool", { subject: "GNU libtool" });
+    // MLX compiles its Metal kernels; newer Xcode releases ship the Metal
+    // compiler as a separate download.
+    requireTool("xcrun", "Run: xcodebuild -downloadComponent MetalToolchain", {
+      args: ["-sdk", "macosx", "metal", "--version"],
+      subject: "The Xcode Metal Toolchain",
+    });
     return;
   }
 
