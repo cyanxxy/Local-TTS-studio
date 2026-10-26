@@ -235,4 +235,4 @@ Reader keeps the complete normalized document and its real chapter table of cont
 - iPhone and iPad browsers expose Supertonic only; Kokoro is disabled there pending validation.
 - WebGPU is preferred where available; WASM fallback is supported where the selected model is enabled.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch because WebGPU is otherwise unavailable in the packaged desktop shell.
-- Cross-origin isolation matters. Without COOP/COEP headers, WASM fallback can degrade to single-threaded execution.
+- Cross-origin isolation matters. The Vite dev server and the Electron shell send COOP/COEP headers; without them, WASM fallback degrades to single-threaded execution.

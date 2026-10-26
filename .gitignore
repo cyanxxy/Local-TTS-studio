@@ -78,5 +78,3 @@ reports/
 # Isolated agent worktrees (repo root only)
 /.worktrees/
 
-# Vercel
-.vercel
