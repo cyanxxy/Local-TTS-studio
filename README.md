@@ -13,7 +13,7 @@ Ten on-device voice engines, voice cloning, and a long-book Reader with audioboo
 
 <img src="./docs/screenshots/reader.png" alt="Open TTS Reader reading Alice's Adventures in Wonderland aloud, highlighting the current sentence and word" width="900">
 
-[Features](#features) · [Models](#models) · [Quick start](#quick-start) · [User guide](./docs/user-guide.md) · [Changelog](./CHANGELOG.md)
+[Features](#features) · [Models](#models) · [Install](#install) · [Develop](#develop) · [User guide](./docs/user-guide.md) · [Changelog](./CHANGELOG.md)
 
 </div>
 
@@ -46,9 +46,38 @@ Full details: [User guide](./docs/user-guide.md).
 The Electron desktop app is the main product; the web build offers the browser engines only.
 Sources, licences, and per-model notes are in the [user guide](./docs/user-guide.md#models).
 
-## Quick start
+## Install
 
-Requires Node.js 24.19 (pinned in `.nvmrc`), npm 11.17+, and, for the desktop app, [rustup](https://rustup.rs/) on Apple Silicon macOS or Windows x64.
+### Mac
+
+You need an Apple Silicon Mac (M1 or newer) on macOS 26 or later, about 20 GB of free disk space, and two free tools installed first:
+
+1. **[Xcode](https://apps.apple.com/app/xcode/id497799835)** from the App Store. Open it once so it finishes setting up.
+2. **[Homebrew](https://brew.sh)**: follow the one-line install on its home page.
+
+Then paste this into Terminal:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cyanxxy/Local-TTS-studio/main/scripts/install-macos.sh | bash
+```
+
+The installer adds the remaining build tools, builds the latest release on your Mac, and puts **Open TTS** in your Applications folder. The first install takes 15 to 30 minutes. Voice models download the first time you use each one.
+
+- **Check first:** `curl -fsSL https://raw.githubusercontent.com/cyanxxy/Local-TTS-studio/main/scripts/install-macos.sh | bash -s -- --check` lists anything missing without changing your Mac.
+- **Update:** run the same install command again.
+- **Uninstall:** delete Open TTS from Applications and the `~/Library/Application Support/Open TTS Installer` folder (build files). Your library and models are in `~/Library/Application Support/Open TTS`.
+
+How the installer works, step by step: [Development](./docs/development.md#one-command-macos-install).
+
+### Windows
+
+There is no installer yet. Build the Windows x64 app from source with `npm run dist:win` (needs LibTorch 2.7.0); see [Development](./docs/development.md).
+
+GitHub Releases contain source code only; Open TTS does not publish unsigned downloads.
+
+## Develop
+
+Requires Node.js 24.19 (pinned in `.nvmrc`), npm 11.17+, and, for the desktop app, [rustup](https://rustup.rs/) plus the native build tools listed in [Development](./docs/development.md#requirements), on Apple Silicon macOS or Windows x64.
 
 ```bash
 npm run setup:desktop   # install dependencies and check native prerequisites
@@ -58,8 +87,8 @@ npm run setup:web       # or: browser-only build
 npm run dev:web         # http://localhost:5173/studio
 ```
 
-GitHub Releases are source-only; build a local package with `npm run dist:mac` or `npm run dist:win`.
-See [Development](./docs/development.md) for prerequisites, every script, and signed builds.
+`npm run dist:mac` or `npm run dist:win` builds a local, unsigned app package.
+See [Development](./docs/development.md) for every script and for signed builds.
 
 ## Documentation
 

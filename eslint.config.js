@@ -1,6 +1,6 @@
 import js from "@eslint/js";
 import globals from "globals";
-import react from "eslint-plugin-react";
+import reactX from "eslint-plugin-react-x";
 import reactHooks from "eslint-plugin-react-hooks";
 import reactRefresh from "eslint-plugin-react-refresh";
 import tseslint from "typescript-eslint";
@@ -17,16 +17,11 @@ export default defineConfig([
       reactRefresh.configs.vite,
     ],
     plugins: {
-      react,
+      "react-x": reactX,
     },
     languageOptions: {
       ecmaVersion: 2020,
       globals: globals.browser,
-    },
-    settings: {
-      react: {
-        version: "detect",
-      },
     },
     rules: {
       // Stricter than the react-hooks preset, which sets this to "warn".
@@ -37,7 +32,7 @@ export default defineConfig([
       "react-hooks/refs": "warn",
       "react-hooks/set-state-in-effect": "warn",
       "react-hooks/immutability": "warn",
-      "react/jsx-key": "error",
+      "react-x/no-missing-key": "error",
     },
   },
   {

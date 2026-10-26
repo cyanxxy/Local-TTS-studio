@@ -266,6 +266,6 @@ export async function* streamQwen3Synthesis(
     }
   } catch (error) {
     if (signal.aborted) throw signal.reason;
-    throw new Error(qwen3ErrorMessage(error));
+    throw new Error(qwen3ErrorMessage(error), { cause: error });
   }
 }

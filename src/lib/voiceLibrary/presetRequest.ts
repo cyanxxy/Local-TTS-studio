@@ -209,7 +209,7 @@ export async function presetRenderKey(
   const settings: Record<string, unknown> = { ...(request.settings as unknown as Record<string, unknown>) };
   // The clip's bytes are identified by referenceAudioSignature and the transcript.
   delete settings.referenceAudioBase64;
-  let parts: ReturnType<typeof engineSignatureParts> | null = null;
+  let parts: ReturnType<typeof engineSignatureParts> | null;
   try {
     parts = engineSignatureParts(engineId, {
       settings: request.settings,

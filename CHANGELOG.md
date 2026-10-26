@@ -4,6 +4,55 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.10.0] - 2026-10-26
+
+### Added
+
+- One-command install on Apple Silicon Macs:
+  `curl -fsSL https://raw.githubusercontent.com/cyanxxy/Local-TTS-studio/main/scripts/install-macos.sh | bash`
+  installs the missing build tools, builds the latest release, and puts
+  Open TTS in Applications. Running it again updates the app. Node and (when
+  needed) Rust are kept in the installer's own folder, and `--check` reports
+  what is missing without changing anything.
+
+### Changed
+
+- Updated the application to Electron 45.0, React 19.3, Vite 8.3, Vitest 5.0,
+  ESLint 10, Transformers.js 4.3, ONNX Runtime 1.30 (Node) and the matching
+  1.31 web build, LiteParse 2.17, Electron Builder 26.18, and the latest
+  compatible supporting packages. TypeScript stays on 6.0 until
+  `typescript-eslint` supports TypeScript 7.
+- Replaced `eslint-plugin-react`, which does not support ESLint 10, with
+  `eslint-plugin-react-x`; its `no-missing-key` rule keeps the missing-`key`
+  check that `react/jsx-key` provided.
+- Updated the native Rust bridge to RTen 0.27 (with its `.rten` model format
+  enabled for the pinned NeuCodec encoder) and current compatible crates.
+  `tch` stays on 0.20 with LibTorch 2.7 for the Windows Qwen build.
+
+### Fixed
+
+- Errors rethrown while parsing bridge messages, downloading models, importing
+  documents and URLs, and generating Audio8 or Qwen speech now keep the
+  original error as their `cause`, as ESLint 10's `preserve-caught-error`
+  requires.
+- Release builds of the Rust bridge on macOS 27 (`npm run build:desktop`,
+  `npm run lint:rust`): build scripts and proc macros are no longer stripped,
+  because stripping them while targeting macOS 26 produced libraries macOS 27
+  refused to load. The packaged bridge binary is unchanged.
+- Unsigned local macOS packages (`npm run dist:mac`) now launch on Apple
+  Silicon. Flipping the Electron fuses invalidated the app's ad-hoc signature,
+  so macOS killed it at startup; electron-builder now re-signs it ad hoc
+  (`electronFuses.resetAdHocDarwinSignature`).
+- The end-to-end bridge test (`electron/rustLocalBridge.test.ts`) now builds
+  with the same environment as the Rust scripts, so it targets macOS 26 and
+  compiles MLX's Metal kernels on macOS 27 hosts.
+
+### Removed
+
+- The unused Vercel configuration (`vercel.json`, `.vercelignore`, and its
+  `.gitignore` entry). The web build is not deployed anywhere; it still builds
+  and runs locally with `npm run dev:web`.
+
 ## [1.9.1] - 2026-10-12
 
 ### Fixed

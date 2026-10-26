@@ -223,7 +223,7 @@ export async function importRemoteDocument(
     throw new Error("The page redirected too many times.");
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error("The URL import timed out after 30 seconds.");
+      throw new Error("The URL import timed out after 30 seconds.", { cause: error });
     }
     throw error;
   } finally {

@@ -13,8 +13,10 @@ base64 = { version = "0.23", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
 hound = "3.5"
 neutts = { version = "0.1.1", features = ["espeak"] }
-rten = "0.24"
-rten-tensor = "0.24"
+# 0.27 gates loading `.rten` files behind `rten_format`; the pinned NeuCodec
+# encoder is published only in that format.
+rten = { version = "0.27", features = ["rten_format"] }
+rten-tensor = "0.27"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.11"
@@ -42,3 +44,12 @@ tch = "0.20"
 
 [dev-dependencies]
 tempfile = "3.27"
+
+# Cargo strips debuginfo from release artifacts by default. On a macOS 27 host
+# with MACOSX_DEPLOYMENT_TARGET=26.0 (set by scripts/rust-target-dir.mjs),
+# rustc's strip step leaves proc-macro dylibs with a misaligned LINKEDIT string
+# pool that dyld refuses to load, so every release build fails. Build scripts
+# and proc macros never ship, so leave them unstripped; the bridge binary keeps
+# the default.
+[profile.release.build-override]
+strip = false

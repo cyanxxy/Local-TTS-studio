@@ -1665,7 +1665,7 @@ describe("local model cache lifecycle IPC", () => {
     function countConfigReads(modelPath: string) {
       const originalReadFile = fs.readFile.bind(fs);
       const reads = vi.fn();
-      vi.spyOn(fs, "readFile").mockImplementation(((target: Parameters<typeof fs.readFile>[0], options) => {
+      vi.spyOn(fs, "readFile").mockImplementation(((target: Parameters<typeof fs.readFile>[0], options: Parameters<typeof fs.readFile>[1]) => {
         if (target === path.join(modelPath, "config.json")) reads();
         return originalReadFile(target, options);
       }) as typeof fs.readFile);

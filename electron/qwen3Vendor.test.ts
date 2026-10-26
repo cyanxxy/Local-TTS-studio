@@ -93,7 +93,7 @@ describe("qwen3-tts-rs vendor snapshot", () => {
           execFileSync("git", ["apply", ...args, "OPEN_TTS.patch"], { cwd: workDir, stdio: "pipe" });
         } catch (error) {
           const stderr = (error as { stderr?: Buffer }).stderr?.toString().trim();
-          throw new Error(`git apply ${args.join(" ")} OPEN_TTS.patch failed: ${stderr || error}`);
+          throw new Error(`git apply ${args.join(" ")} OPEN_TTS.patch failed: ${stderr || error}`, { cause: error });
         }
       };
       gitApply("-R", "--check");
