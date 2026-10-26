@@ -133,7 +133,7 @@ export function useDocumentImport({
       // AdvancedReaderPage owns URL-import failures while its popover remains
       // open. Storing the same rejection here also renders the global banner,
       // duplicating the message and leaving it behind after the popover closes.
-      throw new Error(message);
+      throw new Error(message, { cause: error });
     } finally {
       endImport();
     }

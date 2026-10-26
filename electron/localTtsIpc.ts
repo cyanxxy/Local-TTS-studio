@@ -799,7 +799,7 @@ export function parseBridgeResult(
       details: typeof decoded.details === "string" ? decoded.details : undefined,
     };
   } catch (err) {
-    throw new Error(`Failed parsing bridge result: ${errorMessage(err)}`);
+    throw new Error(`Failed parsing bridge result: ${errorMessage(err)}`, { cause: err });
   }
 
   if (!parsed.ok) {

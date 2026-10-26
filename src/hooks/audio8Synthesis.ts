@@ -66,7 +66,7 @@ export async function* streamAudio8Synthesis(
       }), signal);
     } catch (error) {
       if (signal.aborted) throw signal.reason;
-      throw new Error(audio8ErrorMessage(error));
+      throw new Error(audio8ErrorMessage(error), { cause: error });
     } finally {
       signal.removeEventListener("abort", cancel);
     }

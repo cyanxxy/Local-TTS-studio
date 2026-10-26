@@ -143,7 +143,7 @@ export function parseBridgeMessage(data: unknown): BridgeMessage {
   try {
     parsed = JSON.parse(dataToText(data));
   } catch (err) {
-    throw new Error(`Failed parsing WebSocket bridge message: ${errorMessage(err)}`);
+    throw new Error(`Failed parsing WebSocket bridge message: ${errorMessage(err)}`, { cause: err });
   }
   if (!isRecord(parsed) || typeof parsed.type !== "string") {
     throw new Error("WebSocket bridge returned an invalid message.");

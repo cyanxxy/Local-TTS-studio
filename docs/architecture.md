@@ -45,9 +45,9 @@ NeuTTS and Qwen3 run through `open-tts-local-bridge`, a compiled Rust binary tha
 - `onnxruntime-web` for the direct-ONNX browser engines (Supertonic 3, Kitten, Paradee, Piper, Chatterbox Turbo)
 - `onnxruntime-node` for the Electron-only Audio8 graph sessions, run natively in a `worker_threads` worker
 - `kokoro-js` v1 for Kokoro-82M generation with custom phonemization; its eSpeak NG `phonemizer` build is also served as an unbundled asset to Kitten, Paradee, and Piper
-- Electron 43 for the desktop app (the product; the web build is deprioritized)
+- Electron 45 for the desktop app (the product; the web build is deprioritized)
 - Rust local bridge for Electron probe/WebSocket transport
-- Vitest 4 + Testing Library + jsdom for tests
+- Vitest 5 + Testing Library + jsdom for tests
 - `lucide-react` for icons
 
 ## Source Map
@@ -235,4 +235,4 @@ Reader keeps the complete normalized document and its real chapter table of cont
 - iPhone and iPad browsers expose Supertonic only; Kokoro is disabled there pending validation.
 - WebGPU is preferred where available; WASM fallback is supported where the selected model is enabled.
 - Electron enables Chromium's `enable-unsafe-webgpu` switch because WebGPU is otherwise unavailable in the packaged desktop shell.
-- Cross-origin isolation matters. Without COOP/COEP headers, WASM fallback can degrade to single-threaded execution.
+- Cross-origin isolation matters. The Vite dev server and the Electron shell send COOP/COEP headers; without them, WASM fallback degrades to single-threaded execution.

@@ -4,18 +4,15 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "child_process";
-import { createHash, randomBytes } from "crypto";
+import { randomBytes } from "crypto";
 import { fileURLToPath } from "url";
 import net from "net";
 import { beforeAll, describe, expect, it } from "vitest";
+import { resolveRustTargetDir, rustBuildEnv } from "../scripts/rust-target-dir.mjs";
 
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST_PATH = path.join(ROOT_DIR, "rust", "local-tts-bridge", "Cargo.toml");
-const RUST_TARGET_DIR = process.env.CARGO_TARGET_DIR ?? path.join(
-  os.tmpdir(),
-  "open-tts-rust-target",
-  createHash("sha256").update(ROOT_DIR).digest("hex").slice(0, 12),
-);
+const RUST_TARGET_DIR = resolveRustTargetDir(ROOT_DIR);
 const BRIDGE_BINARY = path.join(
   RUST_TARGET_DIR,
   "debug",
@@ -306,7 +303,9 @@ async function withServeWsBridge<T>(
 beforeAll(async () => {
   await runCommand("cargo", ["build", "--quiet", "--manifest-path", MANIFEST_PATH], {
     cwd: ROOT_DIR,
-    env: { ...process.env, CARGO_TARGET_DIR: RUST_TARGET_DIR },
+    // The scripts' environment, not a bare CARGO_TARGET_DIR: on macOS it also
+    // sets the deployment target the MLX Metal kernels need to compile.
+    env: rustBuildEnv(ROOT_DIR),
   }, 600_000);
 
   if (process.platform === "linux") {

@@ -400,7 +400,7 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
     files = unzipSelectedEntries(bytes, new Set(["META-INF/container.xml"]), budget, true);
   } catch (error) {
     if (error instanceof ReaderImportLimitError) throw error;
-    throw new Error(`"${fileName}" is not a valid EPUB archive.`);
+    throw new Error(`"${fileName}" is not a valid EPUB archive.`, { cause: error });
   }
 
   const containerBytes = findZipEntry(files, "META-INF/container.xml");
@@ -415,7 +415,7 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
     opfFiles = unzipSelectedEntries(bytes, new Set([opfPath, encodeURI(opfPath)]), budget);
   } catch (error) {
     if (error instanceof ReaderImportLimitError) throw error;
-    throw new Error(`"${fileName}" is not a valid EPUB archive.`);
+    throw new Error(`"${fileName}" is not a valid EPUB archive.`, { cause: error });
   }
   files = { ...files, ...opfFiles };
   const opfBytes = findZipEntry(files, opfPath);
@@ -451,7 +451,7 @@ export function parseEpubDocument(bytes: Uint8Array, fileName: string): ReaderDo
     files = { ...files, ...unzipSelectedEntries(bytes, contentPaths, budget) };
   } catch (error) {
     if (error instanceof ReaderImportLimitError) throw error;
-    throw new Error(`"${fileName}" is not a valid EPUB archive.`);
+    throw new Error(`"${fileName}" is not a valid EPUB archive.`, { cause: error });
   }
 
   const navigationLabels = epubNavigationLabels(files, manifest, opfPath);
@@ -558,10 +558,10 @@ export async function fetchRemoteDocument(
     };
   } catch (error) {
     if (error instanceof DOMException && error.name === "AbortError") {
-      throw new Error("The URL import timed out after 30 seconds.");
+      throw new Error("The URL import timed out after 30 seconds.", { cause: error });
     }
     if (error instanceof Error) throw error;
-    throw new Error("The URL could not be imported.");
+    throw new Error("The URL could not be imported.", { cause: error });
   } finally {
     window.clearTimeout(timeoutId);
   }

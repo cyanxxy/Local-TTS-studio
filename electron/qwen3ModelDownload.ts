@@ -361,6 +361,35 @@ async function writeManifest(modelDir: string, manifest: Qwen3ModelManifest): Pr
   await fs.rename(temporaryPath, finalPath);
 }
 
+/** Fetches a file through Xet after the plain download was refused, then checks it against the pin. */
+async function downloadViaXet(
+  xetDownloader: HuggingFaceXetDownloader,
+  profile: Qwen3Profile,
+  file: HubFile,
+  destination: string,
+  onProgress: (downloadedBytes: number, totalBytes?: number) => void,
+  signal?: AbortSignal,
+): Promise<DownloadedFile> {
+  await fs.rm(destination, { force: true });
+  const downloaded = await xetDownloader({
+    modelRepo: profile.repo,
+    revision: profile.revision,
+    fileName: file.path,
+    destination,
+    onProgress,
+    signal,
+  });
+  throwIfDownloadCancelled(signal);
+  const verified = await digestModelFile(destination, signal);
+  if (file.sizeBytes != null && verified.sizeBytes !== file.sizeBytes) {
+    throw new Error(`Xet download size mismatch for ${file.path}.`);
+  }
+  if (file.sha256 != null && verified.sha256 !== file.sha256) {
+    throw new Error(`Xet download digest mismatch for ${file.path}.`);
+  }
+  return { downloaded, ...verified };
+}
+
 export async function downloadQwen3Model(
   profile: Qwen3Profile,
   modelDir: string,
@@ -430,24 +459,7 @@ export async function downloadQwen3Model(
           && error.statusCode === 403
           && file.path.endsWith(".safetensors");
         if (!shouldUseXet) throw error;
-        await fs.rm(destination, { force: true });
-        const downloaded = await xetDownloader({
-          modelRepo: profile.repo,
-          revision: profile.revision,
-          fileName: file.path,
-          destination,
-          onProgress: reportProgress,
-          signal,
-        });
-        throwIfDownloadCancelled(signal);
-        const verified = await digestModelFile(destination, signal);
-        if (file.sizeBytes != null && verified.sizeBytes !== file.sizeBytes) {
-          throw new Error(`Xet download size mismatch for ${file.path}.`);
-        }
-        if (file.sha256 != null && verified.sha256 !== file.sha256) {
-          throw new Error(`Xet download digest mismatch for ${file.path}.`);
-        }
-        result = { downloaded, ...verified };
+        result = await downloadViaXet(xetDownloader, profile, file, destination, reportProgress, signal);
       }
       fileProgress.flush();
     } finally {

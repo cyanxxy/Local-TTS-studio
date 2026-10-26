@@ -38,7 +38,7 @@ The dedicated NeuTTS and Qwen setup pages are hidden by default; enable them und
 
 `.npmrc` sets `strict-allow-scripts=true` and `package.json` carries an `allowScripts` map, so only vetted dependencies may run install scripts. Any other package that ships one **fails the install** rather than executing unreviewed code. `engines.npm` and `engine-strict=true` enforce the npm 11.17.0 floor this depends on.
 
-The allowlist pins exact versions (`esbuild@0.28.2`, `onnxruntime-node@1.27.0`, `sharp@0.34.5`, and so on), so **bumping one of those dependencies breaks `npm ci` until the allowlist is updated in the same commit**. Run `npm approve-scripts --allow-scripts-pending` to list what a bump left uncovered, and `npm approve-scripts <pkg>` to record the new pin.
+The allowlist pins exact versions (`esbuild@0.28.2`, `onnxruntime-node@1.30.0`, `sharp@0.34.5`, and so on), so **bumping one of those dependencies breaks `npm ci` until the allowlist is updated in the same commit**. Run `npm approve-scripts --allow-scripts-pending` to list what a bump left uncovered, and `npm approve-scripts <pkg>` to record the new pin.
 
 <details>
 <summary>Why both settings are required, and what else they constrain</summary>
@@ -86,6 +86,25 @@ Packaged desktop builds bundle the Electron shell and the Rust local bridge. The
 The [latest GitHub Release](https://github.com/cyanxxy/Local-TTS-studio/releases/latest) contains the tagged source archive and curated release notes. Open TTS does not publish unsigned desktop installers.
 
 **Local builds.** Developers can create local packages with `npm run dist:mac` on Apple Silicon macOS 26+ or `npm run dist:win` on Windows x64 with a compatible LibTorch 2.7.0 installation. These builds are unsigned and unnotarized, do not bundle model weights, and are not attached to GitHub Releases.
+
+### One-command macOS install
+
+`scripts/install-macos.sh` is the end-user path while releases stay source-only. It builds the app locally, so the result carries no quarantine flag and opens without a Gatekeeper prompt:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/cyanxxy/Local-TTS-studio/main/scripts/install-macos.sh | bash
+```
+
+In order, it:
+
+1. Checks for Apple Silicon, macOS 26+, at least 20 GB free, and a full Xcode with an accepted license. It downloads Xcode's Metal Toolchain if missing, and uses `/Applications/Xcode.app` through `DEVELOPER_DIR` when `xcode-select` points at the Command Line Tools.
+2. Installs only the missing Homebrew build tools from the macOS prerequisites above. Homebrew itself must already be installed.
+3. Clones or updates the latest release tag in `~/Library/Application Support/Open TTS Installer/source`, a folder it owns.
+4. Downloads Node at the `.nvmrc` version (checksum-verified) and the npm version in `packageManager` into the same folder. It reuses an existing rustup, or installs rustup there with `--no-modify-path`. A system Node, nvm setup, or shell profile is never changed.
+5. Runs `node scripts/setup.mjs --desktop --check`, `npm ci`, `npm run build:electron`, and `electron-builder --mac --arm64 --dir`, keeping Rust build output in that folder.
+6. Replaces `/Applications/Open TTS.app` (or `~/Applications` when `/Applications` is not writable) only after the build succeeds, and refuses while the app is running.
+
+Options: `--check` reports what is missing without changing anything; `--ref <tag-or-branch>` builds something other than the latest release; `--source <dir>` builds an existing checkout in place; `--app-dir <dir>` installs elsewhere. `OPEN_TTS_INSTALL_HOME` moves the installer's folder. Pass options through the pipe with `| bash -s -- --check`. Each run writes `install.log` in the installer's folder. Running it again updates the app. Deleting the app and the installer's folder uninstalls it; the user's library and models stay in `~/Library/Application Support/Open TTS`.
 
 **Signed builds.** For end-user distribution, `npm run dist:signed:mac` and `npm run dist:signed:win` build against `electron-builder.release.mjs`, which sets `forceCodeSigning` so the build fails rather than emitting an unsigned artifact. macOS additionally enables the hardened runtime and notarization, and aborts before packing unless a complete set of Apple notarization credentials is present.
 

@@ -59,7 +59,7 @@ the short version.
 
 Voices derived from non-permissive corpora (Lessac, Ryan, VCTK, and others) are excluded. Settings → Credits lists each model's licence and the attribution LibriTTS requires.
 
-> The deployed web app exposes browser Studio and Reader only. Desktop routes (`/desktop/*`, including the Voices page) are opened by Electron. Chatterbox Turbo needs WebGPU; on a device without it the picker keeps your saved choice but runs the default engine.
+> The web build (`npm run dev:web`) is not deployed anywhere and exposes browser Studio and Reader only. Desktop routes (`/desktop/*`, including the Voices page) are opened by Electron. Chatterbox Turbo needs WebGPU; on a device without it the picker keeps your saved choice but runs the default engine.
 
 ## Settings
 
