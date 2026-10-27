@@ -21,6 +21,7 @@ import type {
 } from "../lib/appPreferences";
 import { APP_SHORTCUT_GROUPS } from "../lib/appShortcuts";
 import { ModelCredits } from "./ModelCredits";
+import { useFocusTrap } from "./reader/useFocusTrap";
 
 interface AppSettingsDialogProps {
   open: boolean;
@@ -131,65 +132,31 @@ export function AppSettingsDialog({
 }: AppSettingsDialogProps) {
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
-  const previousFocusRef = useRef<HTMLElement | null>(null);
   const [section, setSection] = useState<SettingsSection>("appearance");
+
+  // Settings can open over a Reader popover or dialog (Ctrl+,), so it joins
+  // the same trap stack instead of running its own: Escape and Tab then reach
+  // only the surface on top, and closing returns focus to where it was.
+  useFocusTrap(dialogRef, { active: open, onEscape: onClose, autoFocus: false });
 
   useEffect(() => {
     if (!open) return;
     const previousOverflow = document.body.style.overflow;
-    previousFocusRef.current = document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
     document.body.style.overflow = "hidden";
     const frame = window.requestAnimationFrame(() => dialogRef.current?.focus());
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onClose();
-        return;
-      }
-      if (event.key !== "Tab") return;
-
-      const dialog = dialogRef.current;
-      if (!dialog) return;
-      const focusable = Array.from(dialog.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])',
-      )).filter((element) => (
-        element.getClientRects().length > 0
-        && !element.hasAttribute("hidden")
-        && element.getAttribute("aria-hidden") !== "true"
-      ));
-      if (focusable.length === 0) {
-        event.preventDefault();
-        dialog.focus();
-        return;
-      }
-
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
     return () => {
       window.cancelAnimationFrame(frame);
       document.body.style.overflow = previousOverflow;
-      document.removeEventListener("keydown", handleKeyDown);
-      previousFocusRef.current?.focus();
-      previousFocusRef.current = null;
     };
-  }, [onClose, open]);
+  }, [open]);
 
   if (!open) return null;
 
   return (
     <div
-      className="app-settings-overlay no-drag fixed inset-0 z-[100] flex items-center justify-center bg-black/25 p-3 sm:p-6"
+      // Above the Reader's popovers (z-120) and dialogs (z-130): Settings can
+      // be opened over them from the keyboard.
+      className="app-settings-overlay no-drag fixed inset-0 z-[150] flex items-center justify-center bg-black/25 p-3 sm:p-6"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}
@@ -200,7 +167,7 @@ export function AppSettingsDialog({
         aria-modal="true"
         aria-labelledby={titleId}
         tabIndex={-1}
-        className="glass-pop no-drag animate-scale-in flex max-h-[min(46rem,calc(100vh-2rem))] w-full max-w-3xl overflow-hidden rounded-[26px] outline-none"
+        className="glass-pop no-drag animate-scale-in flex max-h-[min(46rem,calc(100dvh-2rem))] w-full max-w-3xl overflow-hidden rounded-[26px] outline-none"
       >
         <aside className="hidden w-48 shrink-0 border-r border-border/70 bg-surface/45 p-4 sm:block">
           <div className="mb-5 flex items-center gap-2 px-2">
@@ -295,7 +262,7 @@ export function AppSettingsDialog({
             {section === "appearance" ? (
               <div className="space-y-7">
                 <section aria-labelledby={`${titleId}-theme`}>
-                  <h4 id={`${titleId}-theme`} className="text-sm font-semibold text-text-secondary">Color theme</h4>
+                  <h3 id={`${titleId}-theme`} className="text-sm font-semibold text-text-secondary">Color theme</h3>
                   <div className="mt-3 grid grid-cols-3 gap-2">
                     {THEMES.map(({ value, label, icon: Icon }) => (
                       <button
@@ -313,7 +280,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-accent`}>
-                  <h4 id={`${titleId}-accent`} className="text-sm font-semibold text-text-secondary">Accent color</h4>
+                  <h3 id={`${titleId}-accent`} className="text-sm font-semibold text-text-secondary">Accent color</h3>
                   <div className="mt-3 flex flex-wrap gap-3">
                     {ACCENTS.map(({ value, label, color }) => (
                       <button
@@ -332,7 +299,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-size`}>
-                  <h4 id={`${titleId}-size`} className="text-sm font-semibold text-text-secondary">Interface size</h4>
+                  <h3 id={`${titleId}-size`} className="text-sm font-semibold text-text-secondary">Interface size</h3>
                   <div className="mt-3 grid grid-cols-3 gap-1 rounded-xl bg-surface/70 p-1">
                     {INTERFACE_SIZES.map(({ value, label }) => (
                       <button
@@ -349,7 +316,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-typography`}>
-                  <h4 id={`${titleId}-typography`} className="text-sm font-semibold text-text-secondary">Typography</h4>
+                  <h3 id={`${titleId}-typography`} className="text-sm font-semibold text-text-secondary">Typography</h3>
 
                   <div className="mt-3">
                     <div className="flex items-baseline justify-between gap-3">
@@ -397,7 +364,7 @@ export function AppSettingsDialog({
                 </section>
 
                 <section aria-labelledby={`${titleId}-effects`}>
-                  <h4 id={`${titleId}-effects`} className="mb-3 text-sm font-semibold text-text-secondary">Visual effects</h4>
+                  <h3 id={`${titleId}-effects`} className="mb-3 text-sm font-semibold text-text-secondary">Visual effects</h3>
                   <div className="divide-y divide-border/70">
                     <SettingsCheckbox
                       checked={preferences.reduceTransparency}
@@ -427,9 +394,9 @@ export function AppSettingsDialog({
                 <div className="divide-y divide-border/70">
                   {APP_SHORTCUT_GROUPS.map((group) => (
                     <section key={group.label} aria-labelledby={`${titleId}-shortcut-${group.label.toLowerCase()}`} className="py-4 first:pt-3">
-                      <h4 id={`${titleId}-shortcut-${group.label.toLowerCase()}`} className="mb-2 text-sm font-semibold text-text-secondary">
+                      <h3 id={`${titleId}-shortcut-${group.label.toLowerCase()}`} className="mb-2 text-sm font-semibold text-text-secondary">
                         {group.label}
-                      </h4>
+                      </h3>
                       <div className="space-y-1">
                         {group.shortcuts.map((shortcut) => (
                           <div key={shortcut.action} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-x-3 rounded-xl px-2 py-2 transition-colors hover:bg-surface/55 sm:gap-x-5">
@@ -450,7 +417,7 @@ export function AppSettingsDialog({
               <ModelCredits idPrefix={`${titleId}-credits`} />
             ) : (
               <section aria-labelledby={`${titleId}-models`}>
-                <h4 id={`${titleId}-models`} className="text-sm font-semibold text-text-secondary">Navigation and model access</h4>
+                <h3 id={`${titleId}-models`} className="text-sm font-semibold text-text-secondary">Navigation and model access</h3>
                 <p className="mt-2 max-w-lg text-sm leading-5 text-text-muted">
                   These local runtimes need additional model downloads. Keep them hidden until you want to set them up.
                 </p>

@@ -93,7 +93,7 @@ export function Audio8InlineSettings({
           model whose storage the user cannot see or reclaim. */}
       <section
         aria-label="Audio8 model cache"
-        className="rounded-xl border border-black/10 bg-surface/55 p-3"
+        className="rounded-xl border border-border bg-surface/55 p-3"
       >
         <h3 className="text-sm font-semibold text-text-secondary">Cache</h3>
         <div className="mt-2 space-y-1 font-mono text-2xs text-text-secondary">

@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { BookmarkPlus, Download, Loader2, Play, Square, Star, Trash2 } from "lucide-react";
 import type { CatalogVoice } from "../../lib/voiceLibrary/catalog";
 import type { VoicePreviewState } from "../../hooks/useVoicePreview";
+import { useFocusRecovery } from "../useFocusRecovery";
 import { iconButtonClass, secondaryButtonClass } from "./ui";
 
 interface VoiceRowProps {
@@ -33,11 +34,17 @@ export function VoiceRow({
   children,
 }: VoiceRowProps) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const rowRef = useRef<HTMLLIElement>(null);
+  const removeRef = useRef<HTMLButtonElement>(null);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  // Remove and its confirmation replace each other; focus follows to Keep
+  // (the safe choice) and back to Remove, instead of dropping to the page.
+  useFocusRecovery(rowRef, () => keepRef.current ?? removeRef.current);
   const rendering = preview?.status === "rendering";
   const playing = preview?.status === "playing";
 
   return (
-    <li className="rounded-2xl border border-border bg-panel p-3">
+    <li ref={rowRef} className="rounded-2xl border border-border bg-panel p-3">
       <div className="flex flex-wrap items-center gap-3">
         <button
           type="button"
@@ -86,10 +93,10 @@ export function VoiceRow({
               <button type="button" className={`${secondaryButtonClass} text-danger`} onClick={() => { setConfirmingDelete(false); onDelete(voice); }}>
                 Delete {voice.name}
               </button>
-              <button type="button" className={secondaryButtonClass} onClick={() => setConfirmingDelete(false)}>Keep</button>
+              <button ref={keepRef} type="button" className={secondaryButtonClass} onClick={() => setConfirmingDelete(false)}>Keep</button>
             </>
           ) : (
-            <button type="button" className={iconButtonClass} aria-label={`Remove ${voice.name}`} title="Remove" onClick={() => setConfirmingDelete(true)}>
+            <button ref={removeRef} type="button" className={iconButtonClass} aria-label={`Remove ${voice.name}`} title="Remove" onClick={() => setConfirmingDelete(true)}>
               <Trash2 size={14} aria-hidden />
             </button>
           ))}

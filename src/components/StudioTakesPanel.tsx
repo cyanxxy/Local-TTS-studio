@@ -53,7 +53,7 @@ export function StudioTakesPanel({ takes, disabled = false, activeSegmentId = nu
       </button>
 
       {open && (
-        <div id={panelId} className="animate-fade-up border-t border-black/5 px-4 pb-4 pt-3">
+        <div id={panelId} className="animate-fade-up border-t border-border/60 px-4 pb-4 pt-3">
           <div className="flex flex-wrap items-end gap-3">
             <div className="min-w-0 flex-1">
               <label htmlFor={selectId} className="text-xs font-medium text-text-secondary">Passage</label>
@@ -62,7 +62,7 @@ export function StudioTakesPanel({ takes, disabled = false, activeSegmentId = nu
                 value={targetId}
                 disabled={busy}
                 onChange={(event) => setChosenTargetId(event.target.value)}
-                className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
+                className="mt-1 w-full rounded-lg border border-border bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
               >
                 {targets.map((entry) => (
                   <option key={entry.id} value={entry.id}>{entry.label}</option>
@@ -83,7 +83,7 @@ export function StudioTakesPanel({ takes, disabled = false, activeSegmentId = nu
                 type="button"
                 disabled={!canRender}
                 onClick={() => void takes.renderVariations(targetId, VARIATION_COUNT)}
-                className="rounded-full bg-accent px-4 py-2 text-xs font-semibold text-white transition-opacity disabled:opacity-50"
+                className="rounded-full bg-accent-fill px-4 py-2 text-xs font-semibold text-white transition-opacity disabled:opacity-50"
               >
                 Variations ×{VARIATION_COUNT}
               </button>

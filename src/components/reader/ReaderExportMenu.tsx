@@ -172,7 +172,7 @@ export const ReaderExportMenu = memo(function ReaderExportMenu({
                     type="button"
                     disabled={!hasText}
                     onClick={() => start(scope, format)}
-                    className="rounded-xl bg-accent px-3.5 py-2 text-xs font-semibold text-white transition-[filter,transform] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
+                    className="rounded-xl bg-accent-fill px-3.5 py-2 text-xs font-semibold text-white transition-[filter,transform] hover:brightness-110 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {state.status === "failed" ? "Try again" : "Create audiobook"}
                   </button>

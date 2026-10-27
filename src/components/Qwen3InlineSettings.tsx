@@ -5,13 +5,14 @@ import {
   QWEN3_SPEAKER_OPTIONS,
   qwen3SupportsInstruct,
 } from "./localRuntime/modelOptions";
+import { DraftNumberInput } from "./DraftNumberInput";
 
 export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void }) {
   const qwen = useQwen3Runtime();
   const voiceClone = qwen.profile.mode === "voiceClone";
   const voiceDesign = qwen.profile.mode === "voiceDesign";
   const profileReadiness = new Map(qwen.setup?.profiles.map((profile) => [profile.repo, profile.readiness]) ?? []);
-  const inputClass = "w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-2 text-sm text-text-primary";
+  const inputClass = "w-full rounded-lg border border-border bg-text-primary/[0.06] px-3 py-2 text-sm text-text-primary";
 
   return (
     <section aria-label="Qwen3 voice settings" className="space-y-3 rounded-2xl border border-border bg-text-primary/[0.03] p-3">
@@ -116,16 +117,17 @@ export function Qwen3InlineSettings({ onOpenSetup }: { onOpenSetup?: () => void 
             </label>
           )}
           <div className="grid grid-cols-3 gap-2">
-            <label className="text-xs text-text-secondary">Temperature<input aria-label="Qwen temperature" type="number" min={QWEN3_MIN_TEMPERATURE} max={QWEN3_MAX_TEMPERATURE} step={0.05} value={qwen.temperature} onChange={(event) => qwen.setTemperature(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
-            <label className="text-xs text-text-secondary">Top-k<input aria-label="Qwen top-k" type="number" min={QWEN3_MIN_TOP_K} max={QWEN3_MAX_TOP_K} step={1} value={qwen.topK} onChange={(event) => qwen.setTopK(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
-            <label className="text-xs text-text-secondary">Max tokens per passage<input aria-label="Qwen max tokens per passage" type="number" min={QWEN3_MIN_NEW_TOKENS} max={QWEN3_MAX_NEW_TOKENS_PER_PASSAGE} step={32} value={qwen.maxNewTokens} onChange={(event) => qwen.setMaxNewTokens(Number(event.target.value))} className={`mt-1 ${inputClass}`} /></label>
+            {/* Typed values commit (and clamp) on blur or Enter, not per keystroke. */}
+            <label className="text-xs text-text-secondary">Temperature<DraftNumberInput aria-label="Qwen temperature" min={QWEN3_MIN_TEMPERATURE} max={QWEN3_MAX_TEMPERATURE} step={0.05} value={qwen.temperature} onCommit={qwen.setTemperature} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary">Top-k<DraftNumberInput aria-label="Qwen top-k" min={QWEN3_MIN_TOP_K} max={QWEN3_MAX_TOP_K} step={1} value={qwen.topK} onCommit={qwen.setTopK} className={`mt-1 ${inputClass}`} /></label>
+            <label className="text-xs text-text-secondary">Max tokens per passage<DraftNumberInput aria-label="Qwen max tokens per passage" min={QWEN3_MIN_NEW_TOKENS} max={QWEN3_MAX_NEW_TOKENS_PER_PASSAGE} step={32} value={qwen.maxNewTokens} onCommit={qwen.setMaxNewTokens} className={`mt-1 ${inputClass}`} /></label>
           </div>
           <p className="text-2xs leading-4 text-text-muted">
             Qwen speaks text in passages of about 200 characters (about 100 for Chinese, Japanese, or Korean). Each passage stops at {QWEN3_MAX_NEW_TOKENS_PER_PASSAGE} tokens, about 30 seconds of speech.
           </p>
           <label className="block text-xs text-text-secondary">
             Seed (optional)
-            <input aria-label="Qwen seed" type="number" min={0} max={QWEN3_MAX_SEED} step={1} value={qwen.seed ?? ""} placeholder="Random" onChange={(event) => qwen.setSeed(event.target.value === "" ? null : Number(event.target.value))} className={`mt-1 ${inputClass}`} />
+            <DraftNumberInput aria-label="Qwen seed" min={0} max={QWEN3_MAX_SEED} step={1} value={qwen.seed} placeholder="Random" onCommit={qwen.setSeed} onClear={() => qwen.setSeed(null)} className={`mt-1 ${inputClass}`} />
             <span className="mt-1 block text-2xs leading-4 text-text-muted">Reuse a seed to repeat a take. Leave it empty for a fresh variation each time.</span>
           </label>
         </div>

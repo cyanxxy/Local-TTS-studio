@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useEffectEvent, useId, useMemo, useRef, useState } from "react";
 import type {
   LocalTtsCacheInfo,
   LocalTtsGenerateResult,
@@ -120,6 +120,7 @@ function LocalRuntimePageBody({
   links,
   initialText,
 }: LocalRuntimePageProps) {
+  const textInputId = useId();
   const qwen3 = useQwen3Runtime();
   const refreshSharedQwen3Setup = qwen3.refreshSetup;
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
@@ -963,13 +964,14 @@ function LocalRuntimePageBody({
         )}
 
         <div className="space-y-2">
-          <label className="block text-sm font-semibold text-text-secondary">
+          <label htmlFor={textInputId} className="block text-sm font-semibold text-text-secondary">
             Text
           </label>
           <textarea
+            id={textInputId}
             value={text}
             onChange={(event) => handleTextChange(event.target.value)}
-            className="w-full min-h-32 px-3 py-2 rounded-xl border border-black/10 bg-surface/55 text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
+            className="w-full min-h-32 px-3 py-2 rounded-xl border border-border bg-surface/55 text-sm text-text-primary focus:ring-1 focus:ring-accent focus:border-accent outline-none transition-all selection:bg-accent/40 selection:text-white"
             placeholder="Type or paste text to synthesize…"
           />
           {exceedsUnicodeScalarLimit(text, MAX_LOCAL_TTS_TEXT_LENGTH) && (
@@ -1031,7 +1033,7 @@ function LocalRuntimePageBody({
         />
 
         {generateBusy && generationProgress && (
-          <div className="flex flex-col gap-2 rounded-xl border border-black/10 bg-surface/55 p-3 text-sm text-text-primary">
+          <div className="flex flex-col gap-2 rounded-xl border border-border bg-surface/55 p-3 text-sm text-text-primary">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <p className="text-sm font-semibold text-text-secondary">
@@ -1073,7 +1075,7 @@ function LocalRuntimePageBody({
         </div>
 
         {(audioUrl || audioPlayer.totalDuration > 0) && (
-          <div className="border border-black/10 rounded-xl p-3 bg-surface/55">
+          <div className="border border-border rounded-xl p-3 bg-surface/55">
             <p className="text-sm font-semibold text-text-secondary mb-2">Output</p>
             <AudioPlayer
               embedded

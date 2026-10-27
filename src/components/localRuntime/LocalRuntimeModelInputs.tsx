@@ -16,6 +16,8 @@ import {
   qwen3SupportsInstruct,
 } from "./modelOptions";
 import { QWEN3_MIN_TEMPERATURE, QWEN3_MAX_TEMPERATURE, QWEN3_MIN_TOP_K, QWEN3_MAX_TOP_K } from "../../contexts/Qwen3RuntimeContext";
+import { DraftNumberInput } from "../DraftNumberInput";
+import { progressFillStyle } from "../progressFill";
 import type { StatusTone } from "./utils";
 
 type StatusMessage = { tone: StatusTone; text: string } | null;
@@ -129,7 +131,7 @@ export function LocalRuntimeQwenSetup(props: QwenModelSetupProps) {
           value={props.qwen3Profile.repo}
           onChange={(event) => props.onQwen3ProfileChange(event.target.value)}
           disabled={props.qwen3DownloadBusy || props.qwen3SetupBusy}
-          className="min-h-[44px] rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-2 text-sm normal-case text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
+          className="min-h-[44px] rounded-lg border border-border bg-text-primary/[0.06] px-3 py-2 text-sm normal-case text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
         >
           {props.qwen3Profiles.map((profile) => <option key={profile.repo} value={profile.repo}>{profile.label}</option>)}
         </select>
@@ -174,8 +176,8 @@ export function LocalRuntimeQwenSetup(props: QwenModelSetupProps) {
               className="mt-2 h-2 overflow-hidden rounded-full bg-border"
             >
               <div
-                className={`h-full rounded-full bg-accent transition-[width] duration-300 ${progress ? "" : "animate-pulse"}`}
-                style={{ width: `${Math.max(progress?.percent ?? 8, 8)}%` }}
+                className={`h-full w-full rounded-full bg-accent transition-transform duration-300 ${progress ? "" : "animate-pulse"}`}
+                style={progressFillStyle(Math.max(progress?.percent ?? 8, 8))}
               />
             </div>
             {props.qwen3DownloadProgress && progress && (
@@ -235,7 +237,7 @@ export function LocalRuntimeQwenSetup(props: QwenModelSetupProps) {
               <input
                 value={props.qwen3ModelPath}
                 readOnly
-                className="min-w-0 flex-1 rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-2 text-sm normal-case text-text-primary"
+                className="min-w-0 flex-1 rounded-lg border border-border bg-text-primary/[0.06] px-3 py-2 text-sm normal-case text-text-primary"
                 placeholder="Choose a compatible Qwen3-TTS model folder"
               />
               <button
@@ -264,7 +266,7 @@ export function LocalRuntimeModelInputs(props: Props) {
           <select
             value={props.neuttsModel}
             onChange={(event) => props.onNeuttsModelChange(event.target.value)}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm normal-case text-text-primary"
           >
             {NEUTTS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
@@ -275,7 +277,7 @@ export function LocalRuntimeModelInputs(props: Props) {
             type="file"
             accept=".wav,.npy,audio/wav,audio/x-wav"
             onChange={(event) => props.onReferenceAudioChange(event.target.files?.[0] ?? null)}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm normal-case text-text-primary"
           />
           <span className="text-sm font-normal normal-case text-text-muted">
             {props.referenceAudioName || "Upload a WAV clip (up to 20 seconds) or pre-encoded .npy codes"}
@@ -291,7 +293,7 @@ export function LocalRuntimeModelInputs(props: Props) {
           <textarea
             value={props.referenceText}
             onChange={(event) => props.onReferenceTextChange(event.target.value)}
-            className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 text-sm normal-case text-text-primary"
+            className="w-full min-h-20 px-3 py-2 rounded-lg border border-border bg-surface/55 text-sm normal-case text-text-primary"
           />
         </label>
       </div>
@@ -309,7 +311,7 @@ export function LocalRuntimeModelInputs(props: Props) {
           <select
             value={props.qwen3Speaker}
             onChange={(event) => props.onQwen3SpeakerChange(event.target.value)}
-            className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm normal-case text-text-primary"
+            className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm normal-case text-text-primary"
           >
             {QWEN3_SPEAKER_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
@@ -324,7 +326,7 @@ export function LocalRuntimeModelInputs(props: Props) {
               type="file"
               accept=".wav,audio/wav,audio/x-wav"
               onChange={(event) => props.onQwen3ReferenceAudioChange(event.target.files?.[0] ?? null)}
-              className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm normal-case text-text-primary"
+              className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm normal-case text-text-primary"
             />
             <span className="text-sm font-normal normal-case text-text-muted">{props.qwen3ReferenceAudioName || "Upload a WAV clip up to 20 seconds, with its exact transcript"}</span>
             {props.qwen3ReferenceAudioGuidance && (
@@ -338,7 +340,7 @@ export function LocalRuntimeModelInputs(props: Props) {
             <textarea
               value={props.qwen3ReferenceText}
               onChange={(event) => props.onQwen3ReferenceTextChange(event.target.value)}
-              className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 text-sm normal-case text-text-primary"
+              className="w-full min-h-20 px-3 py-2 rounded-lg border border-border bg-surface/55 text-sm normal-case text-text-primary"
             />
           </label>
         </div>
@@ -349,7 +351,7 @@ export function LocalRuntimeModelInputs(props: Props) {
         <select
           value={props.qwen3Language}
           onChange={(event) => props.onQwen3LanguageChange(event.target.value)}
-          className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm normal-case text-text-primary"
+          className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm normal-case text-text-primary"
         >
           {QWEN3_LANGUAGE_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
@@ -361,7 +363,7 @@ export function LocalRuntimeModelInputs(props: Props) {
           <textarea
             value={props.qwen3Instruct}
             onChange={(event) => props.onQwen3InstructChange(event.target.value)}
-            className="w-full min-h-20 px-3 py-2 rounded-lg border border-black/10 bg-surface/55 text-sm normal-case text-text-primary"
+            className="w-full min-h-20 px-3 py-2 rounded-lg border border-border bg-surface/55 text-sm normal-case text-text-primary"
             placeholder={voiceDesign ? "A warm, low, reassuring narrator with measured pacing…" : "Warm, calm, conversational…"}
           />
         </label>
@@ -369,16 +371,16 @@ export function LocalRuntimeModelInputs(props: Props) {
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-4 text-xs font-medium text-text-secondary">
         <label className="flex flex-col gap-1">Temperature
-          <input type="number" min={QWEN3_MIN_TEMPERATURE} max={QWEN3_MAX_TEMPERATURE} step={0.05} value={props.qwen3Temperature} onChange={(event) => props.onQwen3TemperatureChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
+          <DraftNumberInput min={QWEN3_MIN_TEMPERATURE} max={QWEN3_MAX_TEMPERATURE} step={0.05} value={props.qwen3Temperature} onCommit={props.onQwen3TemperatureChange} className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm" />
         </label>
         <label className="flex flex-col gap-1">Top-k
-          <input type="number" min={QWEN3_MIN_TOP_K} max={QWEN3_MAX_TOP_K} value={props.qwen3TopK} onChange={(event) => props.onQwen3TopKChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
+          <DraftNumberInput min={QWEN3_MIN_TOP_K} max={QWEN3_MAX_TOP_K} value={props.qwen3TopK} onCommit={props.onQwen3TopKChange} className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm" />
         </label>
         <label className="flex flex-col gap-1">Max tokens per passage
-          <input type="number" min={QWEN3_MIN_NEW_TOKENS} max={QWEN3_MAX_NEW_TOKENS_PER_PASSAGE} step={32} value={props.qwen3MaxNewTokens} onChange={(event) => props.onQwen3MaxNewTokensChange(Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
+          <DraftNumberInput min={QWEN3_MIN_NEW_TOKENS} max={QWEN3_MAX_NEW_TOKENS_PER_PASSAGE} step={32} value={props.qwen3MaxNewTokens} onCommit={props.onQwen3MaxNewTokensChange} className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm" />
         </label>
         <label className="flex flex-col gap-1">Seed (optional)
-          <input type="number" min={0} max={QWEN3_MAX_SEED} step={1} value={props.qwen3Seed ?? ""} placeholder="Random" onChange={(event) => props.onQwen3SeedChange(event.target.value === "" ? null : Number(event.target.value))} className="px-3 py-2 rounded-lg border border-black/10 bg-text-primary/[0.06] text-sm" />
+          <DraftNumberInput min={0} max={QWEN3_MAX_SEED} step={1} value={props.qwen3Seed} placeholder="Random" onCommit={props.onQwen3SeedChange} onClear={() => props.onQwen3SeedChange(null)} className="px-3 py-2 rounded-lg border border-border bg-text-primary/[0.06] text-sm" />
         </label>
       </div>
       <p className="text-xs text-text-muted">

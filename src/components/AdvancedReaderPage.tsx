@@ -55,6 +55,7 @@ import {
 import { findSegmentForTextOffset } from "./reader/readerSegments";
 import { TOOL_BUTTON } from "./reader/readerStyles";
 import { chapterHeadingBlockStart, clamp, splitTextBlocks } from "./reader/readerTextLayout";
+import { useDockClearance } from "./reader/useDockClearance";
 import { useReaderAutoFollow } from "./reader/useReaderAutoFollow";
 import { useReaderKeyboard } from "./reader/useReaderKeyboard";
 import { useReaderSectionEditor } from "./reader/useReaderSectionEditor";
@@ -264,6 +265,8 @@ export function AdvancedReaderPage({
   const scrollerRef = useRef<HTMLDivElement>(null);
   const articleRef = useRef<HTMLElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pageRef = useRef<HTMLDivElement>(null);
+  const dockHostRef = useRef<HTMLDivElement>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [libraryTab, setLibraryTab] = useState<ReaderSidebarTab>("library");
   const [voiceMenuOpen, setVoiceMenuOpen] = useState(false);
@@ -616,10 +619,14 @@ export function AdvancedReaderPage({
   const skipBackward = useStableCallback(onSkipBackward);
   const skipForward = useStableCallback(onSkipForward);
 
+  // The full-screen dock floats over the reading pane; overlays in the pane
+  // read its height to stay clear of it.
+  useDockClearance(pageRef, dockHostRef, fullScreen);
+
   return (
     // On wide windows the open library pushes the page aside instead of
     // covering the text column, so the reader keeps their place in view.
-    <div className={`relative flex w-full flex-col gap-3 transition-[padding] duration-300 sm:gap-4 ${
+    <div ref={pageRef} className={`relative flex w-full flex-col gap-3 transition-[padding] duration-300 sm:gap-4 ${
       libraryOpen ? "lg:pl-[23rem]" : ""
     } ${fullScreen ? immersive ? "min-h-[calc(100vh-2.5rem)]" : "min-h-[calc(100vh-9.5rem)]" : "mt-6"}`}>
 
@@ -829,40 +836,45 @@ export function AdvancedReaderPage({
         <ReaderShortcutsDialog onClose={() => setShortcutsOpen(false)} />
       )}
 
-      <ReaderPlayerDock
-        fullScreen={fullScreen}
-        tone={viewPreferences.tone}
-        isPlaying={isPlaying}
-        clock={clock}
-        totalDuration={totalDuration}
-        segments={segments}
-        activeSegmentId={activeSegmentId}
-        sectionPreviewCount={previewChunks.length}
-        stats={stats}
-        isGenerating={isGenerating}
-        generationProgress={generationProgress}
-        generationError={generationError}
-        modelReady={modelReady}
-        modelError={modelError}
-        loadingProgress={loadingProgress}
-        canGenerate={canGenerate}
-        charsRemaining={charsRemaining}
-        playbackRate={playbackRate}
-        onPlaybackRateChange={onPlaybackRateChange}
-        isRetaking={isRetaking}
-        canRetakeSegments={canRetakeSegments}
-        onRetakeSegment={onRetakeSegment}
-        onJumpToSegment={onJumpToSegment}
-        onGenerate={onGenerate}
-        onRetryLoad={onRetryLoad}
-        onTogglePlay={onTogglePlay}
-        onSeek={onSeek}
-        onSkipBackward={skipBackward}
-        onSkipForward={skipForward}
-        onDownload={onDownload}
-        onStop={onStop}
-        onStep={text.length > 0 ? stepReading : undefined}
-      />
+      {/* `contents` keeps the dock in the page's flow (or fixed to the
+          viewport) exactly as before; the wrapper only lets the page find the
+          dock to measure it. */}
+      <div ref={dockHostRef} className="contents">
+        <ReaderPlayerDock
+          fullScreen={fullScreen}
+          tone={viewPreferences.tone}
+          isPlaying={isPlaying}
+          clock={clock}
+          totalDuration={totalDuration}
+          segments={segments}
+          activeSegmentId={activeSegmentId}
+          sectionPreviewCount={previewChunks.length}
+          stats={stats}
+          isGenerating={isGenerating}
+          generationProgress={generationProgress}
+          generationError={generationError}
+          modelReady={modelReady}
+          modelError={modelError}
+          loadingProgress={loadingProgress}
+          canGenerate={canGenerate}
+          charsRemaining={charsRemaining}
+          playbackRate={playbackRate}
+          onPlaybackRateChange={onPlaybackRateChange}
+          isRetaking={isRetaking}
+          canRetakeSegments={canRetakeSegments}
+          onRetakeSegment={onRetakeSegment}
+          onJumpToSegment={onJumpToSegment}
+          onGenerate={onGenerate}
+          onRetryLoad={onRetryLoad}
+          onTogglePlay={onTogglePlay}
+          onSeek={onSeek}
+          onSkipBackward={skipBackward}
+          onSkipForward={skipForward}
+          onDownload={onDownload}
+          onStop={onStop}
+          onStep={text.length > 0 ? stepReading : undefined}
+        />
+      </div>
     </div>
   );
 }

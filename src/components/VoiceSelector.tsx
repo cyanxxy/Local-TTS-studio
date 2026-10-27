@@ -1,10 +1,45 @@
-import { useState, useRef, useEffect, useId } from "react";
+import { useState, useRef, useEffect, useId, useLayoutEffect, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { ChevronDown, Check } from "lucide-react";
 import type { ModelState, ModelType } from "../types";
 import { engineVoices } from "../models/registry";
 import type { EngineVoice } from "../models/types";
 import { ChatterboxVoiceControls } from "./ChatterboxVoiceControls";
 import { PiperVoiceBrowser } from "./PiperVoiceBrowser";
+
+/** Where the voice menu sits; fixed to the viewport so no scrolling ancestor clips it. */
+interface MenuPosition {
+  top: number;
+  left: number;
+  width: number;
+  maxHeight: number;
+}
+
+const MENU_MAX_HEIGHT = 256;
+const MENU_GAP = 6;
+const MENU_EDGE = 8;
+
+/** The menu's options, in order, for arrow-key movement. */
+function menuItems(menu: HTMLElement | null): HTMLElement[] {
+  return menu ? [...menu.querySelectorAll<HTMLElement>("[role='menuitemradio']")] : [];
+}
+
+/** Places the menu under its trigger, or above it when the viewport has no room below. */
+function placeMenu(trigger: DOMRect, naturalHeight: number): MenuPosition {
+  const viewportHeight = document.documentElement.clientHeight || window.innerHeight;
+  const below = viewportHeight - trigger.bottom - MENU_GAP - MENU_EDGE;
+  const above = trigger.top - MENU_GAP - MENU_EDGE;
+  const wanted = Math.min(naturalHeight, MENU_MAX_HEIGHT);
+  const openAbove = below < wanted && above > below;
+  const maxHeight = Math.max(96, Math.min(MENU_MAX_HEIGHT, openAbove ? above : below));
+  const height = Math.min(wanted, maxHeight);
+  return {
+    top: openAbove ? trigger.top - MENU_GAP - height : trigger.bottom + MENU_GAP,
+    left: trigger.left,
+    width: trigger.width,
+    maxHeight,
+  };
+}
 
 interface VoiceSelectorProps {
   activeModel: ModelType;
@@ -24,8 +59,10 @@ export function VoiceSelector({
   modelState,
 }: VoiceSelectorProps) {
   const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState<MenuPosition | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const openRef = useRef(open);
   const menuId = useId();
 
@@ -38,13 +75,75 @@ export function VoiceSelector({
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (!openRef.current) return;
-      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+      const target = e.target as Node;
+      if (containerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
+
+  // The menu portals to the body and is pinned to the trigger: inside the
+  // Reader's voice popover (a scrolling container) an absolutely positioned
+  // menu was clipped to the popover's edge.
+  useLayoutEffect(() => {
+    if (!open) return;
+    const update = () => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const next = placeMenu(trigger.getBoundingClientRect(), menuRef.current?.scrollHeight ?? MENU_MAX_HEIGHT);
+      setMenuPosition((current) => (
+        current
+        && current.top === next.top
+        && current.left === next.left
+        && current.width === next.width
+        && current.maxHeight === next.maxHeight
+          ? current
+          : next
+      ));
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [open]);
+
+  // A menu button moves focus into its menu: to the chosen voice, or the
+  // first one, so arrow keys work at once.
+  useEffect(() => {
+    if (!open) return;
+    const items = menuItems(menuRef.current);
+    (items.find((item) => item.getAttribute("aria-checked") === "true") ?? items[0])?.focus();
+  }, [open]);
+
+  const closeMenu = () => {
+    setOpen(false);
+    triggerRef.current?.focus();
+  };
+
+  const handleMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = menuItems(menuRef.current);
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    let next: HTMLElement | undefined;
+    if (event.key === "ArrowDown") next = items[(index + 1) % items.length];
+    else if (event.key === "ArrowUp") next = items[(index - 1 + items.length) % items.length];
+    else if (event.key === "Home") next = items[0];
+    else if (event.key === "End") next = items.at(-1);
+    else if (event.key === "Escape" || event.key === "Tab") {
+      // Handled here, so a popover around the selector stays open: Escape
+      // closes only the menu, the surface on top.
+      event.preventDefault();
+      event.stopPropagation();
+      closeMenu();
+      return;
+    }
+    if (!next) return;
+    event.preventDefault();
+    next.focus();
+  };
 
   // Piper's twenty-odd voices need a browser of their own: grouped, filterable,
   // with sizes, licences and attribution.
@@ -61,7 +160,11 @@ export function VoiceSelector({
     return (
       <div className="flex flex-col gap-1.5">
         <span className="text-sm font-semibold text-text-secondary">Voice</span>
-        <span className="text-xs text-text-muted">Loading voices…</span>
+        {/* A model that failed to load will never list voices; say so rather
+            than "Loading" forever. The error itself is shown with the model. */}
+        {modelState?.error
+          ? <span className="text-xs text-danger">Voices are unavailable because the model did not load.</span>
+          : <span className="text-xs text-text-muted">Loading voices…</span>}
       </div>
     );
   }
@@ -113,7 +216,11 @@ export function VoiceSelector({
           onKeyDown={(event) => {
             if (event.key === "Escape" && open) {
               event.preventDefault();
+              event.stopPropagation();
               setOpen(false);
+            } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && !open) {
+              event.preventDefault();
+              setOpen(true);
             }
           }}
           aria-haspopup="menu"
@@ -129,25 +236,27 @@ export function VoiceSelector({
         </button>
 
         {/* Dropdown */}
-        {open && (
+        {open && createPortal(
           <div
+            ref={menuRef}
             id={menuId}
             role="menu"
             aria-label="Select voice"
-            onKeyDown={(event) => {
-              if (event.key === "Escape") {
-                event.preventDefault();
-                setOpen(false);
-                triggerRef.current?.focus();
-              }
+            data-voice-picker-menu
+            onKeyDown={handleMenuKeyDown}
+            className="fixed z-[200] glass-pop rounded-2xl overflow-hidden animate-scale-in"
+            style={{
+              top: menuPosition?.top ?? 0,
+              left: menuPosition?.left ?? 0,
+              width: menuPosition?.width ?? 0,
+              visibility: menuPosition ? "visible" : "hidden",
             }}
-            className="absolute z-50 top-full mt-1.5 left-0 right-0 glass-pop rounded-2xl overflow-hidden animate-scale-in"
           >
-            <div className="max-h-64 overflow-y-auto">
+            <div className="overflow-y-auto" style={{ maxHeight: menuPosition?.maxHeight ?? MENU_MAX_HEIGHT }}>
               {Object.entries(groups).map(([groupLabel, groupVoices], i) => (
-                <div key={groupLabel}>
-                  {i > 0 && <div className="border-t border-black/5 mx-3" />}
-                  <div className="px-3 pt-2.5 pb-1 text-xs font-semibold text-text-secondary">
+                <div key={groupLabel} role="group" aria-label={groupLabel}>
+                  {i > 0 && <div role="separator" className="border-t border-border/60 mx-3" />}
+                  <div aria-hidden="true" className="px-3 pt-2.5 pb-1 text-xs font-semibold text-text-secondary">
                     {groupLabel}
                   </div>
                   {groupVoices.map((entry) => (
@@ -156,8 +265,9 @@ export function VoiceSelector({
                       type="button"
                       role="menuitemradio"
                       aria-checked={entry.id === voice}
-                      onClick={() => { onVoiceChange(entry.id); setOpen(false); }}
-                      className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-all duration-150 active:scale-[0.97] ${
+                      tabIndex={-1}
+                      onClick={() => { onVoiceChange(entry.id); closeMenu(); }}
+                      className={`w-full flex items-center justify-between px-3 py-2 text-sm transition-[background-color,color,transform] duration-150 active:scale-[0.97] ${
                         entry.id === voice
                           ? "text-text-primary bg-accent-light font-medium"
                           : "text-text-secondary hover:bg-text-primary/[0.07] hover:text-text-primary"
@@ -170,7 +280,8 @@ export function VoiceSelector({
                 </div>
               ))}
             </div>
-          </div>
+          </div>,
+          document.body,
         )}
       </div>
     </div>

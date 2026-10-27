@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
-import { focusableWithin, useFocusTrap } from "./useFocusTrap";
+import { focusableWithin, isTopFocusTrap, useFocusTrap } from "./useFocusTrap";
 
 function Harness({
   onEscape = vi.fn(),
@@ -57,6 +57,41 @@ describe("focusableWithin", () => {
     `;
     expect(focusableWithin(container).map((element) => element.textContent || element.tagName))
       .toEqual(["One", "Link", "Tab stop", "TEXTAREA"]);
+  });
+});
+
+describe("focusableWithin and hidden controls (F4)", () => {
+  it("skips controls that are not rendered: closed details, hidden and inert subtrees", () => {
+    const container = document.createElement("div");
+    container.innerHTML = `
+      <button>Visible</button>
+      <details><summary>Advanced</summary><input aria-label="Inside closed details" /></details>
+      <details open><summary>Open</summary><input aria-label="Inside open details" /></details>
+      <div hidden><button>Hidden</button></div>
+      <div inert><button>Inert</button></div>
+      <button>Last visible</button>
+    `;
+    expect(focusableWithin(container).map((element) => element.textContent || element.getAttribute("aria-label")))
+      .toEqual(["Visible", "Advanced", "Open", "Inside open details", "Last visible"]);
+  });
+
+  it("wraps Tab from the last visible control instead of stalling on a hidden one", async () => {
+    function Trap() {
+      const ref = useRef<HTMLDivElement>(null);
+      useFocusTrap(ref, { active: true, onEscape: vi.fn() });
+      return (
+        <div ref={ref}>
+          <button type="button">First</button>
+          <button type="button">Last</button>
+          <details><summary>More</summary><input aria-label="Hidden field" /></details>
+        </div>
+      );
+    }
+    render(<Trap />);
+    await flushFrame();
+    screen.getByText("More").focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+    expect(screen.getByRole("button", { name: "First" })).toHaveFocus();
   });
 });
 
@@ -161,6 +196,43 @@ describe("useFocusTrap", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(outerEscape).toHaveBeenCalledTimes(1);
     expect(innerEscape).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves an Escape that a control inside already handled to that control", () => {
+    const onEscape = vi.fn();
+    render(<Harness onEscape={onEscape} />);
+    fireEvent.click(screen.getByRole("button", { name: "Open" }));
+    const first = screen.getByRole("button", { name: "First" });
+    first.addEventListener("keydown", (event) => event.preventDefault());
+
+    fireEvent.keyDown(first, { key: "Escape" });
+    expect(onEscape).not.toHaveBeenCalled();
+  });
+
+  it("does not pull focus out of a surface on top when the one beneath closes (U2)", async () => {
+    function Stacked() {
+      const lowerRef = useRef<HTMLDivElement>(null);
+      const upperRef = useRef<HTMLDivElement>(null);
+      const [lowerOpen, setLowerOpen] = useState(true);
+      useFocusTrap(lowerRef, { active: lowerOpen, onEscape: vi.fn() });
+      useFocusTrap(upperRef, { active: true, onEscape: vi.fn(), autoFocus: false });
+      return (
+        <>
+          <button type="button">Origin</button>
+          {lowerOpen && <div ref={lowerRef}><button type="button" onClick={() => setLowerOpen(false)}>Lower</button></div>}
+          <div ref={upperRef}><button type="button">Upper</button></div>
+        </>
+      );
+    }
+    render(<Stacked />);
+    await flushFrame();
+    const upper = screen.getByRole("button", { name: "Upper" });
+    expect(isTopFocusTrap(upper.parentElement)).toBe(true);
+    expect(isTopFocusTrap(screen.getByRole("button", { name: "Lower" }).parentElement)).toBe(false);
+
+    upper.focus();
+    fireEvent.click(screen.getByRole("button", { name: "Lower" }));
+    expect(upper).toHaveFocus();
   });
 
   it("ignores keys while inactive", () => {

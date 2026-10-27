@@ -123,6 +123,29 @@ describe("CloneWizard", () => {
     expect(onUse).toHaveBeenCalledWith(expect.objectContaining({ id: "saved-1" }), "studio");
   });
 
+  it("keeps keyboard focus inside the wizard as steps replace the pressed button", async () => {
+    renderWizard();
+    await chooseFile(wavFile(speech(7)));
+    await screen.findByText(/Ready: narrator, 7\.0 s/);
+    fireEvent.click(screen.getByRole("button", { name: /^next/i }));
+    fireEvent.click(screen.getByRole("button", { name: /^next/i }));
+    fireEvent.change(screen.getByLabelText("Transcript"), { target: { value: TRANSCRIPT } });
+
+    // Next disappears on the last step; focus lands on its first field.
+    const next = screen.getByRole("button", { name: /^next/i });
+    next.focus();
+    fireEvent.click(next);
+    expect(screen.getByLabelText("Voice name")).toHaveFocus();
+
+    // Save is replaced by the saved message and its actions.
+    const save = screen.getByRole("button", { name: "Save to My Voices" });
+    save.focus();
+    await act(async () => { fireEvent.click(save); });
+    await screen.findByText(/Saved “narrator” to My Voices/);
+    expect(document.activeElement).not.toBe(document.body);
+    expect(screen.getByRole("region", { name: "Instant voice cloning" }).contains(document.activeElement)).toBe(true);
+  });
+
   it("blocks a clip that fails a target's hard limit until it is fixed", async () => {
     renderWizard();
     await chooseFile(wavFile(speech(14)));

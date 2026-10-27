@@ -1,5 +1,6 @@
 import type { ModelState } from "../types";
 import { ENGINE_REGISTRY, type EngineId } from "../models/registry";
+import { progressFillStyle } from "./progressFill";
 
 interface DownloadProgressProps {
   /** Load state of each engine that may be preparing, keyed by engine. */
@@ -23,8 +24,8 @@ function ProgressBar({ state, name }: { state: ModelState; name: string }) {
       {!state.error && (
         <div className="h-1 bg-border rounded-full overflow-hidden">
           <div
-            className={`h-full rounded-full transition-all duration-500 ease-out ${state.downloadProgress < 99 ? "progress-animated" : "bg-success"}`}
-            style={{ width: state.downloadProgress <= 0 ? "0%" : `${Math.max(4, state.downloadProgress)}%` }}
+            className={`h-full w-full rounded-full transition-transform duration-500 ease-out ${state.downloadProgress < 99 ? "bg-accent" : "bg-success"}`}
+            style={progressFillStyle(state.downloadProgress <= 0 ? 0 : Math.max(4, state.downloadProgress))}
           />
         </div>
       )}

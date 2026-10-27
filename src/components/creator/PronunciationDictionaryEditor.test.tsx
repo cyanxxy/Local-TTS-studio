@@ -56,7 +56,7 @@ describe("PronunciationDictionaryEditor", () => {
     expect(screen.getByText("No rules yet. Add one below.")).toBeInTheDocument();
   });
 
-  it("edits a rule when a field loses focus and ignores an incomplete one", () => {
+  it("edits a rule when a field loses focus and sets an incomplete one aside", () => {
     const state = renderEditor([brand]);
     const written = screen.getByLabelText("Rule 1 written word");
     const spoken = screen.getByLabelText("Rule 1 spoken replacement");
@@ -66,15 +66,41 @@ describe("PronunciationDictionaryEditor", () => {
     fireEvent.blur(spoken);
     expect(state.current[0].rules[0]).toMatchObject({ type: "alias", from: "GIF", to: "gif" });
 
+    // The UI says the rule is unused, so generation must not use it either:
+    // it leaves the dictionary, while its row keeps its place and its text.
     fireEvent.change(written, { target: { value: "  " } });
     fireEvent.blur(written);
-    expect(state.current[0].rules[0]).toMatchObject({ from: "GIF" });
+    expect(state.current[0].rules).toEqual([brand.rules[1]]);
+    expect(screen.getByLabelText("Rule 1 written word")).toBe(written);
     expect(written).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByLabelText("Rule 1 spoken replacement")).toHaveValue("gif");
     expect(screen.getByText("Fill both fields to use this rule.")).toBeInTheDocument();
 
+    // Completing it puts it back where it was.
     fireEvent.change(written, { target: { value: "GIFs" } });
     fireEvent.blur(written);
     expect(state.current[0].rules[0]).toMatchObject({ from: "GIFs", to: "gif" });
+    expect(state.current[0].rules).toHaveLength(2);
+  });
+
+  it("deactivates a rule whose spoken field is cleared (F2)", () => {
+    const state = renderEditor([brand]);
+    const spoken = screen.getByRole("textbox", { name: "Rule 1 spoken replacement" });
+    fireEvent.change(spoken, { target: { value: "" } });
+    fireEvent.blur(spoken);
+    expect(screen.getByText("Fill both fields to use this rule.")).toBeInTheDocument();
+    expect(state.current[0].rules.some((rule) => rule.from === "GIF")).toBe(false);
+  });
+
+  it("drops an unfinished row on delete and keeps later rows in order", () => {
+    const state = renderEditor([brand]);
+    const spoken = screen.getByLabelText("Rule 1 spoken replacement");
+    fireEvent.change(spoken, { target: { value: "" } });
+    fireEvent.blur(spoken);
+    fireEvent.click(screen.getByRole("button", { name: "Delete Rule 1" }));
+    expect(state.current[0].rules).toEqual([brand.rules[1]]);
+    expect(screen.getByLabelText("Rule 1 written word")).toHaveValue("Nguyen");
+    expect(screen.queryByLabelText("Rule 2 written word")).not.toBeInTheDocument();
   });
 
   it("sets case and scope on a rule and switches a rule to IPA", () => {
@@ -90,8 +116,9 @@ describe("PronunciationDictionaryEditor", () => {
     expect(state.current[0].rules[0]).toEqual({ type: "alias", from: "GIF", to: "jif" });
 
     fireEvent.change(screen.getByLabelText("Rule 1 type"), { target: { value: "phoneme" } });
-    // Until the IPA is filled in, the rule stays what it was.
-    expect(state.current[0].rules[0]).toMatchObject({ type: "alias" });
+    // Until the IPA is filled in, the rule is set aside rather than still
+    // speaking its old alias.
+    expect(state.current[0].rules[0]).toMatchObject({ from: "Nguyen" });
     fireEvent.change(screen.getByLabelText("Rule 1 IPA"), { target: { value: "dʒɪf" } });
     fireEvent.change(screen.getByLabelText("Rule 1 spoken alias"), { target: { value: "jif" } });
     fireEvent.blur(screen.getByLabelText("Rule 1 spoken alias"));
@@ -179,7 +206,16 @@ describe("PronunciationDictionaryEditor", () => {
     fireEvent.click(screen.getByRole("button", { name: "Expand Names" }));
     expect(screen.getByLabelText("Language tag for Names")).toBeInTheDocument();
 
+    // A dictionary with rules asks first, and focus moves to the safe choice.
+    const deleteButton = screen.getByRole("button", { name: "Delete dictionary Names" });
+    deleteButton.focus();
+    fireEvent.click(deleteButton);
+    expect(state.current).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Keep" })).toHaveFocus();
+    fireEvent.click(screen.getByRole("button", { name: "Keep" }));
+    expect(screen.getByRole("button", { name: "Delete dictionary Names" })).toHaveFocus();
     fireEvent.click(screen.getByRole("button", { name: "Delete dictionary Names" }));
+    fireEvent.click(screen.getByRole("button", { name: "Delete Names" }));
     expect(state.current).toEqual([]);
   });
 

@@ -53,6 +53,55 @@ function SidebarHarness({
 }
 
 describe("ReaderLibrarySidebar", () => {
+  it("is a dialog on a plain element, not a complementary landmark (A1)", () => {
+    render(<SidebarHarness />);
+    fireEvent.click(screen.getByRole("button", { name: "Open library" }));
+    const drawer = screen.getByRole("dialog", { name: "Reader library" });
+    expect(drawer.tagName).toBe("DIV");
+  });
+
+  it("keeps focus through the delete confirmation and after the document goes", () => {
+    function Deletable() {
+      const [documents, setDocuments] = useState([readerDocument]);
+      return (
+        <ReaderLibrarySidebar
+          open
+          documents={documents}
+          activeDocument={null}
+          currentTextOffset={0}
+          clock={new PlaybackClock()}
+          onClose={vi.fn()}
+          onOpenDocument={vi.fn()}
+          onNewDocument={vi.fn()}
+          onDeleteDocument={(id) => setDocuments((current) => current.filter((record) => record.id !== id))}
+          onUpdateMetadata={vi.fn()}
+          onJumpToOffset={vi.fn()}
+          onAddBookmark={vi.fn()}
+          onRemoveBookmark={vi.fn()}
+          onAddNote={vi.fn()}
+          onUpdateNote={vi.fn()}
+          onRemoveNote={vi.fn()}
+          tab="library"
+          onTabChange={vi.fn()}
+        />
+      );
+    }
+    render(<Deletable />);
+    const deleteButton = screen.getByRole("button", { name: `Delete ${readerDocument.title}` });
+    deleteButton.focus();
+    fireEvent.click(deleteButton);
+    expect(screen.getByRole("button", { name: "Cancel" })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("button", { name: `Delete ${readerDocument.title}` })).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: `Delete ${readerDocument.title}` }));
+    const confirm = screen.getByRole("button", { name: "Delete" });
+    confirm.focus();
+    fireEvent.click(confirm);
+    expect(screen.getByRole("button", { name: "New document" })).toHaveFocus();
+  });
+
   it("shows each book's current chapter and estimated listening time left", () => {
     const book = createReaderDocument({
       id: "long-book",

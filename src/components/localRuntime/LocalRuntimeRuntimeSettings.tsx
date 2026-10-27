@@ -12,7 +12,7 @@ export function LocalRuntimeRuntimeSettings({
   runtimeBusy,
 }: LocalRuntimeRuntimeSettingsProps) {
   return (
-    <section className="rounded-xl border border-black/10 bg-surface/55 p-4">
+    <section className="rounded-xl border border-border bg-surface/55 p-4">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <h3 className="text-sm font-semibold text-text-secondary">Runtime</h3>
         <button

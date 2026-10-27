@@ -411,6 +411,7 @@ describe("LocalRuntimePage", () => {
     const maxTokens = screen.getByLabelText("Max tokens per passage");
     expect(maxTokens).toHaveAttribute("max", "384");
     fireEvent.change(maxTokens, { target: { value: "4096" } });
+    fireEvent.blur(maxTokens);
     expect(maxTokens).toHaveValue(384);
     fireEvent.change(screen.getByLabelText("Seed (optional)"), { target: { value: "1234" } });
     fireEvent.click(screen.getByRole("button", { name: /^generate$/i }));
@@ -419,6 +420,23 @@ describe("LocalRuntimePage", () => {
       maxNewTokens: 384,
       seed: 1234,
     }));
+  });
+
+  it("names the text field by its visible label (U11)", async () => {
+    renderPage();
+    expect(await screen.findByRole("textbox", { name: "Text" })).toBeInTheDocument();
+  });
+
+  it("lets top-k and max tokens be cleared and retyped (F1)", async () => {
+    renderPage();
+    await waitFor(() => expect(screen.getByRole("button", { name: /^generate$/i })).toBeEnabled());
+    for (const [label, typed] of [["Max tokens per passage", "128"], ["Top-k", "40"]] as const) {
+      const input = screen.getByLabelText(label) as HTMLInputElement;
+      fireEvent.change(input, { target: { value: "" } });
+      for (const char of typed) fireEvent.change(input, { target: { value: input.value + char } });
+      fireEvent.blur(input);
+      expect(input.value).toBe(typed);
+    }
   });
 
   it("requires a VoiceDesign description before generation", async () => {

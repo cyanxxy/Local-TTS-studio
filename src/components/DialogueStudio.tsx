@@ -10,10 +10,11 @@ import type { VoicePreset } from "../lib/voiceLibrary/types";
 import { engineVoices, getEngine, type SurfaceEngineId } from "../models/registry";
 import type { EngineVoice } from "../models/types";
 import { useSynthesisSession } from "../shared/synthesisSessionContext";
+import { progressFillStyle } from "./progressFill";
 
 const PLACEHOLDER = "Narrator: It was a quiet morning.\nAnna: [cheerful] Did you hear that?\nBen: (looking up) Hear what?";
 
-const SELECT_CLASS = "w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary";
+const SELECT_CLASS = "w-full rounded-lg border border-border bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary";
 const SECONDARY_BUTTON = "flex items-center gap-1.5 rounded-full bg-text-primary/[0.08] px-3.5 py-2 text-xs font-semibold text-text-primary transition-colors hover:bg-text-primary/[0.14] disabled:opacity-50";
 
 export interface CastableEngine {
@@ -106,7 +107,7 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
                   const engineId = (preset?.engineId ?? castableEngines[0]?.id) as SurfaceEngineId;
                   const voices = voicesFor(engineId);
                   return (
-                    <li key={speaker.key} className="rounded-xl border border-black/5 p-3">
+                    <li key={speaker.key} className="rounded-xl border border-border/60 p-3">
                       <p className="text-sm font-semibold text-text-primary">
                         {speaker.name}
                         <span className="ml-2 font-normal text-text-muted">{speaker.turnCount} {speaker.turnCount === 1 ? "line" : "lines"}</span>
@@ -188,7 +189,7 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
                 type="button"
                 disabled={!canRender}
                 onClick={() => void dialogue.render()}
-                className="rounded-full bg-accent px-4 py-2.5 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
+                className="rounded-full bg-accent-fill px-4 py-2.5 text-sm font-semibold text-white transition-opacity disabled:opacity-50"
               >
                 Render dialogue
               </button>
@@ -205,7 +206,7 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
                 aria-valuenow={renderedCount}
                 className="h-1 overflow-hidden rounded-full bg-text-primary/10"
               >
-                <div className="h-full rounded-full bg-accent transition-all" style={{ width: `${(renderedCount / Math.max(1, dialogue.progress.total)) * 100}%` }} />
+                <div className="h-full w-full rounded-full bg-accent transition-transform" style={progressFillStyle((renderedCount / Math.max(1, dialogue.progress.total)) * 100)} />
               </div>
             )}
             {dialogue.status === "cancelled" && (

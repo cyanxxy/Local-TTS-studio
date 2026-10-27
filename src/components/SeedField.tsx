@@ -25,10 +25,21 @@ export function SeedField({ seed, onChange, label = "Seed" }: SeedFieldProps) {
           placeholder="Random each time"
           value={seed ?? ""}
           onChange={(event) => {
-            const next = event.target.valueAsNumber;
-            onChange(Number.isInteger(next) && next >= 0 && next <= MAX_SEED ? next : null);
+            const { value, valueAsNumber, validity } = event.target;
+            // Only a field the user really emptied clears the seed; text the
+            // browser cannot parse yet ("1e") also reads as "" but is badInput.
+            if (value === "") {
+              if (!validity.badInput) onChange(null);
+              return;
+            }
+            // Anything out of range (one digit too many, a fraction) is
+            // rejected and the field keeps the seed it had, rather than wiping
+            // a long seed the user was about to fix.
+            if (Number.isInteger(valueAsNumber) && valueAsNumber >= 0 && valueAsNumber <= MAX_SEED) {
+              onChange(valueAsNumber);
+            }
           }}
-          className="w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-1.5 text-sm text-text-primary"
+          className="w-full rounded-lg border border-border bg-text-primary/[0.06] px-3 py-1.5 text-sm text-text-primary"
         />
         {seed !== null && (
           <button

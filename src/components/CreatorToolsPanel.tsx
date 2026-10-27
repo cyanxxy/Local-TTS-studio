@@ -134,7 +134,7 @@ export function CreatorToolsPanel({
       {open && (
         <div
           id={panelId}
-          className="flex flex-col gap-4 border-t border-black/5 px-4 pb-4 animate-fade-up sm:gap-5"
+          className="flex flex-col gap-4 border-t border-border/60 px-4 pb-4 animate-fade-up sm:gap-5"
         >
           {/* Preset */}
           <div className="pt-3">
@@ -146,7 +146,7 @@ export function CreatorToolsPanel({
             </label>
             <select
               id={presetId}
-              className="mt-2 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
+              className="mt-2 w-full rounded-lg border border-border bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary"
               value={preset}
               onChange={(event) => creator.onCreatorPresetChange(event.target.value as CreatorPresetId)}
             >
@@ -235,7 +235,7 @@ export function CreatorToolsPanel({
           </div>
 
           {/* Script */}
-          <div className="border-t border-black/5 pt-4 space-y-3">
+          <div className="border-t border-border/60 pt-4 space-y-3">
             <SectionLabel>Script</SectionLabel>
 
             <div>
@@ -306,7 +306,7 @@ export function CreatorToolsPanel({
           </div>
 
           {/* Pronunciation */}
-          <div className="border-t border-black/5 pt-4 space-y-3">
+          <div className="border-t border-border/60 pt-4 space-y-3">
             <SectionLabel>Pronunciation</SectionLabel>
             {creator.migrationNotice && !noticeDismissed && (
               <div role="status" className="flex items-start gap-2 rounded-lg border border-border bg-text-primary/[0.04] p-2 text-xs text-text-secondary">
@@ -353,7 +353,7 @@ export function CreatorToolsPanel({
           </div>
 
           {/* Export */}
-          <div className="border-t border-black/5 pt-4 space-y-3">
+          <div className="border-t border-border/60 pt-4 space-y-3">
             <SectionLabel>Export</SectionLabel>
             <ExportSettings
               creator={creator}

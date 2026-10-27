@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState } from "react";
 import { Eraser, Undo2 } from "lucide-react";
 import {
   ALL_TEXT_CLEANUP_ACTIONS,
@@ -27,6 +27,9 @@ const ACTION_LABELS: Record<TextCleanupAction, { label: string; hint: string }> 
   whitespace: { label: "Extra spaces", hint: "Runs of spaces and blank lines" },
 };
 
+/** How long the summary must hold still before screen readers hear it. */
+const ANNOUNCE_DELAY_MS = 750;
+
 /** One-click cleanup of the script, previewed as a diff before anything changes. */
 export function TextCleanupPanel({ text, onTextChange }: TextCleanupPanelProps) {
   const [actions, setActions] = useState<ReadonlySet<TextCleanupAction>>(() => new Set(DEFAULT_TEXT_CLEANUP_ACTIONS));
@@ -45,6 +48,24 @@ export function TextCleanupPanel({ text, onTextChange }: TextCleanupPanelProps) 
     .filter((action) => result.counts[action] > 0)
     .map((action) => `${result.counts[action]} ${ACTION_LABELS[action].label.toLowerCase()}`)
     .join(", ");
+
+  const summary = changeCount === 0
+    ? (text.trim() ? "Nothing to clean up with these options." : "Write or paste a script to clean it.")
+    : `${changeCount} ${changeCount === 1 ? "change" : "changes"}: ${countsText}.`;
+  // Only the one-line summary is announced, and only once typing pauses: a
+  // live region around the whole diff re-read every removed and added
+  // fragment on each keystroke in the script.
+  // Nothing is announced on mount; the visible summary is already there.
+  const [announced, setAnnounced] = useState("");
+  const [announcedFor, setAnnouncedFor] = useState(summary);
+  useEffect(() => {
+    if (summary === announcedFor) return;
+    const timer = window.setTimeout(() => {
+      setAnnouncedFor(summary);
+      setAnnounced(summary);
+    }, ANNOUNCE_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [announcedFor, summary]);
 
   const toggle = (action: TextCleanupAction) => {
     setActions((current) => {
@@ -90,17 +111,14 @@ export function TextCleanupPanel({ text, onTextChange }: TextCleanupPanelProps) 
         </div>
       )}
 
-      <div aria-live="polite">
+      <div>
         <div className="text-xs font-semibold text-text-secondary">Preview</div>
+        <p role="status" className="sr-only">{announced}</p>
         {changeCount === 0 ? (
-          <p className="mt-1 text-xs text-text-muted">
-            {text.trim() ? "Nothing to clean up with these options." : "Write or paste a script to clean it."}
-          </p>
+          <p className="mt-1 text-xs text-text-muted">{summary}</p>
         ) : (
           <>
-            <p className="mt-1 text-xs text-text-muted">
-              {changeCount} {changeCount === 1 ? "change" : "changes"}: {countsText}.
-            </p>
+            <p className="mt-1 text-xs text-text-muted">{summary}</p>
             <p
               className="mt-2 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-lg border border-border/70 bg-panel p-2 text-sm text-text-primary"
               data-testid="cleanup-preview"

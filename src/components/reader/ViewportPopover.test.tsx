@@ -64,4 +64,29 @@ describe("ViewportPopover", () => {
     fireEvent.keyDown(document, { key: "Escape" });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it("hangs below the anchor from its top edge, growing out of the anchor's corner", () => {
+    render(<Harness />);
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+    expect(dialog.style.bottom).toBe("");
+    expect(dialog.style.transformOrigin).toBe("top right");
+  });
+
+  it("opening above the anchor sits on its bottom edge, with no gap for unused height", () => {
+    // An anchor near the bottom of a 768px window: no room below.
+    const rect = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      top: 700, bottom: 740, left: 600, right: 640, width: 40, height: 40, x: 600, y: 700, toJSON: () => ({}),
+    });
+    const clientHeight = vi.spyOn(document.documentElement, "clientHeight", "get").mockReturnValue(768);
+    render(<Harness />);
+    const dialog = screen.getByRole("dialog", { name: "Settings" });
+
+    // 8px above the anchor's top, however short the content turns out to be.
+    expect(dialog.style.top).toBe("");
+    expect(dialog.style.bottom).toBe(`${768 - (700 - 8)}px`);
+    expect(dialog.style.transformOrigin).toBe("bottom right");
+    rect.mockRestore();
+    clientHeight.mockRestore();
+  });
 });
+

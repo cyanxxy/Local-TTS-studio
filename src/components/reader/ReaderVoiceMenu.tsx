@@ -20,7 +20,8 @@ interface ReaderVoiceMenuProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /** Drives the status dot: ready, failed, or still loading. */
-  modelState: Pick<ModelState, "ready" | "error">;
+  /** `loading` is unknown for desktop runtimes, which are treated as starting up until ready. */
+  modelState: Pick<ModelState, "ready" | "error"> & { loading?: boolean };
   voiceLabel: string;
   modelLabel: string;
   activeModel: ModelType;
@@ -83,7 +84,9 @@ export function ReaderVoiceMenu({
       >
         <span
           className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-            modelState.ready ? "bg-success" : modelState.error ? "bg-danger" : "bg-text-muted animate-pulse"
+            // Pulse only while the model is actually loading; an idle dot that
+            // never stops pulsing reads as a hang.
+            modelState.ready ? "bg-success" : modelState.error ? "bg-danger" : modelState.loading !== false ? "bg-text-muted animate-pulse" : "bg-text-muted"
           }`}
           style={modelState.ready ? { boxShadow: "0 0 6px color-mix(in srgb, var(--color-success) 60%, transparent)" } : undefined}
         />
@@ -104,11 +107,11 @@ export function ReaderVoiceMenu({
           className={POPOVER_CLASS}
           ariaLabel="Voice settings"
           onClose={() => onOpenChange(false)}
-          // ModelToggle portals its menu to document.body so it can escape
-          // this scrollable popover. A press inside that menu must not close
-          // and unmount the settings tree before the option's click selects
-          // the new runtime.
-          keepOpenWithin="[data-model-picker-menu]"
+          // ModelToggle and VoiceSelector portal their menus to document.body
+          // so they can escape this scrollable popover. A press inside one must
+          // not close and unmount the settings tree before the option's click
+          // selects the new runtime or voice.
+          keepOpenWithin="[data-model-picker-menu], [data-voice-picker-menu]"
         >
           <div className="flex flex-col gap-4">
             <ModelToggle

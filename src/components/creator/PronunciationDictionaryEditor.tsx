@@ -27,6 +27,7 @@ import {
   selectClass,
   subtleButtonClass,
 } from "./creatorStyles";
+import { useFocusRecovery } from "../useFocusRecovery";
 
 interface PronunciationDictionaryEditorProps {
   dictionaries: PronunciationDictionary[];
@@ -79,25 +80,34 @@ function toRule(draft: RuleDraft): PronunciationDictionaryRule | null {
 }
 
 interface RuleRowProps {
-  rule: PronunciationDictionaryRule;
+  /** The rule this row edits, or null while it is set aside as unfinished. */
+  rule: PronunciationDictionaryRule | null;
+  /** What an unfinished row last held; used when `rule` is null. */
+  unfinishedDraft?: RuleDraft;
   label: string;
-  onChange: (rule: PronunciationDictionaryRule) => void;
+  /**
+   * Called on commit with the rule the fields now describe, or with null and
+   * the draft when a required field is empty — the rule must then stop being
+   * used, not keep speaking its old value.
+   */
+  onChange: (rule: PronunciationDictionaryRule | null, draft: RuleDraft) => void;
   onDelete: () => void;
 }
 
-function RuleRow({ rule, label, onChange, onDelete }: RuleRowProps) {
-  const [draft, setDraft] = useState(() => toDraft(rule));
-  const [syncedRule, setSyncedRule] = useState(rule);
+function RuleRow({ rule, unfinishedDraft, label, onChange, onDelete }: RuleRowProps) {
+  const source = rule ?? unfinishedDraft ?? null;
+  const [draft, setDraft] = useState<RuleDraft>(() => (rule ? toDraft(rule) : unfinishedDraft ?? toDraft({ type: "alias", from: "", to: "" })));
+  const [syncedSource, setSyncedSource] = useState(source);
   // A rule changed from outside (an import, a deleted row above) replaces what was typed.
-  if (rule !== syncedRule) {
-    setSyncedRule(rule);
-    setDraft(toDraft(rule));
+  if (source !== syncedSource) {
+    setSyncedSource(source);
+    if (rule) setDraft(toDraft(rule));
+    else if (unfinishedDraft) setDraft(unfinishedDraft);
   }
   const complete = toRule(draft) !== null;
 
   const commit = (next: RuleDraft) => {
-    const built = toRule(next);
-    if (built) onChange(built);
+    onChange(toRule(next), next);
   };
   const edit = (patch: Partial<RuleDraft>, commitNow: boolean) => {
     const next = { ...draft, ...patch };
@@ -197,6 +207,33 @@ function RuleRow({ rule, label, onChange, onDelete }: RuleRowProps) {
   );
 }
 
+interface UnfinishedRule {
+  /** The row's place in the list, counting committed and unfinished rows. */
+  position: number;
+  draft: RuleDraft;
+}
+
+interface RuleRowSlot {
+  position: number;
+  /** Index into the dictionary's rules, or null for an unfinished row. */
+  ruleIndex: number | null;
+  draft?: RuleDraft;
+}
+
+/** Interleaves the committed rules with the unfinished rows at their places. */
+function layoutRuleRows(ruleCount: number, unfinished: readonly UnfinishedRule[]): RuleRowSlot[] {
+  const byPosition = new Map(unfinished.map((entry) => [entry.position, entry.draft]));
+  const end = Math.max(ruleCount + unfinished.length, ...unfinished.map((entry) => entry.position + 1));
+  const rows: RuleRowSlot[] = [];
+  let ruleIndex = 0;
+  for (let position = 0; position < end; position += 1) {
+    const draft = byPosition.get(position);
+    if (draft) rows.push({ position, ruleIndex: null, draft });
+    else if (ruleIndex < ruleCount) rows.push({ position, ruleIndex: ruleIndex++ });
+  }
+  return rows;
+}
+
 interface DictionaryCardProps {
   dictionary: PronunciationDictionary;
   expanded: boolean;
@@ -221,16 +258,31 @@ function DictionaryCard({ dictionary, expanded, onToggleExpanded, onChange, onDe
   const [newTo, setNewTo] = useState("");
   const [language, setLanguage] = useState(dictionary.language ?? "");
   const [name, setName] = useState(dictionary.name);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  // Rows whose rule was left incomplete, by their place in the list. The rule
+  // itself is taken out of the dictionary, so generation stops using it, but
+  // the row stays where it was with what was typed until it is completed
+  // (and goes back in at the same place) or deleted.
+  const [unfinished, setUnfinished] = useState<readonly UnfinishedRule[]>([]);
   const idPrefix = useId();
   const bodyId = `${idPrefix}-body`;
+  const cardRef = useRef<HTMLLIElement>(null);
+  const deleteRef = useRef<HTMLButtonElement>(null);
+  const confirmDeleteRef = useRef<HTMLButtonElement>(null);
+  const keepRef = useRef<HTMLButtonElement>(null);
+  // Delete and its confirmation swap places; focus moves to Keep, the safe
+  // choice, and back to Delete if the user keeps the dictionary.
+  useFocusRecovery(cardRef, () => keepRef.current ?? deleteRef.current ?? confirmDeleteRef.current);
   const newRuleReady = newFrom.trim() !== "" && newTo.trim() !== "";
   const languageValid = language.trim() === "" || isLanguageTag(language.trim());
 
-  const apply = (next: unknown) => {
+  const apply = (next: unknown): boolean => {
     try {
       onChange(validatePronunciationDictionary(next));
+      return true;
     } catch (error) {
       onNotify({ tone: "error", text: errorText(error) });
+      return false;
     }
   };
   const commitName = () => {
@@ -249,8 +301,38 @@ function DictionaryCard({ dictionary, expanded, onToggleExpanded, onChange, onDe
     void previous;
     apply(trimmed ? { ...rest, language: trimmed } : rest);
   };
-  const replaceRule = (index: number, rule: PronunciationDictionaryRule) => {
-    apply({ ...dictionary, rules: dictionary.rules.map((existing, at) => (at === index ? rule : existing)) });
+  const rows = layoutRuleRows(dictionary.rules.length, unfinished);
+  const dropUnfinished = (position: number, closeGap: boolean) => {
+    setUnfinished((current) => current
+      .filter((entry) => entry.position !== position)
+      .map((entry) => (closeGap && entry.position > position ? { ...entry, position: entry.position - 1 } : entry)));
+  };
+  const changeRow = (row: RuleRowSlot, rule: PronunciationDictionaryRule | null, draft: RuleDraft) => {
+    if (row.ruleIndex !== null) {
+      const index = row.ruleIndex;
+      if (rule) {
+        apply({ ...dictionary, rules: dictionary.rules.map((existing, at) => (at === index ? rule : existing)) });
+      } else if (apply({ ...dictionary, rules: dictionary.rules.filter((_, at) => at !== index) })) {
+        setUnfinished((current) => [...current, { position: row.position, draft }]);
+      }
+      return;
+    }
+    if (!rule) {
+      // Still unfinished: keep the latest text, in case the row is re-created.
+      setUnfinished((current) => current.map((entry) => (entry.position === row.position ? { ...entry, draft } : entry)));
+      return;
+    }
+    const insertAt = rows.filter((other) => other.ruleIndex !== null && other.position < row.position).length;
+    const rules = [...dictionary.rules];
+    rules.splice(insertAt, 0, rule);
+    if (apply({ ...dictionary, rules })) dropUnfinished(row.position, false);
+  };
+  const deleteRow = (row: RuleRowSlot) => {
+    if (row.ruleIndex !== null) {
+      const index = row.ruleIndex;
+      if (!apply({ ...dictionary, rules: dictionary.rules.filter((_, at) => at !== index) })) return;
+    }
+    dropUnfinished(row.position, true);
   };
   const addBulk = () => {
     const { rules, skipped } = parseBulkRules(bulk ?? "");
@@ -280,7 +362,7 @@ function DictionaryCard({ dictionary, expanded, onToggleExpanded, onChange, onDe
   };
 
   return (
-    <li className="rounded-xl border border-border bg-text-primary/[0.03]">
+    <li ref={cardRef} className="rounded-xl border border-border bg-text-primary/[0.03]">
       <div className="flex items-center gap-2 px-2 py-1.5">
         <button
           type="button"
@@ -312,15 +394,39 @@ function DictionaryCard({ dictionary, expanded, onToggleExpanded, onChange, onDe
           />
           <span>On<span className="sr-only">: {dictionary.name}</span></span>
         </label>
-        <button
-          type="button"
-          aria-label={`Delete dictionary ${dictionary.name}`}
-          title="Delete dictionary"
-          onClick={onDelete}
-          className={ghostIconButtonClass}
-        >
-          <Trash2 size={13} aria-hidden="true" />
-        </button>
+        {confirmingDelete ? (
+          <span className="flex shrink-0 items-center gap-1 text-xs">
+            <button
+              ref={confirmDeleteRef}
+              type="button"
+              className="rounded-md px-1.5 py-1 font-semibold text-danger hover:bg-danger-light"
+              onClick={onDelete}
+            >
+              Delete {dictionary.name}
+            </button>
+            <button
+              ref={keepRef}
+              type="button"
+              className="rounded-md px-1.5 py-1 text-text-secondary hover:bg-text-primary/[0.07]"
+              onClick={() => setConfirmingDelete(false)}
+            >
+              Keep
+            </button>
+          </span>
+        ) : (
+          <button
+            ref={deleteRef}
+            type="button"
+            aria-label={`Delete dictionary ${dictionary.name}`}
+            title="Delete dictionary"
+            // A dictionary can hold hundreds of rules; an empty one has
+            // nothing to lose and goes at once.
+            onClick={() => (dictionary.rules.length === 0 ? onDelete() : setConfirmingDelete(true))}
+            className={ghostIconButtonClass}
+          >
+            <Trash2 size={13} aria-hidden="true" />
+          </button>
+        )}
       </div>
 
       {expanded && (
@@ -348,18 +454,21 @@ function DictionaryCard({ dictionary, expanded, onToggleExpanded, onChange, onDe
             <p className="text-xs text-danger">Use a language tag such as en, en-GB or fr.</p>
           )}
 
-          {dictionary.rules.length === 0 && (
+          {rows.length === 0 && (
             <p className="text-xs text-text-muted">No rules yet. Add one below.</p>
           )}
           <ul className="space-y-2">
-            {dictionary.rules.map((rule, index) => (
+            {rows.map((row, index) => (
               <RuleRow
-                // Rows have no identity beyond their place; RuleRow resyncs when its rule changes.
-                key={index}
-                rule={rule}
+                // Rows have no identity beyond their place; RuleRow resyncs when
+                // its rule changes. A rule set aside as unfinished keeps its
+                // place, so the row (and the field being edited) stays mounted.
+                key={row.position}
+                rule={row.ruleIndex === null ? null : dictionary.rules[row.ruleIndex]}
+                unfinishedDraft={row.draft}
                 label={`Rule ${index + 1}`}
-                onChange={(next) => replaceRule(index, next)}
-                onDelete={() => apply({ ...dictionary, rules: dictionary.rules.filter((_, at) => at !== index) })}
+                onChange={(rule, draft) => changeRow(row, rule, draft)}
+                onDelete={() => deleteRow(row)}
               />
             ))}
           </ul>

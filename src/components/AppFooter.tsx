@@ -12,21 +12,22 @@ export function AppFooter({ runtimeBadges, note }: AppFooterProps) {
           {runtimeBadges.map((label) => (
             <span
               key={label}
-              className="px-2.5 py-1 rounded-full border border-border bg-text-primary/[0.04] font-mono text-xs text-text-muted/70"
+              className="px-2.5 py-1 rounded-full border border-border bg-text-primary/[0.04] font-mono text-xs text-text-muted"
             >
               {label}
             </span>
           ))}
-          <span className="flex items-center gap-1.5 rounded-full border border-success/25 bg-success/[0.07] px-2.5 py-1 font-mono text-xs text-success/80">
+          <span className="flex items-center gap-1.5 rounded-full border border-success/25 bg-success/[0.07] px-2.5 py-1 font-mono text-xs text-success">
+            {/* A steady dot: nothing here is in progress, so nothing pulses. */}
             <span
-              className="h-1 w-1 animate-pulse rounded-full bg-success opacity-80"
+              className="h-1 w-1 rounded-full bg-success opacity-80"
               style={{ boxShadow: "0 0 5px var(--color-success)" }}
             />
             all local
           </span>
         </div>
       ) : (
-        <p className="font-mono text-xs text-text-muted/60">{note}</p>
+        <p className="font-mono text-xs text-text-muted">{note}</p>
       )}
     </footer>
   );

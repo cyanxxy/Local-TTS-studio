@@ -116,6 +116,23 @@ describe("ModelToggle", () => {
     expect(kokoroButton).toBeDisabled();
     expect(kokoroButton).toHaveAttribute("title", "Disabled on iOS");
     expect(within(menu).getByText("Unavailable")).toBeInTheDocument();
+    // The reason tells the user what to do, so it wraps instead of truncating;
+    // a disabled button's title tooltip does not show in every browser.
+    expect(within(menu).getByText("Disabled on iOS")).not.toHaveClass("truncate");
+  });
+
+  it("keeps a model that has not started loading still, without a pinging ring", () => {
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={() => {}}
+        kokoroState={{ ...loadingState, loading: false }}
+        supertonicState={readyState}
+      />,
+    );
+    const trigger = screen.getByTestId("model-picker-trigger");
+    expect(trigger.querySelector("[data-status='idle']")).toBeInTheDocument();
+    expect(trigger.querySelector(".animate-ping-ring")).toBeNull();
   });
 
   it("shows desktop models inside the same compact picker", () => {

@@ -140,7 +140,7 @@ export function BreakInsertMenu({ onInsert }: BreakInsertMenuProps) {
                 aria-invalid={!customValid}
                 aria-describedby={customValid ? undefined : `${customId}-error`}
                 onChange={(event) => setCustom(event.target.value)}
-                className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-1.5 text-sm text-text-primary"
+                className="mt-1 w-full rounded-lg border border-border bg-text-primary/[0.06] px-2.5 py-1.5 text-sm text-text-primary"
               />
             </div>
             <button

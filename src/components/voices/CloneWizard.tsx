@@ -18,7 +18,9 @@ import { useAudition, type CreateAuditionAudio } from "../../hooks/useAudition";
 import { useMicRecorder, type UseMicRecorderOptions } from "../../hooks/useMicRecorder";
 import type { UseVoiceLibraryReturn } from "../../hooks/useVoiceLibrary";
 import type { ApplyResult, ApplySurface } from "../../hooks/useVoiceApplier";
+import { useFocusRecovery } from "../useFocusRecovery";
 import { WaveformTrimmer } from "./WaveformTrimmer";
+import { progressFillStyle } from "../progressFill";
 import { errorCalloutClass, infoCalloutClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "./ui";
 
 const STEPS = ["Sample", "Trim and check", "Transcript", "Save"] as const;
@@ -76,6 +78,11 @@ function CheckList({ checks }: { checks: readonly ReferenceCheck[] }) {
  */
 export function CloneWizard({ library, onUse, transcribe, createRecorder, createAudio, active = true }: CloneWizardProps) {
   const [step, setStep] = useState(0);
+  const sectionRef = useRef<HTMLElement>(null);
+  // Moving between steps unmounts the control that was pressed (Next on the
+  // last step, Save, Start/Stop recording, Clone another voice); focus moves
+  // to the first control of what is now shown instead of the page body.
+  useFocusRecovery(sectionRef);
   const [source, setSource] = useState<ClipSource | null>(null);
   const [range, setRange] = useState<TrimRange>({ startSec: 0, endSec: 0 });
   const [targets, setTargets] = useState<readonly ReferenceCloneTarget[]>(["qwen3-base"]);
@@ -245,7 +252,7 @@ export function CloneWizard({ library, onUse, transcribe, createRecorder, create
         : false;
 
   return (
-    <section aria-label="Instant voice cloning" className="space-y-5">
+    <section ref={sectionRef} aria-label="Instant voice cloning" className="space-y-5">
       <ol className="flex flex-wrap gap-2" aria-label="Cloning steps">
         {STEPS.map((label, index) => (
           <li
@@ -291,7 +298,7 @@ export function CloneWizard({ library, onUse, transcribe, createRecorder, create
                       aria-valuenow={Math.round(Math.min(1, mic.level.peak) * 100)}
                       className="h-2 w-28 overflow-hidden rounded-full bg-text-primary/10"
                     >
-                      <div className="h-full bg-accent" style={{ width: `${Math.min(100, mic.level.peak * 100)}%` }} />
+                      <div className="h-full w-full bg-accent" style={progressFillStyle(mic.level.peak * 100)} />
                     </div>
                     <span className="font-mono text-xs tabular-nums text-text-muted">{formatSeconds(mic.level.elapsedSec)}</span>
                   </>

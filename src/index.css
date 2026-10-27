@@ -19,14 +19,22 @@
   --color-border-strong: #D1D1D6;
   --color-text-primary: #1D1D1F;
   --color-text-secondary: #58585D;
-  --color-text-muted: #76767B;
-  --color-accent: #0071E3;
-  --color-accent-hover: #0077ED;
-  --color-accent-light: rgba(0, 113, 227, 0.1);
-  --color-danger: #FF3B30;
-  --color-danger-light: rgba(255, 59, 48, 0.1);
-  --color-success: #34C759;
-  --color-warning: #FF9F0A;
+  /* Text tokens hold WCAG AA (4.5:1) for small text on the panel, the
+     surface and their own 10% tints; the type scale runs down to 9-11px, so
+     no text colour here may rely on the large-text allowance. */
+  --color-text-muted: #6E6E73;
+  --color-accent: #0066CC;
+  --color-accent-hover: #0071E3;
+  --color-accent-light: rgba(0, 102, 204, 0.1);
+  /* Solid fills that carry white text (primary buttons, badges). In light
+     mode they match the text colour; dark mode keeps a bright accent for text
+     on dark panels, which white text cannot sit on, so the fills stay deep. */
+  --color-accent-fill: #0066CC;
+  --color-danger: #D70015;
+  --color-danger-light: rgba(215, 0, 21, 0.1);
+  --color-danger-fill: #D70015;
+  --color-success: #1E7D36;
+  --color-warning: #8F5600;
   --color-warning-light: rgba(255, 159, 10, 0.12);
 
   /* ── Shadows ──────────────────────────────────────────────── */
@@ -56,18 +64,21 @@
      One canonical scale. UI sizes (sans/Inter) carry a tuned
      line-height; display sizes (Outfit) also carry negative tracking
      so large headings read tight and confident. Use these utilities
-     (text-xs … text-6xl) — never ad-hoc text-[Npx]. */
-  --text-2xs: 9px;
+     (text-xs … text-6xl) — never ad-hoc text-[Npx].
+     UI sizes are in rem so the Interface size preference (the root font
+     size) scales text along with spacing; at the default size they resolve
+     to 9, 10, 11, 13, 14 and 16px. */
+  --text-2xs: 0.5625rem;
   --text-2xs--line-height: 1.45;
-  --text-xs: 10px;
+  --text-xs: 0.625rem;
   --text-xs--line-height: 1.45;
-  --text-sm: 11px;
+  --text-sm: 0.6875rem;
   --text-sm--line-height: 1.5;
-  --text-base: 13px;
+  --text-base: 0.8125rem;
   --text-base--line-height: 1.55;
-  --text-lg: 14px;
+  --text-lg: 0.875rem;
   --text-lg--line-height: 1.5;
-  --text-xl: 16px;
+  --text-xl: 1rem;
   --text-xl--line-height: 1.6;
   /* Reader document body — generous leading for long-form listening */
   --text-reader: 17px;
@@ -151,6 +162,24 @@
     inset 0 1px 0 0 rgb(255 255 255 / 0.12);
 }
 
+/* First paint for the "system" theme. The theme attributes are set from
+   React, and the CSP forbids an inline script that could set them earlier,
+   so until they land the page follows the OS directly: a dark-mode user
+   never sees a light frame. Only the tokens the first frame paints with are
+   repeated here; the full dark set applies once data-theme is set. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --color-surface: #101114;
+    --color-panel: #1c1d22;
+    --color-border: #34363d;
+    --color-border-strong: #4a4c55;
+    --color-text-primary: #f5f5f7;
+    --color-text-secondary: #c3c3c8;
+    --color-text-muted: #92939b;
+    color-scheme: dark;
+  }
+}
+
 :root[data-theme="dark"][data-accent="blue"] {
   --color-accent: #0a84ff;
   --color-accent-hover: #409cff;
@@ -161,6 +190,7 @@
   --color-accent: #8c42c4;
   --color-accent-hover: #9d52d2;
   --color-accent-light: rgba(140, 66, 196, 0.12);
+  --color-accent-fill: #8c42c4;
 }
 :root[data-theme="dark"][data-accent="violet"] {
   --color-accent: #bf5af2;
@@ -169,9 +199,10 @@
 }
 
 :root[data-accent="teal"] {
-  --color-accent: #007f80;
-  --color-accent-hover: #008f90;
-  --color-accent-light: rgba(0, 127, 128, 0.12);
+  --color-accent: #007475;
+  --color-accent-hover: #007f80;
+  --color-accent-light: rgba(0, 116, 117, 0.12);
+  --color-accent-fill: #007475;
 }
 :root[data-theme="dark"][data-accent="teal"] {
   --color-accent: #40c8c8;
@@ -180,9 +211,10 @@
 }
 
 :root[data-accent="orange"] {
-  --color-accent: #d96704;
-  --color-accent-hover: #e87510;
-  --color-accent-light: rgba(217, 103, 4, 0.12);
+  --color-accent: #ad5000;
+  --color-accent-hover: #b85500;
+  --color-accent-light: rgba(173, 80, 0, 0.12);
+  --color-accent-fill: #ad5000;
 }
 :root[data-theme="dark"][data-accent="orange"] {
   --color-accent: #ff9f0a;
@@ -273,6 +305,14 @@ body {
   background-image:
     radial-gradient(ellipse 120% 32% at 50% -6%, color-mix(in srgb, var(--color-accent) 7%, transparent), transparent 70%),
     radial-gradient(ellipse 70% 60% at 100% 8%, color-mix(in srgb, #AF8BFF 5%, transparent), transparent 62%);
+}
+/* The vibrancy material follows the macOS appearance, not the app's theme:
+   the renderer has no way to set nativeTheme.themeSource, so a Light app on
+   a Dark Mac (or the reverse) would draw its text over the wrong material.
+   When the theme is chosen explicitly, lay a near-opaque wash of the app's
+   own surface over the material so text keeps its contrast. */
+:root.is-electron.is-mac:not([data-theme-preference="system"]) body {
+  background-color: color-mix(in srgb, var(--color-surface) 90%, transparent);
 }
 /* Reserve the inset traffic-light strip and make the top a drag handle */
 .is-electron.is-mac header {
@@ -384,22 +424,24 @@ body {
    accent is a translucent tint over the backdrop, not a solid or glossy
    fill, and it glows from within when pressed instead of lifting. */
 .glass-accent {
-  background-color: color-mix(in srgb, var(--color-accent) 88%, transparent);
+  /* 94% keeps the tint translucent while white text holds 4.5:1 even over a
+     white backdrop. */
+  background-color: color-mix(in srgb, var(--color-accent-fill) 94%, transparent);
   -webkit-backdrop-filter: blur(12px) saturate(180%);
   backdrop-filter: blur(12px) saturate(180%);
   color: #fff;
-  border: 1px solid color-mix(in srgb, var(--color-accent) 60%, white 20%);
+  border: 1px solid color-mix(in srgb, var(--color-accent-fill) 60%, white 20%);
   box-shadow:
     inset 0 1px 0 rgb(255 255 255 / 0.35),
     inset 0 0 0 0.5px rgb(255 255 255 / 0.2),
-    0 4px 14px color-mix(in srgb, var(--color-accent) 22%, transparent);
+    0 4px 14px color-mix(in srgb, var(--color-accent-fill) 22%, transparent);
   transition:
     transform 0.25s cubic-bezier(0.34, 1.4, 0.64, 1),
     background-color 0.2s ease,
     filter 0.2s ease;
 }
 .glass-accent:hover:not(:disabled) {
-  background-color: color-mix(in srgb, var(--color-accent) 96%, transparent);
+  background-color: var(--color-accent-fill);
 }
 .glass-accent:active:not(:disabled) {
   transform: scale(0.96);
@@ -433,7 +475,7 @@ body {
     box-shadow: none;
   }
   .glass-fill { background-color: color-mix(in srgb, var(--color-text-primary) 12%, transparent); }
-  .glass-accent { background-color: var(--color-accent); border-color: var(--color-text-primary); }
+  .glass-accent { background-color: var(--color-accent-fill); border-color: var(--color-text-primary); }
 }
 
 /* ── Range inputs ─────────────────────────────────────────── */
@@ -443,9 +485,27 @@ input[type="range"] {
   height: 4px;
   border-radius: 99px;
   background: var(--color-border-strong);
-  outline: none;
   cursor: pointer;
   width: 100%;
+}
+
+/* Keyboard focus: the shared focus ring around the track, plus an accent
+   halo on the thumb so the handle being moved is the one that reads as
+   focused. */
+input[type="range"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--color-accent) 65%, transparent);
+  outline-offset: 6px;
+}
+input[type="range"]:focus-visible::-webkit-slider-thumb {
+  border-color: var(--color-accent);
+  box-shadow:
+    0 1px 4px rgb(0 0 0 / 0.18),
+    inset 0 1px 0 rgb(255 255 255 / 0.9),
+    0 0 0 4px color-mix(in srgb, var(--color-accent) 35%, transparent);
+}
+input[type="range"]:focus-visible::-moz-range-thumb {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-accent) 35%, transparent);
 }
 
 input[type="range"]::-webkit-slider-thumb {
@@ -511,14 +571,18 @@ input[type="range"]::-moz-range-thumb {
 
 /* ── Animations ───────────────────────────────────────────── */
 @theme {
-  --animate-fade-up: fade-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  /* Entrance animations fill backwards only: the first keyframe holds
+     before the start, but nothing stays applied afterwards. A forwards fill
+     would leave a transform on the element for good, making it the
+     containing block of any fixed descendant and a stacking context. */
+  --animate-fade-up: fade-up 0.5s cubic-bezier(0.22, 1, 0.36, 1) backwards;
   @keyframes fade-up {
     0%   { opacity: 0; transform: translateY(12px) scale(0.97);  }
     60%  { opacity: 1; transform: translateY(-2px)  scale(1.005);}
     100% { opacity: 1; transform: translateY(0)     scale(1);    }
   }
 
-  --animate-scale-in: scale-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) both;
+  --animate-scale-in: scale-in 0.3s cubic-bezier(0.22, 1, 0.36, 1) backwards;
   @keyframes scale-in {
     0%   { opacity: 0; transform: scale(0.90); }
     70%  { opacity: 1; transform: scale(1.03); }
@@ -554,21 +618,6 @@ input[type="range"]::-moz-range-thumb {
   100% { transform: scaleY(0.15); }
 }
 
-@keyframes progress-slide {
-  from { background-position:  200% 0; }
-  to   { background-position: -200% 0; }
-}
-
-.progress-animated {
-  background-image: linear-gradient(
-    90deg,
-    var(--color-accent)        0%,
-    color-mix(in srgb, var(--color-accent) 40%, transparent) 40%,
-    var(--color-accent)        80%
-  );
-  background-size: 200% 100%;
-  animation: progress-slide 1.4s linear infinite;
-}
 
 .reader-chunk-highlight {
   background: transparent;

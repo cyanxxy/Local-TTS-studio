@@ -11,6 +11,7 @@ import type { UseAudioExportReturn } from "../../hooks/useAudioExport";
 import type { UseCreatorSettingsReturn } from "../../hooks/useCreatorSettings";
 import type { CaptionExportFormat, ExportSampleRate } from "../../types";
 import { acxCompliance, formatDb, formatEstimate } from "../../lib/creator/display";
+import { progressFillStyle } from "../progressFill";
 import {
   accentButtonClass,
   checkboxLabelClass,
@@ -301,9 +302,11 @@ export function ExportSettings({
         <button
           type="button"
           onClick={isExporting ? audioExport.cancel : audioExport.start}
-          disabled={!hasAudio}
-          aria-describedby={!hasAudio ? downloadStatusId : undefined}
-          className={hasAudio
+          // Cancel must stay reachable while an export runs, even if the audio
+          // it started from has since been cleared.
+          disabled={!hasAudio && !isExporting}
+          aria-describedby={!hasAudio && !isExporting ? downloadStatusId : undefined}
+          className={hasAudio || isExporting
             ? `${accentButtonClass} !py-2.5`
             : "flex w-full items-center justify-center gap-2 rounded-lg bg-border px-3 py-2.5 text-xs font-medium text-text-muted cursor-not-allowed"}
         >
@@ -352,7 +355,7 @@ export function ExportSettings({
             aria-valuenow={percent}
             className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-border"
           >
-            <div className="h-full rounded-full bg-accent transition-[width]" style={{ width: `${percent}%` }} />
+            <div className="h-full w-full rounded-full bg-accent transition-transform" style={progressFillStyle(percent)} />
           </div>
         </div>
       )}

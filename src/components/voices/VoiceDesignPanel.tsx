@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { Play, RefreshCw, Sparkles, Square } from "lucide-react";
+import { Play, RefreshCw, Sparkles, Square, X } from "lucide-react";
 import {
   DEFAULT_VOICE_DESIGN_PREVIEW_COUNT,
   createVoiceDesignPreviewSession,
@@ -19,6 +19,7 @@ import { QWEN3_ENGINE_LANGUAGES, QWEN3_INSTRUCT_MAX_LENGTH } from "../../models/
 import { useAudition, type CreateAuditionAudio } from "../../hooks/useAudition";
 import type { ApplyResult, ApplySurface } from "../../hooks/useVoiceApplier";
 import type { UseVoiceLibraryReturn } from "../../hooks/useVoiceLibrary";
+import { useFocusRecovery } from "../useFocusRecovery";
 import { errorCalloutClass, infoCalloutClass, inputClass, labelClass, primaryButtonClass, secondaryButtonClass } from "./ui";
 
 export interface VoiceDesignPanelProps {
@@ -58,7 +59,13 @@ export function VoiceDesignPanel({ library, synthesize, available, unavailableRe
   const [saved, setSaved] = useState<{ designed: VoiceRecord; cloned: VoiceRecord | null; warnings: string[] } | null>(null);
   const [useMessage, setUseMessage] = useState<ApplyResult | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const sectionRef = useRef<HTMLElement>(null);
+  const generateRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
   const audition = useAudition(createAudio);
+  // Generate disables itself while a run goes and Cancel disappears when it
+  // stops; focus moves between the two instead of dropping to the page.
+  useFocusRecovery(sectionRef, () => cancelRef.current ?? generateRef.current);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -114,6 +121,24 @@ export function VoiceDesignPanel({ library, synthesize, available, unavailableRe
     if (added) await render(next.plan, [added.id]);
   }, [audition, render, session]);
 
+  // A preview can take minutes on CPU, so a run in progress can be stopped.
+  // Previews that already finished stay playable and selectable; the rest are
+  // marked cancelled and can be re-rendered with their New seed button.
+  const cancel = useCallback(() => {
+    const controller = abortRef.current;
+    if (!controller) return;
+    abortRef.current = null;
+    controller.abort();
+    setBusy(false);
+    if (!session) return;
+    for (const request of session.plan.requests) {
+      const status = session.results[request.id]?.status;
+      if (status === "pending" || status === "rendering") {
+        dispatch({ type: "failed", requestId: request.id, error: "Cancelled" });
+      }
+    }
+  }, [session]);
+
   const togglePlay = useCallback((requestId: string) => {
     const result = session?.results[requestId];
     if (!result?.samples || !result.sampleRate) return;
@@ -148,7 +173,7 @@ export function VoiceDesignPanel({ library, synthesize, available, unavailableRe
   const selectedReady = session?.selectedId != null && session.results[session.selectedId]?.status === "ready";
 
   return (
-    <section aria-label="Voice design" className="space-y-5">
+    <section ref={sectionRef} aria-label="Voice design" className="space-y-5">
       <p className="text-sm text-text-secondary">
         Describe the voice you want. Open TTS renders three previews with different seeds so you can pick the one that sounds right.
       </p>
@@ -191,9 +216,16 @@ export function VoiceDesignPanel({ library, synthesize, available, unavailableRe
           />
         </label>
       </div>
-      <button type="button" className={primaryButtonClass} disabled={!available || busy || description.trim().length === 0} onClick={() => void generate()}>
-        <Sparkles size={14} aria-hidden /> {session ? "Generate new previews" : "Generate 3 previews"}
-      </button>
+      <div className="flex flex-wrap items-center gap-2">
+        <button ref={generateRef} type="button" className={primaryButtonClass} disabled={!available || busy || description.trim().length === 0} onClick={() => void generate()}>
+          <Sparkles size={14} aria-hidden /> {session ? "Generate new previews" : "Generate 3 previews"}
+        </button>
+        {busy && (
+          <button ref={cancelRef} type="button" className={secondaryButtonClass} onClick={cancel}>
+            <X size={14} aria-hidden /> Cancel
+          </button>
+        )}
+      </div>
 
       {error && <p role="alert" className={errorCalloutClass}>{error}</p>}
 

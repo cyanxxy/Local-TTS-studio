@@ -8,6 +8,7 @@ import {
 } from "../lib/history/generationHistory";
 import { getEngine, isEngineId } from "../models/registry";
 import { formatBytes } from "./localRuntime/utils";
+import { progressFillStyle } from "./progressFill";
 
 interface StudioHistoryPanelProps {
   /** Newest first. */
@@ -89,7 +90,7 @@ export function StudioHistoryPanel({
           <History size={14} aria-hidden="true" />
           Generation History
           {usage.entryCount > 0 && <span className="font-mono text-xs text-text-muted">{usage.entryCount}</span>}
-          {visibleError && <span className="rounded-full bg-danger px-1.5 text-xs font-semibold text-white" aria-hidden="true">!</span>}
+          {visibleError && <span className="rounded-full bg-danger-fill px-1.5 text-xs font-semibold text-white" aria-hidden="true">!</span>}
         </span>
         <ChevronDown
           size={14}
@@ -113,7 +114,7 @@ export function StudioHistoryPanel({
       )}
 
       {open && (
-        <div id={panelId} className="animate-fade-up border-t border-black/5 px-4 pb-4 pt-3">
+        <div id={panelId} className="animate-fade-up border-t border-border/60 px-4 pb-4 pt-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div>
               <p className="text-xs text-text-secondary" data-testid="history-usage">
@@ -128,7 +129,7 @@ export function StudioHistoryPanel({
                 aria-valuenow={bytesShare}
                 className="mt-1.5 h-1 w-48 overflow-hidden rounded-full bg-text-primary/10"
               >
-                <div className="h-full rounded-full bg-accent" style={{ width: `${bytesShare}%` }} />
+                <div className="h-full w-full rounded-full bg-accent" style={progressFillStyle(bytesShare)} />
               </div>
             </div>
             {confirmingClear ? (
@@ -136,7 +137,7 @@ export function StudioHistoryPanel({
                 <span className="text-text-secondary">Remove all but favorites?</span>
                 <button
                   type="button"
-                  className="rounded-full bg-danger px-3 py-1 font-semibold text-white"
+                  className="rounded-full bg-danger-fill px-3 py-1 font-semibold text-white"
                   onClick={() => {
                     setConfirmingClear(false);
                     void run(() => onClear({ keepFavorites: true }), { refocus: true });
