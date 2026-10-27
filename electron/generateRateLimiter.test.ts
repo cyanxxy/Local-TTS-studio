@@ -69,6 +69,35 @@ describe("generateRateLimiter", () => {
     expect(wait).toHaveBeenCalledWith(495);
   });
 
+  it("waits out the cooldown with a real timer by default", async () => {
+    vi.useFakeTimers({ now: 1_000 });
+    try {
+      const limiter = createGenerateRateLimiter<"qwen3">({ rateWindowMs: 500 });
+
+      await limiter.run("qwen3", async () => "first");
+      const second = limiter.run("qwen3", async () => "second");
+      await vi.advanceTimersByTimeAsync(500);
+      await expect(second).resolves.toBe("second");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets a model's first call wait when the clock is still inside the window", async () => {
+    let clock = 100;
+    const wait = vi.fn(async (ms: number) => {
+      clock += ms;
+    });
+    const limiter = createGenerateRateLimiter<"qwen3">({
+      rateWindowMs: 500,
+      now: () => clock,
+      wait,
+    });
+
+    await expect(limiter.run("qwen3", async () => "first")).resolves.toBe("first");
+    expect(wait).toHaveBeenCalledWith(400);
+  });
+
   it("still rejects a job that another generation overtook while it waited", async () => {
     let resolveOvertaking!: () => void;
     let overtaking: Promise<unknown> | undefined;
