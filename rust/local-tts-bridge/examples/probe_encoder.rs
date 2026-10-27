@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
             hound::SampleFormat::Int => reader
                 .samples::<i16>()
-                .map(|s| s.unwrap() as f32 / 32768.0)
+                .map(|s| f32::from(s.unwrap()) / 32768.0)
                 .collect(),
         };
         let mono: Vec<f32> = raw

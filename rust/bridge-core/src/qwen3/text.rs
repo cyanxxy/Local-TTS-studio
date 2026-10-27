@@ -184,13 +184,13 @@ mod tests {
             // ~4-5 CJK characters per second at 12.5 codec frames per second
             // is at most ~3.1 frames per character.
             let expected_frames = unit.chars().count() * 25 / 8;
-            assert!(expected_frames <= MAX_TEXT_UNIT_GENERATION_TOKENS as usize);
+            assert!(expected_frames <= usize::try_from(MAX_TEXT_UNIT_GENERATION_TOKENS).unwrap());
             let controls = GenerationControls::default().effective_for_text(
                 &unit,
                 "chinese",
                 MAX_TEXT_UNIT_GENERATION_TOKENS,
             );
-            assert!(controls.max_new_tokens as usize >= expected_frames);
+            assert!(usize::try_from(controls.max_new_tokens).unwrap() >= expected_frames);
         }
     }
 

@@ -42,3 +42,6 @@ tch = "0.20"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[lints]
+workspace = true
