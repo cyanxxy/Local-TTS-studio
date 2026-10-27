@@ -163,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[expect(clippy::float_cmp, reason = "0.5 is exact in f32 and in 16-bit PCM")]
     fn decoding_stops_at_the_duration_limit_and_reports_truncation() {
         let decode = |frames: usize| {
             let spec = hound::WavSpec {

@@ -28,9 +28,11 @@ pull requests that job runs only when a bridge input changed: the Rust sources
 and toolchain, the `scripts/*rust*` wrappers, the test file, the Vitest config,
 setup file, and plugin it loads, the npm install inputs, `.gitattributes`, or
 `ci.yml` itself. Pushes to `main` and manual runs always run it.
-`.github/workflows/rust-bridge.yml` additionally checks formatting, then
-builds, Clippy-lints, tests, and probes the native bridge on Apple Silicon; it
-triggers on changes to Rust sources, the bridge build scripts,
+`.github/workflows/rust-bridge.yml` additionally checks formatting, checks the
+Rust dependencies with `cargo-deny` against `rust/deny.toml`, builds,
+Clippy-lints, tests, and probes the native bridge on Apple Silicon, and
+compiles and Clippy-lints the Windows x64 LibTorch build (without running it);
+it triggers on changes to Rust sources, the bridge build scripts,
 `rust-toolchain.toml`, `.npmrc`, `.nvmrc`, `package.json`,
 `package-lock.json`, and `.gitattributes`, and can be started by hand from the
 Actions tab.

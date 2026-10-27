@@ -563,6 +563,10 @@ mod tests {
     fn no_cleanup() {}
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "0.5 and 0.75 are exact in f32; samples must pass through bit for bit"
+    )]
     fn propagates_controls_and_emits_clean_unicode_safe_units() {
         let text = format!("First sentence. {}", "你".repeat(450));
         let controls = GenerationControls::new(0.7, 27, 777);
