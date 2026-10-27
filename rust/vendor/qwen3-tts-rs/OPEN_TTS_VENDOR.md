@@ -80,8 +80,19 @@ The `qwen3-tts` CLI's `--seed`, which upstream accepts but ignores with a
 warning, now calls it once, just before generation, so model and reference
 loading cannot shift the draw sequence. Without `--seed` the CLI samples as
 upstream does. `pibot-tts-worker` still ignores its `--seed`. Open TTS builds
-neither binary, so this change is checked only by compiling the crate's
-binaries, not by the bridge suite.
+neither binary, so no Open TTS test covers this change.
+
+## LibTorch dtypes
+
+The fork keeps `text_embedding` in the checkpoint's bf16 and rounds several
+talker inputs to bf16 to match Python MLX numerics, while LibTorch `Linear`
+weights are converted to f32. LibTorch's `matmul` does not promote mixed
+dtypes, so every Qwen3 mode on the LibTorch backend failed with
+`BFloat16 != float` before producing audio. On LibTorch only, `Linear::forward`
+now casts its input to the weight's dtype. The MLX path is unchanged. With the
+pinned official checkpoints on LibTorch CPU, CustomVoice 0.6B, Base 0.6B voice
+cloning, and VoiceDesign 1.7B all produced speech through the bridge's
+streaming calls, and the same seed reproduced the same audio.
 
 ## Regenerating the patch
 
@@ -113,8 +124,9 @@ forward-applies it.
    confirm `build_input_embeddings` (optional language),
    `build_voice_design_input_embeddings`, the shared instruct prompt,
    `generate_with_instruct_streaming`, `generate_codes_streaming_with_penalty`,
-   the on-device repetition penalty in `predict_code_0`, and the bundled mlx-c
-   error message still match the new upstream APIs.
+   the on-device repetition penalty in `predict_code_0`, the LibTorch input
+   cast in `Linear::forward`, and the bundled mlx-c error message still match
+   the new upstream APIs.
 6. Update both pinned revisions, refresh `OPEN_TTS.patch`, and update the
    expected vendor digest in `electron/qwen3Vendor.test.ts` in the same change.
 7. Run `npx vitest run electron/qwen3Vendor.test.ts`, then the Rust bridge tests

@@ -192,8 +192,10 @@ impl Linear {
         } else {
             x.matmul(&self.weight.tr())
         };
+        // LibTorch's matmul does not promote dtypes, and the talker feeds bf16
+        // activations (rounded for MLX parity) into these f32 weights.
         #[cfg(not(feature = "mlx"))]
-        let out = x.matmul(&self.weight.tr());
+        let out = x.to_dtype(self.weight.kind()).matmul(&self.weight.tr());
 
         if let Some(ref bias) = self.bias {
             #[cfg(feature = "mlx")]

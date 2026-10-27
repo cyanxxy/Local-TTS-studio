@@ -1164,3 +1164,19 @@ index ff6f373..ad1f74a 100644
      SystemTime::now()
          .duration_since(SystemTime::UNIX_EPOCH)
          .map(|d| d.as_nanos() as u64)
+diff --git a/src/layers.rs b/src/layers.rs
+index 80d9b58..416e612 100644
+--- a/src/layers.rs
++++ b/src/layers.rs
+@@ -192,8 +192,10 @@ impl Linear {
+         } else {
+             x.matmul(&self.weight.tr())
+         };
++        // LibTorch's matmul does not promote dtypes, and the talker feeds bf16
++        // activations (rounded for MLX parity) into these f32 weights.
+         #[cfg(not(feature = "mlx"))]
+-        let out = x.matmul(&self.weight.tr());
++        let out = x.to_dtype(self.weight.kind()).matmul(&self.weight.tr());
+ 
+         if let Some(ref bias) = self.bias {
+             #[cfg(feature = "mlx")]

@@ -8,6 +8,11 @@ All notable changes to Open TTS are documented here.
 
 ### Fixed
 
+- Qwen3 on the LibTorch backend (Windows x64 builds) generates speech again.
+  Every mode stopped with a `BFloat16 != float` error before any audio, because
+  the vendored runtime fed bf16 activations into f32 linear layers. LibTorch
+  linear layers now cast their input to the weight's dtype; Apple Silicon (MLX)
+  is unchanged.
 - The vendored `qwen3-tts` CLI now honours `--seed` on MLX and LibTorch
   instead of printing that it ignores it. The app itself already seeded Qwen3
   requests; this only affects the standalone CLI, which Open TTS does not ship.
