@@ -89,6 +89,7 @@ pub mod backend;
 pub mod tensor;
 pub mod trace;
 
+#[cfg(feature = "api")]
 pub mod api;
 pub mod audio;
 pub mod audio_encoder;

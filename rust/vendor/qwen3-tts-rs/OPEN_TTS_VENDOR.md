@@ -38,7 +38,9 @@ Open TTS carries a patch in `OPEN_TTS.patch`. It:
   default), and applies that penalty on the device instead of copying the
   logits to the host every frame;
 - names the vocoder output rate once (`OUTPUT_SAMPLE_RATE`) for the streaming
-  paths.
+  paths;
+- puts the HTTP API and the command-line binaries behind the `api` and `cli`
+  features (see "Optional HTTP API and binaries" below).
 
 The upstream high-level VoiceDesign API at the pinned revision returns
 placeholder silence; the rest of the low-level inference engine remains the
@@ -52,8 +54,10 @@ native/audio-coupled dependencies remain at their pinned versions. Only the
 library, which Open TTS compiles through the vendored MLX backend and covers
 with the bridge suite. `tower-http` has no consumer outside
 `src/bin/api_server.rs`, and Open TTS depends on this crate as a library only,
-so nothing in this repository builds that binary — the `tower-http` bump is
-unverified and must be re-checked against upstream on the next re-vendor.
+so nothing in this repository builds that binary. When the `api` and `cli`
+features were added, `cargo check --all-targets` with the default features
+against LibTorch 2.7.0 compiled it, but CI does not repeat that check, so
+re-check the `tower-http` bump on the next re-vendor.
 
 ## Inference compatibility fixes
 
@@ -67,6 +71,23 @@ when the request is Chinese or Auto, matching upstream; an unknown dialect
 falls back to the requested language. Regression tests cover codec logits,
 prefix token layouts, the dialect override, and the small-model instruction
 capability.
+
+## Optional HTTP API and binaries
+
+Upstream compiles its HTTP API (`qwen3_tts_rs::api`) and the stack behind it
+into the library unconditionally: `axum`, `tokio`, `tower-http`,
+`tracing-subscriber`, `clap`, and the MP3, FLAC, and Opus encoders, two of
+which build C libraries. The bridge uses none of it. The patch makes those
+dependencies optional behind two features:
+
+- `api` gates the `api` module and its encoders;
+- `cli` enables `api` plus what the binaries need, and every `[[bin]]`
+  requires it. `src/bin/trace_rust.rs`, which upstream builds by
+  auto-discovery, gets an explicit `[[bin]]` entry so it can require `cli`.
+
+`default` includes `cli`, so a plain `cargo build` of this crate behaves as
+upstream does. The bridge already sets `default-features = false`, so it
+compiles the library alone.
 
 ## Seeded sampling
 
@@ -126,7 +147,9 @@ forward-applies it.
    `generate_with_instruct_streaming`, `generate_codes_streaming_with_penalty`,
    the on-device repetition penalty in `predict_code_0`, the LibTorch input
    cast in `Linear::forward`, and the bundled mlx-c error message still match
-   the new upstream APIs.
+   the new upstream APIs. Also check that every new upstream dependency used
+   only by `src/api` or `src/bin` is optional and listed in `api` or `cli`, and
+   that every new binary requires `cli`.
 6. Update both pinned revisions, refresh `OPEN_TTS.patch`, and update the
    expected vendor digest in `electron/qwen3Vendor.test.ts` in the same change.
 7. Run `npx vitest run electron/qwen3Vendor.test.ts`, then the Rust bridge tests
