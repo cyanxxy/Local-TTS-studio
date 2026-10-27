@@ -17,3 +17,8 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+# The bridge's build.rs declares `cfg(qwen3_native)`; the shared sources use it,
+# and this crate never sets it, so declare the name here too.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(qwen3_native)"] }
