@@ -30,15 +30,16 @@ import {
 
 // Limits and protocol strings that TypeScript and the Rust bridge each declare
 // and must agree on. The Rust side cannot be built on every machine, so its
-// constants are read from source. The whole crate is searched, not one file:
-// where a constant lives may change, its value may not.
+// constants are read from source. Both bridge crates are searched, not one
+// file: where a constant lives may change, its value may not.
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const BRIDGE_SOURCE_DIR = path.join(REPO_ROOT, "rust/local-tts-bridge/src");
+const RUST_DIR = path.join(REPO_ROOT, "rust");
+const BRIDGE_SOURCE_DIRS = ["bridge-core/src", "local-tts-bridge/src"].map((dir) => path.join(RUST_DIR, dir));
 // The renderer's Qwen3 text-unit chunking lives outside the Electron project,
 // so it is loaded at run time rather than imported.
 const QWEN_CHUNKING_MODULE = path.join(REPO_ROOT, "src/lib/qwenChunking.ts");
-const SOURCE_LABEL = "rust/local-tts-bridge/src";
+const SOURCE_LABEL = "rust/bridge-core/src or rust/local-tts-bridge/src";
 
 type RustValue = number | string;
 
@@ -168,8 +169,8 @@ function rustNeuttsAllowList(sources: { file: string; source: string }[]): strin
   return [...lists[0][1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
 }
 
-const sources = rustSourceFiles(BRIDGE_SOURCE_DIR).map((file) => ({
-  file: path.relative(BRIDGE_SOURCE_DIR, file),
+const sources = BRIDGE_SOURCE_DIRS.flatMap(rustSourceFiles).map((file) => ({
+  file: path.relative(RUST_DIR, file).split(path.sep).join("/"),
   source: readFileSync(file, "utf-8"),
 }));
 const consts = parseRustConsts(sources);
@@ -193,7 +194,7 @@ describe("TypeScript and Rust bridge parity", () => {
     expect(UNIT_GAP_MESSAGE_TYPE).toBe(rust("UNIT_GAP_FRAME_TYPE"));
 
     // The fields the Rust frame builder writes, read from its json! literal.
-    const protocolSource = sources.find(({ file }) => file === "protocol.rs")!.source;
+    const protocolSource = sources.find(({ file }) => file === "bridge-core/src/protocol.rs")!.source;
     const builder = /pub fn unit_gap_frame\([\s\S]*?json!\(\{([\s\S]*?)\}\)/.exec(withoutTestModules(protocolSource));
     if (!builder) throw new Error("unit_gap_frame is not declared in protocol.rs.");
     const rustFields = [...builder[1].matchAll(/"(\w+)"\s*:/g)].map((match) => match[1]).filter((field) => field !== "type");

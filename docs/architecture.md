@@ -61,8 +61,9 @@ electron/
 |-- nativeModels/         Framework for native ONNX models (Audio8 is the first consumer)
 `-- audio8*, qwen3*, readerLibrary*, document*, ...   Per-feature modules
 rust/
-|-- local-tts-bridge/src/ cli.rs, protocol.rs, ws/ (transport), neutts_backend/, qwen3/ (host, engines, streaming, target, ...)
-|-- bridge-policy-tests/  Model-free tests for the transport, validators and streaming policy
+|-- Cargo.toml            Workspace: shared dependency versions and release profile
+|-- bridge-core/src/      Model-free: protocol.rs, ws/ (transport), request validation, streaming policy
+|-- local-tts-bridge/src/ cli.rs, neutts_backend/, qwen3/ (host, engines, runtime, target, ...)
 `-- vendor/qwen3-tts-rs   Hand-maintained snapshot (see OPEN_TTS_VENDOR.md)
 src/
 |-- apps/{web,desktop}/   Renderer shells and entrypoints
@@ -82,7 +83,7 @@ src/
 ### Adding an engine
 
 1. Add `src/models/<id>.ts` exporting a descriptor, and one line in `ENGINES` in `registry.ts`. The id unions, pickers, labels, routes, persistence (`tts-engine-settings-v1`) and Reader cache signatures follow from it.
-2. Implement the runtime. A browser engine adds a worker under `src/workers/` built on `src/workers/kit` (see below) and a pinned manifest in `src/workers/manifests/` (generate it with `node scripts/pin-hf-assets.mjs --repo ... --revision ... --include ... --name ... --out ...`; `--check` verifies it). A native ONNX engine adds an `electron/nativeModels` descriptor and asset table, a worker built on `startNativeModelWorker`, and a client subclass of `NativeModelWorkerClient`. A Rust-bridge engine implements `ws::Backend` in the bridge, keeps its payload validation in a model-free `request.rs`, and adds that to `rust/bridge-policy-tests/src/lib.rs`.
+2. Implement the runtime. A browser engine adds a worker under `src/workers/` built on `src/workers/kit` (see below) and a pinned manifest in `src/workers/manifests/` (generate it with `node scripts/pin-hf-assets.mjs --repo ... --revision ... --include ... --name ... --out ...`; `--check` verifies it). A native ONNX engine adds an `electron/nativeModels` descriptor and asset table, a worker built on `startNativeModelWorker`, and a client subclass of `NativeModelWorkerClient`. A Rust-bridge engine implements `ws::Backend` in the bridge, keeps its payload validation in a model-free `request.rs` in `rust/bridge-core`.
 3. Provide an `EngineRuntime` (`src/shared/engineRuntime.ts`) and register it in the orchestrator (`useEngineOrchestrator`), plus its settings type in `EngineSynthesisSettings`.
 4. Add the new id to every exhaustive switch over engines, notably `src/lib/readerListening.ts` (the Reader listening profiles); these switches have no default branch, so TypeScript fails the build until the new id is handled.
 5. Add credits (the descriptor's `credits`), the README model and credits tables, and the model table in `docs/user-guide.md`, then run `npm run lint`, `npm run typecheck`, and the tests.

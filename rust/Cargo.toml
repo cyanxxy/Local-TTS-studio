@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["bridge-core", "local-tts-bridge"]
+# A digest-pinned upstream snapshot (see its OPEN_TTS_VENDOR.md). It builds
+# only as the bridge's path dependency and keeps its upstream formatting.
+exclude = ["vendor/qwen3-tts-rs"]
+
+[workspace.package]
+edition = "2024"
+# The pinned toolchain in rust-toolchain.toml is the only one CI builds with.
+rust-version = "1.99"
+publish = false
+
+# Dependencies more than one member uses, declared once so their versions
+# cannot drift apart.
+[workspace.dependencies]
+anyhow = "1.0"
+hound = "3.5"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+socket2 = "0.6"
+tempfile = "3.27"
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+
+# Cargo strips debuginfo from release artifacts by default. On a macOS 27 host
+# with MACOSX_DEPLOYMENT_TARGET=26.0 (set by scripts/rust-target-dir.mjs),
+# rustc's strip step leaves proc-macro dylibs with a misaligned LINKEDIT string
+# pool that dyld refuses to load, so every release build fails. Build scripts
+# and proc macros never ship, so leave them unstripped; the bridge binary keeps
+# the default.
+[profile.release.build-override]
+strip = false

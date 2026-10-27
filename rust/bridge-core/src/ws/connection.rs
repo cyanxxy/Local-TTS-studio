@@ -286,28 +286,9 @@ pub fn is_client_disconnect(err: &anyhow::Error) -> bool {
 }
 
 fn enable_tcp_keepalive(stream: &TcpStream) {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsRawFd;
-        let enabled: libc::c_int = 1;
-        let result = unsafe {
-            libc::setsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_KEEPALIVE,
-                std::ptr::from_ref(&enabled).cast(),
-                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
-            )
-        };
-        if result != 0 {
-            eprintln!(
-                "Failed to enable SO_KEEPALIVE on WebSocket connection: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+    if let Err(error) = socket2::SockRef::from(stream).set_keepalive(true) {
+        eprintln!("Failed to enable SO_KEEPALIVE on WebSocket connection: {error}");
     }
-    #[cfg(not(unix))]
-    let _ = stream;
 }
 
 #[cfg(test)]

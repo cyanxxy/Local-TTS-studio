@@ -145,9 +145,10 @@ pub fn round_secs(value: f64) -> f64 {
 /// raw model output and each chunk is cleaned and encoded with one copy.
 pub fn float32_to_le_bytes(samples: &[f32]) -> Vec<u8> {
     let mut bytes = vec![0; std::mem::size_of_val(samples)];
-    for (encoded, sample) in bytes.chunks_exact_mut(4).zip(samples) {
+    let (encoded_samples, _) = bytes.as_chunks_mut::<4>();
+    for (encoded, sample) in encoded_samples.iter_mut().zip(samples) {
         let clean = if sample.is_finite() { *sample } else { 0.0 };
-        encoded.copy_from_slice(&clean.to_le_bytes());
+        *encoded = clean.to_le_bytes();
     }
     bytes
 }
@@ -219,10 +220,7 @@ mod tests {
     #[test]
     fn float32_transport_cleans_non_finite_samples_without_normalizing() {
         let bytes = float32_to_le_bytes(&[f32::NAN, f32::INFINITY, -1.5]);
-        let samples = bytes
-            .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
-            .collect::<Vec<_>>();
+        let samples = crate::ws::test_support::decode_samples(&bytes);
         assert_eq!(samples, vec![0.0, 0.0, -1.5]);
     }
 
@@ -233,8 +231,11 @@ mod tests {
         let bytes = float32_to_le_bytes(&samples);
         assert_eq!(bytes.len(), samples.len() * 4);
         let encoded = bytes
-            .chunks_exact(4)
-            .map(|sample| u32::from_le_bytes(sample.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .copied()
+            .map(u32::from_le_bytes)
             .collect::<Vec<_>>();
         let expected = [-0.0, subnormal, f32::MAX, f32::MIN, 0.25, 0.0].map(f32::to_bits);
         assert_eq!(encoded, expected);

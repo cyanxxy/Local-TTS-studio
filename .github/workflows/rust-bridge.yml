@@ -51,8 +51,11 @@ jobs:
       # images ship. Pre-installing keeps the download off the cargo critical path.
       - run: rustup toolchain install --no-self-update
       # The vendored qwen3-tts-rs tree is digest-pinned to its upstream
-      # snapshot and is intentionally not held to local formatting.
-      - run: cargo fmt --manifest-path rust/local-tts-bridge/Cargo.toml --check
+      # snapshot and is intentionally not held to local formatting. Name the
+      # members: on the virtual workspace root a bare `cargo fmt` fails with
+      # "Failed to find targets", and `--all` would also format path
+      # dependencies such as the vendored crate.
+      - run: cargo fmt --manifest-path rust/Cargo.toml -p open-tts-bridge-core -p open-tts-local-bridge --check
 
   build-and-test:
     name: Build and test bridge (macOS arm64)
@@ -72,7 +75,7 @@ jobs:
         # channel, profile, and components from rust-toolchain.toml.
         run: |
           rustup toolchain install --no-self-update
-          brew install cmake libomp openssl@3 pkg-config automake autoconf libtool
+          brew install cmake libomp openssl@3 pkg-config
       - name: Point Cargo at Homebrew OpenSSL
         shell: bash
         run: |
@@ -83,7 +86,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: rust/local-tts-bridge
+          workspaces: rust -> local-tts-bridge/target
           env-vars: CARGO_TARGET_DIR MACOSX_DEPLOYMENT_TARGET
           # llama-cpp-sys keeps shared CMake dylibs in a non-Cargo directory
           # inside target. rust-cache prunes non-dependency target entries before

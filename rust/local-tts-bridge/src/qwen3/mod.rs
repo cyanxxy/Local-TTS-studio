@@ -1,34 +1,27 @@
 //! Qwen3-TTS hosted in the bridge through the vendored `qwen3-tts-rs`.
 //!
-//! The model-free modules (config, model_files, request, streaming, text) are
-//! compiled for tests on every target, and `bridge-policy-tests` includes them,
-//! so their suites run without a tensor provider. The rest needs
-//! `cfg(qwen3_native)`; other targets get the `unavailable` backend instead.
+//! The model-free policy (config, model_files, request, streaming, text) lives
+//! in `open_tts_bridge_core::qwen3`, so its tests run without a tensor
+//! provider. Everything here needs `cfg(qwen3_native)`; other targets get the
+//! `unavailable` backend instead.
 
 #[cfg(qwen3_native)]
 mod backend;
-#[cfg(any(test, qwen3_native))]
-mod config;
 #[cfg(qwen3_native)]
 mod engines;
 #[cfg(qwen3_native)]
 mod host;
-#[cfg(any(test, qwen3_native))]
-mod model_files;
 #[cfg(qwen3_native)]
 mod reference;
-#[cfg(any(test, qwen3_native))]
-mod request;
 #[cfg(qwen3_native)]
 mod runtime;
-#[cfg(any(test, qwen3_native))]
-mod streaming;
 #[cfg(qwen3_native)]
 mod target;
-#[cfg(any(test, qwen3_native))]
-mod text;
 #[cfg(any(test, not(qwen3_native)))]
 mod unavailable;
+
+#[cfg(qwen3_native)]
+use open_tts_bridge_core::qwen3::{config, model_files, request, streaming};
 
 pub const UPSTREAM_REVISION: &str = "288a716ce38a91c826dd67968c75d1dd4b0f07bc";
 /// Version of the vendored crate, reported by the probe.

@@ -1,37 +1,35 @@
 [package]
 name = "open-tts-local-bridge"
 version = "0.1.0"
-edition = "2024"
-rust-version = "1.94"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
-anyhow = "1.0"
+anyhow.workspace = true
 # `simd-unsafe` is on by default in 0.23 and swaps in hand-written AVX2/NEON
 # engines. Renderer-supplied base64 reaches this decoder, so keep the safe
 # scalar implementation.
 base64 = { version = "0.23", default-features = false, features = ["std"] }
 clap = { version = "4.5", features = ["derive"] }
-hound = "3.5"
+hound.workspace = true
 neutts = { version = "0.1.1", features = ["espeak"] }
 # 0.27 gates loading `.rten` files behind `rten_format`; the pinned NeuCodec
 # encoder is published only in that format.
 rten = { version = "0.27", features = ["rten_format"] }
 rten-tensor = "0.27"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+open-tts-bridge-core = { path = "../bridge-core" }
+serde.workspace = true
+serde_json.workspace = true
 sha1 = "0.11"
 sha2 = "0.11"
 hex = "0.4"
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # `default-features = false` would be a no-op: hf-hub (via neutts) depends on
 # the same ureq 3.4 with default features plus `json`/`socks-proxy`, and Cargo
 # unifies features per crate, so this build always gets `gzip` too. Declared
 # honestly — neucodec_encoder.rs must handle a transparently decoded body.
 ureq = { version = "3.4", features = ["rustls", "gzip"] }
 xet = { package = "hf-xet", version = "1.6" }
-
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 # build.rs sets `cfg(qwen3_native)` for exactly these two targets; change both
 # together.
@@ -43,13 +41,4 @@ qwen3-tts-rs = { path = "../vendor/qwen3-tts-rs", default-features = false, feat
 tch = "0.20"
 
 [dev-dependencies]
-tempfile = "3.27"
-
-# Cargo strips debuginfo from release artifacts by default. On a macOS 27 host
-# with MACOSX_DEPLOYMENT_TARGET=26.0 (set by scripts/rust-target-dir.mjs),
-# rustc's strip step leaves proc-macro dylibs with a misaligned LINKEDIT string
-# pool that dyld refuses to load, so every release build fails. Build scripts
-# and proc macros never ship, so leave them unstripped; the bridge binary keeps
-# the default.
-[profile.release.build-override]
-strip = false
+tempfile.workspace = true

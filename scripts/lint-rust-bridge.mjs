@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { rustBuildEnv } from "./rust-target-dir.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const manifestPath = path.join(rootDir, "rust", "local-tts-bridge", "Cargo.toml");
+const manifestPath = path.join(rootDir, "rust", "Cargo.toml");
 
 execFileSync(
   "cargo",

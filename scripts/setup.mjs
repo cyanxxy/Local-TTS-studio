@@ -64,17 +64,13 @@ function checkDesktopRequirements() {
     }
     requireTool(
       "pkg-config",
-      "Run: brew install cmake libomp openssl@3 pkg-config automake autoconf libtool",
+      "Run: brew install cmake libomp openssl@3 pkg-config",
     );
     requireTool(
       "pkg-config",
       "Run: brew install openssl@3 pkg-config",
       { args: ["--exists", "openssl"], subject: "OpenSSL 3" },
     );
-    for (const tool of ["automake", "autoconf"]) {
-      requireTool(tool, "Run: brew install automake autoconf libtool");
-    }
-    requireTool("glibtool", "Run: brew install libtool", { subject: "GNU libtool" });
     // MLX compiles its Metal kernels; newer Xcode releases ship the Metal
     // compiler as a separate download.
     requireTool("xcrun", "Run: xcodebuild -downloadComponent MetalToolchain", {

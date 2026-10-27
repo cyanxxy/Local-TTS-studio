@@ -2,8 +2,6 @@
 //! the `neutts` crate, plus the RTen NeuCodec encoder for WAV references.
 //! NeuTTS returns whole-text audio, which the request loop then frames.
 
-mod request;
-
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -17,7 +15,7 @@ use crate::protocol::{GenerationOutput, ensure_reference_audio_base64_len, round
 use crate::reference_audio::decode_bounded_mono_wav;
 use crate::resident_model;
 use crate::ws::{Backend, WebSocketConnection};
-use request::{
+use open_tts_bridge_core::neutts_request::{
     NEUTTS_DEFAULT_MODEL, NeuttsReference, ensure_neutts_codes_base64_len, neutts_codes_from_f32,
     parse_neutts_request, prevalidate_neutts_npy, validate_neutts_reference_codes,
 };
@@ -257,8 +255,10 @@ fn prepare_neutts_reference_samples(encoded: &str) -> Result<(Vec<f32>, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::request::{MAX_NEUTTS_REFERENCE_CODE_VALUE, MAX_NEUTTS_REFERENCE_CODES};
     use super::*;
+    use open_tts_bridge_core::neutts_request::{
+        MAX_NEUTTS_REFERENCE_CODE_VALUE, MAX_NEUTTS_REFERENCE_CODES,
+    };
 
     fn wav_base64_with_channels(channels: u16, sample_rate: u32, samples: &[i16]) -> String {
         let spec = hound::WavSpec {

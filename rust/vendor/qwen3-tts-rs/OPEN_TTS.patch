@@ -1,5 +1,5 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 7dca060..83bf423 100644
+index 7dca060..51dbbc7 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
 @@ -16,7 +16,7 @@ exclude = ["models/", "*.wav", ".DS_Store"]
@@ -11,8 +11,21 @@ index 7dca060..83bf423 100644
  
  # Serialization
  serde = { version = "1.0", features = ["derive"] }
-@@ -32,7 +32,8 @@ audiopus_sys = { version = "0.1", features = ["static"] }
- ogg = "0.9"
+@@ -25,39 +25,57 @@ serde_json = "1.0"
+ # Audio processing
+ hound = "3.5"
+ rubato = "0.16"
+-mp3lame-encoder = "0.2"
+-flacenc = "0.5"
+-audiopus = "0.2"
+-audiopus_sys = { version = "0.1", features = ["static"] }
+-ogg = "0.9"
++# Open TTS: the encoders serve only the HTTP API (`api` feature).
++mp3lame-encoder = { version = "0.2", optional = true }
++flacenc = { version = "0.5", optional = true }
++audiopus = { version = "0.2", optional = true }
++audiopus_sys = { version = "0.1", features = ["static"], optional = true }
++ogg = { version = "0.9", optional = true }
  
  # HTTP and file handling
 -base64 = "0.22"
@@ -21,24 +34,95 @@ index 7dca060..83bf423 100644
  url = "2.5"
  
  # Error handling
-@@ -48,7 +49,7 @@ tokio = { version = "1", features = ["full"] }
- tokio-stream = "0.1"
- async-stream = "0.3"
- clap = { version = "4", features = ["derive"] }
+ thiserror = "2.0"
+-anyhow = "1.0"
++anyhow = { version = "1.0", optional = true }
+ 
+ # Logging
+ tracing = "0.1"
+ 
+ # API server
+-axum = { version = "0.8", features = ["multipart"] }
+-tokio = { version = "1", features = ["full"] }
+-tokio-stream = "0.1"
+-async-stream = "0.3"
+-clap = { version = "4", features = ["derive"] }
 -tower-http = { version = "0.6", features = ["trace"] }
-+tower-http = { version = "0.7", features = ["trace"] }
- tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
++# Open TTS: optional so library users can leave out the server stack; see the
++# `api` and `cli` features.
++axum = { version = "0.8", features = ["multipart"], optional = true }
++tokio = { version = "1", features = ["full"], optional = true }
++tokio-stream = { version = "0.1", optional = true }
++async-stream = { version = "0.3", optional = true }
++clap = { version = "4", features = ["derive"], optional = true }
++tower-http = { version = "0.7", features = ["trace"], optional = true }
++tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
  
  [features]
-@@ -56,7 +57,7 @@ default = ["tch-backend"]
+-default = ["tch-backend"]
++default = ["tch-backend", "cli"]
  # Use libtorch/PyTorch as the computation backend (default)
  tch-backend = ["dep:tch"]
  # Use Apple MLX as the computation backend (macOS Apple Silicon only).
 -# Requires the mlx-c git submodule: `git submodule update --init --recursive`
 +# Requires the bundled mlx-c source tree documented in OPEN_TTS_VENDOR.md.
  mlx = []
++# Open TTS: the HTTP API module (`qwen3_tts_rs::api`) and its audio encoders.
++api = [
++    "dep:async-stream",
++    "dep:audiopus",
++    "dep:audiopus_sys",
++    "dep:axum",
++    "dep:flacenc",
++    "dep:mp3lame-encoder",
++    "dep:ogg",
++    "dep:tokio",
++    "dep:tokio-stream",
++]
++# Open TTS: the command-line binaries, including the API server.
++cli = ["api", "dep:anyhow", "dep:clap", "dep:tower-http", "dep:tracing-subscriber"]
  
  [build-dependencies]
+ cmake = "0.1"
+@@ -65,26 +83,37 @@ cmake = "0.1"
+ [[bin]]
+ name = "tts"
+ path = "src/bin/tts.rs"
++required-features = ["cli"]
+ 
+ [[bin]]
+ name = "voice_clone"
+ path = "src/bin/voice_clone.rs"
++required-features = ["cli"]
+ 
+ [[bin]]
+ name = "api_server"
+ path = "src/bin/api_server.rs"
++required-features = ["cli"]
+ 
+ [[bin]]
+ name = "pibot-tts-worker"
+ path = "src/bin/worker.rs"
++required-features = ["cli"]
+ 
+ [[bin]]
+ name = "qwen3-tts"
+ path = "src/bin/qwen3_tts_cli.rs"
++required-features = ["cli"]
+ 
+ [[bin]]
+ name = "trace_vocoder"
+ path = "src/bin/trace_vocoder.rs"
++required-features = ["cli"]
++
++[[bin]]
++name = "trace_rust"
++path = "src/bin/trace_rust.rs"
++required-features = ["cli"]
+ 
+ [dev-dependencies]
+ tempfile = "3.14"
 diff --git a/build.rs b/build.rs
 index f6ba158..94e40cd 100644
 --- a/build.rs
@@ -934,10 +1018,16 @@ index a6cd70d..e1b722e 100644
              GenerationConfig::from_file(&gen_config_path)?
          } else {
 diff --git a/src/lib.rs b/src/lib.rs
-index ba7872d..b956258 100644
+index ba7872d..6de034e 100644
 --- a/src/lib.rs
 +++ b/src/lib.rs
-@@ -94,6 +94,7 @@ pub mod audio;
+@@ -89,11 +89,13 @@ pub mod backend;
+ pub mod tensor;
+ pub mod trace;
+ 
++#[cfg(feature = "api")]
+ pub mod api;
+ pub mod audio;
  pub mod audio_encoder;
  pub mod config;
  pub mod error;

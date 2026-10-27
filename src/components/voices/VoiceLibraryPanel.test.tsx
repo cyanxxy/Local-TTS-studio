@@ -155,7 +155,9 @@ describe("VoiceLibraryPanel", () => {
     fireEvent.change(within(form).getByLabelText("Speed"), { target: { value: "1.25" } });
     expect(within(form).queryByLabelText("Seed")).toBeNull();
     fireEvent.click(within(form).getByRole("button", { name: "Save preset" }));
-    await screen.findByText(/Saved preset “George, brisk”/);
+    // Saving writes through fake-indexeddb, which can take over a second on a
+    // loaded coverage run; the default 1 s wait failed in CI.
+    await screen.findByText(/Saved preset “George, brisk”/, undefined, { timeout: 3_000 });
     const [saved] = await store.listVoices();
     expect(saved).toMatchObject({ kind: "preset", name: "George, brisk", preset: { engineId: "kokoro", voiceId: "bm_george", settings: { speed: 1.25 } } });
     expect(screen.queryByRole("form", { name: "Save preset for George" })).toBeNull();
@@ -169,7 +171,7 @@ describe("VoiceLibraryPanel", () => {
     fireEvent.change(within(form).getByLabelText("Seed"), { target: { value: "42" } });
     fireEvent.change(within(form).getByLabelText("Style instruction"), { target: { value: " Calm. " } });
     fireEvent.click(within(form).getByRole("button", { name: "Save preset" }));
-    await screen.findByText(/Saved preset “Aiden”/);
+    await screen.findByText(/Saved preset “Aiden”/, undefined, { timeout: 3_000 });
     expect((await store.listVoices())[0]).toMatchObject({ preset: { engineId: "qwen3", voiceId: "Aiden", settings: { seed: 42, instruction: "Calm." } } });
   });
 
