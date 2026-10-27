@@ -4,6 +4,22 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-10-27
+
+### Fixed
+
+- Qwen3 on the LibTorch backend (Windows x64 builds) generates speech again.
+  Every mode stopped with a `BFloat16 != float` error before any audio, because
+  the vendored runtime fed bf16 activations into f32 linear layers. LibTorch
+  linear layers now cast their input to the weight's dtype; Apple Silicon (MLX)
+  is unchanged.
+- The vendored `qwen3-tts` CLI now honours `--seed` on MLX and LibTorch
+  instead of printing that it ignores it. The app itself already seeded Qwen3
+  requests; this only affects the standalone CLI, which Open TTS does not ship.
+- The README credits for the Qwen3 runtime now name `second-state/qwen3_tts_rs`
+  by Michael Yuan and the MLX fork by Mario Zechner that Open TTS vendors, and
+  link the Qwen3-TTS repository instead of the Qwen organisation.
+
 ## [1.10.0] - 2026-10-26
 
 ### Added

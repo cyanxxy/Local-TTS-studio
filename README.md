@@ -115,7 +115,8 @@ Open TTS is a shell around other people's research. The models and runtimes are 
 | [Chatterbox Turbo](https://huggingface.co/ResembleAI/chatterbox-turbo-ONNX) by Resemble AI | Zero-shot cloning with expression tags (MIT) |
 | [Audio8 TTS](https://huggingface.co/Audio8/Audio8-TTS-Preview-0.6B-ONNX-INT4) by Audio8 | Native ONNX INT4 model, runtime adapted from Audio8's Apache-2.0 reference |
 | [NeuTTS](https://github.com/neuphonic/neutts-air) by Neuphonic | Nano and Air voices via the `neutts` Rust crate |
-| [Qwen3-TTS](https://github.com/QwenLM) by the Qwen team · [`qwen3-tts-rs`](https://github.com/juntao/qwen3_tts_rs) by juntao | Desktop voice model and its Rust implementation, vendored and patched ([notes](./rust/vendor/qwen3-tts-rs/OPEN_TTS_VENDOR.md)) |
+| [Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS) by the Qwen team | Desktop voice model (Apache-2.0), with [`mlx-community`](https://huggingface.co/mlx-community) 6-bit conversions on Apple Silicon |
+| [`qwen3-tts-rs`](https://github.com/second-state/qwen3_tts_rs) by Michael Yuan (Second State) · [MLX fork](https://github.com/badlogic/qwen3_tts_rs) by Mario Zechner | Rust implementation of Qwen3-TTS and its MLX backend. Open TTS vendors Mario's fork, which adds the quantized MLX layers the 6-bit models need, and patches it ([notes](./rust/vendor/qwen3-tts-rs/OPEN_TTS_VENDOR.md)) |
 | [eSpeak NG](https://github.com/espeak-ng/espeak-ng) | Phonemizer (GPL-3.0-or-later) for Kokoro, Kitten, Paradee, and Piper |
 | [ONNX Runtime](https://onnxruntime.ai) · [Transformers.js](https://github.com/huggingface/transformers.js) | Browser and Node model execution |
 | [MLX](https://github.com/ml-explore/mlx) · [LibTorch](https://pytorch.org) | Native tensor backends for Qwen3-TTS |

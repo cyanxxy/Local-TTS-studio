@@ -3,7 +3,9 @@
 This directory is a source snapshot, not a live Git checkout or submodule.
 
 - `badlogic/qwen3_tts_rs`: `288a716ce38a91c826dd67968c75d1dd4b0f07bc`
-  (crate version 0.2.2)
+  (crate version 0.2.2), Mario Zechner's MLX fork of
+  `second-state/qwen3_tts_rs` by Michael Yuan. The fork adds the quantized MLX
+  layers that the `mlx-community` 6-bit profiles need.
 - nested `badlogic/mlx-c`: `22a304206cbc77a5f74d0e0eb7363f2a6998d74f`
 
 Open TTS carries a patch in `OPEN_TTS.patch`. It:
@@ -69,11 +71,28 @@ capability.
 ## Seeded sampling
 
 `tensor::set_sampling_seed` makes sampling reproducible. On MLX, which upstream
-seeds from the clock on every categorical draw (its CLI accepts `--seed` but
-ignores it), a seed turns the per-draw PRNG key into the seed plus a draw
-counter; `None` restores clock seeding. On LibTorch it calls
-`tch::manual_seed`. The bridge reseeds before every text unit when a request
-carries a seed.
+seeds from the clock on every categorical draw, a seed turns the per-draw PRNG
+key into the seed plus a draw counter; `None` restores clock seeding. On
+LibTorch it calls `tch::manual_seed`. The bridge reseeds before every text unit
+when a request carries a seed.
+
+The `qwen3-tts` CLI's `--seed`, which upstream accepts but ignores with a
+warning, now calls it once, just before generation, so model and reference
+loading cannot shift the draw sequence. Without `--seed` the CLI samples as
+upstream does. `pibot-tts-worker` still ignores its `--seed`. Open TTS builds
+neither binary, so no Open TTS test covers this change.
+
+## LibTorch dtypes
+
+The fork keeps `text_embedding` in the checkpoint's bf16 and rounds several
+talker inputs to bf16 to match Python MLX numerics, while LibTorch `Linear`
+weights are converted to f32. LibTorch's `matmul` does not promote mixed
+dtypes, so every Qwen3 mode on the LibTorch backend failed with
+`BFloat16 != float` before producing audio. On LibTorch only, `Linear::forward`
+now casts its input to the weight's dtype. The MLX path is unchanged. With the
+pinned official checkpoints on LibTorch CPU, CustomVoice 0.6B, Base 0.6B voice
+cloning, and VoiceDesign 1.7B all produced speech through the bridge's
+streaming calls, and the same seed reproduced the same audio.
 
 ## Regenerating the patch
 
@@ -105,8 +124,9 @@ forward-applies it.
    confirm `build_input_embeddings` (optional language),
    `build_voice_design_input_embeddings`, the shared instruct prompt,
    `generate_with_instruct_streaming`, `generate_codes_streaming_with_penalty`,
-   the on-device repetition penalty in `predict_code_0`, and the bundled mlx-c
-   error message still match the new upstream APIs.
+   the on-device repetition penalty in `predict_code_0`, the LibTorch input
+   cast in `Linear::forward`, and the bundled mlx-c error message still match
+   the new upstream APIs.
 6. Update both pinned revisions, refresh `OPEN_TTS.patch`, and update the
    expected vendor digest in `electron/qwen3Vendor.test.ts` in the same change.
 7. Run `npx vitest run electron/qwen3Vendor.test.ts`, then the Rust bridge tests
