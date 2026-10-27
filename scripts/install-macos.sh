@@ -29,7 +29,7 @@ APP_NAME="Open TTS"
 MIN_MACOS_MAJOR=26
 MIN_FREE_GB=20
 # Mirrors the macOS prerequisites in scripts/setup.mjs and docs/development.md.
-BREW_FORMULAS=(cmake libomp openssl@3 pkg-config automake autoconf libtool)
+BREW_FORMULAS=(cmake libomp openssl@3 pkg-config)
 
 INSTALL_HOME="${OPEN_TTS_INSTALL_HOME:-$HOME/Library/Application Support/Open TTS Installer}"
 TOOLCHAIN_DIR="$INSTALL_HOME/toolchain"
@@ -169,9 +169,6 @@ brew_formula_needed() {
     libomp) [[ ! -d $prefix/opt/libomp ]] ;;
     openssl@3) ! pkg-config --exists openssl >/dev/null 2>&1 ;;
     pkg-config) ! command -v pkg-config >/dev/null 2>&1 ;;
-    automake) ! command -v automake >/dev/null 2>&1 ;;
-    autoconf) ! command -v autoconf >/dev/null 2>&1 ;;
-    libtool) ! command -v glibtool >/dev/null 2>&1 ;;
   esac
 }
 

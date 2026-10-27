@@ -72,7 +72,7 @@ jobs:
         # channel, profile, and components from rust-toolchain.toml.
         run: |
           rustup toolchain install --no-self-update
-          brew install cmake libomp openssl@3 pkg-config automake autoconf libtool
+          brew install cmake libomp openssl@3 pkg-config
       - name: Point Cargo at Homebrew OpenSSL
         shell: bash
         run: |

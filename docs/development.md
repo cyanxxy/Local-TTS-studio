@@ -11,7 +11,7 @@ process in [releasing.md](./releasing.md).
 - [rustup](https://rustup.rs/) for Electron desktop development, desktop builds, packaging, and Rust bridge tests. `rust-toolchain.toml` pins Rust 1.99.1 with `clippy` and `rustfmt`; a Rust installed through Homebrew or a distribution package manager ignores that pin.
 - Desktop builds run on Apple Silicon macOS or Windows x64 only. `npm run setup:desktop` rejects Intel macOS, Windows on Arm, and Linux outright.
 - Native prerequisites for desktop builds, which `npm run setup:desktop` hard-fails on rather than installing for you:
-  - macOS: `brew install cmake libomp openssl@3 pkg-config automake autoconf libtool`, plus Xcode's Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), which newer Xcode releases no longer include by default
+  - macOS: `brew install cmake libomp openssl@3 pkg-config`, plus Xcode's Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), which newer Xcode releases no longer include by default
   - Windows: CMake on `PATH`, plus `LIBTORCH` pointing at a LibTorch 2.7.0 release directory
 - The Rust scripts build for the app's minimum macOS (`minimumSystemVersion`, currently 26.0) unless `MACOSX_DEPLOYMENT_TARGET` is already set, matching CI, so a bridge built on a newer macOS still runs on the oldest supported release.
 - The web app alone can run without Rust; desktop commands build `rust/local-tts-bridge` before launching Electron.
