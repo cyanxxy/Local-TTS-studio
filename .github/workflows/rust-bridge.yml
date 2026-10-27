@@ -121,3 +121,36 @@ jobs:
         run: npm run test:rust -- --release
       - name: Probe packaged bridge
         run: ./dist-rust/open-tts-local-bridge --action probe --model qwen3 --cache-dir "$RUNNER_TEMP/open-tts-probe"
+
+  check-windows:
+    name: Check bridge (Windows x64)
+    runs-on: windows-2025
+    timeout-minutes: 90
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}\rust\target
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - run: rustup toolchain install --no-self-update
+      # tch 0.20 needs LibTorch 2.7.0 (docs/local-runtimes.md). The CPU build is
+      # enough to compile and lint the LibTorch code path.
+      - name: Download LibTorch 2.7.0 (CPU)
+        shell: pwsh
+        run: |
+          $ProgressPreference = "SilentlyContinue"
+          $zip = Join-Path $env:RUNNER_TEMP "libtorch.zip"
+          Invoke-WebRequest -Uri "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.7.0%2Bcpu.zip" -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
+          "LIBTORCH=$(Join-Path $env:RUNNER_TEMP 'libtorch')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: rust -> target
+          env-vars: CARGO_TARGET_DIR LIBTORCH
+          # Same reason as the macOS job: llama-cpp-sys keeps CMake output
+          # outside Cargo's artifacts, so cache the registry only.
+          cache-targets: false
+          key: windows-v1
+      # Compiles and lints everything the Windows build links, including the
+      # cfg(qwen3_native) LibTorch backend that no other job builds. Tests are
+      # not run: they would need the LibTorch DLLs on PATH and models.
+      - name: Clippy
+        run: cargo clippy --locked --release --manifest-path rust/Cargo.toml --all-targets -- -D warnings
