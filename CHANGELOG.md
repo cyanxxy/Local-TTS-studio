@@ -4,8 +4,23 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- CI now compiles and Clippy-lints the Windows x64 bridge, including its
+  LibTorch Qwen3 backend, and checks the Rust dependencies with `cargo-deny`
+  (security advisories, licences, and sources, per `rust/deny.toml`).
+
 ### Changed
 
+- `rust/` is a Cargo workspace: the model-free bridge code (WebSocket
+  transport, protocol, request and streaming policy) is the
+  `open-tts-bridge-core` crate, replacing `bridge-policy-tests` and its
+  path includes, with one shared `Cargo.lock` and shared lint settings.
+- The bridge no longer compiles the vendored `qwen3-tts-rs` HTTP server and
+  its MP3, FLAC, and Opus encoders, which drops 30 crates from the build.
+  macOS desktop builds no longer need `automake`, `autoconf`, or `libtool`.
+- Rust 1.99.1 (was 1.97.1). WebSocket TCP keepalive now uses `socket2`
+  instead of an `unsafe` `setsockopt` call and also applies on Windows.
 - CI skips the Linux bridge integration test on pull requests that change no
   bridge inputs, which shortens frontend-only runs from about 7 to about 4
   minutes. The Node 26 leg now runs only Vitest and the web build, and the
