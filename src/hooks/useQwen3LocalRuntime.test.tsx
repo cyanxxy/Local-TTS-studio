@@ -929,6 +929,84 @@ describe("useQwen3LocalRuntime long-text batching", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("ignores a late cancellation after cancelActiveGeneration, keeping audio restored in the meantime", async () => {
+    vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
+    let emitAudioChunk: ((event: Record<string, unknown>) => void) | undefined;
+    let rejectGenerate: ((error: Error) => void) | undefined;
+    const generate = vi.fn((request: GenerateRequest) => {
+      void request;
+      return new Promise<never>((_resolve, reject) => {
+        rejectGenerate = reject;
+      });
+    });
+    // Like the main process: cancel acknowledges at once, and the open
+    // generate() promise rejects with "Generation cancelled." later.
+    const cancel = vi.fn().mockResolvedValue({ cancelled: true });
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate,
+        cancel,
+        subscribeProgress: vi.fn(() => () => undefined),
+        subscribeAudioChunk: vi.fn((listener) => {
+          emitAudioChunk = listener as (event: Record<string, unknown>) => void;
+          return () => undefined;
+        }),
+      },
+    } as never;
+    const { player, methods } = audioPlayer();
+    const setShowPlayer = vi.fn();
+    const { result } = renderHook(() => useQwen3LocalRuntime({
+      enabled: true,
+      text: "A Studio line that history replay interrupts.",
+      player,
+      setShowPlayer,
+    }));
+
+    await waitFor(() => expect(result.current.canGenerate).toBe(true));
+    act(() => result.current.handleGenerate());
+    await waitFor(() => expect(generate).toHaveBeenCalledTimes(1));
+    const request = generate.mock.calls[0][0];
+    const audio = new Float32Array([0.2, -0.2]);
+    act(() => {
+      emitAudioChunk!({
+        requestId: request.requestId,
+        model: "qwen3",
+        index: 0,
+        total: 3,
+        sampleRate: 24_000,
+        sampleCount: audio.length,
+        silenceAfterSamples: 0,
+        audio: audio.buffer,
+      });
+    });
+    await waitFor(() => expect(methods.scheduleChunk).toHaveBeenCalledTimes(1));
+
+    // Studio history replay / a whole-script take: cancel, then put other
+    // audio in the player before the main process settles the request.
+    act(() => result.current.cancelActiveGeneration());
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(result.current.isGenerating).toBe(false);
+    const resetCount = methods.reset.mock.calls.length;
+    const truncateCount = methods.truncateAudioChunks.mock.calls.length;
+    setShowPlayer.mockClear();
+
+    await act(async () => {
+      rejectGenerate!(new Error("Generation cancelled."));
+    });
+
+    expect(methods.reset).toHaveBeenCalledTimes(resetCount);
+    expect(methods.truncateAudioChunks).toHaveBeenCalledTimes(truncateCount);
+    expect(setShowPlayer).not.toHaveBeenCalled();
+    expect(result.current.isGenerating).toBe(false);
+    expect(result.current.error).toBeNull();
+    expect(result.current.canGenerate).toBe(true);
+  });
+
 });
 
 describe("useQwen3LocalRuntime identity", () => {
@@ -954,6 +1032,69 @@ describe("useQwen3LocalRuntime identity", () => {
     expect(result.current.error).toBe("Qwen3 setup failed.");
     expect(result.current.handleStop).toBe(initial.handleStop);
     expect(result.current.resetGeneratedAudio).toBe(initial.resetGeneratedAudio);
+  });
+
+  it("does not re-render its owner for bridge progress events nothing displays", async () => {
+    vi.mocked(useQwen3Runtime).mockReturnValue(runtimeSettings() as never);
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+    vi.stubGlobal("cancelAnimationFrame", () => undefined);
+    let progressListener: ((event: Record<string, unknown>) => void) | undefined;
+    let activeRequestId: string | undefined;
+    window.electron = {
+      isElectron: true,
+      platform: "darwin",
+      arch: "arm64",
+      localTts: {
+        probe: vi.fn().mockResolvedValue({ ready: true, message: "ready", runtime: "rust" }),
+        warm: vi.fn().mockResolvedValue({ warmed: true }),
+        generate: vi.fn((request: GenerateRequest) => {
+          activeRequestId = request.requestId;
+          return new Promise<never>(() => undefined);
+        }),
+        cancel: vi.fn().mockResolvedValue({ cancelled: true }),
+        subscribeProgress: vi.fn((listener) => {
+          progressListener = listener as (event: Record<string, unknown>) => void;
+          return () => undefined;
+        }),
+        subscribeAudioChunk: vi.fn(() => () => undefined),
+      },
+    } as never;
+    const { player } = audioPlayer();
+    let renders = 0;
+    try {
+      const { result } = renderHook(() => {
+        renders += 1;
+        return useQwen3LocalRuntime({
+          enabled: true,
+          text: "A short sentence for the local runtime to speak.",
+          player,
+          setShowPlayer: vi.fn(),
+        });
+      });
+      await waitFor(() => expect(result.current.canGenerate).toBe(true));
+      act(() => result.current.handleGenerate());
+      await waitFor(() => expect(activeRequestId).toBeDefined());
+      await act(async () => { await Promise.resolve(); });
+      while (frames.length) act(() => frames.shift()!(0));
+
+      const before = renders;
+      for (let step = 0; step < 20; step += 1) {
+        act(() => {
+          progressListener?.({
+            requestId: activeRequestId,
+            model: "qwen3",
+            phase: "decode",
+            message: `step ${step}`,
+            elapsedSec: step / 10,
+          });
+        });
+        act(() => frames.shift()?.(0));
+      }
+      expect(renders).toBe(before);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

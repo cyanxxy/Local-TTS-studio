@@ -66,6 +66,8 @@ import { createWorkerRuntime, type GenerateMessage, type LoadMessage } from "./k
 
 const DOWNLOAD_PROGRESS_MAX = 90;
 const WARMUP_PROGRESS_PERCENT = 95;
+// The host counts on this size to know when a clip may have been evicted and
+// must be sent again (WORKER_REFERENCE_SLOTS in lib/chatterboxClips.ts).
 const MAX_CACHED_REFERENCES = 16;
 const WARMUP_TEXT = "Hello.";
 const WARMUP_MAX_NEW_TOKENS = 8;

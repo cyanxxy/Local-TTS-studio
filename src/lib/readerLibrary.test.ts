@@ -15,6 +15,7 @@ import {
   getCachedReaderAudioSignature,
   getReaderDocument,
   listReaderDocuments,
+  mergeReaderDocumentEdits,
   saveReaderProgress,
   openReaderLibrary,
   saveCachedReaderAudio,
@@ -113,6 +114,40 @@ describe("readerLibrary", () => {
     await saveReaderDocument(newer);
     expect((await listReaderDocuments()).map((document) => document.id)).toEqual(["newer", "older"]);
     expect((await getReaderDocument("older"))?.text).toBe("Older text");
+  });
+
+  it("merges a save made from a stale base with what another tab stored since", async () => {
+    const base = createReaderDocument({ id: "shared", text: "One. Two.", now: 100 });
+    await saveReaderDocument(base);
+    const bookmark = { id: "b1", label: "Mark", textOffset: 0, chapterId: null, sectionId: null, positionSec: 0, createdAt: 110 };
+    const fromTabA = { ...base, title: "Tab A title", bookmarks: [bookmark], updatedAt: 110 };
+    expect(await saveReaderDocument(fromTabA, base)).toBe(fromTabA);
+
+    const note = { id: "n1", text: "Note", quote: "Two", textOffset: 5, chapterId: null, sectionId: null, createdAt: 120, updatedAt: 120 };
+    const fromTabB = { ...base, title: "Tab B title", author: "Tab B author", notes: [note], updatedAt: 120 };
+    const saved = await saveReaderDocument(fromTabB, base);
+
+    const stored = (await getReaderDocument("shared"))!;
+    // Both changed the title: the save being made wins it.
+    expect(stored).toMatchObject({ title: "Tab B title", author: "Tab B author", updatedAt: saved.updatedAt });
+    expect(stored.bookmarks.map(({ id }) => id)).toEqual(["b1"]);
+    expect(stored.notes.map(({ id }) => id)).toEqual(["n1"]);
+    // Newer than what it merged with, so tab A, still based on its own save,
+    // merges in turn.
+    expect(saved.updatedAt).toBeGreaterThan(fromTabA.updatedAt);
+  });
+
+  it("keeps deletions and one-sided changes when merging tab edits", () => {
+    const bookmark = { id: "b1", label: "Mark", textOffset: 0, chapterId: null, sectionId: null, positionSec: 0, createdAt: 1 };
+    const base = { ...createReaderDocument({ id: "shared", text: "One. Two.", now: 100 }), bookmarks: [bookmark] };
+    // Removed here; the other tab edited the text and moved on.
+    const local = { ...base, bookmarks: [], updatedAt: 200 };
+    const remote = { ...base, text: "One. Two. Three.", updatedAt: 150 };
+
+    const merged = mergeReaderDocumentEdits(base, local, remote);
+    expect(merged.bookmarks).toEqual([]);
+    expect(merged.text).toBe("One. Two. Three.");
+    expect(merged.updatedAt).toBe(200);
   });
 
   it("persists the active document independently", async () => {
@@ -408,5 +443,63 @@ describe("readerLibrary", () => {
 
     expect(await getCachedReaderAudio(document.id, "section-0")).toBeNull();
     expect((await getCachedReaderAudio(document.id, "section-96"))?.signature).toBe("signature-96");
+  });
+
+  describe("when storage is full", () => {
+    const sectionAudio = (index: number, samples = 4): CachedReaderAudio => {
+      const audio = new Float32Array(samples).buffer;
+      return {
+        cacheKey: createReaderAudioCacheKey("full-disk", `section-${index}`),
+        documentId: "full-disk",
+        chapterId: "chapter-1",
+        sectionId: `section-${index}`,
+        signature: `signature-${index}`,
+        chunks: [{ audio, samplingRate: 24_000, text: "section", index: 0, total: 1 }],
+        byteLength: audio.byteLength,
+        currentTime: 0,
+        playbackRate: 1,
+        totalDuration: 1,
+        updatedAt: index,
+      };
+    };
+    // The audio store refuses `failures` writes the way a full origin does.
+    const refuseAudioWrites = (failures: number) => {
+      const put = IDBObjectStore.prototype.put;
+      let remaining = failures;
+      return vi.spyOn(IDBObjectStore.prototype, "put").mockImplementation(function (this: IDBObjectStore, ...args) {
+        if (this.name === "chapter-audio" && remaining > 0) {
+          remaining -= 1;
+          throw new DOMException("The quota has been exceeded.", "QuotaExceededError");
+        }
+        return put.apply(this, args);
+      });
+    };
+
+    it("evicts the oldest cached sections and saves once more", async () => {
+      for (const index of [1, 2, 3]) await saveCachedReaderAudio(sectionAudio(index));
+      const put = refuseAudioWrites(1);
+      try {
+        await saveCachedReaderAudio(sectionAudio(4));
+      } finally {
+        put.mockRestore();
+      }
+
+      // Room for one section of the same size: only the oldest one goes.
+      expect(await getCachedReaderAudio("full-disk", "section-1")).toBeNull();
+      expect(await getCachedReaderAudio("full-disk", "section-2")).not.toBeNull();
+      expect(await getCachedReaderAudio("full-disk", "section-3")).not.toBeNull();
+      expect((await getCachedReaderAudio("full-disk", "section-4"))?.signature).toBe("signature-4");
+    });
+
+    it("gives up after one retry", async () => {
+      for (const index of [1, 2]) await saveCachedReaderAudio(sectionAudio(index));
+      const put = refuseAudioWrites(2);
+      try {
+        await expect(saveCachedReaderAudio(sectionAudio(3, 16))).rejects.toMatchObject({ name: "QuotaExceededError" });
+      } finally {
+        put.mockRestore();
+      }
+      expect(await getCachedReaderAudio("full-disk", "section-3")).toBeNull();
+    });
   });
 });

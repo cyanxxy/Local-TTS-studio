@@ -85,9 +85,13 @@ export function createLoadProgress({
 
   const emit = (): void => {
     if (closed) return;
-    // Hundredths of a percent are finer than any bar renders, and rounding
-    // keeps float noise from posting a message per received network chunk.
-    const percent = Math.round((from + clampFraction(fraction()) * (to - from)) * 100) / 100;
+    // Whole percents: no bar renders finer, and every report is a worker
+    // message the host turns into a full React commit, so hundredths cost up to
+    // ten thousand commits per load. Rounding also keeps float noise (46.999…)
+    // from posting a step of its own; a finished download reports the end of
+    // the range exactly, even when that end is fractional.
+    const value = clampFraction(fraction());
+    const percent = value >= 1 ? to : Math.round(from + value * (to - from));
     if (percent <= lastPercent) return;
     lastPercent = percent;
     report(percent);

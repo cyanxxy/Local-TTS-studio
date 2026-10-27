@@ -50,4 +50,59 @@ describe("createAuditionPlayer", () => {
     player.dispose();
     expect(raw.close).toHaveBeenCalledOnce();
   });
+
+  describe("while a suspended context resumes", () => {
+    function suspendedContext() {
+      const fake = fakeContext();
+      fake.raw.state = "suspended";
+      const resumes: Array<() => void> = [];
+      fake.raw.resume = vi.fn(() => new Promise<undefined>((resolve) => {
+        resumes.push(() => {
+          fake.raw.state = "running";
+          resolve(undefined);
+        });
+      }));
+      return { ...fake, resumeAll: () => { for (const resume of resumes.splice(0)) resume(); } };
+    }
+
+    it("starts only the latest of two plays", async () => {
+      const { context, sources, resumeAll } = suspendedContext();
+      const player = createAuditionPlayer(() => context);
+      const first = vi.fn();
+      const firstPlay = player.play({ samples: new Float32Array(10), sampleRate: 24_000 }, first);
+      const secondPlay = player.play({ samples: new Float32Array(10), sampleRate: 24_000 });
+      resumeAll();
+      await Promise.all([firstPlay, secondPlay]);
+
+      expect(sources).toHaveLength(1);
+      expect(sources[0].start).toHaveBeenCalledOnce();
+      // The replaced audition still ends, once.
+      expect(first).toHaveBeenCalledOnce();
+    });
+
+    it("does not start after a stop", async () => {
+      const { context, sources, resumeAll } = suspendedContext();
+      const player = createAuditionPlayer(() => context);
+      const onEnded = vi.fn();
+      const playing = player.play({ samples: new Float32Array(10), sampleRate: 24_000 }, onEnded);
+      player.stop();
+      resumeAll();
+      await playing;
+
+      expect(sources).toHaveLength(0);
+      expect(onEnded).toHaveBeenCalledOnce();
+    });
+
+    it("does not touch the context after dispose", async () => {
+      const { context, raw, resumeAll } = suspendedContext();
+      const player = createAuditionPlayer(() => context);
+      const playing = player.play({ samples: new Float32Array(10), sampleRate: 24_000 });
+      player.dispose();
+      resumeAll();
+
+      await expect(playing).resolves.toBeUndefined();
+      expect(raw.createBuffer).not.toHaveBeenCalled();
+      expect(raw.close).toHaveBeenCalledOnce();
+    });
+  });
 });

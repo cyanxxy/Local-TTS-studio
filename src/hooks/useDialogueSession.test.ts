@@ -179,6 +179,27 @@ describe("useDialogueSession", () => {
     window.localStorage.clear();
   });
 
+  it("drops malformed stored voice choices and casts those speakers from the pool", () => {
+    window.localStorage.clear();
+    window.localStorage.setItem("test:dialogue", JSON.stringify({
+      source: SCRIPT,
+      overrides: {
+        anna: null,
+        ben: { engineId: "audio8", voiceId: "narrator", settings: {} },
+        cara: { engineId: "kokoro", voiceId: 7, settings: {} },
+        dan: { engineId: "kokoro", voiceId: "af_heart" },
+      },
+    }));
+    const { result } = setup(() => tone(10, 1), "", "test:dialogue");
+    expect(result.current.casting.anna.voiceId).toBe("af_heart");
+    expect(result.current.casting.ben.engineId).toBe("audio8");
+    expect(result.current.plan?.steps).toHaveLength(2);
+
+    window.localStorage.setItem("test:dialogue", JSON.stringify({ source: SCRIPT, overrides: ["not", "a", "map"] }));
+    expect(setup(() => tone(10, 1), "", "test:dialogue").result.current.casting.anna.voiceId).toBe("af_heart");
+    window.localStorage.clear();
+  });
+
   it("reports out-of-range pauses and stitches only once the render has finished", async () => {
     const { result } = setup(() => tone(10, 1));
     act(() => result.current.setGaps({ speakerChangeGapSec: 9 }));

@@ -263,6 +263,41 @@ describe("useReaderLibrary", () => {
       .toEqual([third.id]));
   });
 
+  it("keeps another tab's annotations when this tab saves its stale copy of the book", async () => {
+    const seed = "Seed text for two tabs. It has two sentences.";
+    const tabA = renderHook(() => useReaderLibrary(seed));
+    await waitFor(() => expect(tabA.result.current.loading).toBe(false));
+    const tabB = renderHook(() => useReaderLibrary(seed));
+    await waitFor(() => expect(tabB.result.current.loading).toBe(false));
+    const id = tabA.result.current.activeDocument!.id;
+    expect(tabB.result.current.activeDocument?.id).toBe(id);
+    const stored = async () => (await listReaderDocuments()).find((document) => document.id === id)!;
+
+    act(() => tabA.result.current.addBookmark({ label: "Tab A mark", textOffset: 5, positionSec: 0 }));
+    await waitFor(async () => expect((await stored()).bookmarks).toHaveLength(1));
+    // Tab B never saw the bookmark, and its note saves the whole book.
+    act(() => tabB.result.current.addNote({ text: "Tab B note", quote: "Seed", textOffset: 0 }));
+    await waitFor(async () => expect((await stored()).notes).toHaveLength(1));
+    expect((await stored()).bookmarks.map((bookmark) => bookmark.label)).toEqual(["Tab A mark"]);
+    // Tab B's copy picks up what it merged.
+    expect(tabB.result.current.activeDocument!.bookmarks.map((bookmark) => bookmark.label)).toEqual(["Tab A mark"]);
+
+    // A deletion in one tab is not undone by the other tab's next save.
+    const [bookmark] = tabA.result.current.activeDocument!.bookmarks;
+    act(() => tabA.result.current.removeBookmark(bookmark.id));
+    await waitFor(async () => expect((await stored()).bookmarks).toHaveLength(0));
+    act(() => tabB.result.current.addNote({ text: "Second note", quote: "two", textOffset: 30 }));
+    await waitFor(async () => expect((await stored()).notes).toHaveLength(2));
+    expect((await stored()).bookmarks).toEqual([]);
+
+    // And tab A's next save keeps both of tab B's notes.
+    act(() => tabA.result.current.addHighlight({ start: 0, end: 4, color: "yellow" }));
+    await waitFor(async () => expect((await stored()).highlights).toHaveLength(1));
+    expect((await stored()).notes.map((note) => note.text)).toEqual(["Tab B note", "Second note"]);
+    tabA.unmount();
+    tabB.unmount();
+  });
+
   it("moves highlights with their words when the text is edited", async () => {
     const seed = "Keep this phrase. Drop these words. Keep that phrase.";
     const { result } = renderHook(() => useReaderLibrary(seed));
