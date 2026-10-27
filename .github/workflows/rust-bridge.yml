@@ -7,6 +7,8 @@ on:
     paths:
       - "rust/**"
       - "rust-toolchain.toml"
+      # Controls how the vendored qwen3-tts-rs tree is checked out.
+      - ".gitattributes"
       - "scripts/*rust*"
       - ".npmrc"
       - ".nvmrc"
@@ -17,6 +19,8 @@ on:
     paths:
       - "rust/**"
       - "rust-toolchain.toml"
+      # Controls how the vendored qwen3-tts-rs tree is checked out.
+      - ".gitattributes"
       - "scripts/*rust*"
       - ".npmrc"
       - ".nvmrc"

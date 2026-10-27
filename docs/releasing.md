@@ -18,20 +18,27 @@ non-release pushes to `main`.
 
 Before a release branch merges, `.github/workflows/ci.yml` validates linting,
 the Electron type check, Vitest with the coverage thresholds from
-`vitest.config.ts`, and the web build, once on the Node release pinned in
-`.nvmrc` and once on Node 26. A separate job in the same workflow runs the
-native-bridge integration test (`electron/rustLocalBridge.test.ts`) on Linux in
-its own Vitest process, so the Cargo build it performs cannot slow the
-timing-sensitive Electron tests. `.github/workflows/rust-bridge.yml`
-additionally checks formatting, then builds, Clippy-lints, tests, and probes
-the native bridge on Apple Silicon; it triggers on changes to Rust sources, the
-bridge build scripts, `rust-toolchain.toml`, `.npmrc`, `.nvmrc`,
-`package.json`, and `package-lock.json`, and can be started by hand from the
+`vitest.config.ts`, and the web build on the Node release pinned in `.nvmrc`.
+A Node 26 leg repeats Vitest (without coverage) and the web build, since lint,
+the type check, and the coverage gate do not depend on the Node version. A
+separate job in the same workflow runs the native-bridge integration test
+(`electron/rustLocalBridge.test.ts`) on Linux in its own Vitest process, so the
+Cargo build it performs cannot slow the timing-sensitive Electron tests. On
+pull requests that job runs only when a bridge input changed: the Rust sources
+and toolchain, the `scripts/*rust*` wrappers, the test file, the Vitest config,
+setup file, and plugin it loads, the npm install inputs, `.gitattributes`, or
+`ci.yml` itself. Pushes to `main` and manual runs always run it.
+`.github/workflows/rust-bridge.yml` additionally checks formatting, then
+builds, Clippy-lints, tests, and probes the native bridge on Apple Silicon; it
+triggers on changes to Rust sources, the bridge build scripts,
+`rust-toolchain.toml`, `.npmrc`, `.nvmrc`, `package.json`,
+`package-lock.json`, and `.gitattributes`, and can be started by hand from the
 Actions tab.
 
 The final `Lint, test, and build web` check preserves the branch-protection
-context and succeeds only when both Node matrix entries and Linux bridge
-integration have passed.
+context and succeeds only when both Node matrix entries have passed and the
+Linux bridge integration has either passed or was skipped because the change
+detection found no bridge inputs.
 
 Workflow actions are pinned to commit SHAs with the release version in a
 trailing comment. `.github/dependabot.yml` raises weekly pull requests for

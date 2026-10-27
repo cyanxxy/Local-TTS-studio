@@ -15,6 +15,50 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  changes:
+    name: Detect bridge changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      bridge: ${{ steps.filter.outputs.bridge }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          # A pull_request run checks out GitHub's test merge commit, whose
+          # first parent is the base branch tip, so HEAD^1..HEAD is the PR diff.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Decide whether the Linux bridge test must run
+        id: filter
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+
+          # Pushes to main and manual runs always run the bridge test, as does
+          # any checkout that is not a merge commit.
+          if [[ "$EVENT_NAME" != "pull_request" ]] || ! git rev-parse --verify --quiet HEAD^2 >/dev/null; then
+            echo "bridge=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          changed="$(git diff --name-only HEAD^1 HEAD)"
+          printf '%s\n' "$changed"
+
+          # Everything the bridge job builds, runs, or configures: the Rust
+          # sources and toolchain, the cargo wrapper scripts, the test file and
+          # the Vitest config, setup, and plugin it loads, the npm install
+          # inputs, .gitattributes (it controls how rust/vendor is checked
+          # out), and this workflow.
+          bridge_paths='^(rust/|rust-toolchain\.toml$|scripts/[^/]*rust[^/]*$|electron/rustLocalBridge\.test\.ts$|vitest\.config\.ts$|src/test-setup\.ts$|vite\.kokoroAssets\.ts$|package\.json$|package-lock\.json$|\.npmrc$|\.nvmrc$|\.gitattributes$|\.github/workflows/ci\.yml$)'
+          if grep -qE "$bridge_paths" <<<"$changed"; then
+            echo "bridge=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No bridge inputs changed; skipping the Linux bridge test."
+            echo "bridge=false" >> "$GITHUB_OUTPUT"
+          fi
+
   checks:
     name: Lint, test, and build web (Node ${{ matrix.node.label }})
     runs-on: ubuntu-24.04
@@ -25,11 +69,15 @@ jobs:
         node:
           # The release runtime pinned in .nvmrc, plus the newest major that
           # package.json `engines.node` admits. vitest.config.ts carries a
-          # Node 26 specific workaround, so that leg keeps it honest.
+          # Node 26 specific workaround, so that leg keeps it honest. Lint, the
+          # Electron type check, and the coverage gate do not depend on the
+          # Node version, so only the pinned leg (`full`) runs them.
           - label: pinned
             file: .nvmrc
+            full: true
           - label: "26"
             version: "26"
+            full: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
@@ -40,19 +88,23 @@ jobs:
           node-version: ${{ matrix.node.version }}
           cache: npm
       - run: npm ci
-      - run: npm run lint
+      - if: matrix.node.full
+        run: npm run lint
       # lint:rust is deliberately not run here: Clippy needs the full native
       # build, so rust-bridge.yml on macOS is this repo's native gate.
-      - run: npx tsc --noEmit -p tsconfig.electron.json
+      - if: matrix.node.full
+        run: npx tsc --noEmit -p tsconfig.electron.json
       # --coverage makes the 100% thresholds in vitest.config.ts a real gate.
       # rustLocalBridge.test.ts compiles the native bridge in beforeAll and runs
       # in its own job below so the cargo build cannot starve timing-sensitive
       # Electron tests in this process.
-      - run: npx vitest run --coverage --exclude "electron/rustLocalBridge.test.ts"
+      - run: npx vitest run ${{ matrix.node.full && '--coverage' || '' }} --exclude "electron/rustLocalBridge.test.ts"
       - run: npm run build:web
 
   bridge-linux:
     name: Bridge integration test (Linux)
+    needs: changes
+    if: needs.changes.outputs.bridge == 'true'
     runs-on: ubuntu-24.04
     # The test cargo-builds the native bridge in beforeAll; leave headroom for
     # a cold compile of the llama.cpp dependency tree.
@@ -61,6 +113,9 @@ jobs:
       # rustLocalBridge.test.ts honours CARGO_TARGET_DIR; point it inside the
       # workspace so Swatinem/rust-cache can see and cache the build.
       CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
+      # The test only needs a working binary. Skipping debug info shortens the
+      # dev-profile compile and link; debug assertions stay on.
+      CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
@@ -81,7 +136,7 @@ jobs:
           # rebuild Cargo artifacts.
           cache-targets: false
           cache-directories: rust/local-tts-bridge/target/llama-cmake-cache
-          key: ci-bridge-linux-llama-cmake-only-v1
+          key: ci-bridge-linux-llama-cmake-only-v2
       - run: npm ci
       - run: npm run test:rust:policy
       - run: npx vitest run electron/rustLocalBridge.test.ts
@@ -89,13 +144,26 @@ jobs:
   checks-complete:
     # Keep the branch-protection context stable as the underlying jobs expand.
     name: Lint, test, and build web
-    needs: [checks, bridge-linux]
+    needs: [changes, checks, bridge-linux]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Require every CI job to pass
+        shell: bash
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           WEB_RESULT: ${{ needs.checks.result }}
+          BRIDGE_NEEDED: ${{ needs.changes.outputs.bridge }}
           BRIDGE_RESULT: ${{ needs.bridge-linux.result }}
-        run: test "$WEB_RESULT" = success && test "$BRIDGE_RESULT" = success
+        # The bridge job may be skipped only when the change detection itself
+        # succeeded and found no bridge inputs; any other skip fails the check.
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          test "$WEB_RESULT" = success
+          if [[ "$BRIDGE_NEEDED" == "true" ]]; then
+            test "$BRIDGE_RESULT" = success
+          else
+            test "$BRIDGE_RESULT" = skipped
+          fi
