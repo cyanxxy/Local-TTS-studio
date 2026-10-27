@@ -19,7 +19,7 @@ describe("useReaderWordTracking", () => {
   it("follows the spoken word through the active segment as the clock moves", () => {
     const clock = new PlaybackClock();
     clock.set(0.2);
-    const { result } = renderHook(() => useReaderWordTracking(clock, segment, true));
+    const { result } = renderHook(() => useReaderWordTracking(clock, segment, null));
 
     expect(result.current).toEqual({ wordIndex: 0, wordRange: { start: 10, end: 15 } });
 
@@ -27,22 +27,47 @@ describe("useReaderWordTracking", () => {
     expect(result.current).toEqual({ wordIndex: 1, wordRange: { start: 16, end: 29 } });
   });
 
-  it("tracks nothing without a segment, while timing is unstable, or between words", () => {
+  it("tracks nothing without a segment or between words", () => {
     const clock = new PlaybackClock();
     clock.set(1.5);
     const { result, rerender } = renderHook(
-      ({ active, stable }: { active: AudioSegment | null; stable: boolean }) => (
-        useReaderWordTracking(clock, active, stable)
-      ),
-      { initialProps: { active: null as AudioSegment | null, stable: true } },
+      ({ active }: { active: AudioSegment | null }) => useReaderWordTracking(clock, active, null),
+      { initialProps: { active: null as AudioSegment | null } },
     );
     expect(result.current).toEqual({ wordIndex: -1, wordRange: null });
 
-    rerender({ active: segment, stable: false });
-    expect(result.current).toEqual({ wordIndex: -1, wordRange: null });
-
-    rerender({ active: segment, stable: true });
+    rerender({ active: segment });
     act(() => clock.set(9));
     expect(result.current).toEqual({ wordIndex: -1, wordRange: null });
+  });
+
+  it("suppresses the segment still growing but tracks the finished one while generating", () => {
+    const finished: AudioSegment = { ...segment, id: "segment-1", startSec: 0, endSec: 3 };
+    const growing: AudioSegment = {
+      ...segment,
+      id: "segment-2",
+      text: "Another growing sentence.",
+      startSec: 3,
+      endSec: 5,
+      textStart: 40,
+      textEnd: 65,
+    };
+    const clock = new PlaybackClock();
+    clock.set(0.2);
+    const { result, rerender } = renderHook(
+      ({ active, growingId }: { active: AudioSegment; growingId: string | null }) => (
+        useReaderWordTracking(clock, active, growingId)
+      ),
+      { initialProps: { active: finished, growingId: growing.id as string | null } },
+    );
+    expect(result.current).toEqual({ wordIndex: 0, wordRange: { start: 10, end: 15 } });
+
+    act(() => clock.set(3.2));
+    rerender({ active: growing, growingId: growing.id });
+    expect(result.current).toEqual({ wordIndex: -1, wordRange: null });
+
+    // Once generation ends nothing is growing, so the last segment tracks too.
+    rerender({ active: growing, growingId: null });
+    expect(result.current.wordIndex).toBe(0);
   });
 });

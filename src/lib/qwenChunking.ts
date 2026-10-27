@@ -145,6 +145,55 @@ export function buildQwen3TextUnits(text: string): TextChunk[] {
   return splitTextUnits(text, start, end);
 }
 
+/** A line at least this long that ends without punctuation is a hard wrap, not a heading. */
+const QWEN3_HEADING_MAX_CHARS = 60;
+const LINE_ENDS_SENTENCE = /[.!?…。！？;；:：]["'”’)\]]*$/u;
+const LINE_ENDS_MID_CLAUSE = /[,，、\-–—]$/u;
+const LINE_ENDS_WORD = /[\p{L}\p{N}]$/u;
+const LINE_STARTS_LOWERCASE = /^\p{Ll}/u;
+
+/**
+ * Rewrites the line breaks of imported text (PDF hard wraps, title and byline
+ * lines) into what Qwen should hear. Qwen units end at the last boundary in a
+ * 200-character window, so hard-wrapped prose otherwise ends nearly every unit
+ * mid-sentence, and a stack of unpunctuated header lines runs together. Both
+ * leave the model without a clear place to stop, and it can then run to the
+ * generation limit without ever producing end-of-speech.
+ *
+ * A wrapped line's break becomes a space and a heading-like line gets a full
+ * stop. Each rewrite replaces one "\n" with one character, so the result has
+ * the same length and every source offset (highlighting, progress, caches)
+ * still points at the original text.
+ */
+export function prepareQwen3SpeechText(text: string): string {
+  if (!text.includes("\n")) return text;
+  const lines = text.split("\n");
+  let prepared = lines[0];
+  for (let index = 1; index < lines.length; index += 1) {
+    prepared += qwen3LineJoin(lines[index - 1], lines[index]) + lines[index];
+  }
+  return prepared;
+}
+
+function qwen3LineJoin(line: string, nextLine: string): string {
+  const body = line.trimEnd();
+  if (!body || LINE_ENDS_SENTENCE.test(body)) return "\n";
+  const last = body.slice(-2).match(/.$/u)![0];
+  // CJK prose has no spaces between words, so a space would be wrong, and
+  // "\n" already ends a unit there.
+  if (isQwen3CjkCharacter(last)) return "\n";
+  const next = nextLine.trimStart();
+  const paragraphEnds = next === "";
+  if (!paragraphEnds && (
+    countUnicodeScalars(body) >= QWEN3_HEADING_MAX_CHARS
+    || LINE_STARTS_LOWERCASE.test(next)
+    || LINE_ENDS_MID_CLAUSE.test(body)
+  )) {
+    return " ";
+  }
+  return LINE_ENDS_WORD.test(body) ? "." : "\n";
+}
+
 /**
  * Groups Qwen's small inference units into IPC-safe requests. Reader documents
  * can be much longer than a single local-runtime request, so this preserves the
@@ -155,8 +204,12 @@ export function buildQwen3TextUnits(text: string): TextChunk[] {
  * move a window's boundaries relative to a whole-document split. The returned
  * units therefore come from splitting each request exactly as the bridge
  * will, so a streamed `textUnitIndex` indexes `units` from `unitStart`.
+ *
+ * Section and unit text is `prepareQwen3SpeechText(text)`, which has the same
+ * length, so the offsets index the original text too.
  */
-export function buildQwen3RequestPlan(text: string): Qwen3RequestPlan {
+export function buildQwen3RequestPlan(sourceText: string): Qwen3RequestPlan {
+  const text = prepareQwen3SpeechText(sourceText);
   const marks = findSpeechBreakMarks(text);
   if (marks.length === 0) return buildUnmarkedRequestPlan(text);
 

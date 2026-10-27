@@ -28,6 +28,12 @@ use tokenizers::Tokenizer;
 /// Output rate of the 12 Hz speech tokenizer's vocoder.
 const OUTPUT_SAMPLE_RATE: u32 = 24000;
 
+/// Reference codec frames pushed through the streaming vocoder before an ICL
+/// utterance, so its first audio is decoded with the reference voice's acoustic
+/// context. Matches `left_context_size` in the official `chunked_decode`
+/// (QwenLM/Qwen3-TTS, `modeling_qwen3_tts_tokenizer_v2.py`).
+const ICL_VOCODER_LEFT_CONTEXT_FRAMES: usize = 25;
+
 fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
     if max_codes > 0 && generated_frames >= max_codes as usize {
         return Err(Qwen3TTSError::Generation(format!(
@@ -369,9 +375,13 @@ impl CodePredictor {
                 let logits = if top_k > 0 {
                     let vocab_size = logits.size()[logits.dim() - 1];
                     let k = top_k.min(vocab_size);
+                    // The k-th largest value is the minimum of the top k. MLX
+                    // returns them in partition order, not sorted, so the
+                    // element at index k - 1 can be the largest, which would
+                    // keep one candidate and turn sampling into greedy decoding.
                     let top_values = logits.topk_values(k, -1, true, true);
-                    let threshold = top_values.select(-1, k - 1);
-                    let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
+                    let threshold = top_values.amin_dim(-1, true);
+                    let mask = logits.lt_tensor(&threshold);
                     logits.masked_fill(&mask, f64::NEG_INFINITY)
                 } else {
                     logits
@@ -1108,9 +1118,11 @@ impl TalkerModel {
             let logits = if top_k > 0 {
                 let vocab_size = logits.size()[logits.dim() - 1];
                 let k = top_k.min(vocab_size);
+                // The minimum of the top k, not index k - 1: MLX returns them
+                // unsorted (see the code predictor's sampler).
                 let top_values = logits.topk_values(k, -1, true, true);
-                let threshold = top_values.select(-1, k - 1);
-                let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
+                let threshold = top_values.amin_dim(-1, true);
+                let mask = logits.lt_tensor(&threshold);
                 logits.masked_fill(&mask, f64::NEG_INFINITY)
             } else {
                 logits
@@ -2969,6 +2981,18 @@ impl TTSInference {
             .vocoder
             .as_ref()
             .map(|vocoder| vocoder.streaming_state());
+        // A cold vocoder state decodes the first generated frames without the
+        // reference voice's acoustic context. The official implementation
+        // prepends the reference codes before decoding and cuts the reference
+        // audio off afterwards; the streaming equivalent is to push the tail of
+        // the reference codes through the same stateful decode and discard the
+        // samples. `ref_codes` is frames x codebooks, like a generated chunk.
+        if let Some(state) = vocoder_state.as_mut() {
+            let warm_start = ref_codes
+                .len()
+                .saturating_sub(ICL_VOCODER_LEFT_CONTEXT_FRAMES);
+            let _ = self.decode_codes_to_audio_streaming(&ref_codes[warm_start..], state);
+        }
         self.talker.generate_codes_streaming_with_penalty(
             &input_embeddings,
             max_codes,

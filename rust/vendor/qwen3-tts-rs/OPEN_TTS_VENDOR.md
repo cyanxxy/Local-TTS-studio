@@ -39,6 +39,17 @@ Open TTS carries a patch in `OPEN_TTS.patch`. It:
   logits to the host every frame;
 - names the vocoder output rate once (`OUTPUT_SAMPLE_RATE`) for the streaming
   paths;
+- takes the top-k sampling threshold as the minimum of the top-k values
+  (`Tensor::amin_dim`, backed by a new `mlx_min_axis` binding) in both the
+  talker and the code predictor. Upstream read index `k - 1`, which assumes
+  sorted values, but MLX's `topk` returns them in partition order, so the
+  threshold could be the largest logit: sampling then kept one candidate and
+  every seed decoded the same, effectively greedy, output;
+- warms the streaming vocoder state in `generate_with_icl_streaming` by
+  decoding the last 25 reference codec frames (`ICL_VOCODER_LEFT_CONTEXT_FRAMES`,
+  the official `chunked_decode` `left_context_size`) and discarding the
+  samples, so each voice-clone unit's first audio is decoded with the reference
+  voice's acoustic context instead of a cold state;
 - puts the HTTP API and the command-line binaries behind the `api` and `cli`
   features (see "Optional HTTP API and binaries" below).
 

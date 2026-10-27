@@ -73,7 +73,7 @@ interface ReaderTextPaneProps {
   headingBlockStart: number | null;
   clock: PlaybackClock;
   activeSegment: AudioSegment | null;
-  estimatedWordTrackingStable: boolean;
+  growingSegmentId: string | null;
   isPlaying: boolean;
   editing: boolean;
   draft: string;
@@ -126,7 +126,7 @@ export const ReaderTextPane = memo(function ReaderTextPane({
   headingBlockStart,
   clock,
   activeSegment,
-  estimatedWordTrackingStable,
+  growingSegmentId,
   isPlaying,
   editing,
   draft,
@@ -149,7 +149,7 @@ export const ReaderTextPane = memo(function ReaderTextPane({
   onHighlightPassage,
   onRemoveHighlight,
 }: ReaderTextPaneProps) {
-  const { wordIndex, wordRange } = useReaderWordTracking(clock, activeSegment, estimatedWordTrackingStable);
+  const { wordIndex, wordRange } = useReaderWordTracking(clock, activeSegment, growingSegmentId);
   const paragraphs = useMemo(
     () => groupPartsByBlock(blocks, buildOverlayParts(text, blocks, activeRange, highlights)),
     [activeRange, blocks, highlights, text],

@@ -7,6 +7,7 @@ import {
   buildQwen3RequestPlan,
   buildQwen3RequestSections,
   buildQwen3TextUnits,
+  prepareQwen3SpeechText,
   QWEN3_UNIT_MAX_CHARS,
 } from "./qwenChunking";
 import { encodeSpeechBreakMark } from "./speechBreakMarks";
@@ -188,10 +189,10 @@ describe("buildQwen3RequestPlan pause marks", () => {
   });
 
   it("ends a request at every mark and carries the pause", () => {
-    const text = `Hi.\n\nOk.${encodeSpeechBreakMark(1.5)}Yes\n\nNo.`;
+    const text = `Hi.\n\nOk.${encodeSpeechBreakMark(1.5)}Yes.\n\nNo.`;
     const plan = buildQwen3RequestPlan(text);
 
-    expect(plan.sections.map((section) => section.text)).toEqual(["Hi.\n\nOk.", "Yes\n\nNo."]);
+    expect(plan.sections.map((section) => section.text)).toEqual(["Hi.\n\nOk.", "Yes.\n\nNo."]);
     expect(plan.sections.map((section) => section.pauseAfterSec)).toEqual([1.5, 0]);
     expect(plan.sections[0].pauseKind).toBe("sentence");
     expect(plan.units.map((unit) => unit.pauseAfterSec)).toEqual([1.5, 0]);
@@ -199,7 +200,7 @@ describe("buildQwen3RequestPlan pause marks", () => {
       expect(text.slice(section.start, section.end)).toBe(section.text);
     }
     expect(plan.sections[1]).toMatchObject({ unitStart: 1, unitEnd: 2 });
-    expect(text.slice(plan.units[1].start, plan.units[1].end)).toBe("Yes\n\nNo.");
+    expect(text.slice(plan.units[1].start, plan.units[1].end)).toBe("Yes.\n\nNo.");
   });
 
   it("adds up marks with nothing between them and keeps a trailing pause", () => {
@@ -215,5 +216,58 @@ describe("buildQwen3RequestPlan pause marks", () => {
     expect(plan.sections).toHaveLength(1);
     expect(plan.sections[0]).toMatchObject({ text: "Hello.", pauseAfterSec: 0 });
     expect(buildQwen3RequestPlan(encodeSpeechBreakMark(2))).toEqual({ sections: [], units: [] });
+  });
+});
+
+describe("prepareQwen3SpeechText", () => {
+  // The start of a PDF import that made Qwen run to its token limit.
+  const pdfHead = [
+    "2/3/22, 9:31 PM        The Bitter Lesson",
+    "The Bitter Lesson",
+    "Rich Sutton",
+    "March 13, 2019",
+    "",
+    "The biggest lesson that can be read from 70 years of AI research is that general methods that leverage",
+    "computation are ultimately the most effective, and by a large margin. The ultimate reason for this is",
+    "Moore's law, or rather its generalization of continued exponentially falling cost per unit of",
+    "computation.",
+  ].join("\n");
+
+  it("ends heading lines and joins hard-wrapped prose", () => {
+    expect(prepareQwen3SpeechText(pdfHead)).toBe(
+      "2/3/22, 9:31 PM        The Bitter Lesson.The Bitter Lesson.Rich Sutton.March 13, 2019.\n"
+      + "The biggest lesson that can be read from 70 years of AI research is that general methods that leverage "
+      + "computation are ultimately the most effective, and by a large margin. The ultimate reason for this is "
+      + "Moore's law, or rather its generalization of continued exponentially falling cost per unit of "
+      + "computation.",
+    );
+  });
+
+  it("keeps the length so source offsets still index the original text", () => {
+    expect(prepareQwen3SpeechText(pdfHead)).toHaveLength(pdfHead.length);
+    const plan = buildQwen3RequestPlan(pdfHead);
+    for (const unit of plan.units) {
+      expect(unit.text).toHaveLength(unit.end - unit.start);
+    }
+  });
+
+  it("no longer ends the opening unit mid-sentence", () => {
+    const [first] = buildQwen3RequestPlan(pdfHead).units;
+    expect(first.text.trimEnd()).toMatch(/[.,]$/);
+  });
+
+  it("leaves punctuated lines, paragraph breaks and CJK lines alone", () => {
+    expect(prepareQwen3SpeechText("One.\nTwo!\n\nThree?")).toBe("One.\nTwo!\n\nThree?");
+    expect(prepareQwen3SpeechText("中文第一行\n第二行")).toBe("中文第一行\n第二行");
+  });
+
+  it("joins a short wrapped line that continues in lowercase or after a comma", () => {
+    expect(prepareQwen3SpeechText("A short line\nthat continues.")).toBe("A short line that continues.");
+    expect(prepareQwen3SpeechText("First,\nSecond.")).toBe("First, Second.");
+  });
+
+  it("is idempotent", () => {
+    const once = prepareQwen3SpeechText(pdfHead);
+    expect(prepareQwen3SpeechText(once)).toBe(once);
   });
 });

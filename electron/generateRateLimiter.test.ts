@@ -48,11 +48,57 @@ describe("generateRateLimiter", () => {
     await first;
   });
 
+  it("lets a new job wait out the rest of the cooldown instead of failing", async () => {
+    let clock = 1_000;
+    const wait = vi.fn(async (ms: number) => {
+      clock += ms;
+    });
+    const limiter = createGenerateRateLimiter<"qwen3">({
+      rateWindowMs: 500,
+      now: () => clock,
+      wait,
+    });
+
+    await limiter.run("qwen3", async () => "section", { jobId: "reader-job", sectionIndex: 0, sectionCount: 1 });
+    clock += 5;
+    await expect(limiter.run("qwen3", async () => "look-ahead", {
+      jobId: "look-ahead-job",
+      sectionIndex: 0,
+      sectionCount: 1,
+    })).resolves.toBe("look-ahead");
+    expect(wait).toHaveBeenCalledWith(495);
+  });
+
+  it("still rejects a job that another generation overtook while it waited", async () => {
+    let resolveOvertaking!: () => void;
+    let overtaking: Promise<unknown> | undefined;
+    let clock = 1_000;
+    const limiter = createGenerateRateLimiter<"qwen3">({
+      rateWindowMs: 500,
+      now: () => clock,
+      wait: async (ms) => {
+        clock += ms;
+        // Another request starts while this one is waiting.
+        overtaking = limiter.run("qwen3", () => new Promise<void>((resolve) => {
+          resolveOvertaking = resolve;
+        }));
+      },
+    });
+
+    await limiter.run("qwen3", async () => undefined);
+    await expect(limiter.run("qwen3", async () => "late")).rejects.toThrow(
+      "A qwen3 generation is already running.",
+    );
+    resolveOvertaking();
+    await overtaking;
+  });
+
   it("preserves the cooldown window between completed calls", async () => {
     const now = vi.fn(() => 1_000);
     const limiter = createGenerateRateLimiter<"qwen3" | "neutts">({
       rateWindowMs: 500,
       now,
+      wait: async () => undefined,
     });
 
     await limiter.run("qwen3", async () => "first");
@@ -70,6 +116,7 @@ describe("generateRateLimiter", () => {
     const limiter = createGenerateRateLimiter<"qwen3">({
       rateWindowMs: 500,
       now,
+      wait: async () => undefined,
     });
 
     await expect(limiter.run("qwen3", async () => "first", {
@@ -94,6 +141,7 @@ describe("generateRateLimiter", () => {
     const limiter = createGenerateRateLimiter<"qwen3">({
       rateWindowMs: 500,
       now: () => 1_000,
+      wait: async () => undefined,
     });
 
     await limiter.run("qwen3", async () => undefined, {

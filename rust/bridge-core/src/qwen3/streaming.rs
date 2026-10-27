@@ -321,6 +321,17 @@ pub fn generate_voice_clone_units(
     )
 }
 
+/// The text the model hears for one unit: its words, single-spaced, with no
+/// surrounding whitespace. Upstream Qwen3-TTS only ever sees stripped text
+/// (its demo calls `text.strip()`), but a unit keeps the boundary it was cut
+/// at, so a unit could end in "\n", start with a space, or carry a run of PDF
+/// spaces. Those can keep the model from producing end-of-speech until it
+/// reaches the generation limit. The unit list, and so every streamed
+/// `textUnitIndex`, is unchanged.
+fn unit_speech_text(unit: &str) -> String {
+    unit.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Streams every mode the same way: split into bounded units, budget each
 /// unit, stream its chunks as they decode, and report the inter-unit gap when a
 /// unit ends. `generate_unit` is the only mode-specific step.
@@ -338,6 +349,13 @@ fn generate_units(
     let mut streaming = StreamingUnitSink::new(sink, total);
 
     for (index, unit) in units.iter().enumerate() {
+        let unit = unit_speech_text(unit);
+        // Only a unit cut from a run of whitespace is empty; it has nothing
+        // to say, and generating it would fail the request for no audio.
+        if unit.is_empty() {
+            continue;
+        }
+        let unit = unit.as_str();
         streaming.sink.progress(
             "inference",
             &format!(
@@ -596,8 +614,12 @@ mod tests {
                 .calls
                 .iter()
                 .map(|call| call.text.as_str())
-                .collect::<String>(),
-            text
+                .collect::<Vec<_>>(),
+            split_text_units(&text, CUSTOM_VOICE_UNIT_CHARS)
+                .unwrap()
+                .iter()
+                .map(|unit| unit_speech_text(unit))
+                .collect::<Vec<_>>()
         );
         assert!(engine.calls.iter().all(|call| call.speaker == "uncle_fu"));
         assert!(engine.calls.iter().all(|call| call.language == "italian"));
@@ -723,6 +745,76 @@ mod tests {
             seen.get(),
             Some(1),
             "first chunk must reach the sink at once"
+        );
+    }
+
+    #[test]
+    fn units_reach_the_engine_single_spaced_without_surrounding_whitespace() {
+        // The opening of a PDF import whose first unit ran to the generation
+        // limit while it still ended in "\n".
+        let text =
+            "2/3/22, 9:31 PM        The Bitter Lesson.\nRich Sutton.\n\n The biggest lesson.";
+        let mut engine = RecordingEngine::default();
+        let mut sink = RecordingSink::default();
+
+        generate_custom_voice_units(
+            &mut engine,
+            &CustomVoiceRequest {
+                text,
+                speaker: "Aiden",
+                language: "English",
+                instruct: "",
+                controls: GenerationControls::new(0.9, 50, 384),
+            },
+            &mut sink,
+            &mut no_cleanup,
+        )
+        .unwrap();
+
+        assert_eq!(
+            engine
+                .calls
+                .iter()
+                .map(|call| call.text.as_str())
+                .collect::<Vec<_>>(),
+            ["2/3/22, 9:31 PM The Bitter Lesson. Rich Sutton. The biggest lesson."]
+        );
+    }
+
+    #[test]
+    fn a_unit_of_only_whitespace_is_not_generated() {
+        // A window that falls inside a long run of spaces becomes its own unit.
+        let text = format!("First.{}Second.", " ".repeat(450));
+        let mut engine = RecordingEngine::default();
+        let mut sink = RecordingSink::default();
+
+        generate_custom_voice_units(
+            &mut engine,
+            &CustomVoiceRequest {
+                text: &text,
+                speaker: "Aiden",
+                language: "English",
+                instruct: "",
+                controls: GenerationControls::new(0.9, 50, 384),
+            },
+            &mut sink,
+            &mut no_cleanup,
+        )
+        .unwrap();
+
+        assert!(
+            split_text_units(&text, CUSTOM_VOICE_UNIT_CHARS)
+                .unwrap()
+                .len()
+                > 2
+        );
+        assert_eq!(
+            engine
+                .calls
+                .iter()
+                .map(|call| call.text.as_str())
+                .collect::<Vec<_>>(),
+            ["First.", "Second."]
         );
     }
 
@@ -891,8 +983,12 @@ mod tests {
                 .calls
                 .iter()
                 .map(|call| call.text.as_str())
-                .collect::<String>(),
-            text
+                .collect::<Vec<_>>(),
+            split_text_units(&text, CUSTOM_VOICE_UNIT_CHARS)
+                .unwrap()
+                .iter()
+                .map(|unit| unit_speech_text(unit))
+                .collect::<Vec<_>>()
         );
         assert!(engine.calls.iter().all(|call| call.language == "auto"));
         assert!(engine.calls.iter().all(|call| {

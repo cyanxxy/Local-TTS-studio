@@ -98,28 +98,36 @@ describe("offsetAtTime and timeAtOffset", () => {
   const words = estimateSegmentWords(first);
 
   it("finds the word being spoken, and the last word during the trailing pause", () => {
-    expect(offsetAtTime([first, second], words[1].startSec + 0.01, true)).toBe(6);
-    expect(offsetAtTime([first, second], 2.9, true)).toBe(11);
+    expect(offsetAtTime([first, second], words[1].startSec + 0.01, null)).toBe(6);
+    expect(offsetAtTime([first, second], 2.9, null)).toBe(11);
     const [delta, epsilon] = estimateSegmentWords(second);
-    expect(offsetAtTime([first, second], delta.startSec, true)).toBe(18);
-    expect(offsetAtTime([first, second], epsilon.startSec, true)).toBe(24);
+    expect(offsetAtTime([first, second], delta.startSec, null)).toBe(18);
+    expect(offsetAtTime([first, second], epsilon.startSec, null)).toBe(24);
     // Past the end of the generated audio, the last passage still answers.
-    expect(offsetAtTime([first, second], 9, true)).toBe(24);
+    expect(offsetAtTime([first, second], 9, null)).toBe(24);
   });
 
   it("uses the passage start without stable timing or words", () => {
-    expect(offsetAtTime([first, second], 2, false)).toBe(0);
-    expect(offsetAtTime([segment({ text: "   ", textStart: 4, textEnd: 7 })], 0.5, true)).toBe(4);
-    expect(offsetAtTime([segment({ text: "No range" })], 0.5, true)).toBeNull();
-    expect(offsetAtTime([], 0, true)).toBeNull();
+    expect(offsetAtTime([first, second], 2, "a")).toBe(0);
+    expect(offsetAtTime([segment({ text: "   ", textStart: 4, textEnd: 7 })], 0.5, null)).toBe(4);
+    expect(offsetAtTime([segment({ text: "No range" })], 0.5, null)).toBeNull();
+    expect(offsetAtTime([], 0, null)).toBeNull();
+  });
+
+  it("only falls back to the passage start for the segment still growing", () => {
+    const epsilon = estimateSegmentWords(second)[1];
+    expect(offsetAtTime([first, second], epsilon.startSec, "a")).toBe(24);
+    expect(offsetAtTime([first, second], epsilon.startSec, "b")).toBe(18);
+    expect(timeAtOffset([first, second], 24, "a")).toBe(epsilon.startSec);
+    expect(timeAtOffset([first, second], 24, "b")).toBe(3);
   });
 
   it("times a word by its estimate, or the next word from a space", () => {
-    expect(timeAtOffset([first, second], 8, true)).toBe(words[1].startSec);
-    expect(timeAtOffset([first, second], 5, true)).toBe(words[1].startSec);
-    expect(timeAtOffset([first, second], 8, false)).toBe(0);
-    expect(timeAtOffset([first, second], 17, true)).toBe(3);
-    expect(timeAtOffset([segment({ startSec: 2, text: "x" })], 0, true)).toBeNull();
-    expect(timeAtOffset([], 3, true)).toBeNull();
+    expect(timeAtOffset([first, second], 8, null)).toBe(words[1].startSec);
+    expect(timeAtOffset([first, second], 5, null)).toBe(words[1].startSec);
+    expect(timeAtOffset([first, second], 8, "a")).toBe(0);
+    expect(timeAtOffset([first, second], 17, null)).toBe(3);
+    expect(timeAtOffset([segment({ startSec: 2, text: "x" })], 0, null)).toBeNull();
+    expect(timeAtOffset([], 3, null)).toBeNull();
   });
 });

@@ -24,12 +24,12 @@ export interface ReaderWordTracking {
 export function useReaderWordTracking(
   clock: PlaybackClock,
   activeSegment: AudioSegment | null,
-  /** False while a streaming model is still extending segment durations. */
-  trackingStable: boolean,
+  /** The segment a streaming model is still extending, whose word timing is not final. */
+  growingSegmentId: string | null,
 ): ReaderWordTracking {
   const words = useMemo(
-    () => (trackingStable && activeSegment ? estimateSegmentWords(activeSegment) : NO_WORDS),
-    [activeSegment, trackingStable],
+    () => (activeSegment && activeSegment.id !== growingSegmentId ? estimateSegmentWords(activeSegment) : NO_WORDS),
+    [activeSegment, growingSegmentId],
   );
   const selectWordIndex = useCallback(
     (timeSec: number) => words.findIndex((word) => timeSec >= word.startSec && timeSec < word.endSec),

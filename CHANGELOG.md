@@ -4,6 +4,8 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.10.2] - 2026-10-27
+
 ### Added
 
 - CI now compiles and Clippy-lints the Windows x64 bridge, including its
@@ -28,6 +30,31 @@ All notable changes to Open TTS are documented here.
 
 ### Fixed
 
+- Qwen3 on Apple MLX samples again. Top-k sampling took its cutoff from an
+  unsorted list, so it usually kept only the single most likely code: every
+  run and every seed produced the same audio, and some passages (such as a PDF
+  print header) never reached end-of-speech and failed their whole Reader
+  section at the frame limit. The cutoff is now the true k-th largest value.
+- Qwen3 reads hard-wrapped imports (PDFs) as whole sentences: a line wrap is
+  read as a space and an unpunctuated heading or byline line ends with a full
+  stop, so passages no longer end mid-sentence. Source offsets are unchanged.
+- The Qwen3 bridge hands each text unit to the model single-spaced with no
+  surrounding whitespace, as the reference implementation does. A unit that
+  kept its trailing line break could run to the frame limit without ever
+  ending, which failed the whole Reader section.
+- A new generation that starts within 500 ms of the previous one (Reader
+  look-ahead, the next audiobook export section) waits out the rest of the
+  cooldown instead of failing with "Too many generation requests".
+- Qwen3 Voice Clone streaming primes the vocoder with the end of the
+  reference clip, as the reference implementation's decoder does, so each
+  passage starts in the cloned voice instead of from a cold decoder.
+- With Qwen3 Voice Clone, the Reader's passage count matches the units it
+  streams instead of counting whole requests.
+- While Qwen3 generates, the Reader keeps word highlighting, click-to-seek,
+  and sentence steps word-accurate in passages that have finished generating;
+  only the passage still being generated waits for its timing to settle.
+- When Qwen fails a passage while its model is ready, the Reader says it
+  couldn't read the passage instead of saying Qwen needs setup.
 - `.gitattributes` no longer routes the vendored `qwen3-tts-rs` tree through
   Git LFS, so a fresh checkout no longer shows
   `mlx-c/examples/arrays.safetensors` as modified.

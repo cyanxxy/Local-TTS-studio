@@ -217,7 +217,7 @@ index 954f379..d70073d 100644
  const FRAME_HEADER_BYTES: usize = 9;
  const STDOUT_FILENO: i32 = 1;
 diff --git a/src/inference.rs b/src/inference.rs
-index e908a86..8dc3234 100644
+index e908a86..6711964 100644
 --- a/src/inference.rs
 +++ b/src/inference.rs
 @@ -9,8 +9,11 @@
@@ -233,12 +233,18 @@ index e908a86..8dc3234 100644
  use crate::layers::{KVCache, Linear, RMSNorm, RotaryEmbedding, TransformerLayer};
  use crate::tensor::{DType, Device, Tensor};
  use crate::trace::TraceWriter;
-@@ -22,6 +25,18 @@ use std::time::{Duration, Instant};
+@@ -22,6 +25,24 @@ use std::time::{Duration, Instant};
  use tokenizers::pre_tokenizers::byte_level::ByteLevel;
  use tokenizers::Tokenizer;
  
 +/// Output rate of the 12 Hz speech tokenizer's vocoder.
 +const OUTPUT_SAMPLE_RATE: u32 = 24000;
++
++/// Reference codec frames pushed through the streaming vocoder before an ICL
++/// utterance, so its first audio is decoded with the reference voice's acoustic
++/// context. Matches `left_context_size` in the official `chunked_decode`
++/// (QwenLM/Qwen3-TTS, `modeling_qwen3_tts_tokenizer_v2.py`).
++const ICL_VOCODER_LEFT_CONTEXT_FRAMES: usize = 25;
 +
 +fn ensure_generation_reached_eos(generated_frames: usize, max_codes: i64) -> Result<()> {
 +    if max_codes > 0 && generated_frames >= max_codes as usize {
@@ -252,7 +258,23 @@ index e908a86..8dc3234 100644
  fn round_f32_to_bf16_value(value: f32) -> f32 {
      let bits = value.to_bits();
      let rounding_bias = 0x7fff + ((bits >> 16) & 1);
-@@ -404,6 +419,7 @@ pub struct TalkerModel {
+@@ -354,9 +375,13 @@ impl CodePredictor {
+                 let logits = if top_k > 0 {
+                     let vocab_size = logits.size()[logits.dim() - 1];
+                     let k = top_k.min(vocab_size);
++                    // The k-th largest value is the minimum of the top k. MLX
++                    // returns them in partition order, not sorted, so the
++                    // element at index k - 1 can be the largest, which would
++                    // keep one candidate and turn sampling into greedy decoding.
+                     let top_values = logits.topk_values(k, -1, true, true);
+-                    let threshold = top_values.select(-1, k - 1);
+-                    let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
++                    let threshold = top_values.amin_dim(-1, true);
++                    let mask = logits.lt_tensor(&threshold);
+                     logits.masked_fill(&mask, f64::NEG_INFINITY)
+                 } else {
+                     logits
+@@ -404,6 +429,7 @@ pub struct TalkerModel {
      layers: Vec<TransformerLayer>,
      /// Final layer norm
      norm: RMSNorm,
@@ -260,7 +282,7 @@ index e908a86..8dc3234 100644
      /// Main codec head for predicting code 0
      codec_head: Linear,
      /// Code predictor sub-transformer for codes 1-15
-@@ -528,6 +544,7 @@ impl TalkerModel {
+@@ -528,6 +554,7 @@ impl TalkerModel {
              layers,
              norm,
              codec_head,
@@ -268,7 +290,7 @@ index e908a86..8dc3234 100644
              code_predictor,
              rotary_emb,
              hidden_size,
-@@ -586,85 +603,96 @@ impl TalkerModel {
+@@ -586,85 +613,96 @@ impl TalkerModel {
          &self,
          text_token_ids: &[i64],
          speaker_id: i64,
@@ -423,7 +445,7 @@ index e908a86..8dc3234 100644
      }
  
      /// Build dual-stream input embeddings using a speaker embedding (x-vector)
-@@ -1037,29 +1065,40 @@ impl TalkerModel {
+@@ -1037,29 +1075,40 @@ impl TalkerModel {
          let last_hidden = normed_hidden.select(1, normed_hidden.size()[1] - 1);
          let mut logits = self.codec_head.forward(&last_hidden);
  
@@ -481,7 +503,21 @@ index e908a86..8dc3234 100644
  
          if temperature <= 0.0 {
              logits.argmax(-1, false).int64_value(&[0])
-@@ -1228,12 +1267,42 @@ impl TalkerModel {
+@@ -1069,9 +1118,11 @@ impl TalkerModel {
+             let logits = if top_k > 0 {
+                 let vocab_size = logits.size()[logits.dim() - 1];
+                 let k = top_k.min(vocab_size);
++                // The minimum of the top k, not index k - 1: MLX returns them
++                // unsorted (see the code predictor's sampler).
+                 let top_values = logits.topk_values(k, -1, true, true);
+-                let threshold = top_values.select(-1, k - 1);
+-                let mask = logits.lt_tensor(&threshold.unsqueeze(-1));
++                let threshold = top_values.amin_dim(-1, true);
++                let mask = logits.lt_tensor(&threshold);
+                 logits.masked_fill(&mask, f64::NEG_INFINITY)
+             } else {
+                 logits
+@@ -1228,12 +1279,42 @@ impl TalkerModel {
          eos_code: i64,
          tts_pad_embed: &Tensor,
          chunk_size: usize,
@@ -525,7 +561,7 @@ index e908a86..8dc3234 100644
          let mut all_codes = Vec::new();
          let mut pending_codes = Vec::new();
          let mut past_code_0s: Vec<i64> = Vec::new();
-@@ -1390,10 +1459,22 @@ pub struct TTSInference {
+@@ -1390,10 +1471,22 @@ pub struct TTSInference {
      vocoder: Option<Vocoder>,
      /// Model configuration
      config: Qwen3TTSConfig,
@@ -548,7 +584,7 @@ index e908a86..8dc3234 100644
  impl TTSInference {
      /// Create a new TTS inference engine.
      pub fn new(model_path: &Path, device: Device) -> Result<Self> {
-@@ -1428,6 +1509,14 @@ impl TTSInference {
+@@ -1428,6 +1521,14 @@ impl TTSInference {
          let config_path = model_path.join("config.json");
          let config = Qwen3TTSConfig::from_file(&config_path)?;
  
@@ -563,7 +599,7 @@ index e908a86..8dc3234 100644
          // Load weights
          let weights_path = model_path.join("model.safetensors");
          let tensors = Tensor::load_safetensors(&weights_path)?;
-@@ -1482,6 +1571,7 @@ impl TTSInference {
+@@ -1482,6 +1583,7 @@ impl TTSInference {
              talker,
              vocoder,
              config,
@@ -571,7 +607,7 @@ index e908a86..8dc3234 100644
              device,
          })
      }
-@@ -1541,9 +1631,11 @@ impl TTSInference {
+@@ -1541,9 +1643,11 @@ impl TTSInference {
  
          let vocoder = self.vocoder.as_ref()?;
          let codes_tensor = self.codes_to_vocoder_tensor(codes, 2048);
@@ -585,7 +621,7 @@ index e908a86..8dc3234 100644
          let audio_len = audio_tensor.numel();
          Some(audio_tensor.view(&[audio_len]).to_vec_f32())
      }
-@@ -1603,19 +1695,13 @@ impl TTSInference {
+@@ -1603,19 +1707,13 @@ impl TTSInference {
              .copied()
              .unwrap_or(0) as i64;
  
@@ -608,7 +644,7 @@ index e908a86..8dc3234 100644
          let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
          let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
          let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
-@@ -1625,7 +1711,7 @@ impl TTSInference {
+@@ -1625,7 +1723,7 @@ impl TTSInference {
          let tts_eos_id = self.config.tts_eos_token_id as i64;
  
          println!(
@@ -617,7 +653,7 @@ index e908a86..8dc3234 100644
              speaker, speaker_id, language, language_id
          );
          println!(
-@@ -1681,6 +1767,7 @@ impl TTSInference {
+@@ -1681,6 +1779,7 @@ impl TTSInference {
              tts_bos_id,
              tts_eos_id,
              codec_think_id,
@@ -625,7 +661,7 @@ index e908a86..8dc3234 100644
              codec_think_bos_id,
              codec_think_eos_id,
              codec_pad_id,
-@@ -1703,6 +1790,7 @@ impl TTSInference {
+@@ -1703,6 +1802,7 @@ impl TTSInference {
              codec_eos_id,
              &tts_pad_embed,
          );
@@ -633,7 +669,7 @@ index e908a86..8dc3234 100644
          println!("Generated {} code frames", codes.len());
  
          // Convert codes to audio using vocoder
-@@ -1742,6 +1830,24 @@ impl TTSInference {
+@@ -1742,6 +1842,24 @@ impl TTSInference {
          Ok((waveform, sample_rate))
      }
  
@@ -658,7 +694,7 @@ index e908a86..8dc3234 100644
      /// Generate speech with instruction control.
      ///
      /// Instruction control allows modulating speech characteristics like tone,
-@@ -1769,48 +1875,65 @@ impl TTSInference {
+@@ -1769,48 +1887,65 @@ impl TTSInference {
      ///     2048,
      /// )?;
      /// ```
@@ -754,7 +790,7 @@ index e908a86..8dc3234 100644
          let codec_think_bos_id = self.config.talker_config.codec_think_bos_id as i64;
          let codec_think_eos_id = self.config.talker_config.codec_think_eos_id as i64;
          let codec_pad_id = self.config.talker_config.codec_pad_id as i64;
-@@ -1834,7 +1957,7 @@ impl TTSInference {
+@@ -1834,7 +1969,7 @@ impl TTSInference {
          let user_tokens = self.tokenize("user")?;
          let user_id = user_tokens.first().copied().unwrap_or(882) as i64;
  
@@ -763,7 +799,7 @@ index e908a86..8dc3234 100644
          // The instruction is conditioning context, not synthesized speech
          let instruct_embeddings = if !instruct.is_empty() {
              // Tokenize instruction: <|im_start|>user\n{instruct}<|im_end|>\n
-@@ -1848,14 +1971,8 @@ impl TTSInference {
+@@ -1848,14 +1983,8 @@ impl TTSInference {
              // Embed instruction tokens (text side)
              let instruct_text_embed = self.talker.embed_text(&instruct_token_ids);
  
@@ -780,7 +816,7 @@ index e908a86..8dc3234 100644
          } else {
              None
          };
-@@ -1878,14 +1995,15 @@ impl TTSInference {
+@@ -1878,14 +2007,15 @@ impl TTSInference {
  
          // Build dual-stream input embeddings for main text
          println!("Building input embeddings...");
@@ -798,7 +834,7 @@ index e908a86..8dc3234 100644
              codec_think_bos_id,
              codec_think_eos_id,
              codec_pad_id,
-@@ -1902,19 +2020,45 @@ impl TTSInference {
+@@ -1902,19 +2032,45 @@ impl TTSInference {
          // Pre-compute tts_pad embedding
          let tts_pad_embed = self.talker.embed_text(&[tts_pad_id]);
  
@@ -847,7 +883,7 @@ index e908a86..8dc3234 100644
          println!("Generated {} code frames", codes.len());
  
          // Decode with vocoder
-@@ -1932,6 +2076,87 @@ impl TTSInference {
+@@ -1932,6 +2088,87 @@ impl TTSInference {
          Ok((waveform, sample_rate))
      }
  
@@ -935,7 +971,7 @@ index e908a86..8dc3234 100644
      /// Get a reference to the loaded model weights.
      pub fn weights(&self) -> &HashMap<String, Tensor> {
          &self.weights
-@@ -2737,14 +2962,14 @@ impl TTSInference {
+@@ -2737,14 +2974,26 @@ impl TTSInference {
              max_codes,
              chunk_size.max(1)
          );
@@ -948,11 +984,23 @@ index e908a86..8dc3234 100644
              .as_ref()
              .map(|vocoder| vocoder.streaming_state());
 -        self.talker.generate_codes_streaming(
++        // A cold vocoder state decodes the first generated frames without the
++        // reference voice's acoustic context. The official implementation
++        // prepends the reference codes before decoding and cuts the reference
++        // audio off afterwards; the streaming equivalent is to push the tail of
++        // the reference codes through the same stateful decode and discard the
++        // samples. `ref_codes` is frames x codebooks, like a generated chunk.
++        if let Some(state) = vocoder_state.as_mut() {
++            let warm_start = ref_codes
++                .len()
++                .saturating_sub(ICL_VOCODER_LEFT_CONTEXT_FRAMES);
++            let _ = self.decode_codes_to_audio_streaming(&ref_codes[warm_start..], state);
++        }
 +        self.talker.generate_codes_streaming_with_penalty(
              &input_embeddings,
              max_codes,
              temperature,
-@@ -2752,26 +2977,31 @@ impl TTSInference {
+@@ -2752,26 +3001,31 @@ impl TTSInference {
              codec_eos_id,
              &tts_pad_embed,
              chunk_size,
@@ -989,7 +1037,7 @@ index e908a86..8dc3234 100644
          println!("Generated {} streamed code frames", generated);
          Ok(())
      }
-@@ -2779,8 +3009,12 @@ impl TTSInference {
+@@ -2779,8 +3033,12 @@ impl TTSInference {
  
  #[cfg(test)]
  mod tests {
@@ -1190,7 +1238,7 @@ index 0000000..c9a8e03
 +    }
 +}
 diff --git a/src/tensor.rs b/src/tensor.rs
-index fc23924..e0a1e3e 100644
+index fc23924..e62a32c 100644
 --- a/src/tensor.rs
 +++ b/src/tensor.rs
 @@ -135,6 +135,23 @@ impl From<tch::Device> for Device {
@@ -1217,11 +1265,70 @@ index fc23924..e0a1e3e 100644
  /// Unified tensor type backed by either tch::Tensor or MLX array.
  pub struct Tensor {
      #[cfg(feature = "tch-backend")]
+@@ -454,6 +471,10 @@ impl Tensor {
+         Tensor::from_tch(self.inner.argmin(dim, keepdim))
+     }
+ 
++    pub fn amin_dim(&self, dim: i64, keepdim: bool) -> Self {
++        Tensor::from_tch(self.inner.amin(&[dim][..], keepdim))
++    }
++
+     pub fn topk(&self, k: i64, dim: i64, largest: bool, sorted: bool) -> (Self, Self) {
+         let (values, indices) = self.inner.topk(k, dim, largest, sorted);
+         (Tensor::from_tch(values), Tensor::from_tch(indices))
+@@ -1050,6 +1071,15 @@ impl Tensor {
+         Tensor::from_mlx(crate::backend::mlx::ops::argmin(&self.inner, dim, keepdim))
+     }
+ 
++    pub fn amin_dim(&self, dim: i64, keepdim: bool) -> Self {
++        let dim = if dim < 0 {
++            self.inner.ndim() as i64 + dim
++        } else {
++            dim
++        } as i32;
++        Tensor::from_mlx(crate::backend::mlx::ops::min_axis(&self.inner, dim, keepdim))
++    }
++
+     pub fn topk(&self, k: i64, dim: i64, _largest: bool, _sorted: bool) -> (Self, Self) {
+         let dim = if dim < 0 {
+             self.inner.ndim() as i64 + dim
+diff --git a/src/backend/mlx/ffi.rs b/src/backend/mlx/ffi.rs
+index 3ab047f..7172888 100644
+--- a/src/backend/mlx/ffi.rs
++++ b/src/backend/mlx/ffi.rs
+@@ -456,6 +456,14 @@ extern "C" {
+         s: mlx_stream,
+     ) -> c_int;
+ 
++    pub fn mlx_min_axis(
++        res: *mut mlx_array,
++        a: mlx_array,
++        axis: c_int,
++        keepdims: bool,
++        s: mlx_stream,
++    ) -> c_int;
++
+     // Math functions
+     pub fn mlx_exp(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
+     pub fn mlx_log(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
 diff --git a/src/backend/mlx/ops.rs b/src/backend/mlx/ops.rs
-index ff6f373..ad1f74a 100644
+index ff6f373..7bb8546 100644
 --- a/src/backend/mlx/ops.rs
 +++ b/src/backend/mlx/ops.rs
-@@ -767,9 +767,31 @@ pub fn random_categorical(logits: &MlxArray, axis: i32, _num_samples: i32) -> Ml
+@@ -383,6 +383,12 @@ pub fn argmin(a: &MlxArray, axis: i32, keepdims: bool) -> MlxArray {
+     res
+ }
+ 
++pub fn min_axis(a: &MlxArray, axis: i32, keepdims: bool) -> MlxArray {
++    let mut res = MlxArray::empty();
++    unsafe { ffi::mlx_min_axis(&mut res.ptr, a.ptr, axis, keepdims, default_stream()) };
++    res
++}
++
+ // ---------------------------------------------------------------------------
+ // Math functions
+ // ---------------------------------------------------------------------------
+@@ -767,9 +773,31 @@ pub fn random_categorical(logits: &MlxArray, axis: i32, _num_samples: i32) -> Ml
      res
  }
  

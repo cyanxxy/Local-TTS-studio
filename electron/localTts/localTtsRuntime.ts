@@ -368,7 +368,11 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
         if (registry.isCancelled(requestId)) throw generationCancelledError();
         return generateRateLimiter.run(
           model,
-          () => runWebSocketGenerate(model, requestId, payload, event),
+          () => {
+            // The limiter may have held the request through its cooldown.
+            if (registry.isCancelled(requestId)) throw generationCancelledError();
+            return runWebSocketGenerate(model, requestId, payload, event);
+          },
           continuation,
         );
       });
