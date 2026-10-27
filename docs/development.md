@@ -8,7 +8,7 @@ process in [releasing.md](./releasing.md).
 
 - Node.js 24.19.0 LTS is recommended. Supported releases are Node.js 22.22.2+, 24.15.0+, and 26.x; odd-numbered releases are intentionally excluded.
 - npm 11.17.0 or newer. Node bundles its own npm, which may be older — check `npm -v` rather than assuming. An out-of-range npm fails the install with `EBADENGINE`; upgrade with `npm install -g npm@11.17.0`. See [Install scripts](#install-scripts) for why this is enforced.
-- [rustup](https://rustup.rs/) for Electron desktop development, desktop builds, packaging, and Rust bridge tests. `rust-toolchain.toml` pins Rust 1.97.1 with `clippy` and `rustfmt`; a Rust installed through Homebrew or a distribution package manager ignores that pin.
+- [rustup](https://rustup.rs/) for Electron desktop development, desktop builds, packaging, and Rust bridge tests. `rust-toolchain.toml` pins Rust 1.99.1 with `clippy` and `rustfmt`; a Rust installed through Homebrew or a distribution package manager ignores that pin.
 - Desktop builds run on Apple Silicon macOS or Windows x64 only. `npm run setup:desktop` rejects Intel macOS, Windows on Arm, and Linux outright.
 - Native prerequisites for desktop builds, which `npm run setup:desktop` hard-fails on rather than installing for you:
   - macOS: `brew install cmake libomp openssl@3 pkg-config automake autoconf libtool`, plus Xcode's Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), which newer Xcode releases no longer include by default

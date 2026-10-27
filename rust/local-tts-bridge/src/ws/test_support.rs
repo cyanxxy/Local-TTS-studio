@@ -60,8 +60,11 @@ pub fn read_binary(client: &mut Client) -> Vec<u8> {
 /// Little-endian Float32 samples from a binary audio frame.
 pub fn decode_samples(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|sample| f32::from_le_bytes(sample.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .copied()
+        .map(f32::from_le_bytes)
         .collect()
 }
 

@@ -2,7 +2,7 @@
 name = "open-tts-bridge-policy-tests"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.99"
 publish = false
 
 # The pure-Rust subset of the bridge's own dependencies, at the same versions
