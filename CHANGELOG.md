@@ -4,6 +4,8 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+## [1.10.1] - 2026-10-27
+
 ### Fixed
 
 - The vendored `qwen3-tts` CLI now honours `--seed` on MLX and LibTorch
