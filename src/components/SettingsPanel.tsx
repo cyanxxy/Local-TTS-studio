@@ -1,4 +1,4 @@
-import { useId, useState } from "react";
+import { memo, useId, useState } from "react";
 import { ChevronDown, RefreshCw, Trash2 } from "lucide-react";
 import type { ModelType } from "../types";
 import { getEngine } from "../models/registry";
@@ -13,7 +13,7 @@ interface SettingsPanelProps {
   onRedownloadActive: () => void;
 }
 
-export function SettingsPanel({
+export const SettingsPanel = memo(function SettingsPanel({
   activeModel,
   busy,
   status,
@@ -94,4 +94,4 @@ export function SettingsPanel({
       )}
     </div>
   );
-}
+});

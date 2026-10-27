@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import {
   normalizeReaderTextFragment,
   readerSectionAtOffset,
@@ -166,6 +166,15 @@ export function useReaderSession({
     setContinuation,
   } = audioCache;
 
+  // A progress write replaces the record about once a second during playback,
+  // keeping its text and chapters. The commands below read the record when
+  // they run instead of depending on it, so the memoised Reader controls they
+  // are handed to keep their identity while a book plays.
+  const documentRef = useRef(document);
+  useLayoutEffect(() => {
+    documentRef.current = document;
+  }, [document]);
+
   const generateNow = useCallback(() => {
     abandonRestore();
     generate();
@@ -176,8 +185,9 @@ export function useReaderSession({
     positionSec?: number,
     continuation?: ReaderAdvance,
   ) => {
-    if (!document) return;
-    const targetOffset = Math.max(0, Math.min(document.text.length, textOffset));
+    const current = documentRef.current;
+    if (!current) return;
+    const targetOffset = Math.max(0, Math.min(current.text.length, textOffset));
     const targetSection = readerSectionAtOffset(sections, targetOffset);
     if (targetSection && targetSection.id !== section?.id) {
       flush();
@@ -189,7 +199,7 @@ export function useReaderSession({
       totalDurationSec: 0,
       textOffset: targetOffset,
     });
-  }, [document, flush, requestRestore, section?.id, sections, setContinuation, updateProgress]);
+  }, [flush, requestRestore, section?.id, sections, setContinuation, updateProgress]);
 
   const navigateToOffset = useCallback((textOffset: number, positionSec?: number) => {
     navigate(textOffset, positionSec);
@@ -224,6 +234,7 @@ export function useReaderSession({
   const editRef = useRef<SectionEdit | null>(null);
 
   const startSectionEdit = useCallback(() => {
+    const document = documentRef.current;
     if (!document || !section) return;
     editRef.current = {
       documentId: document.id,
@@ -232,10 +243,11 @@ export function useReaderSession({
       start: section.start,
       end: section.end,
     };
-  }, [document, section]);
+  }, [section]);
 
   const changeSectionText = useCallback((nextSectionText: string) => {
     const edit = editRef.current;
+    const document = documentRef.current;
     if (!document || (!edit && !section)) return;
     if (edit && edit.documentId !== document.id) return;
     // The editor replaces the span it opened on, even after the draft has
@@ -260,7 +272,7 @@ export function useReaderSession({
       },
     });
     clearErrors();
-  }, [clearErrors, discardForEdit, document, resetAudioForTextEdit, section, updateActiveText]);
+  }, [clearErrors, discardForEdit, resetAudioForTextEdit, section, updateActiveText]);
 
   const endSectionEdit = useCallback(() => {
     const edit = editRef.current;

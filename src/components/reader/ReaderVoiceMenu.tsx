@@ -1,4 +1,4 @@
-import { useId, useRef, type ReactNode } from "react";
+import { memo, useId, useRef, type ReactNode } from "react";
 import { ChevronDown, SlidersHorizontal } from "lucide-react";
 import { QUALITY_MAX, QUALITY_MIN, QUALITY_STEP } from "../../constants";
 import type { ModelState, ModelType } from "../../types";
@@ -44,8 +44,12 @@ interface ReaderVoiceMenuProps {
   onQualityChange: (quality: number) => void;
 }
 
-/** The voice button and its model, voice and quality popover. */
-export function ReaderVoiceMenu({
+/**
+ * The voice button and its model, voice and quality popover. Memoised: the
+ * Reader page builds it inline and re-renders with every progress sample and
+ * streamed chunk, none of which it shows.
+ */
+export const ReaderVoiceMenu = memo(function ReaderVoiceMenu({
   open,
   onOpenChange,
   modelState,
@@ -167,4 +171,4 @@ export function ReaderVoiceMenu({
       )}
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { buildSpeechPlanSafe, createChunkRemapper, type SpeechPlan } from "../lib/speechPipeline";
 import type { SurfaceEngineId, SurfaceEngineSettings } from "../models/registry";
 import type { EngineRuntimeMap } from "../shared/engineRuntime";
@@ -96,14 +96,18 @@ export function useSpeechPipeline({
 
   // Requests resolve their settings when they are made, from what the user has
   // chosen by then, without the wrapped runtimes changing identity on each edit.
+  // Each engine's wrapped `synthesize` also outlives the runtime objects it is
+  // rewrapped into on every model-state tick and streamed chunk.
   const latest = useRef({ choices: { dictionaries, normalize, cleanup }, languageSettings });
   useEffect(() => {
     latest.current = { choices: { dictionaries, normalize, cleanup }, languageSettings };
   }, [cleanup, dictionaries, languageSettings, normalize]);
+  const [synthesizeWrappers] = useState(() => new WeakMap<object, unknown>());
   const wrapRuntimes = useCallback((runtimes: EngineRuntimeMap) => withSpeechPipelineAll(
     runtimes,
     (id) => resolveSpeechPipelineSettings(latest.current.choices, engineSpeechLanguage(id, latest.current.languageSettings)),
-  ), []);
+    synthesizeWrappers,
+  ), [synthesizeWrappers]);
 
   return { plan, spokenText: plan.spoken, player: pipelinePlayer, retakeText, wrapRuntimes };
 }

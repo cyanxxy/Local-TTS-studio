@@ -159,6 +159,10 @@ export function ModelToggle({
     return () => document.removeEventListener("pointerdown", closeFromOutside);
   }, [open]);
 
+  // The menu is placed again when options come or go, not when one's load
+  // progress changes its detail text: that arrives many times a second while a
+  // model downloads, and every placement reads layout.
+  const choiceCount = choices.length;
   useLayoutEffect(() => {
     if (!open) return;
     const placeMenu = () => {
@@ -212,7 +216,7 @@ export function ModelToggle({
       window.visualViewport?.removeEventListener("resize", placeMenu);
       window.visualViewport?.removeEventListener("scroll", placeMenu);
     };
-  }, [choices, open]);
+  }, [choiceCount, open]);
 
   const availableChoiceIndexes = choices
     .map((choice, choiceIndex) => ({ choice, choiceIndex }))

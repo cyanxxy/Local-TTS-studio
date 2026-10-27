@@ -3,6 +3,7 @@ import { AudioLines, MessagesSquare } from "lucide-react";
 import { useGenerationHistory } from "../hooks/useGenerationHistory";
 import { useStudioHistory } from "../hooks/useStudioHistory";
 import { useStudioTakes } from "../hooks/useStudioTakes";
+import type { GenerationHistoryEntry } from "../lib/history/generationHistory";
 import { getEngine } from "../models/registry";
 import { useSynthesisSession } from "../shared/synthesisSessionContext";
 import { AudioPlayer } from "./AudioPlayer";
@@ -17,6 +18,7 @@ import { StudioHistoryPanel } from "./StudioHistoryPanel";
 import { StudioTakesPanel } from "./StudioTakesPanel";
 import { TextInput } from "./TextInput";
 import { VoiceSelector } from "./VoiceSelector";
+import { useStableCallback } from "./reader/useStableCallback";
 import { renderSurfaceEngineSettings } from "./surfaceEngineSettings";
 
 /** Studio: the script, the model and voice controls, and the player. */
@@ -37,8 +39,16 @@ export function StudioSurface() {
   // Tags go at the end; the user moves them where they belong.
   const insertTag = (tag: string) => changeText(`${script}${/(^|\s)$/.test(script) ? "" : " "}${tag}`);
   const [mode, setMode] = useState<"single" | "dialogue">("single");
+  // Dialogue mode mounts the first time it is shown, not with Studio: most
+  // sessions never open it, and mounted it follows the shared session.
+  const [dialogueMounted, setDialogueMounted] = useState(false);
   const history = useGenerationHistory();
   const historyActions = useStudioHistory({ session, history });
+  // Studio re-renders with every keystroke, model-state tick and streamed
+  // chunk; the memoised history panel keeps these handlers throughout.
+  const replayHistory = useStableCallback((id: string) => void historyActions.replay(id));
+  const downloadHistory = useStableCallback((entry: GenerationHistoryEntry) => void historyActions.download(entry));
+  const reuseHistory = useStableCallback((id: string) => void historyActions.reuse(id));
   const takes = useStudioTakes(session);
 
   return (
@@ -54,7 +64,10 @@ export function StudioSurface() {
             key={id}
             type="button"
             aria-pressed={mode === id}
-            onClick={() => setMode(id)}
+            onClick={() => {
+              setMode(id);
+              if (id === "dialogue") setDialogueMounted(true);
+            }}
             className={`flex items-center gap-1.5 rounded-full px-3.5 py-1.5 text-xs font-semibold transition-colors ${
               mode === id ? "bg-panel text-text-primary shadow-glass-sm" : "text-text-secondary hover:text-text-primary"
             }`}
@@ -65,10 +78,12 @@ export function StudioSurface() {
         ))}
       </div>
 
-      {/* Kept mounted so the script, casting and a running render survive switching modes. */}
-      <div hidden={mode !== "dialogue"}>
-        <DialogueStudio />
-      </div>
+      {/* Once shown, kept mounted so the script, casting and a running render survive switching modes. */}
+      {dialogueMounted && (
+        <div hidden={mode !== "dialogue"}>
+          <DialogueStudio />
+        </div>
+      )}
 
       {mode === "single" && (
       <div className="mt-4 surface rounded-[24px]">
@@ -189,9 +204,9 @@ export function StudioSurface() {
             usage={history.usage}
             loading={history.loading}
             error={historyActions.error ?? history.error}
-            onReplay={(id) => void historyActions.replay(id)}
-            onDownload={(entry) => void historyActions.download(entry)}
-            onReuse={(id) => void historyActions.reuse(id)}
+            onReplay={replayHistory}
+            onDownload={downloadHistory}
+            onReuse={reuseHistory}
             onSetFavorite={history.setFavorite}
             onDelete={history.deleteEntry}
             onClear={history.clear}

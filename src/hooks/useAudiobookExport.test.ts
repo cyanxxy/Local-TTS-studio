@@ -183,4 +183,31 @@ describe("useAudiobookExport", () => {
     expect(encode).toHaveBeenCalledTimes(2);
     expect(result.current.state.format).toBe("mp3");
   });
+
+  it("keeps its identity while playback only moves the book's progress, and exports the newest record", async () => {
+    const library = { hasAudio: vi.fn(async () => false), loadAudio: vi.fn(async () => null) };
+    const encode = vi.fn(async () => ({ blob: new Blob([]), extension: "mp3" } as ExportResult));
+    const renderSection = () => (async function* () { yield chunk(); })();
+    const save = vi.fn();
+    const { result, rerender } = renderHook(({ document }) => useAudiobookExport({
+      document,
+      sections,
+      engineId: "kokoro",
+      signatureParts: parts,
+      renderSection,
+      // The library object is rebuilt with every progress write; its functions are not.
+      library: { ...library },
+      encode,
+      save,
+    }), { initialProps: { document: book } });
+    const before = result.current;
+
+    const moved = { ...book, progress: { ...book.progress, positionSec: 30 } };
+    rerender({ document: moved });
+
+    expect(result.current).toBe(before);
+    act(() => result.current.start({ kind: "chapter", chapterId: book.chapters[1].id }, "mp3"));
+    await waitFor(() => expect(result.current.state.status).toBe("done"));
+    expect(library.hasAudio).toHaveBeenCalledWith(book.id, expect.any(String), expect.any(String));
+  });
 });

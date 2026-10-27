@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { memo, useId, useRef, useState } from "react";
 import { ChevronDown, Download, History, Play, RotateCcw, Star, Trash2, X } from "lucide-react";
 import { formatClock } from "../lib/formatClock";
 import {
@@ -9,6 +9,7 @@ import {
 import { getEngine, isEngineId } from "../models/registry";
 import { formatBytes } from "./localRuntime/utils";
 import { progressFillStyle } from "./progressFill";
+import { useStableCallback } from "./reader/useStableCallback";
 
 interface StudioHistoryPanelProps {
   /** Newest first. */
@@ -29,8 +30,12 @@ function engineLabel(engineId: string): string {
   return isEngineId(engineId) ? getEngine(engineId).label : engineId;
 }
 
+// One formatter for every row: `toLocaleString` with options builds a new one
+// per call.
+const WHEN_FORMAT = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+
 function formatWhen(timestamp: number): string {
-  return new Date(timestamp).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  return WHEN_FORMAT.format(timestamp);
 }
 
 function errorText(cause: unknown): string {
@@ -39,8 +44,83 @@ function errorText(cause: unknown): string {
 
 const ICON_BUTTON = "flex h-8 w-8 items-center justify-center rounded-full text-text-secondary transition-colors hover:bg-text-primary/[0.08] hover:text-text-primary focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50";
 
+interface HistoryRowProps {
+  entry: GenerationHistoryEntry;
+  onReplay: (id: string) => void;
+  onDownload: (entry: GenerationHistoryEntry) => void;
+  onReuse: (id: string) => void;
+  onToggleFavorite: (entry: GenerationHistoryEntry) => void;
+  onDelete: (id: string) => void;
+}
+
+/** One saved generation; rows re-render only when their own entry changes. */
+const HistoryRow = memo(function HistoryRow({
+  entry,
+  onReplay,
+  onDownload,
+  onReuse,
+  onToggleFavorite,
+  onDelete,
+}: HistoryRowProps) {
+  return (
+    <li className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-text-primary/[0.04]">
+      <button
+        type="button"
+        className={ICON_BUTTON}
+        aria-label={`Play "${entry.title}"`}
+        onClick={() => onReplay(entry.id)}
+      >
+        <Play size={14} aria-hidden="true" />
+      </button>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-text-primary">{entry.title}</p>
+        <p className="truncate text-xs text-text-muted">
+          {engineLabel(entry.engineId)} · {entry.voice.label ?? entry.voice.voiceId}
+          {entry.seed === undefined ? "" : ` · seed ${entry.seed}`}
+          {" "}· {formatClock(entry.durationSec)} · {formatWhen(entry.createdAt)}
+          {entry.completed ? "" : " · stopped early"}
+        </p>
+      </div>
+      <button
+        type="button"
+        className={ICON_BUTTON}
+        aria-label={`Reuse settings of "${entry.title}"`}
+        title="Reuse text, engine, voice and settings"
+        onClick={() => onReuse(entry.id)}
+      >
+        <RotateCcw size={14} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        className={ICON_BUTTON}
+        aria-label={`Download "${entry.title}"`}
+        onClick={() => onDownload(entry)}
+      >
+        <Download size={14} aria-hidden="true" />
+      </button>
+      <button
+        type="button"
+        className={`${ICON_BUTTON} ${entry.favorite ? "text-accent" : ""}`}
+        aria-label={entry.favorite ? `Remove "${entry.title}" from favorites` : `Favorite "${entry.title}"`}
+        aria-pressed={entry.favorite}
+        onClick={() => onToggleFavorite(entry)}
+      >
+        <Star size={14} aria-hidden="true" fill={entry.favorite ? "currentColor" : "none"} />
+      </button>
+      <button
+        type="button"
+        className={ICON_BUTTON}
+        aria-label={`Delete "${entry.title}"`}
+        onClick={() => onDelete(entry.id)}
+      >
+        <Trash2 size={14} aria-hidden="true" />
+      </button>
+    </li>
+  );
+});
+
 /** Every saved Studio generation, with replay, export, reuse, favorites and cleanup. */
-export function StudioHistoryPanel({
+export const StudioHistoryPanel = memo(function StudioHistoryPanel({
   entries,
   usage,
   loading,
@@ -72,6 +152,13 @@ export function StudioHistoryPanel({
     // The control that was used is gone after a delete or clear.
     if (options.refocus) toggleRef.current?.focus();
   };
+
+  const toggleFavorite = useStableCallback((entry: GenerationHistoryEntry) => {
+    void run(() => onSetFavorite(entry.id, !entry.favorite));
+  });
+  const deleteEntry = useStableCallback((id: string) => {
+    void run(() => onDelete(id), { refocus: true });
+  });
 
   const shownError = error ?? actionError;
   const visibleError = shownError && shownError !== dismissedError ? shownError : null;
@@ -168,59 +255,15 @@ export function StudioHistoryPanel({
           ) : (
             <ul className="mt-3 flex max-h-96 flex-col gap-1 overflow-y-auto" aria-label="Saved generations">
               {entries.map((entry) => (
-                <li key={entry.id} className="flex items-center gap-2 rounded-xl px-2 py-1.5 hover:bg-text-primary/[0.04]">
-                  <button
-                    type="button"
-                    className={ICON_BUTTON}
-                    aria-label={`Play "${entry.title}"`}
-                    onClick={() => onReplay(entry.id)}
-                  >
-                    <Play size={14} aria-hidden="true" />
-                  </button>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-text-primary">{entry.title}</p>
-                    <p className="truncate text-xs text-text-muted">
-                      {engineLabel(entry.engineId)} · {entry.voice.label ?? entry.voice.voiceId}
-                      {entry.seed === undefined ? "" : ` · seed ${entry.seed}`}
-                      {" "}· {formatClock(entry.durationSec)} · {formatWhen(entry.createdAt)}
-                      {entry.completed ? "" : " · stopped early"}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    className={ICON_BUTTON}
-                    aria-label={`Reuse settings of "${entry.title}"`}
-                    title="Reuse text, engine, voice and settings"
-                    onClick={() => onReuse(entry.id)}
-                  >
-                    <RotateCcw size={14} aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className={ICON_BUTTON}
-                    aria-label={`Download "${entry.title}"`}
-                    onClick={() => onDownload(entry)}
-                  >
-                    <Download size={14} aria-hidden="true" />
-                  </button>
-                  <button
-                    type="button"
-                    className={`${ICON_BUTTON} ${entry.favorite ? "text-accent" : ""}`}
-                    aria-label={entry.favorite ? `Remove "${entry.title}" from favorites` : `Favorite "${entry.title}"`}
-                    aria-pressed={entry.favorite}
-                    onClick={() => void run(() => onSetFavorite(entry.id, !entry.favorite))}
-                  >
-                    <Star size={14} aria-hidden="true" fill={entry.favorite ? "currentColor" : "none"} />
-                  </button>
-                  <button
-                    type="button"
-                    className={ICON_BUTTON}
-                    aria-label={`Delete "${entry.title}"`}
-                    onClick={() => void run(() => onDelete(entry.id), { refocus: true })}
-                  >
-                    <Trash2 size={14} aria-hidden="true" />
-                  </button>
-                </li>
+                <HistoryRow
+                  key={entry.id}
+                  entry={entry}
+                  onReplay={onReplay}
+                  onReuse={onReuse}
+                  onDownload={onDownload}
+                  onToggleFavorite={toggleFavorite}
+                  onDelete={deleteEntry}
+                />
               ))}
             </ul>
           )}
@@ -228,4 +271,4 @@ export function StudioHistoryPanel({
       )}
     </div>
   );
-}
+});

@@ -202,4 +202,16 @@ describe("useReaderListeningProfile", () => {
     act(() => none.result.current.remember({ voice: "x" }));
     expect(none.updateListening).not.toHaveBeenCalled();
   });
+
+  it("keeps `remember` while playback only moves the book's progress", () => {
+    const listening = { engine: "kokoro", voice: "af_heart", updatedAt: 1 } as ReaderListeningProfile;
+    const playing = withProfile(listening);
+    const { result, rerender } = setup({ document: playing, engineId: "kokoro" });
+    const remember = result.current.remember;
+
+    // A progress sample replaces the record and keeps its profile.
+    rerender({ document: { ...playing, progress: { ...playing.progress, positionSec: 12 } }, engineId: "kokoro" });
+
+    expect(result.current.remember).toBe(remember);
+  });
 });

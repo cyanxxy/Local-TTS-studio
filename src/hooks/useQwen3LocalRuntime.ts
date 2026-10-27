@@ -19,6 +19,7 @@ import {
   streamQwen3Synthesis,
 } from "./qwen3Synthesis";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
+import { useQwen3LiveSettings } from "./useQwen3LiveSettings";
 import { useQwen3Warmup } from "./useQwen3Warmup";
 import { useSynthesisQueue } from "./useSynthesisQueue";
 import {
@@ -104,6 +105,9 @@ export function useQwen3LocalRuntime({
 }: UseQwen3LocalRuntimeOptions): EngineRuntime<"qwen3"> {
   const settings = useQwen3Runtime();
   const refreshSetup = settings.refreshSetup;
+  // What a generation sends; unlike `settings`, it keeps its identity through
+  // download progress and setup refreshes.
+  const liveSettings = useQwen3LiveSettings(settings);
   const [runtime, setRuntime] = useState<LocalTtsProbeResult | null>(null);
   // A probe the user asked for again. The first probe after enabling is not
   // stored here: it is pending until `probeSettled`, so the effect that starts
@@ -445,7 +449,7 @@ export function useQwen3LocalRuntime({
     setGenerationProgress(0);
     setError(null);
     const jobId = requestId("job");
-    const basePayload = qwen3BasePayload(settings, settings.seed);
+    const basePayload = qwen3BasePayload(liveSettings, liveSettings.seed);
 
     const runSections = async () => {
       let combinedResult: LocalTtsGenerateResult | null = null;
@@ -480,17 +484,17 @@ export function useQwen3LocalRuntime({
             payload: {
               ...basePayload,
               text: section.text,
-              ...qwen3ReferencePayload(settings, jobId, uploadReference),
+              ...qwen3ReferencePayload(liveSettings, jobId, uploadReference),
             },
           });
 
-          const initiallyUploadsReference = settings.profile.mode === "voiceClone" && sectionIndex === 0;
+          const initiallyUploadsReference = liveSettings.profile.mode === "voiceClone" && sectionIndex === 0;
           activateRequest(id);
           let generated: LocalTtsGenerateResult;
           try {
             generated = await generateSection(initiallyUploadsReference);
           } catch (sectionError: unknown) {
-            const canRestoreReference = settings.profile.mode === "voiceClone"
+            const canRestoreReference = liveSettings.profile.mode === "voiceClone"
               && !initiallyUploadsReference
               && isQwen3ReferenceCacheMiss(sectionError)
               && mountedRef.current
@@ -590,9 +594,9 @@ export function useQwen3LocalRuntime({
     getAudioChunkCount,
     getContentEpoch,
     holdForeground,
+    liveSettings,
     scheduleChunk,
     setShowPlayer,
-    settings,
     text,
     truncateAudioChunks,
   ]);

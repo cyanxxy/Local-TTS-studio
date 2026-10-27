@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { memo, useId, useMemo, useState } from "react";
 import { ChevronDown } from "lucide-react";
 import {
   CREATOR_PRESETS,
@@ -61,7 +61,7 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function CreatorToolsPanel({
+export const CreatorToolsPanel = memo(function CreatorToolsPanel({
   creator,
   engineSupport,
   script,
@@ -367,4 +367,4 @@ export function CreatorToolsPanel({
       )}
     </div>
   );
-}
+});

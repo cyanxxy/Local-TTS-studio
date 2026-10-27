@@ -1034,10 +1034,20 @@ describe("SynthesisApp", () => {
     expect(screen.getByRole("textbox", { name: "script" })).toHaveValue("A new Studio-only script.");
   });
 
+  it("puts the page in the main landmark, with the header and footer outside it", () => {
+    render(<WebApp />);
+    const main = screen.getByRole("main");
+    expect(within(main).getByRole("textbox", { name: "script" })).toBeInTheDocument();
+    expect(within(main).queryByRole("banner")).not.toBeInTheDocument();
+    expect(within(main).queryByRole("contentinfo")).not.toBeInTheDocument();
+  });
+
   it("switches Studio to Dialogue mode and back without losing the single-voice script", async () => {
     render(<WebApp />);
     expect(screen.getByRole("textbox", { name: "script" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Generation History/ })).toBeInTheDocument();
+    // Dialogue mode mounts the first time it is shown, not hidden with Studio.
+    expect(screen.queryByRole("textbox", { name: "Dialogue script", hidden: true })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Dialogue" }));
     const script = await screen.findByRole("textbox", { name: "Dialogue script" });

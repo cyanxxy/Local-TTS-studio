@@ -50,6 +50,7 @@ import {
 } from "../models/registry";
 import type { ModelType } from "../types";
 import type { CreatorEngineSupport } from "../components/CreatorToolsPanel";
+import { useStableCallback } from "../components/reader/useStableCallback";
 import type { SynthesisChunk, SynthesisRequest } from "./engineRuntime";
 import { engineSpeechLanguage, resolveSpeechPipelineSettings } from "./speechPipelineRuntime";
 
@@ -382,7 +383,10 @@ export function useSynthesisSessionState({
     },
   })), [desktopModelOptions.reader, rememberListening]);
 
-  const resetAudioForTextEdit = useCallback(() => {
+  // The script, the runtimes and the player change with every keystroke,
+  // model-state tick and streamed chunk. The edit handlers read them when they
+  // run, so the editors they are handed to keep one handler throughout.
+  const resetAudioForTextEdit = useStableCallback(() => {
     const hasActiveAudioState = Object.values(runtimes).some((runtime) => runtime.isGenerating)
       || player.segments.length > 0
       || player.totalDuration > 0;
@@ -391,19 +395,16 @@ export function useSynthesisSessionState({
       // would reload the model on the first keystroke after listening.
       retireAllAudio();
     }
-  }, [player.segments.length, player.totalDuration, retireAllAudio, runtimes]);
+  });
 
-  const handleTextChange = useCallback((nextText: string) => {
+  const handleTextChange = useStableCallback((nextText: string) => {
     if (nextText === text) return;
 
     resetAudioForTextEdit();
     setText(nextText);
     setExportError(null);
     setImportError(null);
-  }, [
-    resetAudioForTextEdit,
-    text,
-  ]);
+  });
 
   // A look-ahead render holds the engine's queue, so a generate asked for
   // while one runs first yields the engine and then waits for it to free up.
@@ -488,13 +489,14 @@ export function useSynthesisSessionState({
   ), [readerLibrary.activeDocument, readerSections.nextSection]);
   const readerTuning = creator.generationSettings;
   const readerSynthesize = readerRuntime.synthesize as (request: SynthesisRequest) => AsyncIterable<SynthesisChunk>;
+  // Qwen3's entry is all of its provider's settings, the clone reference
+  // included, keyed on the fields so a download's progress changes nothing here.
   const renderReaderSection = useCallback((text: string, signal: AbortSignal) => readerSynthesize({
     text,
-    // Qwen3's settings live in its provider, which also holds the clone reference.
-    settings: readerEngineId === "qwen3" ? qwen3Settings : surfaceEngineSettings[readerEngineId],
+    settings: surfaceEngineSettings[readerEngineId],
     tuning: readerTuning,
     signal,
-  } as SynthesisRequest), [qwen3Settings, readerEngineId, readerSynthesize, readerTuning, surfaceEngineSettings]);
+  } as SynthesisRequest), [readerEngineId, readerSynthesize, readerTuning, surfaceEngineSettings]);
   const readerSignaturePartsWhenSettled = readerListening.settled ? readerSignatureParts : null;
   const audiobook = useAudiobookExport({
     document: readerLibrary.activeDocument,
@@ -527,10 +529,11 @@ export function useSynthesisSessionState({
   useEffect(() => {
     lookaheadControlsRef.current = { preempt: preemptLookahead, isBusy: isLookaheadBusy, settled: lookaheadSettled };
   }, [isLookaheadBusy, lookaheadSettled, preemptLookahead]);
-  const handleReaderRetakeSegment = useCallback((...args: Parameters<typeof browser.handleRetakeSegment>) => {
+  const { handleRetakeSegment: retakeBrowserSegment } = browser;
+  const handleReaderRetakeSegment = useCallback((...args: Parameters<typeof retakeBrowserSegment>) => {
     preemptLookahead();
-    browser.handleRetakeSegment(...args);
-  }, [browser, preemptLookahead]);
+    retakeBrowserSegment(...args);
+  }, [preemptLookahead, retakeBrowserSegment]);
   const { flushAudio: flushReaderAudio, generate: generateReaderSection } = readerSession;
   useEffect(() => {
     flushReaderAudioRef.current = flushReaderAudio;
@@ -672,18 +675,20 @@ export function useSynthesisSessionState({
     setShowPlayer(true);
   }, [jumpToSegment]);
 
-  const handleGenerate = useCallback(() => {
+  // A runtime object changes identity with its model state and progress;
+  // these commands run whichever runtime the surface has when they are used.
+  const handleGenerate = useStableCallback(() => {
     setExportError(null);
     studioRuntime.handleGenerate();
-  }, [studioRuntime]);
+  });
 
-  const handleStudioStop = useCallback(() => {
+  const handleStudioStop = useStableCallback(() => {
     studioRuntime.handleStop();
-  }, [studioRuntime]);
+  });
 
-  const handleStudioRetryLoad = useCallback(() => {
+  const handleStudioRetryLoad = useStableCallback(() => {
     studioRuntime.retryLoad();
-  }, [studioRuntime]);
+  });
 
   // The Reader's Generate button and shortcut: generating now also drops a
   // lookup of the section's saved audio that is still running.
@@ -692,14 +697,14 @@ export function useSynthesisSessionState({
     generateReaderSection();
   }, [generateReaderSection]);
 
-  const handleReaderStop = useCallback(() => {
+  const handleReaderStop = useStableCallback(() => {
     cancelPendingReaderGenerate();
     readerRuntime.handleStop();
-  }, [cancelPendingReaderGenerate, readerRuntime]);
+  });
 
-  const handleReaderRetryLoad = useCallback(() => {
+  const handleReaderRetryLoad = useStableCallback(() => {
     readerRuntime.retryLoad();
-  }, [readerRuntime]);
+  });
 
   const reportExportError = useCallback((message: string) => setExportError(message), []);
   const exportFileName = useCallback(() => buildExportFileName({
@@ -797,26 +802,41 @@ export function useSynthesisSessionState({
     ? player.segments.findIndex((segment) => segment.id === player.activeSegmentId)
     : -1;
 
+  // The app shell reads only these, through its own context (see
+  // `SynthesisSessionProvider`), so each keeps its identity until one of its
+  // fields changes: the header and footer then sit out the keystrokes,
+  // model-state ticks and streamed chunks that re-render the surfaces.
+  const preferencesState = useMemo(
+    () => ({ value: preferences, update: updatePreferences, reset: resetPreferences }),
+    [preferences, resetPreferences, updatePreferences],
+  );
+  const appSettings = useMemo(
+    () => ({ open: appSettingsOpen, onOpen: openAppSettings, onClose: closeAppSettings }),
+    [appSettingsOpen, closeAppSettings, openAppSettings],
+  );
+  const routing = useMemo(() => ({
+    activePage,
+    isReaderPage,
+    isStudioPage,
+    routeBasePath,
+    tabs: availableTabs,
+    navigate: handlePageNavigation,
+  }), [activePage, availableTabs, handlePageNavigation, isReaderPage, isStudioPage, routeBasePath]);
+  /** What the header and footer say about the visible surface. */
+  const chrome = useMemo(() => ({
+    visibleError,
+    showWasmBadge,
+    webgpuModeNote,
+    showSingleThreadedNote,
+    activeModelSupportMessage,
+  }), [activeModelSupportMessage, showSingleThreadedNote, showWasmBadge, visibleError, webgpuModeNote]);
+
   return {
     environment,
-    preferences: { value: preferences, update: updatePreferences, reset: resetPreferences },
-    appSettings: { open: appSettingsOpen, onOpen: openAppSettings, onClose: closeAppSettings },
-    routing: {
-      activePage,
-      isReaderPage,
-      isStudioPage,
-      routeBasePath,
-      tabs: availableTabs,
-      navigate: handlePageNavigation,
-    },
-    /** What the header and footer say about the visible surface. */
-    chrome: {
-      visibleError,
-      showWasmBadge,
-      webgpuModeNote,
-      showSingleThreadedNote,
-      activeModelSupportMessage,
-    },
+    preferences: preferencesState,
+    appSettings,
+    routing,
+    chrome,
     player: {
       state: player,
       show: showPlayer,

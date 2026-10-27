@@ -447,4 +447,37 @@ describe("ModelToggle", () => {
     expect(within(menu).getByTestId("model-option-paradee")).toHaveAttribute("aria-checked", "true");
     expect(within(menu).getByTestId("model-option-piper")).toHaveTextContent("VITS · Preparing");
   });
+
+  it("places an open menu again when options change, not on every load-progress tick", () => {
+    const onModelChange = () => {};
+    const view = (progress: number) => (
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={onModelChange}
+        kokoroState={{ ...loadingState, downloadProgress: progress }}
+        supertonicState={readyState}
+      />
+    );
+    const { rerender } = render(view(10));
+    openPicker();
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+
+    try {
+      for (let progress = 11; progress < 20; progress += 1) rerender(view(progress));
+      expect(rectSpy).not.toHaveBeenCalled();
+
+      rerender(
+        <ModelToggle
+          activeModel="kokoro"
+          onModelChange={onModelChange}
+          kokoroState={loadingState}
+          supertonicState={readyState}
+          desktopModelOptions={[{ key: "audio8", label: "Audio8", onSelect: () => {} }]}
+        />,
+      );
+      expect(rectSpy).toHaveBeenCalled();
+    } finally {
+      rectSpy.mockRestore();
+    }
+  });
 });

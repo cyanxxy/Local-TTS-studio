@@ -259,4 +259,30 @@ describe("useReaderSession", () => {
 
     expect(player.restoreAudioCache).not.toHaveBeenCalled();
   });
+
+  it("keeps its navigation and edit commands while playback only moves the progress, and reads the newest record", async () => {
+    const { result, library, rerender } = setup();
+    await waitFor(() => expect(library.loadAudio).toHaveBeenCalled());
+    const before = result.current;
+
+    // A progress sample replaces the record but keeps its text and chapters.
+    library.activeDocument = { ...book, progress: { ...book.progress, positionSec: 9 } };
+    rerender();
+
+    expect(result.current.document).not.toBe(before.document);
+    expect(result.current.navigateToOffset).toBe(before.navigateToOffset);
+    expect(result.current.startSectionEdit).toBe(before.startSectionEdit);
+    expect(result.current.changeSectionText).toBe(before.changeSectionText);
+
+    act(() => result.current.navigateToOffset(book.text.length + 40));
+    expect(library.updateProgress).toHaveBeenCalledWith({
+      positionSec: 0, totalDurationSec: 0, textOffset: book.text.length,
+    });
+    act(() => result.current.startSectionEdit());
+    act(() => result.current.changeSectionText("Replacement."));
+    expect(library.updateActiveText).toHaveBeenCalledWith(
+      expect.stringContaining("Replacement."),
+      expect.objectContaining({ preserveText: true }),
+    );
+  });
 });

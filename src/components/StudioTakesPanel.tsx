@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { memo, useId, useMemo, useState } from "react";
 import { Check, ChevronDown, Layers, Loader2, Pin, Play, Square, Trash2 } from "lucide-react";
 import { formatClock } from "../lib/formatClock";
 import { compareTakes, measureTakeAudio } from "../lib/takes";
@@ -17,7 +17,7 @@ const VARIATION_COUNT = 3;
 const ICON_BUTTON = "flex h-8 w-8 items-center justify-center rounded-full text-text-secondary transition-colors hover:bg-text-primary/[0.08] hover:text-text-primary focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-50";
 
 /** Render seeded variations of the script or one passage, audition them, and pick the one the timeline keeps. */
-export function StudioTakesPanel({ takes, disabled = false, activeSegmentId = null }: StudioTakesPanelProps) {
+export const StudioTakesPanel = memo(function StudioTakesPanel({ takes, disabled = false, activeSegmentId = null }: StudioTakesPanelProps) {
   const [open, setOpen] = useState(false);
   const [chosenTargetId, setChosenTargetId] = useState<string | null>(null);
   const panelId = useId();
@@ -165,4 +165,4 @@ export function StudioTakesPanel({ takes, disabled = false, activeSegmentId = nu
       )}
     </div>
   );
-}
+});

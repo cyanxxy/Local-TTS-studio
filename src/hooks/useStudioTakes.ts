@@ -265,7 +265,9 @@ export function useStudioTakes(session: SynthesisSession): UseStudioTakesReturn 
     setApplied((currentApplied) => ({ ...currentApplied, [targetId]: takeId }));
   }, [getContentEpoch, replaceSegment, restoreAudioCache, setActiveTake]);
 
-  return {
+  // Studio re-renders with every model-state tick and streamed chunk; the
+  // takes panel only needs to when one of these does.
+  return useMemo(() => ({
     targets,
     stacks,
     applied,
@@ -281,5 +283,21 @@ export function useStudioTakes(session: SynthesisSession): UseStudioTakesReturn 
     stopAudition,
     removeTake,
     pinTake,
-  };
+  }), [
+    applied,
+    audition,
+    auditioningTakeId,
+    cancel,
+    error,
+    pickTake,
+    pinTake,
+    removeTake,
+    renderVariations,
+    rendering,
+    seedControl,
+    stacks,
+    stopAudition,
+    targets,
+    unavailableReason,
+  ]);
 }

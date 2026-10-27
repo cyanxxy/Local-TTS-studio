@@ -279,6 +279,26 @@ describe("useEngineOrchestrator", () => {
     expect(mock.runtimes.kokoro.resetGeneratedAudio).toHaveBeenCalledOnce();
   });
 
+  it("keeps its commands through a runtime's state tick and runs them on the newest runtimes", () => {
+    const { result, rerender } = renderOrchestrator({ studio: "audio8" });
+    const first = result.current;
+    const staleAudio8 = mock.runtimes.audio8;
+
+    // A model-state tick or a streamed chunk hands back a new runtime object.
+    mock.runtimes.audio8 = { ...mock.runtime("audio8"), generationProgress: 40 };
+    rerender({ surface: "studio" });
+
+    expect(result.current.runtimes).not.toBe(first.runtimes);
+    expect(result.current.retireAllAudio).toBe(first.retireAllAudio);
+    expect(result.current.changeEngineInput).toBe(first.changeEngineInput);
+
+    act(() => result.current.changeEngineInput("audio8", vi.fn()));
+    expect(mock.runtimes.audio8.resetGeneratedAudio).toHaveBeenCalledOnce();
+    act(() => result.current.retireAllAudio());
+    expect(mock.runtimes.audio8.cancelActiveGeneration).toHaveBeenCalledTimes(2);
+    expect(staleAudio8.cancelActiveGeneration).not.toHaveBeenCalled();
+  });
+
   describe("spoken-text pipeline", () => {
     const BREAKS = 'GIF files are small.<break time="1s"/>The end.';
     const speech: SpeechPipelineChoices = {

@@ -1,15 +1,20 @@
-import { useCallback, useEffect, useId, useMemo, useRef } from "react";
+import { memo, useCallback, useEffect, useId, useMemo, useRef } from "react";
 import { AlertTriangle, Download, Loader2, Play, RefreshCw, Square, Subtitles, Users } from "lucide-react";
 import { useVoiceLibrary } from "../hooks/useVoiceLibrary";
 import { useDialogueSession, type UseDialogueSessionReturn } from "../hooks/useDialogueSession";
 import { formatClock } from "../lib/formatClock";
+import type { UseCreatorSettingsReturn } from "../hooks/useCreatorSettings";
 import type { PresetSynthesize } from "../lib/presetSynthesis";
 import { createRuntimeSynthesize, presetFromSelection, type SynthesisBase } from "../lib/studioSynthesis";
 import { dialoguePoolPresets } from "../lib/voiceLibrary/catalog";
 import type { VoicePreset } from "../lib/voiceLibrary/types";
-import { engineVoices, getEngine, type SurfaceEngineId } from "../models/registry";
+import { engineVoices, getEngine, type SurfaceEngineId, type SurfaceEngineSettings } from "../models/registry";
 import type { EngineVoice } from "../models/types";
+import type { EngineRuntimeMap } from "../shared/engineRuntime";
 import { useSynthesisSession } from "../shared/synthesisSessionContext";
+import type { SynthesisSession } from "../shared/useSynthesisSessionState";
+import type { GenerationTuningSettings, ModelType } from "../types";
+import { useStableCallback } from "./reader/useStableCallback";
 import { progressFillStyle } from "./progressFill";
 
 const PLACEHOLDER = "Narrator: It was a quiet morning.\nAnna: [cheerful] Did you hear that?\nBen: (looking up) Hear what?";
@@ -283,35 +288,72 @@ export function DialogueStudioView({ dialogue, castableEngines, voicesFor }: Dia
   );
 }
 
-/** Dialogue mode of Studio, wired to the shared session's engines. */
+interface DialogueStudioPanelProps {
+  surfaceEngineSettings: SurfaceEngineSettings;
+  generationSettings: GenerationTuningSettings;
+  /** The session's runtimes when a line renders; they change with every model-state tick. */
+  getRuntimes: () => EngineRuntimeMap;
+  studioEngineId: SurfaceEngineId;
+  supportedModels: readonly ModelType[];
+  desktopEngineIds: readonly SurfaceEngineId[];
+  kokoroVoices: SynthesisSession["engines"]["kokoroVoices"];
+  exportOptions: UseCreatorSettingsReturn["exportOptions"];
+}
+
+/**
+ * Dialogue mode of Studio, wired to the shared session's engines. Studio keeps
+ * it mounted while hidden, and the session changes with every keystroke,
+ * model-state tick and streamed chunk; it reads the session here and renders
+ * the panel only when something the dialogue uses has changed.
+ */
 export function DialogueStudio() {
-  const session = useSynthesisSession();
-  const { engines, creator, studio, environment } = session;
-  const base = useMemo<SynthesisBase>(
-    () => ({ settings: engines.surfaceEngineSettings, tuning: creator.generationSettings }),
-    [creator.generationSettings, engines.surfaceEngineSettings],
+  const { engines, creator, studio, environment } = useSynthesisSession();
+  const { runtimes } = engines;
+  const getRuntimes = useStableCallback(() => runtimes);
+  const desktopOptions = engines.desktopModelOptions.studio;
+  const desktopEngineIds = useMemo(() => desktopOptions.map((option) => option.key), [desktopOptions]);
+  return (
+    <DialogueStudioPanel
+      surfaceEngineSettings={engines.surfaceEngineSettings}
+      generationSettings={creator.generationSettings}
+      getRuntimes={getRuntimes}
+      studioEngineId={studio.engineId}
+      supportedModels={environment.browserSupport.supportedModels}
+      desktopEngineIds={desktopEngineIds}
+      kokoroVoices={engines.kokoroVoices}
+      exportOptions={creator.exportOptions}
+    />
   );
-  const sourceRef = useRef({ runtimes: engines.runtimes, base });
+}
+
+const DialogueStudioPanel = memo(function DialogueStudioPanel({
+  surfaceEngineSettings,
+  generationSettings,
+  getRuntimes,
+  studioEngineId,
+  supportedModels,
+  desktopEngineIds,
+  kokoroVoices,
+  exportOptions,
+}: DialogueStudioPanelProps) {
+  const base = useMemo<SynthesisBase>(
+    () => ({ settings: surfaceEngineSettings, tuning: generationSettings }),
+    [generationSettings, surfaceEngineSettings],
+  );
+  const baseRef = useRef(base);
   useEffect(() => {
-    sourceRef.current = { runtimes: engines.runtimes, base };
+    baseRef.current = base;
   });
   const synthesize = useCallback<PresetSynthesize>(
-    (text, preset, signal) => createRuntimeSynthesize(
-      () => sourceRef.current.runtimes,
-      () => sourceRef.current.base,
-    )(text, preset, signal),
-    [],
+    (text, preset, signal) => createRuntimeSynthesize(getRuntimes, () => baseRef.current)(text, preset, signal),
+    [getRuntimes],
   );
 
   const castableEngines = useMemo<CastableEngine[]>(() => {
-    const ids: SurfaceEngineId[] = [
-      ...environment.browserSupport.supportedModels,
-      ...engines.desktopModelOptions.studio.map((option) => option.key),
-    ];
+    const ids: SurfaceEngineId[] = [...supportedModels, ...desktopEngineIds];
     return ids.map((id) => ({ id, label: getEngine(id).label }));
-  }, [engines.desktopModelOptions.studio, environment.browserSupport.supportedModels]);
+  }, [desktopEngineIds, supportedModels]);
 
-  const kokoroVoices = engines.kokoroVoices;
   const voicesFor = useMemo(
     () => (engineId: SurfaceEngineId) => engineVoices(engineId, engineId === "kokoro" ? { runtimeVoices: kokoroVoices } : undefined),
     [kokoroVoices],
@@ -324,18 +366,18 @@ export function DialogueStudio() {
   );
 
   const voicePool = useMemo<VoicePreset[]>(() => {
-    const selected = presetFromSelection(studio.engineId, base);
-    const voices = voicesFor(studio.engineId);
+    const selected = presetFromSelection(studioEngineId, base);
+    const voices = voicesFor(studioEngineId);
     if (voices.length === 0) return [selected, ...savedPresets];
     // Studio's own voice leads, so a one-speaker script sounds like Studio.
     return [selected, ...voices.filter((voice) => voice.id !== selected.voiceId).map((voice): VoicePreset => ({
-      engineId: studio.engineId,
+      engineId: studioEngineId,
       voiceId: voice.id,
       settings: {},
       label: voice.label,
     })), ...savedPresets];
-  }, [base, savedPresets, studio.engineId, voicesFor]);
+  }, [base, savedPresets, studioEngineId, voicesFor]);
 
-  const dialogue = useDialogueSession({ synthesize, exportOptions: creator.exportOptions, voicePool });
+  const dialogue = useDialogueSession({ synthesize, exportOptions, voicePool });
   return <DialogueStudioView dialogue={dialogue} castableEngines={castableEngines} voicesFor={voicesFor} />;
-}
+});

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import {
   getDefaultSupportedModel,
@@ -24,6 +24,7 @@ import type { GenerationTuningSettings } from "../types";
 import { useAudio8Runtime, type Audio8Runtime } from "./useAudio8Runtime";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useBrowserEngineRuntimes, type UseBrowserEngineRuntimesReturn } from "./useBrowserEngineRuntimes";
+import { useQwen3LiveSettings } from "./useQwen3LiveSettings";
 import { useQwen3LocalRuntime } from "./useQwen3LocalRuntime";
 import { useSpeechPipeline } from "./useSpeechPipeline";
 import { useSupertonic3Runtime } from "./useSupertonic3Runtime";
@@ -187,12 +188,15 @@ export function useEngineOrchestrator({
   const visibleEngineId: SurfaceEngineId | null = surface === null ? null : engineIds[surface];
   const selects = (engine: SurfaceEngineId) => studioEngineId === engine || readerEngineId === engine;
 
+  // Only the settings, not the whole provider value, whose identity also
+  // changes with a model download's progress or a setup refresh.
+  const qwen3LiveSettings = useQwen3LiveSettings(qwen3Settings);
   const languageSettings = useMemo(() => ({
     kokoro: engineSettings.kokoro,
     supertonic: engineSettings.supertonic,
     supertonic3: engineSettings.supertonic3,
-    qwen3: qwen3Settings,
-  }), [engineSettings.kokoro, engineSettings.supertonic, engineSettings.supertonic3, qwen3Settings]);
+    qwen3: qwen3LiveSettings,
+  }), [engineSettings.kokoro, engineSettings.supertonic, engineSettings.supertonic3, qwen3LiveSettings]);
   const pipeline = useSpeechPipeline({
     text,
     choices: speech,
@@ -308,11 +312,21 @@ export function useEngineOrchestrator({
     qwen3,
   }), [audio8, browser.runtimes, qwen3, supertonic3, wrapRuntimes]);
 
+  // The map changes identity with every model-state tick and streamed chunk,
+  // so the commands below read it from a ref instead of depending on it: a
+  // handler built on them (and every memoised control it reaches) would
+  // otherwise change identity just as often. They only run from event
+  // handlers and effects, after the ref has caught up.
+  const runtimesRef = useRef(runtimes);
+  useLayoutEffect(() => {
+    runtimesRef.current = runtimes;
+  }, [runtimes]);
+
   const retireAllAudio = useCallback(() => {
-    const all = Object.values(runtimes);
+    const all = Object.values(runtimesRef.current);
     for (const runtime of all) runtime.cancelActiveGeneration();
     for (const runtime of all) runtime.resetGeneratedAudio();
-  }, [runtimes]);
+  }, []);
 
   // When the page or its engine selection changes, the generation of the
   // surface left behind stops: its audio would otherwise keep streaming into
@@ -326,8 +340,8 @@ export function useEngineOrchestrator({
     previousVisibleRef.current = { surface, engine: visibleEngineId };
     if (previous.engine === null) return;
     if (previous.surface === surface && previous.engine === visibleEngineId) return;
-    runtimes[previous.engine].cancelActiveGeneration();
-  }, [runtimes, surface, visibleEngineId]);
+    runtimesRef.current[previous.engine].cancelActiveGeneration();
+  }, [surface, visibleEngineId]);
 
   const { loadModel } = browser;
   const selectBrowserModel = useCallback((target: Surface, model: BrowserEngineId) => {
@@ -360,13 +374,13 @@ export function useEngineOrchestrator({
   const changeEngineInput = useCallback((engine: SurfaceEngineId, apply: () => void) => {
     if (engine === visibleEngineId) {
       if (surface === "reader") beforeReaderAudioChange();
-      const runtime = runtimes[engine];
+      const runtime = runtimesRef.current[engine];
       runtime.cancelActiveGeneration();
       runtime.resetGeneratedAudio();
     }
     apply();
     onEngineChange();
-  }, [beforeReaderAudioChange, onEngineChange, runtimes, surface, visibleEngineId]);
+  }, [beforeReaderAudioChange, onEngineChange, surface, visibleEngineId]);
 
   const { voicesInUse } = browser;
   const surfaceEngineSettings = useMemo<SurfaceEngineSettings>(() => ({
@@ -378,8 +392,8 @@ export function useEngineOrchestrator({
     chatterbox: { ...chatterboxSettings, voice: voicesInUse.chatterbox },
     audio8: engineSettings.audio8,
     supertonic3: engineSettings.supertonic3,
-    qwen3: qwen3Settings,
-  }), [chatterboxSettings, engineSettings.audio8, engineSettings.supertonic3, qwen3Settings, supertonicSettings.language, voicesInUse]);
+    qwen3: qwen3LiveSettings,
+  }), [chatterboxSettings, engineSettings.audio8, engineSettings.supertonic3, qwen3LiveSettings, supertonicSettings.language, voicesInUse]);
 
   const desktopModelOptions = useMemo(() => {
     const optionsFor = (target: Surface) => describeDesktopModelOptions(

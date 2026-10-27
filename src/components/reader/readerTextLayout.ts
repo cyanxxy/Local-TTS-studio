@@ -148,6 +148,23 @@ export function groupPartsByBlock(
 }
 
 /**
+ * Whether two part lists draw the same spans. Rebuilding the overlay when the
+ * spoken passage moves makes new part objects for every paragraph, though only
+ * the one or two the passage left or entered actually change.
+ */
+export function sameOverlayParts(a: readonly OverlayPart[], b: readonly OverlayPart[]): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((part, index) => {
+    const other = b[index];
+    return part.start === other.start
+      && part.text === other.text
+      && part.isActive === other.isActive
+      && part.highlight === other.highlight;
+  });
+}
+
+/**
  * Imported chapters usually open with their own title line. When the first
  * block of a chapter's opening section repeats the chapter title (ignoring a
  * Markdown heading marker and letter case), that block is drawn as the heading
