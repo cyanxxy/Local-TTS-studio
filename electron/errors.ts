@@ -1,6 +1,6 @@
 /**
  * The exact text of a deliberate stop. The Rust bridge sends the same string
- * (rust/local-tts-bridge/src/main.rs) and the renderer recognises a
+ * (CANCELLED_MESSAGE in rust/bridge-core/src/protocol.rs) and the renderer recognises a
  * cancellation by matching it, so it must not change on one side alone.
  */
 export const GENERATION_CANCELLED_MESSAGE = "Generation cancelled.";
