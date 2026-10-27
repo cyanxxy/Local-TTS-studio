@@ -456,6 +456,14 @@ extern "C" {
         s: mlx_stream,
     ) -> c_int;
 
+    pub fn mlx_min_axis(
+        res: *mut mlx_array,
+        a: mlx_array,
+        axis: c_int,
+        keepdims: bool,
+        s: mlx_stream,
+    ) -> c_int;
+
     // Math functions
     pub fn mlx_exp(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;
     pub fn mlx_log(res: *mut mlx_array, a: mlx_array, s: mlx_stream) -> c_int;

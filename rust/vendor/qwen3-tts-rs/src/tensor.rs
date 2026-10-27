@@ -471,6 +471,10 @@ impl Tensor {
         Tensor::from_tch(self.inner.argmin(dim, keepdim))
     }
 
+    pub fn amin_dim(&self, dim: i64, keepdim: bool) -> Self {
+        Tensor::from_tch(self.inner.amin(&[dim][..], keepdim))
+    }
+
     pub fn topk(&self, k: i64, dim: i64, largest: bool, sorted: bool) -> (Self, Self) {
         let (values, indices) = self.inner.topk(k, dim, largest, sorted);
         (Tensor::from_tch(values), Tensor::from_tch(indices))
@@ -1065,6 +1069,15 @@ impl Tensor {
             dim
         } as i32;
         Tensor::from_mlx(crate::backend::mlx::ops::argmin(&self.inner, dim, keepdim))
+    }
+
+    pub fn amin_dim(&self, dim: i64, keepdim: bool) -> Self {
+        let dim = if dim < 0 {
+            self.inner.ndim() as i64 + dim
+        } else {
+            dim
+        } as i32;
+        Tensor::from_mlx(crate::backend::mlx::ops::min_axis(&self.inner, dim, keepdim))
     }
 
     pub fn topk(&self, k: i64, dim: i64, _largest: bool, _sorted: bool) -> (Self, Self) {

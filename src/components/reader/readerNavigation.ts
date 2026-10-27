@@ -113,18 +113,19 @@ function hasTextRange(segment: AudioSegment): segment is AudioSegment & { textSt
 
 /**
  * Section-local offset of the word being spoken at `timeSec`: the estimated
- * word when timing is stable, else the start of the passage. In the pause
- * after a passage it is the passage's last word. Null without timed audio.
+ * word, or the start of the passage when it is the still-growing
+ * `unsettledSegmentId` (its word timing is not final). In the pause after a
+ * passage it is the passage's last word. Null without timed audio.
  */
 export function offsetAtTime(
   segments: readonly AudioSegment[],
   timeSec: number,
-  wordTimingStable: boolean,
+  unsettledSegmentId: string | null,
 ): number | null {
   const segment = segments.find((entry) => hasTextRange(entry) && timeSec >= entry.startSec && timeSec < entry.endSec)
     ?? [...segments].reverse().find((entry) => hasTextRange(entry) && entry.startSec <= timeSec);
   if (!segment || !hasTextRange(segment)) return null;
-  if (!wordTimingStable) return segment.textStart;
+  if (segment.id === unsettledSegmentId) return segment.textStart;
   const words = estimateSegmentWords(segment);
   if (words.length === 0) return segment.textStart;
   const word = words.find((entry) => timeSec < entry.endSec) ?? words[words.length - 1];
@@ -132,19 +133,20 @@ export function offsetAtTime(
 }
 
 /**
- * When the word at a section-local offset starts playing. With stable timing
- * that is the estimated word's start (the word holding the offset, or the next
- * one when the offset falls on a space); otherwise the start of the passage
- * holding the offset. Null when no generated passage covers it.
+ * When the word at a section-local offset starts playing. That is the
+ * estimated word's start (the word holding the offset, or the next one when
+ * the offset falls on a space), or the start of the passage holding the offset
+ * when it is the still-growing `unsettledSegmentId`. Null when no generated
+ * passage covers it.
  */
 export function timeAtOffset(
   segments: readonly AudioSegment[],
   localOffset: number,
-  wordTimingStable: boolean,
+  unsettledSegmentId: string | null,
 ): number | null {
   const segment = findSegmentForTextOffset(segments, localOffset);
   if (!segment) return null;
-  if (!wordTimingStable || !hasTextRange(segment)) return segment.startSec;
+  if (segment.id === unsettledSegmentId || !hasTextRange(segment)) return segment.startSec;
   const word = estimateSegmentWords(segment).find((entry) => localOffset < entry.end);
   return word ? word.startSec : segment.startSec;
 }

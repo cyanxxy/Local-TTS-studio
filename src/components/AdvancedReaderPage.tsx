@@ -13,7 +13,7 @@ import type { AudioSegment } from "../hooks/useAudioPlayer";
 import { chunkTextForModelDetailed } from "../lib/chunking";
 import type { PlaybackClock } from "../lib/playbackClock";
 import { browserEnginePreviewChunks, browserEngineVoiceLabel, getEngine } from "../models/registry";
-import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
+import { buildQwen3RequestPlan } from "../lib/qwenChunking";
 import {
   isReaderHighlightAnchored,
   type ReaderChapter,
@@ -111,9 +111,8 @@ interface AdvancedReaderPageProps {
   activeModel: ModelType;
   onModelChange: (model: ModelType) => void;
   desktopModelOptions?: ReaderDesktopModelOption[];
-  desktopQwenMode?: "customVoice" | "voiceClone" | "voiceDesign";
-  /** False while a streaming model is still extending semantic segment durations. */
-  estimatedWordTrackingStable?: boolean;
+  /** The segment a streaming model is still extending; earlier ones are final. */
+  growingSegmentId?: string | null;
   desktopVoiceLabel?: string;
   desktopModelSettings?: ReactNode;
   kokoroState: ModelState;
@@ -216,8 +215,7 @@ export function AdvancedReaderPage({
   activeModel,
   onModelChange,
   desktopModelOptions = [],
-  desktopQwenMode = "customVoice",
-  estimatedWordTrackingStable = true,
+  growingSegmentId = null,
   desktopVoiceLabel,
   desktopModelSettings,
   kokoroState,
@@ -333,13 +331,13 @@ export function AdvancedReaderPage({
   const runtimeBackend = browserModelState.backend;
   const previewChunks = useMemo(
     () => selectedDesktopModel?.key === "qwen3"
-      ? desktopQwenMode === "voiceClone"
-        ? buildQwen3RequestSections(text)
-        : buildQwen3TextUnits(text)
+      // The exact unit list the runtime maps streamed chunks onto, in every
+      // mode: the bridge splits voice clone requests into units too.
+      ? buildQwen3RequestPlan(text).units
       : selectedDesktopModel?.key === "supertonic3"
       ? chunkTextForModelDetailed(text, "supertonic", { runtime: { backend: runtimeBackend, quality } })
       : browserEnginePreviewChunks(activeModel, text, { backend: runtimeBackend, quality }),
-    [activeModel, desktopQwenMode, quality, runtimeBackend, selectedDesktopModel?.key, text],
+    [activeModel, quality, runtimeBackend, selectedDesktopModel?.key, text],
   );
   const textBlocks = useMemo(() => splitTextBlocks(text), [text]);
 
@@ -426,7 +424,7 @@ export function AdvancedReaderPage({
     // the model generated it in.
     const targetSec = typeof positionSec === "number"
       ? positionSec
-      : timeAtOffset(segments, localOffset, estimatedWordTrackingStable);
+      : timeAtOffset(segments, localOffset, growingSegmentId);
     if (targetSec !== null && totalDuration > 0) {
       onSeek(clamp(targetSec / totalDuration, 0, 1));
     } else {
@@ -437,8 +435,8 @@ export function AdvancedReaderPage({
   }, [
     activeDocument?.text.length,
     activeSection?.end,
-    estimatedWordTrackingStable,
     finishEditing,
+    growingSegmentId,
     onJumpToSegment,
     onNavigateToOffset,
     onSeek,
@@ -464,16 +462,19 @@ export function AdvancedReaderPage({
   const documentLanguage = activeDocument?.language;
   const stepReading = useStableCallback((unit: ReaderStepUnit, direction: ReaderStepDirection) => {
     const nowSec = clock.getTime();
-    const spokenOffset = hasAudio ? offsetAtTime(segments, nowSec, estimatedWordTrackingStable) : null;
+    const spokenOffset = hasAudio ? offsetAtTime(segments, nowSec, growingSegmentId) : null;
     const currentOffset = clamp(spokenOffset ?? currentLocalTextOffset, 0, text.length);
     const boundaries = unit === "sentence"
       ? sentenceStarts(text, textBlocks, documentLanguage)
       : paragraphStarts(text, textBlocks);
     let target = stepBoundary(boundaries, currentOffset, direction);
-    if (target !== null && direction === "next" && hasAudio && !estimatedWordTrackingStable) {
+    if (
+      target !== null && direction === "next" && hasAudio && growingSegmentId !== null
+      && findSegmentForTextOffset(segments, target)?.id === growingSegmentId
+    ) {
       // Without word timing a step seeks to its passage's start, which may be
       // behind the voice; step to the next passage instead of going back.
-      const landingSec = timeAtOffset(segments, target, false);
+      const landingSec = timeAtOffset(segments, target, growingSegmentId);
       if (landingSec !== null && landingSec <= nowSec) {
         const nextPassage = segments.find((segment) => (
           segment.startSec > nowSec && typeof segment.textStart === "number"
@@ -744,8 +745,12 @@ export function AdvancedReaderPage({
 
       {selectedDesktopModel && modelError && (
         <ReaderDesktopModelAlert
+          // A ready Qwen model that failed a passage still reports through
+          // modelError; that is a generation failure, not a setup problem.
           title={selectedDesktopModel.key === "qwen3"
-            ? `${activeModelLabel} needs setup in Reader`
+            ? modelReady
+              ? `${activeModelLabel} couldn't read this passage`
+              : `${activeModelLabel} needs setup in Reader`
             : `${activeModelLabel} is unavailable`}
           message={modelError}
           actionLabel={selectedDesktopModel.key === "qwen3" ? "Open Qwen settings" : "Retry"}
@@ -807,7 +812,7 @@ export function AdvancedReaderPage({
           headingBlockStart={headingBlockStart}
           clock={clock}
           activeSegment={activeSegment}
-          estimatedWordTrackingStable={estimatedWordTrackingStable}
+          growingSegmentId={growingSegmentId}
           isPlaying={isPlaying}
           editing={editing}
           draft={editor.draft}

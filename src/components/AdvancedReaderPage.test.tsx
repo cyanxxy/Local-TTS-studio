@@ -11,7 +11,7 @@ import {
   getReaderSectionText,
 } from "../lib/readerDocument";
 import { DEFAULT_READER_VIEW_PREFERENCES } from "../lib/readerPreferences";
-import { buildQwen3RequestSections, buildQwen3TextUnits } from "../lib/qwenChunking";
+import { buildQwen3RequestPlan, buildQwen3TextUnits } from "../lib/qwenChunking";
 import { chunkTextForModelDetailed } from "../lib/chunking";
 import { chunkKittenText, chunkParadeeText, chunkPiperText } from "../lib/phonemeModels";
 import { PlaybackClock } from "../lib/playbackClock";
@@ -812,24 +812,47 @@ describe("AdvancedReaderPage", () => {
     expect(onSelectQwen3).toHaveBeenCalledTimes(1);
   });
 
-  it("uses request-sized preview sections for Qwen voice cloning", () => {
+  const selectedQwenOption = {
+    key: "qwen3",
+    label: "Qwen3-TTS",
+    badge: "Electron",
+    detail: "0.6B CustomVoice MLX",
+    selected: true,
+    onSelect: vi.fn(),
+  } as const;
+
+  it("reports a failed Qwen passage as a generation error, not a setup problem", () => {
+    renderReader({
+      desktopModelOptions: [selectedQwenOption],
+      modelReady: true,
+      modelError: "Qwen3 CustomVoice inference failed in section 1 of 33.",
+    });
+    expect(screen.getByText(/couldn't read this passage/)).toBeInTheDocument();
+    expect(screen.queryByText(/needs setup/)).not.toBeInTheDocument();
+  });
+
+  it("asks for Qwen setup while the model is not ready", () => {
+    renderReader({
+      desktopModelOptions: [selectedQwenOption],
+      modelReady: false,
+      modelError: "Select or download a valid Qwen3 model directory before generating.",
+    });
+    expect(screen.getByText(/needs setup in Reader/)).toBeInTheDocument();
+  });
+
+  it("previews Qwen voice cloning by streamed text unit, like the other modes", () => {
     const text = "A sentence for local voice cloning. ".repeat(420);
     renderReader({
       text,
-      desktopQwenMode: "voiceClone",
-      desktopModelOptions: [{
-        key: "qwen3",
-        label: "Qwen3-TTS",
-        badge: "Electron",
-        detail: "0.6B Base MLX",
-        selected: true,
-        onSelect: vi.fn(),
-      }],
+      desktopModelOptions: [{ ...selectedQwenOption, detail: "0.6B Base MLX" }],
     });
 
+    // The runtime maps streamed chunks onto request-plan units in every Qwen
+    // mode, so the passage count is the unit count, not the request count.
+    const plan = buildQwen3RequestPlan(text);
     const props = audioPlayerMock.mock.lastCall?.[0] as { sectionPreviewCount?: number };
-    expect(props.sectionPreviewCount).toBe(buildQwen3RequestSections(text).length);
-    expect(props.sectionPreviewCount).toBeLessThan(buildQwen3TextUnits(text).length);
+    expect(plan.sections.length).toBeLessThan(plan.units.length);
+    expect(props.sectionPreviewCount).toBe(plan.units.length);
   });
 
   it("uses Supertonic chunking when Supertonic 3 is selected", () => {
@@ -914,48 +937,75 @@ describe("AdvancedReaderPage", () => {
     expect(sectionText).toBe(text);
   });
 
-  it("waits for Qwen streaming to finish before estimating word timing", () => {
-    const clock = clockAt(1.5);
-    const segment = createSegment({
+  describe("while a unit-streaming engine is still generating", () => {
+    const finished = createSegment({
       text: "Hello extraordinary world.",
       startSec: 0,
       endSec: 3,
       textStart: 0,
       textEnd: 26,
     });
-    const view = renderReader({
-      text: "Hello extraordinary world.",
-      totalDuration: 3,
-      clock,
-      isPlaying: true,
-      isGenerating: true,
-      activeSegmentId: "segment-1",
-      segments: [segment],
-      estimatedWordTrackingStable: false,
+    const growing = createSegment({
+      id: "segment-2",
+      text: " Another growing sentence.",
+      index: 2,
+      startSec: 3,
+      endSec: 5,
+      textStart: 26,
+      textEnd: 52,
+    });
+    const text = "Hello extraordinary world. Another growing sentence.";
+    const activeWord = (container: HTMLElement) => container.querySelector("[data-reader-active-word='true']");
+
+    it("tracks words in a finished segment", () => {
+      const view = renderReader({
+        text,
+        totalDuration: 5,
+        clock: clockAt(1.5),
+        isPlaying: true,
+        isGenerating: true,
+        activeSegmentId: "segment-1",
+        segments: [finished, growing],
+        growingSegmentId: "segment-2",
+      });
+
+      expect(activeWord(view.container)).toHaveTextContent("extraordinary");
     });
 
-    expect(view.container.querySelector("[data-reader-active-word='true']")).toBeNull();
-    expect(view.container.querySelector(".reader-chunk-highlight-active")).toHaveTextContent(
-      "Hello extraordinary world.",
-    );
+    it("holds back word timing in the segment that is still growing until it settles", () => {
+      const clock = clockAt(4);
+      const view = renderReader({
+        text,
+        totalDuration: 5,
+        clock,
+        isPlaying: true,
+        isGenerating: true,
+        activeSegmentId: "segment-2",
+        segments: [finished, growing],
+        growingSegmentId: "segment-2",
+      });
 
-    view.rerender(
-      <AdvancedReaderPage
-        {...view.props}
-        text="Hello extraordinary world."
-        totalDuration={3}
-        clock={clock}
-        isPlaying
-        isGenerating={false}
-        activeSegmentId="segment-1"
-        segments={[segment]}
-        estimatedWordTrackingStable
-      />,
-    );
+      expect(activeWord(view.container)).toBeNull();
+      expect(view.container.querySelector(".reader-chunk-highlight-active")).toHaveTextContent(
+        "Another growing sentence.",
+      );
 
-    expect(view.container.querySelector("[data-reader-active-word='true']")).toHaveTextContent(
-      "extraordinary",
-    );
+      view.rerender(
+        <AdvancedReaderPage
+          {...view.props}
+          text={text}
+          totalDuration={5}
+          clock={clock}
+          isPlaying
+          isGenerating={false}
+          activeSegmentId="segment-2"
+          segments={[finished, growing]}
+          growingSegmentId={null}
+        />,
+      );
+
+      expect(activeWord(view.container)).not.toBeNull();
+    });
   });
 
   it("seeks by generated audio ranges without coupling them to preview boundaries", () => {

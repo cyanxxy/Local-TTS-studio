@@ -383,6 +383,12 @@ pub fn argmin(a: &MlxArray, axis: i32, keepdims: bool) -> MlxArray {
     res
 }
 
+pub fn min_axis(a: &MlxArray, axis: i32, keepdims: bool) -> MlxArray {
+    let mut res = MlxArray::empty();
+    unsafe { ffi::mlx_min_axis(&mut res.ptr, a.ptr, axis, keepdims, default_stream()) };
+    res
+}
+
 // ---------------------------------------------------------------------------
 // Math functions
 // ---------------------------------------------------------------------------

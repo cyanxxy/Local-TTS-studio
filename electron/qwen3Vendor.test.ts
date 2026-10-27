@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VENDOR_DIR = path.join(ROOT_DIR, "rust", "vendor", "qwen3-tts-rs");
 const PATCH_PATH = path.join(VENDOR_DIR, "OPEN_TTS.patch");
-const EXPECTED_VENDOR_DIGEST = "520436b998ec59316c2684d4b103226913504ad35714da1348dd83e0a2e9d7e2";
+const EXPECTED_VENDOR_DIGEST = "0c1815164595021f0c03656643b0ee91fc9573219cce9debdea03fcaebc292e1";
 const DIGEST_EXCLUSIONS = new Set([
   "OPEN_TTS.patch",
   "OPEN_TTS_VENDOR.md",

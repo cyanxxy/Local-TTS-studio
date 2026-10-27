@@ -1,5 +1,4 @@
 import { Suspense } from "react";
-import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import { useReaderMediaSession } from "../hooks/useReaderMediaSession";
 import type { ReaderLookaheadStatus } from "../hooks/useReaderLookahead";
 import { getEngine, surfaceEngineVoiceLabel } from "../models/registry";
@@ -27,7 +26,6 @@ interface ReaderSurfaceProps {
 /** The Reader page, wired to the shared session's library, engines and player. */
 export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfaceProps) {
   const session = useSynthesisSession();
-  const qwen3Settings = useQwen3Runtime();
   const { documents, engines, environment, player, reader, routing } = session;
   const { library, runtime, session: readerSession } = reader;
   const { browserSupport } = environment;
@@ -88,11 +86,13 @@ export function ReaderSurface({ immersive, onImmersiveChange }: ReaderSurfacePro
           activeModel={engines.activeModel}
           onModelChange={reader.changeModel}
           desktopModelOptions={engines.desktopModelOptions.reader}
-          desktopQwenMode={reader.desktopModel === "qwen3" ? qwen3Settings.profile.mode : undefined}
-          // Unit-streaming engines keep extending a segment's duration while
-          // it generates, so estimated word timing settles only afterwards.
-          estimatedWordTrackingStable={
-            readerEngine.capabilities.streamingGranularity !== "unit" || !runtime.isGenerating
+          // Unit-streaming engines keep extending the segment being generated
+          // (the last one), so estimated word timing settles only once the next
+          // segment starts or generation ends. Earlier segments are final.
+          growingSegmentId={
+            readerEngine.capabilities.streamingGranularity === "unit" && runtime.isGenerating
+              ? player.state.segments.at(-1)?.id ?? null
+              : null
           }
           desktopVoiceLabel={reader.desktopModel
             ? surfaceEngineVoiceLabel(reader.desktopModel, engines.surfaceEngineSettings)
