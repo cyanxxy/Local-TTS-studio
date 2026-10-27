@@ -89,6 +89,9 @@ export function useReaderListeningProfile({
   // changes at once; this marks the render after them as settled even if a
   // setting refused to move, so one stubborn input cannot hold the Reader.
   const [appliedKey, setAppliedKey] = useState<string | null>(null);
+  // Leaving the Reader puts Studio's voice, quality and speed back, so the
+  // profile applied on this visit is not in place on the next one.
+  if (!active && appliedKey !== null) setAppliedKey(null);
 
   const applyProfile = useEffectEvent((target: ListeningTarget) => apply(target));
   useEffect(() => {

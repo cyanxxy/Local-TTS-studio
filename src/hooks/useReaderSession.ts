@@ -56,6 +56,12 @@ export interface ReaderSession extends ReaderSections {
   audioSignature: string | null;
   /** Saves the active section's audio now; call before anything replaces it. */
   flushAudio: () => void;
+  /**
+   * Generates the active section because the listener asked to. A lookup of
+   * its saved audio still running is dropped, so that audio is not restored
+   * into (or over) the generation.
+   */
+  generate: () => void;
   /** Turns to `section` and plays it, generating it first when it has no saved audio. */
   playSection: (section: ReaderSection) => void;
   /** Moves the reading position, turning to the section that holds it. */
@@ -150,7 +156,20 @@ export function useReaderSession({
     onSectionEnter: clearErrors,
     reportError,
   });
-  const { discardForEdit, flush, isRestorePending, requestRestore, setContinuation } = audioCache;
+  const {
+    abandonRestore,
+    discardForEdit,
+    flush,
+    isPartialAudio,
+    isRestorePending,
+    requestRestore,
+    setContinuation,
+  } = audioCache;
+
+  const generateNow = useCallback(() => {
+    abandonRestore();
+    generate();
+  }, [abandonRestore, generate]);
 
   const navigate = useCallback((
     textOffset: number,
@@ -198,6 +217,8 @@ export function useReaderSession({
     flushProgress,
     autoAdvance,
     advance,
+    isPartialAudio,
+    regenerate: generate,
   });
 
   const editRef = useRef<SectionEdit | null>(null);
@@ -257,8 +278,8 @@ export function useReaderSession({
 
   const newDocument = useCallback(() => {
     flush();
-    void createDocument(NEW_DOCUMENT);
-  }, [createDocument, flush]);
+    void createDocument(NEW_DOCUMENT).catch((cause: unknown) => onError(errorMessage(cause)));
+  }, [createDocument, flush, onError]);
 
   const openDocument = useCallback((id: string) => {
     flush();
@@ -274,6 +295,7 @@ export function useReaderSession({
     document,
     audioSignature: audioCache.signature,
     flushAudio: flush,
+    generate: generateNow,
     playSection,
     navigateToOffset,
     startSectionEdit,
@@ -290,6 +312,7 @@ export function useReaderSession({
     document,
     endSectionEdit,
     flush,
+    generateNow,
     navigateToOffset,
     newDocument,
     openDocument,

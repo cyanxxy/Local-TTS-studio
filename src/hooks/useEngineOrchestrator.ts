@@ -100,6 +100,12 @@ export interface UseEngineOrchestratorReturn {
   /** Stops every engine's surface generation (unforced) and clears what each put in the player. */
   retireAllAudio: () => void;
   selectBrowserModel: (surface: Surface, model: BrowserEngineId) => void;
+  /**
+   * Makes `model` the chosen browser model again without retiring any audio:
+   * Studio's choice put back after the Reader switched the shared model for a
+   * book. The audio on screen then is not the switched model's to clear.
+   */
+  putBackBrowserModel: (model: BrowserEngineId) => void;
   selectDesktopModel: (surface: Surface, engine: DesktopInlineEngineId) => void;
   /**
    * Changes an input that shapes `engine`'s audio. When that engine drives the
@@ -119,7 +125,8 @@ export interface UseEngineOrchestratorReturn {
  *
  * Engines are activated per surface. A browser or Supertonic 3 model stays
  * loaded while either surface selects it, so switching pages reloads nothing;
- * only the generation of the surface being left is stopped.
+ * only the generation of the surface being left is stopped, even when the
+ * page shown next runs the same engine.
  */
 export function useEngineOrchestrator({
   surface,
@@ -307,17 +314,20 @@ export function useEngineOrchestrator({
     for (const runtime of all) runtime.resetGeneratedAudio();
   }, [runtimes]);
 
-  // When the visible engine changes, whether because the page or its
-  // selection did, the engine left behind stops: its audio would otherwise
-  // keep streaming into the player under a surface that did not ask for it.
-  // Switching between surfaces that select the same engine changes nothing
-  // here, so a generation continues across that switch.
-  const previousVisibleEngineRef = useRef(visibleEngineId);
+  // When the page or its engine selection changes, the generation of the
+  // surface left behind stops: its audio would otherwise keep streaming into
+  // the player under a surface that did not ask for it. That holds when the
+  // page shown next runs the same engine too, because the player is shared:
+  // a Reader section would stream on into the Studio audio put back there.
+  // (Leaving the Reader saves its audio first; see `handlePageNavigation`.)
+  const previousVisibleRef = useRef({ surface, engine: visibleEngineId });
   useEffect(() => {
-    const previous = previousVisibleEngineRef.current;
-    previousVisibleEngineRef.current = visibleEngineId;
-    if (previous !== null && previous !== visibleEngineId) runtimes[previous].cancelActiveGeneration();
-  }, [runtimes, visibleEngineId]);
+    const previous = previousVisibleRef.current;
+    previousVisibleRef.current = { surface, engine: visibleEngineId };
+    if (previous.engine === null) return;
+    if (previous.surface === surface && previous.engine === visibleEngineId) return;
+    runtimes[previous.engine].cancelActiveGeneration();
+  }, [runtimes, surface, visibleEngineId]);
 
   const { loadModel } = browser;
   const selectBrowserModel = useCallback((target: Surface, model: BrowserEngineId) => {
@@ -332,6 +342,12 @@ export function useEngineOrchestrator({
     }
     onEngineChange();
   }, [activeModel, beforeReaderAudioChange, browserSupport, desktopModels, loadModel, onEngineChange, retireAllAudio]);
+
+  const putBackBrowserModel = useCallback((model: BrowserEngineId) => {
+    if (model === chosenModel) return;
+    setChosenModel(model);
+    if (isModelSupportedInBrowser(model, browserSupport)) loadModel(model);
+  }, [browserSupport, chosenModel, loadModel]);
 
   const selectDesktopModel = useCallback((target: Surface, engine: DesktopInlineEngineId) => {
     if (target === "reader") beforeReaderAudioChange();
@@ -414,6 +430,7 @@ export function useEngineOrchestrator({
     desktopModelOptions,
     retireAllAudio,
     selectBrowserModel,
+    putBackBrowserModel,
     selectDesktopModel,
     changeEngineInput,
   };

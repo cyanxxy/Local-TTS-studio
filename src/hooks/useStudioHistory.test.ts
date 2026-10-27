@@ -1,9 +1,13 @@
-import { act, renderHook, waitFor } from "@testing-library/react";
+import { act, render, renderHook, waitFor } from "@testing-library/react";
 import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
+import { createElement, useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createGenerationHistoryStore, type GenerationHistoryStore } from "../lib/history/generationHistory";
+import type { SynthesisSession } from "../shared/useSynthesisSessionState";
 import { createStudioHarness, pcmChunk } from "./studioSession.testkit";
-import { useGenerationHistory } from "./useGenerationHistory";
+import { useAudioPlayer, type UseAudioPlayerReturn } from "./useAudioPlayer";
+import { useGenerationHistory, type UseGenerationHistoryReturn } from "./useGenerationHistory";
+import { useStudioAudioKeeper } from "./useStudioAudioKeeper";
 import { useStudioHistory } from "./useStudioHistory";
 
 const downloadAudioChunks = vi.hoisted(() => vi.fn(async () => undefined));
@@ -274,5 +278,122 @@ describe("useStudioHistory", () => {
 
     await act(async () => { await result.current.history.clear({ keepFavorites: true }); });
     await waitFor(() => expect(result.current.history.entries.map((entry) => entry.text)).toEqual(["First take of the day."]));
+  });
+});
+
+// Web Audio stand-ins for the real player, as in useAudioPlayer.test.ts.
+class MockAudioBuffer {
+  public readonly duration: number;
+  private readonly channelData: Float32Array;
+  constructor(length: number, sampleRate: number) {
+    this.duration = length / sampleRate;
+    this.channelData = new Float32Array(length);
+  }
+  getChannelData(): Float32Array {
+    return this.channelData;
+  }
+}
+class MockAudioBufferSourceNode {
+  public buffer: MockAudioBuffer | null = null;
+  public playbackRate = { value: 1 };
+  public onended: (() => void) | null = null;
+  connect(): void {}
+  disconnect(): void {}
+  start(): void {}
+  stop(): void {}
+}
+class MockAudioContext {
+  public currentTime = 0;
+  public state: "running" | "suspended" | "closed" = "running";
+  public readonly destination = {};
+  public baseLatency = 0;
+  resume = vi.fn(async () => { this.state = "running"; });
+  suspend = vi.fn(async () => { this.state = "suspended"; });
+  close = vi.fn(async () => { this.state = "closed"; });
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  createBuffer(_channels: number, length: number, sampleRate: number) {
+    return new MockAudioBuffer(length, sampleRate);
+  }
+  createBufferSource() {
+    return new MockAudioBufferSourceNode();
+  }
+}
+
+describe("useStudioHistory with the shared player across a Reader visit", () => {
+  beforeEach(() => {
+    vi.stubGlobal("AudioContext", MockAudioContext as unknown as typeof AudioContext);
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => setTimeout(() => callback(0), 16) as unknown as number);
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => clearTimeout(id));
+    vi.stubGlobal("indexedDB", new IDBFactory());
+    vi.stubGlobal("IDBKeyRange", IDBKeyRange);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("does not save Studio's audio a second time when it is put back after Studio -> Reader -> Studio", async () => {
+    let ids = 0;
+    const store = createGenerationHistoryStore({ createId: () => `gen-${++ids}` });
+    const handles: { player?: UseAudioPlayerReturn; keep?: () => void; history?: UseGenerationHistoryReturn } = {};
+
+    // StudioSurface: mounted only while Studio is the page.
+    function Studio({ session }: { session: SynthesisSession }) {
+      const history = useGenerationHistory(store);
+      useStudioHistory({ session, history });
+      handles.history = history;
+      return null;
+    }
+    // The session provider: the one player and the keeper.
+    function App({ page }: { page: "studio" | "reader" }) {
+      const player = useAudioPlayer();
+      const [, setShow] = useState(false);
+      const keeper = useStudioAudioKeeper({ isStudioPage: page === "studio", player, setShowPlayer: setShow });
+      handles.player = player;
+      handles.keep = keeper.keepStudioAudio;
+      const session = {
+        player: { state: player, setShow, isPutBackStudioAudio: keeper.isPutBackStudioAudio },
+        studio: { text: "Hello from the studio.", engineId: "kokoro", runtime: { isGenerating: false } },
+        engines: { surfaceEngineSettings: { kokoro: { voice: "af_heart" } } },
+        creator: { generationSettings: { speed: 1, quality: 8 } },
+      } as unknown as SynthesisSession;
+      return page === "studio" ? createElement(Studio, { session }) : null;
+    }
+
+    const view = render(createElement(App, { page: "studio" }));
+    await waitFor(() => expect(handles.history?.loading).toBe(false));
+
+    // A Studio generation streams and completes: saved once.
+    await act(async () => {
+      handles.player!.beginStream();
+      await handles.player!.scheduleChunk({ audio: new Float32Array(100).fill(0.2), samplingRate: 100, text: "Hello from the studio.", index: 1, total: 1 });
+      handles.player!.endStream({ completed: true });
+    });
+    await waitFor(() => expect(handles.history?.entries).toHaveLength(1));
+
+    // The Reader keeps Studio's audio and empties the player for its section.
+    view.rerender(createElement(App, { page: "reader" }));
+    act(() => {
+      handles.keep!();
+      handles.player!.reset();
+    });
+
+    // Back to Studio: the keeper puts Studio's audio back, complete.
+    view.rerender(createElement(App, { page: "studio" }));
+    await waitFor(() => expect(handles.player!.isSynthesisComplete).toBe(true));
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 200)));
+    await act(async () => { await handles.history!.refresh(); });
+
+    expect(handles.history!.entries).toHaveLength(1);
+
+    // A generation made after the visit is still saved.
+    act(() => handles.player!.reset());
+    await act(async () => {
+      handles.player!.beginStream();
+      await handles.player!.scheduleChunk({ audio: new Float32Array(100).fill(0.3), samplingRate: 100, text: "Hello from the studio.", index: 1, total: 1 });
+      handles.player!.endStream({ completed: true });
+    });
+    await waitFor(() => expect(handles.history?.entries).toHaveLength(2));
   });
 });

@@ -67,6 +67,23 @@ type AppEngineId = Exclude<SurfaceEngineId, "qwen3">;
 type AppEngineSettings = { [Id in AppEngineId]: EngineSettings<Id> };
 
 /**
+ * `saved` with the sampling settings `current` has (Audio8's seed and
+ * temperature, Chatterbox's temperature and seed, Supertonic 3's seed).
+ * Sampling is not part of a book's listening profile, so it is one setting
+ * for both pages: putting Studio's settings back after a Reader visit keeps
+ * it as it is now. Reverting it would also leave the Reader audio made with
+ * it signed with a sampling the Reader no longer has, and so discarded.
+ */
+function withCurrentSampling(saved: AppEngineSettings, current: AppEngineSettings): AppEngineSettings {
+  return {
+    ...saved,
+    audio8: { ...saved.audio8, seed: current.audio8.seed, temperature: current.audio8.temperature },
+    chatterbox: { ...saved.chatterbox, temperature: current.chatterbox.temperature, seed: current.chatterbox.seed },
+    supertonic3: { ...saved.supertonic3, seed: current.supertonic3.seed },
+  };
+}
+
+/**
  * Everything the app's surfaces share: the routed page, the engines and their
  * settings, the one audio player, the Studio script, and the Reader's library
  * and session. The surfaces read it through `SynthesisSessionContext`; this
@@ -100,9 +117,20 @@ export function useSynthesisSessionState({
   const qwen3Settings = useQwen3Runtime();
   const initialState = useMemo(() => getInitialAppState(), []);
   const initialCreatorState = useMemo(() => getInitialCreatorState(), []);
+  // Anything that replaces the Reader's audio saves it first. The Reader
+  // session that knows how is created after the engines it saves for, so the
+  // engines (and the router) reach it through this ref.
+  const flushReaderAudioRef = useRef<() => void>(() => undefined);
+  const beforeReaderAudioChange = useCallback(() => flushReaderAudioRef.current(), []);
+  // The browser's Back and Forward leave a page without `handlePageNavigation`;
+  // the Reader's audio is saved all the same before the next page shows.
+  const handleHistoryLeave = useCallback((from: AppPage) => {
+    if (from === "reader") flushReaderAudioRef.current();
+  }, []);
   const { activePage, availableTabs: routeTabs, isReaderPage, isStudioPage, navigateToPage } = useAppRouting(
     enableDesktopRuntimes,
     routeBasePath,
+    handleHistoryLeave,
   );
   const availableTabs = useMemo(() => routeTabs.filter((tab) => {
     if (tab.key === "neutts") return preferences.showNeuTTS;
@@ -132,11 +160,6 @@ export function useSynthesisSessionState({
   const synthesisText = isReaderPage && readerSections.activeSection
     ? readerSections.activeSectionText
     : text;
-  // Anything that replaces the Reader's audio saves it first. The Reader
-  // session that knows how is created after the engines it saves for, so the
-  // engines reach it through this ref.
-  const flushReaderAudioRef = useRef<() => void>(() => undefined);
-  const beforeReaderAudioChange = useCallback(() => flushReaderAudioRef.current(), []);
 
   const openAppSettings = useCallback(() => setAppSettingsOpen(true), []);
   const closeAppSettings = useCallback(() => setAppSettingsOpen(false), []);
@@ -185,6 +208,7 @@ export function useSynthesisSessionState({
     desktopEngineAvailability,
     retireAllAudio,
     selectBrowserModel,
+    putBackBrowserModel,
     selectDesktopModel,
     changeEngineInput,
   } = useEngineOrchestrator({
@@ -223,18 +247,21 @@ export function useSynthesisSessionState({
       ? isModelSupportedInBrowser(engine, runnableBrowserSupport)
       : desktopEngineAvailability[engine]
   ), [desktopEngineAvailability, runnableBrowserSupport]);
-  // A book's remembered voice, quality and speed belong to the Reader. The
-  // values Studio had are set aside the first time the Reader changes them and
-  // put back when Studio is shown again or a book without a profile is opened.
+  // A book's remembered engine, voice, quality and speed belong to the
+  // Reader. The values Studio had are set aside the first time the Reader
+  // changes them and put back when Studio is shown again or a book without a
+  // profile is opened. That includes the browser model: both pages share it,
+  // so a book that speaks with another one would otherwise change Studio's.
   const [studioGlobals, setStudioGlobals] = useState<{
     engineSettings: AppEngineSettings;
     quality: number;
     playbackRate: number;
+    chosenModel: ModelType;
   } | null>(null);
   const currentPlaybackRate = player.playbackRate;
   const setAsideStudioGlobals = useCallback(() => {
-    setStudioGlobals((current) => current ?? { engineSettings, quality, playbackRate: currentPlaybackRate });
-  }, [currentPlaybackRate, engineSettings, quality]);
+    setStudioGlobals((current) => current ?? { engineSettings, quality, playbackRate: currentPlaybackRate, chosenModel });
+  }, [chosenModel, currentPlaybackRate, engineSettings, quality]);
   const applyListeningProfile = useCallback(({ engine: profile, playbackRate: rate }: ListeningTarget) => {
     setAsideStudioGlobals();
     if (profile) {
@@ -290,9 +317,10 @@ export function useSynthesisSessionState({
 
   const putBackStudioGlobals = useEffectEvent(() => {
     if (!studioGlobals) return;
-    setEngineSettings(studioGlobals.engineSettings);
+    setEngineSettings(withCurrentSampling(studioGlobals.engineSettings, engineSettings));
     setQuality(studioGlobals.quality);
     setPlaybackRate(studioGlobals.playbackRate);
+    putBackBrowserModel(studioGlobals.chosenModel);
     setStudioGlobals(null);
   });
   const readerBookHasProfile = readerLibrary.activeDocument?.listening !== undefined;
@@ -306,13 +334,13 @@ export function useSynthesisSessionState({
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       const persisted: PersistedAppState = {
-        model: chosenModel,
+        model: studioGlobals?.chosenModel ?? chosenModel,
         text,
         quality: studioGlobals?.quality ?? quality,
         desktopModels: chosenDesktopModels,
       };
       persistAppState(persisted);
-      persistEngineSettings(studioGlobals?.engineSettings ?? engineSettings);
+      persistEngineSettings(studioGlobals ? withCurrentSampling(studioGlobals.engineSettings, engineSettings) : engineSettings);
     }, 200);
 
     return () => window.clearTimeout(timeoutId);
@@ -384,9 +412,14 @@ export function useSynthesisSessionState({
     isBusy: () => false,
     settled: () => Promise.resolve(),
   });
-  const { requestGenerate: requestReaderGenerate, cancelPending: cancelPendingReaderGenerate } = useGenerateAfterLookahead({
+  const {
+    requestGenerate: requestReaderGenerate,
+    cancelPending: cancelPendingReaderGenerate,
+    waiting: readerGenerateWaiting,
+  } = useGenerateAfterLookahead({
     controls: lookaheadControlsRef,
     canGenerate: readerRuntime.canGenerate,
+    isGenerating: readerRuntime.isGenerating,
     startGenerate: readerRuntime.handleGenerate,
     scopeKey: `${readerLibrary.activeDocument?.id ?? ""}:${readerSections.activeSection?.id ?? ""}`,
   });
@@ -419,7 +452,11 @@ export function useSynthesisSessionState({
   const reportReaderError = useCallback((message: string) => setImportError(message), []);
   // The Reader empties the shared player as it enters a section; Studio's
   // unsaved audio is set aside first and put back when Studio returns.
-  const { keepStudioAudio } = useStudioAudioKeeper({ isStudioPage, player, setShowPlayer });
+  const { keepStudioAudio, dropKeptStudioAudio, isPutBackStudioAudio } = useStudioAudioKeeper({
+    isStudioPage,
+    player,
+    setShowPlayer,
+  });
   const retireAudioForReader = useCallback(() => {
     keepStudioAudio();
     retireAllAudio();
@@ -478,7 +515,8 @@ export function useSynthesisSessionState({
     engineId: readerEngineId,
     signatureParts: readerSignaturePartsWhenSettled,
     renderSection: renderReaderSection,
-    engineBusy: readerRuntime.isGenerating,
+    // A generate waiting for the look-ahead to yield already owns the engine.
+    engineBusy: readerRuntime.isGenerating || readerGenerateWaiting,
     modelReady: readerRuntime.modelState.ready,
     currentSectionPlaying: player.isPlaying && player.isSynthesisComplete && player.segments.length > 0,
     isRetaking: browser.isRetakingSegment,
@@ -493,10 +531,36 @@ export function useSynthesisSessionState({
     preemptLookahead();
     browser.handleRetakeSegment(...args);
   }, [browser, preemptLookahead]);
-  const { flushAudio: flushReaderAudio } = readerSession;
+  const { flushAudio: flushReaderAudio, generate: generateReaderSection } = readerSession;
   useEffect(() => {
     flushReaderAudioRef.current = flushReaderAudio;
   }, [flushReaderAudio]);
+  // What the Reader's controls see of its runtime. The engine refuses its own
+  // generation while the look-ahead renders on it, but Generate yields the
+  // look-ahead first (see `useGenerateAfterLookahead`), so the controls offer
+  // it all the same.
+  const lookaheadHoldsReaderEngine = readerLookahead.status === "rendering"
+    && !readerRuntime.canGenerate
+    && !readerRuntime.isGenerating
+    && readerRuntime.modelState.ready;
+  const readerSurfaceRuntime = useMemo(
+    () => (lookaheadHoldsReaderEngine ? { ...readerRuntime, canGenerate: true } : readerRuntime),
+    [lookaheadHoldsReaderEngine, readerRuntime],
+  );
+
+  // An import started on Studio can finish after the listener has moved to
+  // the Reader. The script still changes, but the player then holds the
+  // Reader's audio, which is not Studio's to retire: only what was kept for
+  // Studio is stale.
+  const handleImportedStudioText = useCallback((nextText: string) => {
+    if (!isStudioPage && dropKeptStudioAudio()) {
+      setText(nextText);
+      setExportError(null);
+      setImportError(null);
+      return;
+    }
+    handleTextChange(nextText);
+  }, [dropKeptStudioAudio, handleTextChange, isStudioPage]);
 
   const documentsBridge = desktopRuntimesAvailable
     ? window.electron?.documents
@@ -511,7 +575,7 @@ export function useSynthesisSessionState({
     documentsBridge,
     isReaderPage,
     createReaderDocument: readerLibrary.createDocument,
-    onStudioText: handleTextChange,
+    onStudioText: handleImportedStudioText,
     setImportError,
   });
 
@@ -621,6 +685,13 @@ export function useSynthesisSessionState({
     studioRuntime.retryLoad();
   }, [studioRuntime]);
 
+  // The Reader's Generate button and shortcut: generating now also drops a
+  // lookup of the section's saved audio that is still running.
+  const handleReaderGenerateNow = useCallback(() => {
+    setExportError(null);
+    generateReaderSection();
+  }, [generateReaderSection]);
+
   const handleReaderStop = useCallback(() => {
     cancelPendingReaderGenerate();
     readerRuntime.handleStop();
@@ -700,7 +771,7 @@ export function useSynthesisSessionState({
     surface: isStudioPage
       ? { ...studioRuntime, generate: handleGenerate, stop: handleStudioStop }
       : isReaderPage
-        ? { ...readerRuntime, generate: handleReaderGenerate, stop: handleReaderStop }
+        ? { ...readerSurfaceRuntime, generate: handleReaderGenerateNow, stop: handleReaderStop }
         : null,
     hasAudio: player.totalDuration > 0,
     onTogglePlayback: handleTogglePlayback,
@@ -750,6 +821,7 @@ export function useSynthesisSessionState({
       state: player,
       show: showPlayer,
       setShow: setShowPlayer,
+      isPutBackStudioAudio,
       activeSegmentNumber: activeSegmentIndex >= 0 ? activeSegmentIndex + 1 : null,
       togglePlay,
       skipBackward: handleSkipBackward,
@@ -808,10 +880,10 @@ export function useSynthesisSessionState({
       updateViewPreferences: updateReaderViewPreferences,
       engineId: readerEngineId,
       desktopModel: readerDesktopModel,
-      runtime: readerRuntime,
+      runtime: readerSurfaceRuntime,
       changeModel: handleReaderModelChange,
       setPlaybackRate: handleReaderPlaybackRateChange,
-      generate: handleReaderGenerate,
+      generate: handleReaderGenerateNow,
       stop: handleReaderStop,
       retryLoad: handleReaderRetryLoad,
       jumpToSegment: handleJumpToSegment,

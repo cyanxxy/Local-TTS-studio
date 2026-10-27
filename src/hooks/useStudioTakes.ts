@@ -75,7 +75,7 @@ export function useStudioTakes(session: SynthesisSession): UseStudioTakesReturn 
   const [auditioningTakeId, setAuditioningTakeId] = useState<string | null>(null);
   const controllerRef = useRef<AbortController | null>(null);
   const auditionRef = useRef<AuditionPlayer | null>(null);
-  const { segments, replaceSegment, restoreAudioCache } = player.state;
+  const { segments, replaceSegment, restoreAudioCache, getContentEpoch } = player.state;
 
   const latest = useRef({ session, stacks });
   useEffect(() => {
@@ -106,7 +106,16 @@ export function useStudioTakes(session: SynthesisSession): UseStudioTakesReturn 
   const [wasGenerating, setWasGenerating] = useState(isGenerating);
   const generationStarted = isGenerating && !wasGenerating;
   if (wasGenerating !== isGenerating) setWasGenerating(isGenerating);
-  if (seenText !== studio.text || (hadAudio && !hasAudio) || generationStarted) {
+  // Audio put in the player wholesale (a history replay, the Dialogue
+  // render) is not what the takes were rendered for either, though the player
+  // never empties on the way. Picking a whole-script take replaces it too,
+  // and that one keeps its stack.
+  const contentEpoch = getContentEpoch();
+  const [seenEpoch, setSeenEpoch] = useState(contentEpoch);
+  const [pickedEpoch, setPickedEpoch] = useState<number | null>(null);
+  const audioReplaced = contentEpoch !== seenEpoch && contentEpoch !== pickedEpoch;
+  if (contentEpoch !== seenEpoch) setSeenEpoch(contentEpoch);
+  if (seenText !== studio.text || (hadAudio && !hasAudio) || generationStarted || audioReplaced) {
     setSeenText(studio.text);
     resetTakes();
     setApplied({});
@@ -233,6 +242,7 @@ export function useStudioTakes(session: SynthesisSession): UseStudioTakesReturn 
         ...(take.audio.pauseAfterSec === undefined ? {} : { pauseAfterSec: take.audio.pauseAfterSec }),
         ...(take.audio.pauseKind === undefined ? {} : { pauseKind: take.audio.pauseKind }),
       }], { synthesisComplete: true });
+      setPickedEpoch(getContentEpoch());
       current.player.setShow(true);
     } else {
       const segment = current.player.state.segments.find((entry) => entry.id === targetId);
@@ -253,7 +263,7 @@ export function useStudioTakes(session: SynthesisSession): UseStudioTakesReturn 
       });
     }
     setApplied((currentApplied) => ({ ...currentApplied, [targetId]: takeId }));
-  }, [replaceSegment, restoreAudioCache, setActiveTake]);
+  }, [getContentEpoch, replaceSegment, restoreAudioCache, setActiveTake]);
 
   return {
     targets,

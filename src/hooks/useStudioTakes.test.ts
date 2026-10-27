@@ -160,6 +160,36 @@ describe("useStudioTakes", () => {
     expect(result.current.stacks).toEqual({});
   });
 
+  it("drops stacks when other audio replaces the player's, and does not put a take on the passage now under its id", async () => {
+    const { result, harness, rerender } = setup({ segments: [segment(1, "Passage A."), segment(2, "Passage B.")], totalDuration: 2 });
+    harness.setSynthesize(() => oneChunk(0.9));
+    await act(async () => { await result.current.renderVariations("segment-2", 1); });
+    const take = result.current.stacks["segment-2"].takes[0];
+
+    // A history replay: the player is never empty on the way, and a player
+    // that reuses ids puts "Older Y." under the id passage B had.
+    harness.state.contentEpoch += 1;
+    harness.state.segments = [segment(1, "Older X."), segment(2, "Older Y.")];
+    rerender();
+
+    expect(result.current.stacks).toEqual({});
+    act(() => result.current.pickTake("segment-2", take.id));
+    expect(harness.calls.replaceSegment).not.toHaveBeenCalled();
+  });
+
+  it("keeps the whole-script stack when its own take becomes the player's audio", async () => {
+    const { result, harness, rerender } = setup();
+    harness.setSynthesize(() => oneChunk(0.4));
+    await act(async () => { await result.current.renderVariations(WHOLE_SCRIPT_TARGET, 2); });
+    const take = result.current.stacks[WHOLE_SCRIPT_TARGET].takes[0];
+
+    act(() => result.current.pickTake(WHOLE_SCRIPT_TARGET, take.id));
+    rerender();
+
+    expect(result.current.stacks[WHOLE_SCRIPT_TARGET].takes).toHaveLength(2);
+    expect(result.current.applied[WHOLE_SCRIPT_TARGET]).toBe(take.id);
+  });
+
   it("offers seeded takes for Audio8 now that it accepts a seed", () => {
     const { result } = setup({ engineId: "audio8" });
     expect(result.current.unavailableReason).toBeNull();

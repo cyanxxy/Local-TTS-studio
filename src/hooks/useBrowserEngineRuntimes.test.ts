@@ -7,6 +7,15 @@ import type { WorkerInMessage, WorkerOutMessage } from "../types";
 import type { AudioSegment, UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useBrowserEngineRuntimes } from "./useBrowserEngineRuntimes";
 
+// Whether a cloned Chatterbox voice reaches the worker is up to the test.
+const referenceSync = vi.hoisted(() => ({ failure: null as Error | null }));
+vi.mock("../lib/chatterboxClips", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../lib/chatterboxClips")>(),
+  ensureChatterboxReference: async () => {
+    if (referenceSync.failure) throw referenceSync.failure;
+  },
+}));
+
 class LoadingWorker extends EventTarget {
   static instances: LoadingWorker[] = [];
   posted: WorkerInMessage[] = [];
@@ -82,6 +91,7 @@ const kokoroWorker = () => LoadingWorker.instances.find((worker) => worker.url.i
 
 describe("useBrowserEngineRuntimes", () => {
   beforeEach(() => {
+    referenceSync.failure = null;
     LoadingWorker.instances = [];
     vi.stubGlobal("Worker", LoadingWorker);
   });
@@ -118,7 +128,7 @@ describe("useBrowserEngineRuntimes", () => {
     expect(result.current.voicesInUse).toMatchObject({ kokoro: "af_heart", supertonic: "Female" });
   });
 
-  it("refuses to start a generation or a retake while a request renders on the same worker", async () => {
+  it("refuses to start a generation, and holds a retake, while a request renders on the same worker", async () => {
     const { result, player } = renderRuntimes();
     await waitFor(() => expect(result.current.runtimes.kokoro.canGenerate).toBe(true));
     const chunks: SynthesisChunk[] = [];
@@ -148,10 +158,69 @@ describe("useBrowserEngineRuntimes", () => {
     await request;
     expect(chunks).toHaveLength(1);
 
-    await waitFor(() => expect(result.current.runtimes.kokoro.canGenerate).toBe(true));
-    act(() => result.current.handleRetakeSegment(SEGMENT.id));
-    expect(kokoroWorker()?.generations).toHaveLength(2);
+    // The retake asked for meanwhile runs once the request has finished.
+    await waitFor(() => expect(kokoroWorker()?.generations).toHaveLength(2));
+    expect(kokoroWorker()!.generations[1]).toMatchObject({ text: SEGMENT.text });
     expect(result.current.isRetakingSegment).toBe(true);
+    expect(player.beginStream).not.toHaveBeenCalled();
+  });
+
+  it("runs a retake asked for right after a look-ahead render is preempted", async () => {
+    const { result } = renderRuntimes();
+    await waitFor(() => expect(result.current.runtimes.kokoro.canGenerate).toBe(true));
+    const lookahead = new AbortController();
+    const request = (async () => {
+      try {
+        for await (const chunk of result.current.runtimes.kokoro.synthesize({
+          text: "The next section.",
+          settings: { voice: "af_heart" },
+          tuning: { speed: 1, quality: 5 },
+          signal: lookahead.signal,
+        })) void chunk;
+      } catch {
+        // Aborted: the look-ahead yielded.
+      }
+    })();
+    await waitFor(() => expect(kokoroWorker()?.generations).toHaveLength(1));
+
+    // What the Reader's Retake does: preempt the look-ahead, then retake.
+    act(() => {
+      lookahead.abort(new DOMException("The look-ahead yielded to the engine.", "AbortError"));
+      result.current.handleRetakeSegment(SEGMENT.id);
+    });
+    await request;
+
+    await waitFor(() => expect(kokoroWorker()?.generations).toHaveLength(2));
+    expect(kokoroWorker()!.generations[1]).toMatchObject({ text: SEGMENT.text });
+    expect(result.current.isRetakingSegment).toBe(true);
+  });
+
+  it("drops a retake still waiting for the worker when the surface stops", async () => {
+    const { result } = renderRuntimes();
+    await waitFor(() => expect(result.current.runtimes.kokoro.canGenerate).toBe(true));
+    const preview = new AbortController();
+    const request = (async () => {
+      try {
+        for await (const chunk of result.current.runtimes.kokoro.synthesize({
+          text: "A preview of the voice.",
+          settings: { voice: "af_heart" },
+          tuning: { speed: 1, quality: 5 },
+          signal: preview.signal,
+        })) void chunk;
+      } catch {
+        // Aborted below.
+      }
+    })();
+    await waitFor(() => expect(kokoroWorker()?.generations).toHaveLength(1));
+
+    act(() => result.current.handleRetakeSegment(SEGMENT.id));
+    act(() => result.current.runtimes.kokoro.handleStop());
+    act(() => preview.abort());
+    await request;
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 10)));
+
+    expect(kokoroWorker()?.generations).toHaveLength(1);
+    expect(result.current.isRetakingSegment).toBe(false);
   });
 
   it("speaks a Supertonic 2 request in its own language", async () => {
@@ -170,5 +239,30 @@ describe("useBrowserEngineRuntimes", () => {
     expect(generation).toMatchObject({ voice: "Male", language: "fr" });
     act(() => supertonicWorker()!.emit({ type: "GENERATION_COMPLETE", generationId: generation.generationId }));
     await request;
+  });
+
+  it("clears a cloned voice's failure once it reaches the worker after all", async () => {
+    referenceSync.failure = new Error("This cloned voice is no longer loaded.");
+    const { result, rerender } = renderHook(({ referenceId }: { referenceId: string }) => useBrowserEngineRuntimes({
+      activeModel: "chatterbox",
+      active: true,
+      retain: true,
+      browserSupport: { ...SUPPORT, supportedModels: ["kokoro", "chatterbox"] },
+      text: "Enough text for the surface to speak.",
+      savedVoices: { kokoro: "af_heart", supertonic: "Female", kitten: "Bella", paradee: "heart", piper: "en_US-kristin-medium", chatterbox: referenceId },
+      generationSettings: { speed: 1, quality: 5 },
+      engineFields: { referenceId },
+      player: createPlayer(),
+      setShowPlayer: vi.fn(),
+    }), { initialProps: { referenceId: "clip~mine" } });
+    await waitFor(() => expect(result.current.runtimes.chatterbox.error).toBe("This cloned voice is no longer loaded."));
+
+    // The clip is chosen again (another voice, then this one) and loads.
+    referenceSync.failure = null;
+    rerender({ referenceId: "clip~other" });
+    rerender({ referenceId: "clip~mine" });
+
+    await waitFor(() => expect(result.current.runtimes.chatterbox.canGenerate).toBe(true));
+    expect(result.current.runtimes.chatterbox.error).toBeNull();
   });
 });

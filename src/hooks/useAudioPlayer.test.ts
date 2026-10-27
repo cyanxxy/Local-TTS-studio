@@ -288,6 +288,51 @@ describe("useAudioPlayer", () => {
     expect(result.current.getContentEpoch()).toBe(initial + 2);
   });
 
+  it("never reissues a segment id still in the timeline after a reset and a truncation", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    const stream = async (texts: string[]) => {
+      await act(async () => {
+        for (const text of texts) await result.current.scheduleChunk(makeChunk(text, 10, 10));
+      });
+    };
+    const ids = () => {
+      // Bounded: the playback loop queues a frame of its own each time.
+      for (let frame = 0; frame < 20 && animationFrameCallbacks.length > 0; frame += 1) flushNextAnimationFrame();
+      return result.current.segments.map((segment) => segment.id);
+    };
+
+    // An earlier generation in the same session, then a new stream whose last
+    // passage fails and is rolled back to its checkpoint (Qwen3's clone retry).
+    await stream(["a", "b", "c", "d", "e"]);
+    act(() => result.current.reset());
+    await stream(["s1", "s2", "failed attempt"]);
+    act(() => result.current.truncateAudioChunks(2));
+    await stream(["r1", "r2", "r3", "r4", "r5"]);
+
+    const streamed = ids();
+    expect(streamed).toHaveLength(7);
+    expect(new Set(streamed).size).toBe(streamed.length);
+  });
+
+  it("gives restored audio ids no earlier passage had, so nothing keyed by an old id lands on it", async () => {
+    const { result } = renderHook(() => useAudioPlayer());
+    await act(async () => {
+      await result.current.scheduleChunk(makeChunk("Passage A", 10, 10));
+      await result.current.scheduleChunk(makeChunk("Passage B", 10, 10));
+    });
+    for (let frame = 0; frame < 20 && animationFrameCallbacks.length > 0; frame += 1) flushNextAnimationFrame();
+    const generated = result.current.segments.map((segment) => segment.id);
+
+    act(() => result.current.restoreAudioCache([
+      { audio: new Float32Array(10).buffer, samplingRate: 10, text: "Older X", index: 1, total: 2 },
+      { audio: new Float32Array(10).buffer, samplingRate: 10, text: "Older Y", index: 2, total: 2 },
+    ]));
+
+    const restored = result.current.segments.map((segment) => segment.id);
+    expect(restored).toHaveLength(2);
+    expect(restored.filter((id) => generated.includes(id))).toEqual([]);
+  });
+
   it("plays at every speed the speed picker offers", () => {
     const { result } = renderHook(() => useAudioPlayer());
 

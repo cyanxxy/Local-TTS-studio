@@ -177,6 +177,35 @@ describe("useEngineOrchestrator", () => {
     expect(mock.runtimes.audio8.cancelActiveGeneration).toHaveBeenCalledOnce();
   });
 
+  it("stops the generation of the surface being left even when the next page runs the same engine", () => {
+    // Both surfaces run the shared browser model.
+    const { rerender } = renderOrchestrator();
+
+    rerender({ surface: "reader" });
+    expect(mock.runtimes.kokoro.cancelActiveGeneration).toHaveBeenCalledOnce();
+
+    // Re-rendering the same page stops nothing.
+    rerender({ surface: "reader" });
+    expect(mock.runtimes.kokoro.cancelActiveGeneration).toHaveBeenCalledOnce();
+
+    rerender({ surface: "studio" });
+    expect(mock.runtimes.kokoro.cancelActiveGeneration).toHaveBeenCalledTimes(2);
+    expect(mock.runtimes.supertonic.cancelActiveGeneration).not.toHaveBeenCalled();
+  });
+
+  it("puts Studio's browser model back without retiring the audio on screen", () => {
+    const { result } = renderOrchestrator({ surface: "reader" });
+    act(() => result.current.selectBrowserModel("reader", "supertonic"));
+    expect(result.current.chosenModel).toBe("supertonic");
+    vi.clearAllMocks();
+
+    act(() => result.current.putBackBrowserModel("kokoro"));
+
+    expect(result.current.chosenModel).toBe("kokoro");
+    expect(result.current.engineIds).toEqual({ studio: "kokoro", reader: "kokoro" });
+    for (const id of ALL_ENGINES) expect(mock.runtimes[id].resetGeneratedAudio).not.toHaveBeenCalled();
+  });
+
   it("retires every runtime's audio, cancelling all before resetting any", () => {
     const { result } = renderOrchestrator();
     const order: string[] = [];

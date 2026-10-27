@@ -79,6 +79,24 @@ describe("useReaderListeningProfile", () => {
     expect(result.current.settled).toBe(true);
   });
 
+  it("applies the profile again when the Reader returns after Studio's settings were put back", () => {
+    const profile = { engine: "audio8" as const, voice: "Clara", playbackRate: 1.5, updatedAt: 1 };
+    const document = withProfile(profile);
+    const { result, apply, rerender } = setup({ document, engineId: "kokoro" });
+    act(() => vi.advanceTimersByTime(1));
+    expect(apply).toHaveBeenCalledOnce();
+
+    // Studio is shown (its settings go back), then the Reader again.
+    rerender({ document, engineId: "kokoro", active: false });
+    rerender({ document, engineId: "kokoro", active: true });
+    expect(result.current.settled).toBe(false);
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(apply).toHaveBeenCalledTimes(2);
+    expect(apply).toHaveBeenLastCalledWith({ engine: profile, playbackRate: 1.5 });
+    expect(result.current.settled).toBe(true);
+  });
+
   it("does not hold the Reader when a setting refuses to move", () => {
     const profile = { engine: "audio8" as const, voice: "Clara", playbackRate: 1, updatedAt: 1 };
     const { result, apply } = setup({ document: withProfile(profile), engineId: "kokoro" });

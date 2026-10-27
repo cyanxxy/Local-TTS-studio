@@ -82,6 +82,7 @@ interface Options {
   player: Pick<
     UseAudioPlayerReturn,
     | "getAudioCacheSnapshot"
+    | "getContentEpoch"
     | "getCurrentTime"
     | "getPlaybackSnapshot"
     | "isSynthesisComplete"
@@ -112,6 +113,17 @@ export interface ReaderAudioCache {
    * is empty for now, and its zero state is not a reading position.
    */
   isRestorePending: () => boolean;
+  /**
+   * Drops the lookup in flight for the active section: the listener asked for
+   * the section to be generated before it finished, and its saved audio must
+   * not be restored into (or after) that generation.
+   */
+  abandonRestore: () => void;
+  /**
+   * The player holds the active section's audio as it was saved before it
+   * finished streaming: the rest of the section has never been made.
+   */
+  isPartialAudio: () => boolean;
   /** Resume `sectionId` at `currentTime` (seconds) instead of its saved position when it is entered next. */
   requestRestore: (sectionId: string, currentTime?: number) => void;
   /** What the next entry into `continuation.sectionId` does; null cancels a pending one. */
@@ -175,6 +187,7 @@ export function useReaderAudioCache({
   const { clearAudio, loadAudio, saveAudio } = library;
   const {
     getAudioCacheSnapshot,
+    getContentEpoch,
     getCurrentTime,
     getPlaybackSnapshot,
     isSynthesisComplete,
@@ -192,6 +205,9 @@ export function useReaderAudioCache({
   const clearedForEditRef = useRef<string | null>(null);
   const savedAudioRef = useRef<SavedAudio | null>(null);
   const lastSaveAtRef = useRef(0);
+  // The player's content epoch right after a partial save was restored,
+  // while the player still holds exactly that audio.
+  const partialEpochRef = useRef<number | null>(null);
 
   useEffect(() => {
     clearedForEditRef.current = null;
@@ -290,6 +306,7 @@ export function useReaderAudioCache({
     restorePendingRef.current = false;
     savedAudioRef.current = null;
     lastSaveAtRef.current = 0;
+    partialEpochRef.current = null;
     const entered = enteredSection();
     const enteredDocument = entered.document;
     const enteredSectionValue = entered.section;
@@ -314,7 +331,8 @@ export function useReaderAudioCache({
     const restore = async () => {
       try {
         const cache = await loadSectionAudio(enteredDocument.id, enteredSectionValue.id);
-        if (cancelled) return;
+        // Abandoned too when a Generate came first (`abandonRestore`).
+        if (cancelled || restoreVersionRef.current !== restoreVersion) return;
         const continuation = continuationRef.current?.sectionId === enteredSectionValue.id
           ? continuationRef.current
           : null;
@@ -338,14 +356,23 @@ export function useReaderAudioCache({
               ? enteredDocument.progress.positionSec
               : cache.currentTime;
           const maximumTime = Math.max(0, cache.totalDuration);
+          const partial = cache.synthesisComplete !== true;
           restoreAudioCache(cache.chunks, {
             // A saved 0 is meaningful (the user stopped or rewound).
             currentTime: Math.max(0, Math.min(maximumTime, preferredTime)),
             playbackRate: latest.playbackRate ?? cache.playbackRate,
-            synthesisComplete: cache.synthesisComplete === true,
+            synthesisComplete: !partial,
           });
+          if (partial) partialEpochRef.current = getContentEpoch();
           showPlayer(cache.chunks.length > 0);
-          if (continuation?.autoPlay && cache.chunks.length > 0) {
+          if (partial && continuation?.autoGenerate) {
+            // Saved while it was still streaming in (the periodic save, or a
+            // flush on the way out), so the rest of it was never made.
+            // Continuous listening generates the section again rather than
+            // stopping where the save did; the partial audio stays in the
+            // player if the engine cannot generate now.
+            window.setTimeout(() => generateEnteredSection(), 0);
+          } else if (continuation?.autoPlay && cache.chunks.length > 0) {
             window.setTimeout(() => void togglePlay(), 0);
           }
         } else {
@@ -373,7 +400,7 @@ export function useReaderAudioCache({
       cancelled = true;
       restorePendingRef.current = false;
     };
-  }, [active, documentId, reportError, restoreAudioCache, sectionId, signatureKnown, togglePlay]);
+  }, [active, documentId, getContentEpoch, reportError, restoreAudioCache, sectionId, signatureKnown, togglePlay]);
 
   // Saves the section's audio: once a finished section stops changing, and at
   // most every READER_STREAMING_SAVE_INTERVAL_MS while one is still streaming
@@ -413,6 +440,14 @@ export function useReaderAudioCache({
   }, [active, flush]);
 
   const isRestorePending = useCallback(() => restorePendingRef.current, []);
+  const abandonRestore = useCallback(() => {
+    if (!restorePendingRef.current) return;
+    restoreVersionRef.current += 1;
+    restorePendingRef.current = false;
+  }, []);
+  const isPartialAudio = useCallback(() => (
+    partialEpochRef.current !== null && partialEpochRef.current === getContentEpoch()
+  ), [getContentEpoch]);
   const requestRestore = useCallback((target: string, currentTime?: number) => {
     restoreRequestRef.current = {
       sectionId: target,
@@ -433,8 +468,10 @@ export function useReaderAudioCache({
     signature,
     flush,
     isRestorePending,
+    abandonRestore,
+    isPartialAudio,
     requestRestore,
     setContinuation,
     discardForEdit,
-  }), [discardForEdit, flush, isRestorePending, requestRestore, setContinuation, signature]);
+  }), [abandonRestore, discardForEdit, flush, isPartialAudio, isRestorePending, requestRestore, setContinuation, signature]);
 }

@@ -159,6 +159,8 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
   const totalDurationRef = useRef(0);
   const timelineAnchorRef = useRef(0);
   const contextAnchorRef = useRef(0);
+  // Issues segment ids. It is never rewound, so an id names one passage for
+  // the player's whole lifetime.
   const segmentCounterRef = useRef(0);
   const autoPlayOnChunkRef = useRef(true);
   const streamCompleteRef = useRef(true);
@@ -884,7 +886,9 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     const playbackSnapshot = wasPlaying ? getLiveTimelineTime() : currentTimeRef.current;
     playbackOperationRef.current += 1;
     allChunksRef.current = allChunksRef.current.slice(0, retainedCount);
-    segmentCounterRef.current = new Set(allChunksRef.current.map((chunk) => chunk.segmentId)).size;
+    // The counter is not rewound: it only ever moves forward over the
+    // player's lifetime, so an id issued after an earlier stream (or a
+    // restore) can never repeat one the retained chunks still carry.
     const nextDuration = allChunksRef.current.at(-1)?.endSec ?? 0;
     const nextTime = clamp(playbackSnapshot, 0, nextDuration);
     syncTotalDuration(nextDuration);
@@ -912,7 +916,9 @@ export function useAudioPlayer(): UseAudioPlayerReturn {
     contentEpochRef.current += 1;
     stopAllNodes();
     cancelTimelineStateFlush();
-    segmentCounterRef.current = 0;
+    // Restored passages get fresh ids rather than restarting at segment-1:
+    // anything keyed by the old ids (a take stack, a retake in flight) must
+    // not land on a different passage that happens to reuse one.
     let previousSource: CachedReaderAudioChunk | undefined;
     let previousSegmentId: string | undefined;
     const restored: StoredAudioChunk[] = chunks.map((chunk) => {

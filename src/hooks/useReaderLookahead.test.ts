@@ -207,15 +207,43 @@ describe("useReaderLookahead", () => {
     await settle();
     expect(result.current.isBusy()).toBe(true);
 
-    let settled = false;
+    let busyWhenSettled: boolean | null = null;
     act(() => {
       result.current.preempt();
-      void result.current.settled().then(() => { settled = true; });
+      void result.current.settled().then(() => { busyWhenSettled = result.current.isBusy(); });
     });
     expect(synthesis.requests[0].signal?.aborted).toBe(true);
     await settle();
-    expect(settled).toBe(true);
-    expect(result.current.isBusy()).toBe(false);
+    expect(busyWhenSettled).toBe(false);
+  });
+
+  it("starts a render that yielded over once it has wound down, unless what it yielded to took the engine", async () => {
+    const synthesis = controllableSynthesis([pcm(0.1)]);
+    const { result, rerender } = setup(synthesis);
+    await settle();
+    expect(result.current.status).toBe("rendering");
+
+    // Nothing takes the engine after all: the render starts over.
+    act(() => result.current.preempt());
+    await settle();
+    await settle();
+    expect(synthesis.synthesize).toHaveBeenCalledTimes(2);
+    expect(synthesis.requests[1].signal?.aborted).toBe(false);
+    expect(result.current.status).toBe("rendering");
+
+    // A generation takes the engine: the render waits for it to end.
+    act(() => {
+      result.current.preempt();
+      rerender({ engineBusy: true });
+    });
+    await settle();
+    await settle();
+    expect(synthesis.synthesize).toHaveBeenCalledTimes(2);
+    expect(result.current.status).toBe("idle");
+
+    rerender({ engineBusy: false });
+    await settle();
+    expect(synthesis.synthesize).toHaveBeenCalledTimes(3);
   });
 
   it("does not start a second render for a section it already finished", async () => {

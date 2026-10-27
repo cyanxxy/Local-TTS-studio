@@ -14,9 +14,21 @@ function setup(initial: { busy: boolean; canGenerate: boolean }) {
     } satisfies LookaheadControls,
   };
   const startGenerate = vi.fn();
-  const view = renderHook((props: { canGenerate: boolean; scopeKey: string | null }) => (
-    useGenerateAfterLookahead({ controls, canGenerate: props.canGenerate, startGenerate, scopeKey: props.scopeKey })
-  ), { initialProps: { canGenerate: initial.canGenerate, scopeKey: "section-1" as string | null } });
+  const view = renderHook((props: { canGenerate: boolean; scopeKey: string | null; isGenerating?: boolean }) => (
+    useGenerateAfterLookahead({
+      controls,
+      canGenerate: props.canGenerate,
+      isGenerating: props.isGenerating ?? false,
+      startGenerate,
+      scopeKey: props.scopeKey,
+    })
+  ), {
+    initialProps: { canGenerate: initial.canGenerate, scopeKey: "section-1" } as {
+      canGenerate: boolean;
+      scopeKey: string | null;
+      isGenerating?: boolean;
+    },
+  });
   return { ...view, controls, startGenerate, finishRender };
 }
 
@@ -61,7 +73,7 @@ describe("useGenerateAfterLookahead", () => {
   it("forgets a pending request that was cancelled or belonged to another section", async () => {
     const stopped = setup({ busy: true, canGenerate: true });
     act(() => stopped.result.current.requestGenerate());
-    stopped.result.current.cancelPending();
+    act(() => stopped.result.current.cancelPending());
     await act(async () => {
       stopped.finishRender();
       await Promise.resolve();
@@ -77,5 +89,35 @@ describe("useGenerateAfterLookahead", () => {
     });
     moved.rerender({ canGenerate: true, scopeKey: "section-2" });
     expect(moved.startGenerate).not.toHaveBeenCalled();
+  });
+
+  it("says it is waiting from a request that preempted a render until its generation is under way", async () => {
+    const { result, rerender, finishRender } = setup({ busy: true, canGenerate: false });
+    expect(result.current.waiting).toBe(false);
+    act(() => result.current.requestGenerate());
+    expect(result.current.waiting).toBe(true);
+
+    await act(async () => {
+      finishRender();
+      await Promise.resolve();
+    });
+    // Wound down, but the engine has not reported it can generate yet.
+    expect(result.current.waiting).toBe(true);
+    rerender({ canGenerate: true, scopeKey: "section-1" });
+    expect(result.current.waiting).toBe(true);
+    rerender({ canGenerate: false, scopeKey: "section-1", isGenerating: true });
+    expect(result.current.waiting).toBe(false);
+  });
+
+  it("stops waiting when the request is cancelled or the section changes", () => {
+    const stopped = setup({ busy: true, canGenerate: false });
+    act(() => stopped.result.current.requestGenerate());
+    act(() => stopped.result.current.cancelPending());
+    expect(stopped.result.current.waiting).toBe(false);
+
+    const moved = setup({ busy: true, canGenerate: false });
+    act(() => moved.result.current.requestGenerate());
+    moved.rerender({ canGenerate: false, scopeKey: "section-2" });
+    expect(moved.result.current.waiting).toBe(false);
   });
 });
