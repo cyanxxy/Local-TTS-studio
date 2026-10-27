@@ -44,4 +44,16 @@ describe("useAppPreferences", () => {
     expect(onCommit).toHaveBeenCalledWith("dark");
     expect(document.documentElement.dataset.themePreference).toBe("dark");
   });
+
+  it("hands the chosen theme to the desktop shell so the native window follows it (U6)", () => {
+    const setThemeSource = vi.fn();
+    window.electron = { isElectron: true, appearance: { setThemeSource } };
+    localStorage.setItem("open-tts-preferences-v1", JSON.stringify({ theme: "light" }));
+    try {
+      render(<Preferences />);
+      expect(setThemeSource).toHaveBeenCalledWith("light");
+    } finally {
+      delete window.electron;
+    }
+  });
 });

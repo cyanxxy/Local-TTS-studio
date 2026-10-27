@@ -39,6 +39,12 @@ export function useAppPreferences() {
     return () => media?.removeEventListener?.("change", apply);
   }, [preferences]);
 
+  // The desktop window's vibrancy material and native controls follow the
+  // native theme, not the page; hand the choice over so they match it.
+  useEffect(() => {
+    window.electron?.appearance?.setThemeSource(preferences.theme);
+  }, [preferences.theme]);
+
   const updatePreferences = useCallback((patch: Partial<AppPreferences>) => {
     setPreferences((current) => ({ ...current, ...patch }));
   }, []);

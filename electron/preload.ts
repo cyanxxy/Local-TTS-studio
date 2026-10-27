@@ -491,6 +491,11 @@ contextBridge.exposeInMainWorld("electron", {
       };
     },
   },
+  appearance: {
+    setThemeSource: (source: "system" | "light" | "dark") => {
+      ipcRenderer.send("app:set-theme-source", { source });
+    },
+  },
   audio8: {
     load: (request: { requestId: string }) => ipcRenderer.invoke("audio8:load", request),
     generate: (request: { requestId: string; text: string; voice: string }) => (

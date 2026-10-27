@@ -7,6 +7,7 @@ import { configureApplicationMenu } from "./applicationMenu";
 import { createDiagnosticsLog, mirrorToConsole } from "./diagnostics";
 import { describeError } from "./errors";
 import { createIpcDiagnostics } from "./ipc/ipcDiagnostics";
+import { registerAppearanceIpc } from "./ipc/registerAppearanceIpc";
 import { registerAudio8Ipc } from "./ipc/registerAudio8Ipc";
 import { registerDocumentIpc } from "./ipc/registerDocumentIpc";
 import { registerLocalTtsIpc } from "./ipc/registerLocalTtsIpc";
@@ -127,6 +128,7 @@ function start(): void {
       logger: diagnostics.logger("local-tts"),
     }));
     shutdown.register(registerAudio8Ipc(ipc, { userDataPath }));
+    registerAppearanceIpc(ipc);
     // Last, so the flush also covers what the participants above log as they stop.
     shutdown.register({
       name: "diagnostics",

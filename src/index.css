@@ -306,14 +306,6 @@ body {
     radial-gradient(ellipse 120% 32% at 50% -6%, color-mix(in srgb, var(--color-accent) 7%, transparent), transparent 70%),
     radial-gradient(ellipse 70% 60% at 100% 8%, color-mix(in srgb, #AF8BFF 5%, transparent), transparent 62%);
 }
-/* The vibrancy material follows the macOS appearance, not the app's theme:
-   the renderer has no way to set nativeTheme.themeSource, so a Light app on
-   a Dark Mac (or the reverse) would draw its text over the wrong material.
-   When the theme is chosen explicitly, lay a near-opaque wash of the app's
-   own surface over the material so text keeps its contrast. */
-:root.is-electron.is-mac:not([data-theme-preference="system"]) body {
-  background-color: color-mix(in srgb, var(--color-surface) 90%, transparent);
-}
 /* Reserve the inset traffic-light strip and make the top a drag handle */
 .is-electron.is-mac header {
   -webkit-app-region: drag;

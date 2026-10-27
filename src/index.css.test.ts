@@ -135,13 +135,6 @@ describe("index.css first paint (U7)", () => {
   });
 });
 
-describe("index.css macOS vibrancy (U6)", () => {
-  it("washes the window in the app surface when the theme is chosen explicitly", () => {
-    expect(block(':root.is-electron.is-mac:not([data-theme-preference="system"]) body'))
-      .toMatch(/background-color: color-mix\(in srgb, var\(--color-surface\) 90%, transparent\)/);
-  });
-});
-
 describe("index.css range inputs (U3)", () => {
   it("does not suppress the focus outline and rings the thumb on keyboard focus", () => {
     expect(block('input[type="range"]')).not.toMatch(/outline:\s*none/);
