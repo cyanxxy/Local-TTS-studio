@@ -1234,6 +1234,39 @@ describe("createWebSocketBridgeWorkerPool", () => {
     await waitFor(() => children[0].killed);
   });
 
+  it("cancels a request waiting for a drain without killing the warm worker", async () => {
+    const { pool, spawn, children, servers } = makePool((message, server) => {
+      if (message.command === "cancel") {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: false, error: "Generation cancelled." });
+        return;
+      }
+      if (message.command === "warm") {
+        server.sendJson({ type: "result", requestId: message.requestId, ok: true, result: {} });
+      }
+    }, { cancelDrainMs: 60_000 });
+    const first = pool.run("qwen3", {
+      ...RUN_DEFAULTS, requestId: "first", payload: {}, spawnConfig: SPAWN_CONFIG,
+    });
+    const firstCancelled = expect(first).rejects.toThrow(/cancelled/i);
+    await waitFor(() => servers[0]?.messages.length === 1);
+    pool.cancel("first");
+    await firstCancelled;
+    // Started before the bridge acknowledged, so it waits on the drain.
+    const waiting = pool.run("qwen3", {
+      ...RUN_DEFAULTS, requestId: "waiting", payload: {}, spawnConfig: SPAWN_CONFIG,
+    });
+
+    expect(pool.cancel("waiting")).toBe(true);
+
+    // Settled at once, not after the drain, and the worker keeps its model.
+    await expect(waiting).rejects.toThrow(/cancelled/i);
+    expect(children[0].killed).toBe(false);
+    await expect(pool.run("qwen3", {
+      ...RUN_DEFAULTS, requestId: "third", command: "warm", payload: {}, spawnConfig: SPAWN_CONFIG,
+    })).resolves.toMatchObject({ response: { ok: true } });
+    expect(spawn).toHaveBeenCalledTimes(1);
+  });
+
   it.each(["cancel", "model shutdown", "pool shutdown"] as const)(
     "does not respawn a request waiting for a drain after %s",
     async (action) => {
@@ -1258,7 +1291,8 @@ describe("createWebSocketBridgeWorkerPool", () => {
       await shutdown;
       await waitingCancelled;
       expect(spawn).toHaveBeenCalledTimes(1);
-      expect(children.every((child) => child.killed)).toBe(true);
+      // A cancel leaves the draining worker to finish (or to time out) on its own.
+      expect(children.every((child) => child.killed)).toBe(action !== "cancel");
     },
   );
 

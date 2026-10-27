@@ -1,4 +1,4 @@
-import { dialog, type WebContents } from "electron";
+import { BrowserWindow, dialog, type OpenDialogOptions, type WebContents } from "electron";
 import path from "path";
 import { runHfXetDownloader } from "../hfXetDownload";
 import type { LocalModelLifecycle } from "../localModelLifecycle";
@@ -49,7 +49,7 @@ export interface Qwen3SetupOptions {
 export interface Qwen3SetupHandlers {
   setup(request: unknown): Promise<Qwen3SetupResult>;
   download(request: unknown, sender: WebContents): Promise<Qwen3ModelDownloadResult>;
-  chooseModelDir(request: unknown): Promise<Qwen3ModelDirChoice>;
+  chooseModelDir(request: unknown, sender: WebContents): Promise<Qwen3ModelDirChoice>;
 }
 
 /** Qwen3 model inventory, managed downloads and manual model folders. */
@@ -155,12 +155,19 @@ export function createQwen3SetupHandlers({
       });
     },
 
-    async chooseModelDir(request) {
+    async chooseModelDir(request, sender) {
+      // A picker opened once the quit has started would hold a window the quit
+      // is about to close, for a choice nothing can use any more.
+      assertAcceptingRequests();
       const profile = getRequestedQwen3Profile(request);
-      const result = await dialog.showOpenDialog({
+      // Attach the picker to the requesting window (a sheet on macOS) so it
+      // blocks that window and closes with it, as the document import does.
+      const owner = BrowserWindow.fromWebContents(sender);
+      const options: OpenDialogOptions = {
         title: "Choose Qwen3 model directory",
         properties: ["openDirectory"],
-      });
+      };
+      const result = await (owner ? dialog.showOpenDialog(owner, options) : dialog.showOpenDialog(options));
       if (result.canceled || result.filePaths.length === 0) {
         return { path: null };
       }

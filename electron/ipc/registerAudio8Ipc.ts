@@ -9,6 +9,7 @@ import {
 import { parseAudio8GenerateRequest, parseAudio8RequestId } from "../audio8Ipc";
 import { Audio8NativeClient } from "../audio8NativeClient";
 import { LOCAL_RUNTIME_SHUTTING_DOWN_MESSAGE } from "../errors";
+import { createSenderWatcher, type RequestSender } from "../localTts/senderLifecycle";
 import type { TrustedIpc } from "./trusted";
 
 export interface Audio8IpcOptions {
@@ -60,6 +61,48 @@ export function registerAudio8Ipc(
     return audio8NativeClient;
   }
 
+  // Which renderer each in-flight load and generation belongs to. A renderer
+  // that crashes, reloads or closes can no longer cancel its own requests, and
+  // the worker runs generations one at a time, so an orphaned one would hold
+  // the queue for minutes in front of the new page's requests. The local
+  // runtime's request registry does the same for the bridge.
+  const requestOwners = new Map<string, { senderId: number; abandoned: boolean }>();
+  const watchSender = createSenderWatcher((senderId) => {
+    for (const [requestId, owner] of requestOwners) {
+      if (owner.senderId !== senderId) continue;
+      owner.abandoned = true;
+      audio8NativeClient?.cancel(requestId);
+    }
+  });
+
+  /**
+   * Runs `start` on behalf of `sender`. The request is owned from the moment it
+   * arrives, so one still waiting out a cache clear when its renderer goes is
+   * dropped instead of being started for nobody.
+   */
+  async function runOwnedRequest<T>(
+    sender: RequestSender,
+    requestId: string,
+    cancelledError: () => Error,
+    start: () => Promise<T>,
+  ): Promise<T> {
+    if (requestOwners.has(requestId)) {
+      throw new Error(`Audio8 request ${requestId} is already in flight.`);
+    }
+    watchSender(sender);
+    const owner = { senderId: sender.id, abandoned: false };
+    requestOwners.set(requestId, owner);
+    try {
+      // Generation lazily fetches the voice profile into the model directory,
+      // so it writes there too and has to clear the same gate as a load.
+      await audio8CacheClear;
+      if (owner.abandoned) throw cancelledError();
+      return await start();
+    } finally {
+      requestOwners.delete(requestId);
+    }
+  }
+
   function trackAudio8CacheTask<T>(task: Promise<T>): Promise<T> {
     activeAudio8CacheTasks.add(task);
     void task.finally(() => activeAudio8CacheTasks.delete(task)).catch(() => undefined);
@@ -78,10 +121,14 @@ export function registerAudio8Ipc(
 
   ipc.handle("audio8:load", async (event, request) => {
     const requestId = parseAudio8RequestId(request);
-    await audio8CacheClear;
-    const result = await getAudio8NativeClient().load(requestId, (percent) => {
-      sendAudio8Progress(event.sender, requestId, percent);
-    });
+    const result = await runOwnedRequest(
+      event.sender,
+      requestId,
+      () => new Error("Audio8 model load cancelled."),
+      () => getAudio8NativeClient().load(requestId, (percent) => {
+        sendAudio8Progress(event.sender, requestId, percent);
+      }),
+    );
     // A completed load is the only point where the current revision is known to
     // be fully downloaded and open, so pruning here can never be what leaves the
     // user without a usable model, and it provably touches nothing the worker
@@ -94,12 +141,14 @@ export function registerAudio8Ipc(
 
   ipc.handle("audio8:generate", async (event, request) => {
     const { requestId, text, voice, sampling } = parseAudio8GenerateRequest(request);
-    // Generation lazily fetches the voice profile into the model directory, so
-    // it writes there too and has to clear the same gate as a load.
-    await audio8CacheClear;
-    return getAudio8NativeClient().generate(requestId, text, voice, (percent) => {
-      sendAudio8Progress(event.sender, requestId, percent);
-    }, sampling);
+    return runOwnedRequest(
+      event.sender,
+      requestId,
+      () => new Error("Audio8 synthesis cancelled."),
+      () => getAudio8NativeClient().generate(requestId, text, voice, (percent) => {
+        sendAudio8Progress(event.sender, requestId, percent);
+      }, sampling),
+    );
   });
 
   ipc.handle("audio8:cancel", (_event, request) => {

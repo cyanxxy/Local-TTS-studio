@@ -12,19 +12,29 @@ export const UNTRUSTED_SENDER_MESSAGE = "Rejected IPC from untrusted sender.";
 /** The part of an IPC event the trust check reads. */
 export interface IpcSenderEvent {
   senderFrame?: { url: string } | null;
-  sender: { getURL(): string };
 }
 
-export function ipcSenderUrl(event: IpcSenderEvent): string {
-  // `senderFrame` is null once the frame has navigated away or been destroyed.
-  return event.senderFrame?.url ?? event.sender.getURL();
+/**
+ * The URL of the frame that sent the message, or null once that frame has
+ * navigated away or been destroyed. Electron's security checklist (item 17)
+ * validates the sending frame. The web contents' URL is not a stand-in for
+ * it: that is the main frame's current document, which may not be the
+ * document (or the frame) that sent the message, so a message whose sender is
+ * gone is treated as untrusted.
+ */
+export function ipcSenderUrl(event: IpcSenderEvent): string | null {
+  return event.senderFrame?.url ?? null;
+}
+
+function isTrustedSenderUrl(url: string | null, options: { allowDevServer?: boolean }): boolean {
+  return url !== null && isAllowedAppUrl(url, options);
 }
 
 export function assertTrustedIpcSender(
   event: IpcSenderEvent,
   options: { allowDevServer?: boolean } = { allowDevServer: true },
 ): void {
-  if (!isAllowedAppUrl(ipcSenderUrl(event), options)) {
+  if (!isTrustedSenderUrl(ipcSenderUrl(event), options)) {
     throw new Error(UNTRUSTED_SENDER_MESSAGE);
   }
 }
@@ -71,8 +81,10 @@ export interface TrustedIpcOptions {
 }
 
 function senderOrigin(event: IpcSenderEvent): string {
+  const url = ipcSenderUrl(event);
+  if (url === null) return "unknown";
   try {
-    return new URL(ipcSenderUrl(event)).origin;
+    return new URL(url).origin;
   } catch {
     return "unknown";
   }
@@ -97,7 +109,7 @@ export function createTrustedIpc(
   };
 
   const isTrusted = (channel: string, event: IpcSenderEvent): boolean => {
-    if (isAllowedAppUrl(ipcSenderUrl(event), { allowDevServer })) return true;
+    if (isTrustedSenderUrl(ipcSenderUrl(event), { allowDevServer })) return true;
     report(onUntrustedSender, channel, senderOrigin(event));
     return false;
   };

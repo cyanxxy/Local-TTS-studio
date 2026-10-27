@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{
     Arc,
@@ -24,6 +25,12 @@ struct Args {
     destination: PathBuf,
     #[arg(long, default_value_t = false)]
     metadata_only: bool,
+    /// Exit once stdin reaches end-of-file. The app holds a pipe open on stdin
+    /// for the whole download and the OS closes it however the app goes away,
+    /// including a crash or SIGKILL that never runs the app's own kill timers;
+    /// without this the download would carry on with nobody to receive it.
+    #[arg(long, default_value_t = false)]
+    exit_with_parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,8 +240,30 @@ fn run(args: Args) -> Result<()> {
     Ok(())
 }
 
+/// The same watcher the WebSocket bridge runs (`local-tts-bridge`'s
+/// `exit_when_parent_pipe_closes`). A half-written `.download` file is left
+/// behind; the next run removes it before it starts.
+fn exit_when_parent_pipe_closes() {
+    thread::spawn(|| {
+        let mut input = std::io::stdin().lock();
+        let mut byte = [0_u8; 1];
+        loop {
+            match input.read(&mut byte) {
+                Ok(0) => std::process::exit(1),
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => std::process::exit(1),
+            }
+        }
+    });
+}
+
 fn main() {
-    if let Err(error) = run(Args::parse()) {
+    let args = Args::parse();
+    if args.exit_with_parent {
+        exit_when_parent_pipe_closes();
+    }
+    if let Err(error) = run(args) {
         eprintln!("{error:#}");
         std::process::exit(1);
     }

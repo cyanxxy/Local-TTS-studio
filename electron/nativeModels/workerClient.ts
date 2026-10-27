@@ -35,7 +35,10 @@ export type NativeModelWorkerFactory<TModelRequest extends NativeModelRequest> =
  * How long a request may go without any word from the worker. Loads report
  * download percentages and generations report token percentages, so silence
  * this long means the worker is wedged rather than busy — a generation that
- * legitimately runs for minutes keeps ticking and is never cut off.
+ * legitimately runs for minutes keeps ticking and is never cut off. Any message
+ * from the worker counts for every request waiting on it: the worker runs model
+ * requests one at a time, so one queued behind a long generation hears nothing
+ * of its own until its turn comes.
  */
 export const NATIVE_MODEL_REQUEST_INACTIVITY_TIMEOUT_MS = 300_000;
 
@@ -174,11 +177,16 @@ export class NativeModelWorkerClient<TModelRequest extends NativeModelRequest, T
     if (!message) return;
     const pending = this.#pending.get(message.requestId);
     if (!pending) return;
+    // The worker thread is alive and working through its queue, so nothing
+    // waiting on it is stuck yet. Extending only the reporting request's
+    // deadline let a request queued behind a long, healthy generation expire,
+    // and expiry terminates the worker — generation included. A worker wedged
+    // inside a native call sends nothing at all, so every deadline still runs out.
+    this.#extendAllDeadlines();
     if (message.type === "progress") {
       // Progress is routed to the request that caused it. Fanning it out sent a
       // second window's download percentages — and a generation's token
       // percentages — into whichever progress bar happened to be listening.
-      this.#extendDeadline(message.requestId);
       pending.onProgress?.(message.percent);
       return;
     }
@@ -200,6 +208,10 @@ export class NativeModelWorkerClient<TModelRequest extends NativeModelRequest, T
     if (pending.timer) clearTimeout(pending.timer);
     pending.timer = setTimeout(() => this.#expire(requestId), this.#inactivityTimeoutMs);
     pending.timer.unref?.();
+  }
+
+  #extendAllDeadlines(): void {
+    for (const requestId of this.#pending.keys()) this.#extendDeadline(requestId);
   }
 
   #expire(requestId: string): void {

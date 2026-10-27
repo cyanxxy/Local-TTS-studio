@@ -40,8 +40,10 @@ vi.mock("electron", () => ({
   BrowserWindow: class {
     static fromWebContents = () => null;
     static getAllWindows = () => [];
+    once = vi.fn();
     loadURL = () => Promise.resolve();
   },
+  nativeTheme: { shouldUseDarkColors: false },
   dialog: { showOpenDialog: vi.fn() },
   ipcMain: {
     handle: (channel: string, handler: Listener) => ipc.mainHandlers.set(channel, handler),

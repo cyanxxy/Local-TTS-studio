@@ -62,13 +62,15 @@ const mocks = vi.hoisted(() => ({
   singleInstanceLock: true,
   exit: vi.fn(),
   windowOpened: null as (() => void) | null,
+  ready: null as Promise<void> | null,
+  ownerWindow: null as unknown,
 }));
 
 vi.mock("electron", () => ({
   app: {
     isPackaged: false,
     commandLine: { appendSwitch: vi.fn() },
-    whenReady: () => Promise.resolve(),
+    whenReady: () => mocks.ready ?? Promise.resolve(),
     on: (channel: string, listener: (...args: unknown[]) => void) => {
       mocks.appListeners.set(channel, listener);
     },
@@ -80,15 +82,17 @@ vi.mock("electron", () => ({
     quit: mocks.quit,
   },
   BrowserWindow: class {
-    static fromWebContents = () => null;
+    static fromWebContents = () => mocks.ownerWindow;
     static getAllWindows = () => mocks.windows;
     constructor() {
       if (mocks.windowError) throw mocks.windowError;
       mocks.windowOpened?.();
     }
 
+    once = vi.fn();
     loadURL = () => Promise.resolve();
   },
+  nativeTheme: { shouldUseDarkColors: false },
   dialog: { showOpenDialog: vi.fn() },
   ipcMain: {
     handle: (channel: string, handler: (event: unknown, ...args: unknown[]) => unknown) => {
@@ -112,7 +116,8 @@ vi.mock("electron", () => ({
   shell: { openExternal: vi.fn() },
 }));
 
-vi.mock("./readerLibraryWorkerClient", () => ({
+vi.mock("./readerLibraryWorkerClient", async (importOriginal) => ({
+  ...await importOriginal<typeof import("./readerLibraryWorkerClient")>(),
   ReaderLibraryWorkerClient: vi.fn(function ReaderLibraryWorkerClient() {
     if (mocks.workerError) throw mocks.workerError;
     return { saveAudio: mocks.saveAudio, getAudio: mocks.getAudio, close: mocks.closeWorker };
@@ -458,6 +463,37 @@ describe("Reader library quit-time flush", () => {
     expect(mocks.quit).toHaveBeenCalledTimes(1);
   });
 
+  it("does not cut short a worker close that runs past the flush timeout", async () => {
+    const window = createWindow();
+    mocks.windows = [window];
+    startReaderLibraryWorker();
+    // The worker takes nearly its full 2 s close budget to write out what the
+    // flush queued, after a renderer that never acknowledged the flush.
+    mocks.closeWorker.mockImplementationOnce(() => new Promise<void>((resolve) => { setTimeout(resolve, 1_900); }));
+
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    quit();
+    await vi.advanceTimersByTimeAsync(1_500 + 1_800);
+    expect(mocks.closeWorker).toHaveBeenCalledTimes(1);
+    expect(mocks.quit).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(100);
+    expect(mocks.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds a second quit while the flush is still outstanding", async () => {
+    mocks.windows = [createWindow()];
+    startReaderLibraryWorker();
+
+    vi.useFakeTimers({ toFake: ["setTimeout"] });
+    expect(quit().preventDefault).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(300);
+    expect(quit().preventDefault).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1_300);
+    expect(mocks.quit).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects Reader library work once the flush window has closed", async () => {
     mocks.windows = [];
     startReaderLibraryWorker();
@@ -786,6 +822,51 @@ describe("Audio8 IPC", () => {
 
       release();
       await expect(generated).resolves.toBe("stopped");
+    });
+
+    it.each([
+      { name: "crashes", event: "render-process-gone", via: "on" },
+      { name: "reloads", event: "did-navigate", via: "on" },
+      { name: "closes", event: "destroyed", via: "once" },
+    ] as const)("cancels the in-flight generation of a window that $name", async ({ event: lifecycleEvent, via }) => {
+      let release!: () => void;
+      mocks.audio8Hold = new Promise<void>((resolve) => { release = () => resolve(); });
+      const event = createEvent(undefined);
+      const generated = (mocks.invokeHandlers.get("audio8:generate")!(
+        event,
+        { requestId: "g1", text: "hi", voice: "clara" },
+      ) as Promise<unknown>).then(() => "finished", () => "stopped");
+      await drainTurns();
+
+      const listener = event.sender[via].mock.calls.find(([name]) => name === lifecycleEvent)?.[1] as () => void;
+      listener();
+
+      // Nothing else can stop it: the renderer that owned the id is gone, and the
+      // worker would otherwise keep generating ahead of the new page's requests.
+      expect(audio8Clients()[0].cancel).toHaveBeenCalledWith("g1");
+      release();
+      await expect(generated).resolves.toBe("stopped");
+    });
+
+    it("drops a request still waiting out a clear once its window is gone", async () => {
+      await invokeAudio8("audio8:load", { requestId: "load-1" });
+      let releaseClear!: () => void;
+      mocks.audio8Destroy = new Promise<void>((resolve) => { releaseClear = () => resolve(); });
+      const cleared = invokeAudio8("audio8:clear-cache") as Promise<unknown>;
+      const event = createEvent(undefined);
+      const generated = mocks.invokeHandlers.get("audio8:generate")!(
+        event,
+        { requestId: "g1", text: "hi", voice: "clara" },
+      ) as Promise<unknown>;
+      await drainTurns();
+
+      const crashed = event.sender.on.mock.calls.find(([name]) => name === "render-process-gone")?.[1] as () => void;
+      crashed();
+      releaseClear();
+      await cleared;
+
+      await expect(generated).rejects.toThrow("Audio8 synthesis cancelled.");
+      expect(audio8Clients()).toHaveLength(1);
     });
 
     it.each([
@@ -1649,6 +1730,34 @@ describe("local model cache lifecycle IPC", () => {
     });
   });
 
+  describe("Qwen3 model folder picker", () => {
+    afterEach(() => {
+      mocks.ownerWindow = null;
+    });
+
+    it("opens as a sheet of the window that asked for it", async () => {
+      const owner = { id: "requesting-window" };
+      mocks.ownerWindow = owner;
+      vi.mocked(dialog.showOpenDialog).mockReset().mockResolvedValue({ canceled: true, filePaths: [] });
+
+      await expect(invoke("local-tts:choose-qwen3-model-dir", { modelRepo: qwenProfile.repo }))
+        .resolves.toEqual({ path: null });
+
+      expect(dialog.showOpenDialog).toHaveBeenCalledWith(owner, expect.objectContaining({
+        properties: ["openDirectory"],
+      }));
+    });
+
+    it("refuses to open once the quit has started", async () => {
+      vi.mocked(dialog.showOpenDialog).mockReset().mockResolvedValue({ canceled: true, filePaths: [] });
+      mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
+
+      await expect(invoke("local-tts:choose-qwen3-model-dir", { modelRepo: qwenProfile.repo }))
+        .rejects.toThrow("The local runtime is shutting down.");
+      expect(dialog.showOpenDialog).not.toHaveBeenCalled();
+    });
+  });
+
   describe("Qwen3 model folder checks", () => {
     // Consecutive sections of one read, as the Reader sends them, so the
     // generation cooldown does not refuse the second request.
@@ -1978,8 +2087,9 @@ describe("main-process diagnostics", () => {
     mocks.logFlush = new Promise<void>(() => {});
 
     mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
-    // The barrier gives up first, then the final flush gets its own short wait.
-    await vi.advanceTimersByTimeAsync(2_500);
+    // The barrier gives up first (at the Reader library's 3.5 s budget plus
+    // 500 ms), then the final flush gets its own short wait.
+    await vi.advanceTimersByTimeAsync(4_000);
     expect(mocks.quit).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(500);
 
@@ -2003,11 +2113,16 @@ describe("single-instance lock", () => {
     mocks.windows = [];
     mocks.exit.mockClear();
     mocks.quit.mockClear();
+    // The diagnostics suite's last case leaves a log write that never lands,
+    // which would hold every quit here for the barrier's whole budget.
+    mocks.logPending = false;
+    mocks.logFlush = null;
   });
 
   afterEach(() => {
     mocks.singleInstanceLock = true;
     mocks.windowOpened = null;
+    mocks.ready = null;
   });
 
   it("exits a second launch before it logs, registers IPC or opens a window", async () => {
@@ -2038,6 +2153,8 @@ describe("single-instance lock", () => {
     await importMain();
     const opened = vi.fn();
     mocks.windowOpened = opened;
+    // A log write that lands at once: the barrier holds, then quits again.
+    mocks.logPending = true;
     mocks.appListeners.get("before-quit")!({ preventDefault: vi.fn() });
 
     mocks.appListeners.get("second-instance")!();
@@ -2045,6 +2162,25 @@ describe("single-instance lock", () => {
 
     expect(opened).not.toHaveBeenCalled();
     await waitForQuit();
+  });
+
+  it("does not try to open a window for a dock click or relaunch before the app is ready", async () => {
+    let becomeReady!: () => void;
+    mocks.ready = new Promise<void>((resolve) => { becomeReady = resolve; });
+    const opened = vi.fn();
+    mocks.windowOpened = opened;
+    await importMain();
+
+    // Creating a BrowserWindow now would throw in the main process. Nothing is
+    // listening yet, so nothing is lost: the first window comes with `ready`.
+    expect(mocks.appListeners.has("activate")).toBe(false);
+    expect(mocks.appListeners.has("second-instance")).toBe(false);
+
+    becomeReady();
+    await drainTurns();
+    expect(opened).toHaveBeenCalledTimes(1);
+    mocks.appListeners.get("activate")!();
+    expect(opened).toHaveBeenCalledTimes(2);
   });
 
   it("reopens a window on a dock click when none is left", async () => {

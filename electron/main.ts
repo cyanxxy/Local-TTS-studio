@@ -10,7 +10,7 @@ import { createIpcDiagnostics } from "./ipc/ipcDiagnostics";
 import { registerAudio8Ipc } from "./ipc/registerAudio8Ipc";
 import { registerDocumentIpc } from "./ipc/registerDocumentIpc";
 import { registerLocalTtsIpc } from "./ipc/registerLocalTtsIpc";
-import { registerReaderLibraryIpc } from "./ipc/registerReaderLibraryIpc";
+import { READER_LIBRARY_QUIT_BUDGET_MS, registerReaderLibraryIpc } from "./ipc/registerReaderLibraryIpc";
 import { createTrustedIpc } from "./ipc/trusted";
 import { RUST_CANCEL_KILL_AFTER_MS } from "./localTts/localTtsRuntime";
 
@@ -65,25 +65,45 @@ function start(): void {
     app.commandLine.appendSwitch("enable-features", "Vulkan");
   }
 
-  // Participants start in registration order. The Reader flush goes first and is
-  // bounded by its own shorter timeout, which this outer one caps; the extra
-  // 500 ms lets a SIGTERM-ignoring bridge child reach its SIGKILL escalation.
+  // Participants start in registration order and then run side by side, each
+  // bounded by its own timeout: the Reader flush and worker close, and a
+  // SIGTERM-ignoring bridge child's SIGKILL escalation. The outer cap covers the
+  // longer of the two, plus 500 ms for that last step to land, so it only ever
+  // cuts short a participant whose own bound failed.
   const shutdown = createShutdownCoordinator({
-    timeoutMs: RUST_CANCEL_KILL_AFTER_MS + 500,
+    timeoutMs: Math.max(READER_LIBRARY_QUIT_BUDGET_MS, RUST_CANCEL_KILL_AFTER_MS) + 500,
     // What the participants logged while the barrier held gets a bounded chance
-    // to reach the disk before the process exits.
-    quit: () => {
-      void Promise.race([
-        diagnostics.flush(),
-        new Promise<void>((resolve) => { setTimeout(resolve, DIAGNOSTICS_FLUSH_TIMEOUT_MS); }),
-      ]).then(() => app.quit());
-    },
+    // to reach the disk before the process exits. The barrier still holds
+    // meanwhile, so a second Cmd+Q cannot skip it.
+    finish: () => Promise.race([
+      diagnostics.flush(),
+      new Promise<void>((resolve) => { setTimeout(resolve, DIAGNOSTICS_FLUSH_TIMEOUT_MS); }),
+    ]),
+    quit: () => app.quit(),
     onParticipantError: (name, error) => {
       diagnostics.logger("shutdown").error("A shutdown step failed", { participant: name, error: describeError(error) });
     },
   });
 
   app.whenReady().then(() => {
+    // Both can open a window, and a BrowserWindow cannot be created before
+    // `ready`; macOS can emit `activate` that early (a dock click during
+    // launch). Neither is needed sooner: the first window is created below,
+    // and registering them first lets a dock click retry if that one failed.
+    // Neither opens a window once the quit has started: its renderer would only
+    // meet IPC handlers that refuse new work.
+    app.on("activate", () => {
+      if (!shutdown.shuttingDown && BrowserWindow.getAllWindows().length === 0) {
+        // Re-create window on macOS dock click
+        createMainWindow(windowOptions);
+      }
+    });
+
+    // Another launch while this copy runs: show the running window instead.
+    app.on("second-instance", () => {
+      if (!shutdown.shuttingDown) revealMainWindow(windowOptions);
+    });
+
     configureApplicationMenu(process.platform, !isDev);
     registerSessionSecurity(windowOptions);
     createMainWindow(windowOptions);
@@ -137,19 +157,5 @@ function start(): void {
 
   app.on("window-all-closed", () => {
     if (process.platform !== "darwin") app.quit();
-  });
-
-  // Neither opens a window once the quit has started: its renderer would only
-  // meet IPC handlers that refuse new work.
-  app.on("activate", () => {
-    if (!shutdown.shuttingDown && BrowserWindow.getAllWindows().length === 0) {
-      // Re-create window on macOS dock click
-      createMainWindow(windowOptions);
-    }
-  });
-
-  // Another launch while this copy runs: show the running window instead.
-  app.on("second-instance", () => {
-    if (!shutdown.shuttingDown) revealMainWindow(windowOptions);
   });
 }

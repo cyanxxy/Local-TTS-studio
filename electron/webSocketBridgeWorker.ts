@@ -221,6 +221,9 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   // Dead workers whose request is still collecting the process's last output
   // (see failActiveAfterOutput). The model stays busy until that settles.
   const failingWorkers = new Map<TModel, Worker>();
+  // Requests waiting for a cancelled predecessor's drain, keyed by request id.
+  // Calling the entry ends the wait early (the request was cancelled too).
+  const drainWaiters = new Map<string, () => void>();
   let shuttingDown = false;
   let shutdownPromise: Promise<void> | null = null;
   const idleEvictionDelay = (model: TModel, residencyKey: string | null): number => (
@@ -647,7 +650,12 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
       // Let the previous cancel finish unwinding so this request can reuse the
       // still-loaded model. beginDrain's timer bounds the wait: if the bridge
       // never acknowledges, it is killed and this falls through to a respawn.
-      await draining.promise;
+      // Cancelling this request ends its wait at once (see cancel()).
+      await new Promise<void>((resolve) => {
+        drainWaiters.set(requestId, resolve);
+        void draining.promise.then(resolve);
+      });
+      drainWaiters.delete(requestId);
     }
     // Shutdown and cancellation both release a drain. The request waiting on
     // it must stop here, before it can create a replacement process that was
@@ -790,6 +798,16 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
         if (failing?.active?.requestId === requestId) {
           settleActive(model, failing, { ok: false, error: generationCancelledError() });
         }
+        return true;
+      }
+      const waitingOnDrain = drainWaiters.get(requestId);
+      if (waitingOnDrain) {
+        // Still waiting for an earlier cancel to unwind, so the worker is not
+        // this request's: it is warm, holds the loaded model and is about to be
+        // idle. Killing it (below) threw that away for a request that never
+        // reached it. Ending the wait makes acquisition reject as cancelled.
+        cancelledRequests.add(requestId);
+        waitingOnDrain();
         return true;
       }
       // A worker with no active request is still spawning for this request

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, net, protocol, session, shell } from "electron";
+import { app, BrowserWindow, nativeTheme, net, protocol, session, shell } from "electron";
 import path from "path";
 import { pathToFileURL } from "url";
 import { ELECTRON_APP_SCHEME, getElectronAppUrl, resolveElectronAppPath } from "./appProtocol";
@@ -18,6 +18,11 @@ export interface AppWindowOptions {
    */
   appDirectory: string;
 }
+
+// The renderer's `--color-surface` in each appearance (src/index.css). The
+// window paints it before the page has painted anything of its own.
+const LIGHT_SURFACE_COLOR = "#f5f5f7";
+const DARK_SURFACE_COLOR = "#101114";
 
 /** Must run before `app` is ready: Chromium reads scheme privileges at startup. */
 export function registerAppScheme(): void {
@@ -42,9 +47,17 @@ export function createMainWindow({ isDev, appDirectory }: AppWindowOptions): Bro
     height: 750,
     minWidth: 800,
     minHeight: 600,
+    // Shown at `ready-to-show`, once the page has painted, rather than as an
+    // empty frame that the page then repaints.
+    show: false,
     // Transparent on macOS so the native vibrancy material shows through and
     // the translucent UI panels read as real Liquid Glass over the desktop.
-    backgroundColor: isMac ? "#00000000" : "#f5f5f7",
+    // Elsewhere the page's own surface for the OS appearance, which is also
+    // what its first frame follows (the "system" theme), so a dark-mode user
+    // never sees a light flash before it.
+    backgroundColor: isMac
+      ? "#00000000"
+      : nativeTheme.shouldUseDarkColors ? DARK_SURFACE_COLOR : LIGHT_SURFACE_COLOR,
     ...(isMac
       ? {
           vibrancy: "under-window" as const,
@@ -65,12 +78,16 @@ export function createMainWindow({ isDev, appDirectory }: AppWindowOptions): Bro
     },
   });
 
+  win.once("ready-to-show", () => win.show());
+
   const target = isDev ? `${DEV_SERVER_URL}/desktop/studio` : getElectronAppUrl("/studio");
   // loadURL rejects on a navigation abort (e.g. the window is closed mid-load);
   // attach a handler so it is logged rather than surfacing as an unhandled
   // rejection on the main process.
   win.loadURL(target).catch((err) => {
     console.error(`Failed to load ${target}:`, err);
+    // Never leave a window that exists but cannot be seen or closed.
+    if (!win.isDestroyed() && !win.isVisible()) win.show();
   });
   return win;
 }
@@ -140,7 +157,10 @@ function registerProductionAppProtocol(isDev: boolean, appDirectory: string): vo
 
 function registerNavigationSecurityHandlers(isDev: boolean): void {
   app.on("web-contents-created", (_event, contents) => {
-    contents.on("will-navigate", (event, navigationUrl) => {
+    // The URL comes from the event itself; the positional `url` argument is
+    // deprecated.
+    contents.on("will-navigate", (event) => {
+      const navigationUrl = event.url;
       if (isAllowedAppUrl(navigationUrl, { allowDevServer: isDev })) return;
 
       event.preventDefault();

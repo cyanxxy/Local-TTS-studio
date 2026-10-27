@@ -109,7 +109,7 @@ describe("KeepWarmLeases", () => {
 
   it.each([
     ["crashes", (sender: FakeSender) => sender.emit("render-process-gone")],
-    ["reloads", (sender: FakeSender) => sender.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false })],
+    ["reloads", (sender: FakeSender) => sender.emit("did-navigate", {}, "app://-/studio", 200, "OK")],
     ["closes", (sender: FakeSender) => sender.emit("destroyed")],
   ])("drops every lease of a window that %s, and only those", (_name, leave) => {
     const { leases, onChange } = setup();

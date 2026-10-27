@@ -3,14 +3,21 @@ import { randomUUID } from "crypto";
 import type { ShutdownParticipant } from "../appShutdown";
 import { errorMessage } from "../errors";
 import { isRecord } from "../guards";
-import { ReaderLibraryWorkerClient } from "../readerLibraryWorkerClient";
+import { READER_LIBRARY_WORKER_CLOSE_TIMEOUT_MS, ReaderLibraryWorkerClient } from "../readerLibraryWorkerClient";
 import type { TrustedIpc } from "./trusted";
 
 // Renderers debounce Reader writes for up to a second, so the quit has to hold
-// long enough for a flush round trip. The outer quit race
-// (RUST_CANCEL_KILL_AFTER_MS + 500) still caps the total, so a renderer that
-// never answers cannot stretch the shutdown past that budget.
+// long enough for a flush round trip. A renderer that never answers cannot
+// stretch the shutdown past it.
 const READER_LIBRARY_FLUSH_TIMEOUT_MS = 1_500;
+
+/**
+ * The longest the Reader library holds the quit: the flush round trip, then the
+ * worker's own close before it is terminated. The outer quit cap in main.ts has
+ * to cover it; a shorter cap exited mid-close, with the flushed writes still
+ * queued on the worker.
+ */
+export const READER_LIBRARY_QUIT_BUDGET_MS = READER_LIBRARY_FLUSH_TIMEOUT_MS + READER_LIBRARY_WORKER_CLOSE_TIMEOUT_MS;
 // src/lib/readerLibrary.ts recognises this text to treat a write lost to the
 // quit as expected rather than as a failure.
 const READER_LIBRARY_SHUTTING_DOWN_MESSAGE = "Reader library is shutting down.";

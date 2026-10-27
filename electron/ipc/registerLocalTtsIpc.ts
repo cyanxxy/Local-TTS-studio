@@ -29,7 +29,7 @@ export function registerLocalTtsIpc(ipc: TrustedIpc, options: LocalTtsRuntimeOpt
   ipc.handle("local-tts:clear-cache", (_event, request) => runtime.clearCache(request));
   ipc.handle("local-tts:qwen3-setup", (_event, request) => runtime.qwen3Setup(request));
   ipc.handle("local-tts:download-qwen3-model", (event, request) => runtime.downloadQwen3Model(request, event));
-  ipc.handle("local-tts:choose-qwen3-model-dir", (_event, request) => runtime.chooseQwen3ModelDir(request));
+  ipc.handle("local-tts:choose-qwen3-model-dir", (event, request) => runtime.chooseQwen3ModelDir(request, event));
 
   return runtime.shutdown;
 }
