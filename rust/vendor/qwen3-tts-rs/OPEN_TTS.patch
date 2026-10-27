@@ -75,7 +75,7 @@ index f6ba158..94e40cd 100644
      }
  
 diff --git a/src/bin/qwen3_tts_cli.rs b/src/bin/qwen3_tts_cli.rs
-index 6a64fe5..9401023 100644
+index 6a64fe5..8914b2f 100644
 --- a/src/bin/qwen3_tts_cli.rs
 +++ b/src/bin/qwen3_tts_cli.rs
 @@ -60,7 +60,7 @@ struct Args {
@@ -87,6 +87,38 @@ index 6a64fe5..9401023 100644
      max_tokens: i64,
  
      /// Output sample rate.
+@@ -79,7 +79,7 @@ struct Args {
+     #[arg(long, default_value_t = 1.0)]
+     repetition_penalty: f64,
+ 
+-    /// Accepted for worker parity. Currently ignored by MLX backend.
++    /// Sampling seed. The same seed, input, and model reproduce the same audio.
+     #[arg(long)]
+     seed: Option<u64>,
+ }
+@@ -132,10 +132,6 @@ fn main() -> anyhow::Result<()> {
+             "warning: --repetition-penalty is accepted for CLI parity but ignored by this sampler"
+         );
+     }
+-    if args.seed.is_some() {
+-        eprintln!("warning: --seed is accepted for CLI parity but ignored by MLX backend");
+-    }
+-
+     println!("Loading models from: {}", model_path.display());
+     let load_start = Instant::now();
+     init_backend();
+@@ -164,6 +160,11 @@ fn main() -> anyhow::Result<()> {
+     )?;
+     let speaker_encode = ref_start.elapsed();
+ 
++    // Seed right before sampling so model and reference loading cannot shift
++    // the draw sequence. Without --seed, sampling stays as upstream left it.
++    if let Some(seed) = args.seed {
++        qwen3_tts_rs::tensor::set_sampling_seed(Some(seed));
++    }
+     let generation = inference.generate_with_icl_timed(
+         &text,
+         &ref_text,
 diff --git a/src/bin/worker.rs b/src/bin/worker.rs
 index 954f379..d70073d 100644
 --- a/src/bin/worker.rs

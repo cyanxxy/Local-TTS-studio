@@ -3,7 +3,9 @@
 This directory is a source snapshot, not a live Git checkout or submodule.
 
 - `badlogic/qwen3_tts_rs`: `288a716ce38a91c826dd67968c75d1dd4b0f07bc`
-  (crate version 0.2.2)
+  (crate version 0.2.2), Mario Zechner's MLX fork of
+  `second-state/qwen3_tts_rs` by Michael Yuan. The fork adds the quantized MLX
+  layers that the `mlx-community` 6-bit profiles need.
 - nested `badlogic/mlx-c`: `22a304206cbc77a5f74d0e0eb7363f2a6998d74f`
 
 Open TTS carries a patch in `OPEN_TTS.patch`. It:
@@ -69,11 +71,17 @@ capability.
 ## Seeded sampling
 
 `tensor::set_sampling_seed` makes sampling reproducible. On MLX, which upstream
-seeds from the clock on every categorical draw (its CLI accepts `--seed` but
-ignores it), a seed turns the per-draw PRNG key into the seed plus a draw
-counter; `None` restores clock seeding. On LibTorch it calls
-`tch::manual_seed`. The bridge reseeds before every text unit when a request
-carries a seed.
+seeds from the clock on every categorical draw, a seed turns the per-draw PRNG
+key into the seed plus a draw counter; `None` restores clock seeding. On
+LibTorch it calls `tch::manual_seed`. The bridge reseeds before every text unit
+when a request carries a seed.
+
+The `qwen3-tts` CLI's `--seed`, which upstream accepts but ignores with a
+warning, now calls it once, just before generation, so model and reference
+loading cannot shift the draw sequence. Without `--seed` the CLI samples as
+upstream does. `pibot-tts-worker` still ignores its `--seed`. Open TTS builds
+neither binary, so this change is checked only by compiling the crate's
+binaries, not by the bridge suite.
 
 ## Regenerating the patch
 

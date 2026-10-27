@@ -4,6 +4,15 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- The vendored `qwen3-tts` CLI now honours `--seed` on MLX and LibTorch
+  instead of printing that it ignores it. The app itself already seeded Qwen3
+  requests; this only affects the standalone CLI, which Open TTS does not ship.
+- The README credits for the Qwen3 runtime now name `second-state/qwen3_tts_rs`
+  by Michael Yuan and the MLX fork by Mario Zechner that Open TTS vendors, and
+  link the Qwen3-TTS repository instead of the Qwen organisation.
+
 ## [1.10.0] - 2026-10-26
 
 ### Added
