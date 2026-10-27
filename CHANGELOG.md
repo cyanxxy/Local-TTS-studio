@@ -4,6 +4,19 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+### Changed
+
+- CI skips the Linux bridge integration test on pull requests that change no
+  bridge inputs, which shortens frontend-only runs from about 7 to about 4
+  minutes. The Node 26 leg now runs only Vitest and the web build, and the
+  Linux bridge build omits debug info.
+
+### Fixed
+
+- `.gitattributes` no longer routes the vendored `qwen3-tts-rs` tree through
+  Git LFS, so a fresh checkout no longer shows
+  `mlx-c/examples/arrays.safetensors` as modified.
+
 ## [1.10.1] - 2026-10-27
 
 ### Fixed
