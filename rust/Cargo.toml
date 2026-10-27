@@ -9,6 +9,7 @@ exclude = ["vendor/qwen3-tts-rs"]
 edition = "2024"
 # The pinned toolchain in rust-toolchain.toml is the only one CI builds with.
 rust-version = "1.99"
+license = "Apache-2.0"
 publish = false
 
 # Dependencies more than one member uses, declared once so their versions

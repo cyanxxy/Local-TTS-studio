@@ -1,0 +1,71 @@
+# cargo-deny policy for the bridge workspace: `cargo deny check` from rust/.
+# CI runs it in rust-bridge.yml. Every exception below says why it exists;
+# remove it when its reason no longer holds.
+
+[graph]
+# The platforms the bridge is built for: the desktop targets plus Linux, where
+# CI and the model-free tests run.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "x86_64-unknown-linux-gnu",
+]
+
+[advisories]
+ignore = [
+    # zip 0.6.6 (tch 0.20, Windows only) and zip 2.6.1 (neutts): the
+    # vulnerable APIs are ZipArchive::extract and ZipStreamReader::extract.
+    # Neither crate calls them at run time; neutts reads checkpoint entries
+    # into memory, tch reads .npz entries the bridge never loads, and
+    # torch-sys extracts only behind its unused download feature. No release
+    # of tch or neutts accepts a fixed zip.
+    { id = "RUSTSEC-2026-0367", reason = "zip extract APIs are not called; no tch/neutts release accepts zip >= 9" },
+    { id = "RUSTSEC-2026-0368", reason = "zip extract APIs are not called; no tch/neutts release accepts zip >= 9" },
+    { id = "RUSTSEC-2026-0369", reason = "zip extract APIs are not called; no tch/neutts release accepts zip >= 9" },
+    # zstd-safe 5.0.2 is zip 0.6.6's zstd backend under tch. The bridge loads
+    # tensors only from .safetensors, never from zip archives.
+    { id = "RUSTSEC-2026-0403", reason = "only reachable through tch's .npz reader, which the bridge never calls" },
+    # paste is a proc macro pulled in by tokenizers; unmaintained, not unsafe.
+    { id = "RUSTSEC-2024-0436", reason = "build-time proc macro via tokenizers; no maintained replacement upstream" },
+]
+
+[licenses]
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+exceptions = [
+    # neutts' `espeak` feature statically links eSpeak NG into the bridge
+    # binary. GPL-3.0-or-later has obligations for anyone distributing that
+    # binary; see the README's credits.
+    { allow = ["GPL-3.0-or-later"], crate = "espeak-ng" },
+    { allow = ["GPL-3.0-or-later"], crate = "espeak-ng-data-dict-ru" },
+    { allow = ["GPL-3.0-or-later"], crate = "espeak-ng-data-dicts" },
+    { allow = ["GPL-3.0-or-later"], crate = "espeak-ng-data-phonemes" },
+]
+
+[bans]
+# Most duplicates come from upstream crates pinning older majors; report them
+# without failing.
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace members and the vendored crate are path dependencies.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
