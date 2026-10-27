@@ -61,7 +61,7 @@ electron/
 |-- nativeModels/         Framework for native ONNX models (Audio8 is the first consumer)
 `-- audio8*, qwen3*, readerLibrary*, document*, ...   Per-feature modules
 rust/
-|-- Cargo.toml            Workspace: shared dependency versions, lints, release profile
+|-- Cargo.toml            Workspace: shared dependency versions and release profile
 |-- bridge-core/src/      Model-free: protocol.rs, ws/ (transport), request validation, streaming policy
 |-- local-tts-bridge/src/ cli.rs, neutts_backend/, qwen3/ (host, engines, runtime, target, ...)
 `-- vendor/qwen3-tts-rs   Hand-maintained snapshot (see OPEN_TTS_VENDOR.md)

@@ -220,13 +220,7 @@ mod tests {
     #[test]
     fn float32_transport_cleans_non_finite_samples_without_normalizing() {
         let bytes = float32_to_le_bytes(&[f32::NAN, f32::INFINITY, -1.5]);
-        let samples = bytes
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .copied()
-            .map(f32::from_le_bytes)
-            .collect::<Vec<_>>();
+        let samples = crate::ws::test_support::decode_samples(&bytes);
         assert_eq!(samples, vec![0.0, 0.0, -1.5]);
     }
 

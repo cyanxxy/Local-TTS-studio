@@ -8,7 +8,7 @@ const manifestPath = path.join(rootDir, "rust", "Cargo.toml");
 
 execFileSync(
   "cargo",
-  ["test", "--locked", "--manifest-path", manifestPath, "--workspace", ...process.argv.slice(2)],
+  ["test", "--locked", "--manifest-path", manifestPath, ...process.argv.slice(2)],
   {
     cwd: rootDir,
     env: rustBuildEnv(rootDir),

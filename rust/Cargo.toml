@@ -2,7 +2,7 @@
 resolver = "3"
 members = ["bridge-core", "local-tts-bridge"]
 # A digest-pinned upstream snapshot (see its OPEN_TTS_VENDOR.md). It builds
-# only as the bridge's path dependency and is not held to workspace lints.
+# only as the bridge's path dependency and keeps its upstream formatting.
 exclude = ["vendor/qwen3-tts-rs"]
 
 [workspace.package]

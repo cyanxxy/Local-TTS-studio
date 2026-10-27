@@ -52,8 +52,9 @@ jobs:
       - run: rustup toolchain install --no-self-update
       # The vendored qwen3-tts-rs tree is digest-pinned to its upstream
       # snapshot and is intentionally not held to local formatting. Name the
-      # members: on the virtual workspace root a bare `cargo fmt` checks
-      # nothing, and `--all` would also format path dependencies like vendor.
+      # members: on the virtual workspace root a bare `cargo fmt` fails with
+      # "Failed to find targets", and `--all` would also format path
+      # dependencies such as the vendored crate.
       - run: cargo fmt --manifest-path rust/Cargo.toml -p open-tts-bridge-core -p open-tts-local-bridge --check
 
   build-and-test:
