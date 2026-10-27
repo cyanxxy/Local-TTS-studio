@@ -6,10 +6,10 @@ import {
 } from "../../electron/localTtsLimits";
 
 // Keep this in sync with CUSTOM_VOICE_UNIT_CHARS in
-// rust/local-tts-bridge/src/qwen3/runtime.rs.
+// rust/bridge-core/src/qwen3/streaming.rs.
 export const QWEN3_UNIT_MAX_CHARS = 200;
 // Keep this in sync with CJK_CHAR_WEIGHT in
-// rust/local-tts-bridge/src/qwen3/text.rs. CJK text speaks about twice as long
+// rust/bridge-core/src/qwen3/text.rs. CJK text speaks about twice as long
 // per character, so CJK-heavy units are cut at about half the characters.
 export const QWEN3_CJK_CHARACTER_WEIGHT = 2;
 /** A run of pause marks is capped like a single break tag. */

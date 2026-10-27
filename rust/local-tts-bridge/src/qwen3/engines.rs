@@ -14,7 +14,12 @@ const VOICE_CLONE_STREAMING_CHUNK_SIZE: usize = 4;
 // unit has been generated.
 const TEXT_UNIT_STREAMING_CHUNK_SIZE: usize = 4;
 
-impl CustomVoiceEngine for TTSInference {
+/// A loaded CustomVoice or VoiceDesign model as a streaming engine. The engine
+/// traits come from `open_tts_bridge_core`, so they are implemented on this
+/// local wrapper rather than on the vendored type.
+pub struct InstructSession<'a>(pub &'a mut TTSInference);
+
+impl CustomVoiceEngine for InstructSession<'_> {
     fn generate_custom_voice_streaming(
         &mut self,
         text: &str,
@@ -25,22 +30,23 @@ impl CustomVoiceEngine for TTSInference {
         on_audio: StreamedAudio<'_>,
     ) -> Result<()> {
         qwen3_tts_rs::tensor::set_sampling_seed(controls.seed);
-        self.generate_with_instruct_streaming(
-            text,
-            speaker,
-            language,
-            instruct,
-            controls.temperature,
-            controls.top_k,
-            controls.max_new_tokens,
-            TEXT_UNIT_STREAMING_CHUNK_SIZE,
-            on_audio,
-        )
-        .context("Qwen3 CustomVoice inference failed.")
+        self.0
+            .generate_with_instruct_streaming(
+                text,
+                speaker,
+                language,
+                instruct,
+                controls.temperature,
+                controls.top_k,
+                controls.max_new_tokens,
+                TEXT_UNIT_STREAMING_CHUNK_SIZE,
+                on_audio,
+            )
+            .context("Qwen3 CustomVoice inference failed.")
     }
 }
 
-impl VoiceDesignEngine for TTSInference {
+impl VoiceDesignEngine for InstructSession<'_> {
     fn generate_voice_design_streaming(
         &mut self,
         text: &str,
@@ -50,18 +56,19 @@ impl VoiceDesignEngine for TTSInference {
         on_audio: StreamedAudio<'_>,
     ) -> Result<()> {
         qwen3_tts_rs::tensor::set_sampling_seed(controls.seed);
-        self.generate_with_instruct_streaming(
-            text,
-            "",
-            language,
-            instruct,
-            controls.temperature,
-            controls.top_k,
-            controls.max_new_tokens,
-            TEXT_UNIT_STREAMING_CHUNK_SIZE,
-            on_audio,
-        )
-        .context("Qwen3 VoiceDesign inference failed.")
+        self.0
+            .generate_with_instruct_streaming(
+                text,
+                "",
+                language,
+                instruct,
+                controls.temperature,
+                controls.top_k,
+                controls.max_new_tokens,
+                TEXT_UNIT_STREAMING_CHUNK_SIZE,
+                on_audio,
+            )
+            .context("Qwen3 VoiceDesign inference failed.")
     }
 }
 

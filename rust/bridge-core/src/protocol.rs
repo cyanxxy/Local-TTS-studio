@@ -14,10 +14,6 @@ pub const MAX_AUDIO_CHUNK_SAMPLES: usize = 262_144;
 // text is what the client matches on to keep the worker warm.
 pub const CANCELLED_MESSAGE: &str = "Generation cancelled.";
 /// The `type` of the frame that reports the silence after a finished text unit.
-#[cfg_attr(
-    not(qwen3_native),
-    allow(dead_code, reason = "only the native Qwen3 backend sends unit gaps")
-)]
 pub const UNIT_GAP_FRAME_TYPE: &str = "unit_gap";
 pub const MAX_LOCAL_TTS_TEXT_CHARS: usize = 6_000;
 pub const MAX_REFERENCE_TEXT_CHARS: usize = 2_000;
@@ -57,10 +53,6 @@ pub fn classify_buffered_request(text: String) -> BufferedRequest {
 /// The text-only frame sent after a streamed text unit's last audio chunk when
 /// `silence_samples` of silence follow it. The client inserts the silence at
 /// that point of its timeline; it never counts toward `audioChunkCount`.
-#[cfg_attr(
-    not(qwen3_native),
-    allow(dead_code, reason = "only the native Qwen3 backend sends unit gaps")
-)]
 pub fn unit_gap_frame(
     request_id: &str,
     sample_rate: u32,

@@ -62,7 +62,7 @@ describe("buildQwen3TextUnits", () => {
     expect(unitTexts(text)).toEqual(["Intro.", ` ${"x".repeat(199)}`, "x".repeat(21)]);
   });
 
-  // rust/local-tts-bridge/src/qwen3/text.rs pins the same fixtures in
+  // rust/bridge-core/src/qwen3/text.rs pins the same fixtures in
   // parity_fixtures_shared_with_the_renderer and cjk_units_use_half_the_character_budget.
   it("matches the Rust splitter's fixtures", () => {
     expect(unitTexts("Hello. World")).toEqual(["Hello.", " World"]);

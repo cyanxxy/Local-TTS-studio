@@ -11,7 +11,7 @@ updates:
         patterns:
           - "*"
   - package-ecosystem: cargo
-    directory: /rust/local-tts-bridge
+    directory: /rust
     schedule:
       interval: weekly
     # rust/vendor/qwen3-tts-rs is a digest-pinned path dependency maintained

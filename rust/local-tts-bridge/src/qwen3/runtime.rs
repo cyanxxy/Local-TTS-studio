@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 
 use super::config::{GenerationControls, normalize_language};
-use super::engines::VoiceCloneSession;
+use super::engines::{InstructSession, VoiceCloneSession};
 use super::host::{HostKey, NativeQwenHost, REFERENCE_MAX_DURATION_SECONDS};
 use super::model_files::ExpectedModelType;
 use super::reference::decode_reference_wav;
@@ -73,7 +73,12 @@ impl Qwen3Runtime {
     ) -> Result<GenerationSummary> {
         let host = self.ensure_host(model_path, ExpectedModelType::CustomVoice)?;
         let mut cleanup = clear_inference_cache;
-        generate_custom_voice_units(&mut host.inference, request, sink, &mut cleanup)
+        generate_custom_voice_units(
+            &mut InstructSession(&mut host.inference),
+            request,
+            sink,
+            &mut cleanup,
+        )
     }
 
     pub fn generate_voice_design(
@@ -84,7 +89,12 @@ impl Qwen3Runtime {
     ) -> Result<GenerationSummary> {
         let host = self.ensure_host(model_path, ExpectedModelType::VoiceDesign)?;
         let mut cleanup = clear_inference_cache;
-        generate_voice_design_units(&mut host.inference, request, sink, &mut cleanup)
+        generate_voice_design_units(
+            &mut InstructSession(&mut host.inference),
+            request,
+            sink,
+            &mut cleanup,
+        )
     }
 
     pub fn generate_voice_clone(

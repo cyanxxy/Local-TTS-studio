@@ -2,25 +2,17 @@
 //! either probes it once or talks to it over an authenticated loopback
 //! WebSocket (`ws`); `neutts_backend` and `qwen3` are the models it can host.
 
-// Exercise the vendored sampler/prompt policy in the bridge's normal test suite.
-#[cfg(test)]
-#[path = "../../vendor/qwen3-tts-rs/src/generation_policy.rs"]
-mod qwen_generation_policy;
-
 mod cli;
 mod neucodec_encoder;
 mod neutts_backend;
-mod protocol;
 mod qwen3;
-mod reference_audio;
-mod resident_model;
-mod ws;
 
 use std::io::{Read, Write};
 use std::thread;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use open_tts_bridge_core::{protocol, reference_audio, resident_model, ws};
 use serde_json::{Value, json};
 
 use cli::{Action, Cli, LocalModel};
@@ -113,7 +105,7 @@ fn exit_when_parent_pipe_closes() {
 /// versions the probes report from drifting.
 #[cfg(test)]
 fn locked_package_version(package: &str) -> Option<String> {
-    let lockfile = include_str!("../Cargo.lock");
+    let lockfile = include_str!("../../Cargo.lock");
     let name_line = format!("name = \"{package}\"");
     let mut lines = lockfile.lines();
     lines.find(|line| *line == name_line)?;

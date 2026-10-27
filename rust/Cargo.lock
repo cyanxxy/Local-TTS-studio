@@ -2289,6 +2289,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "open-tts-bridge-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hound",
+ "serde",
+ "serde_json",
+ "socket2",
+ "tempfile",
+ "tungstenite",
+]
+
+[[package]]
 name = "open-tts-local-bridge"
 version = "0.1.0"
 dependencies = [
@@ -2299,6 +2312,7 @@ dependencies = [
  "hf-xet",
  "hound",
  "neutts",
+ "open-tts-bridge-core",
  "qwen3-tts-rs",
  "rten",
  "rten-tensor",
@@ -2306,10 +2320,8 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2 0.11.1",
- "socket2",
  "tch",
  "tempfile",
- "tungstenite",
  "ureq",
 ]
 

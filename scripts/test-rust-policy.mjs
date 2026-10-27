@@ -4,7 +4,8 @@ import { fileURLToPath } from "node:url";
 import { rustBuildEnv } from "./rust-target-dir.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const manifestPath = path.join(rootDir, "rust", "bridge-policy-tests", "Cargo.toml");
+// bridge-core links no native runtime, so this needs no MLX, Metal, or LibTorch.
+const manifestPath = path.join(rootDir, "rust", "bridge-core", "Cargo.toml");
 
 execFileSync(
   "cargo",
