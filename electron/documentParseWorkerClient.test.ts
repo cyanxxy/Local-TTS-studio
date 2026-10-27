@@ -196,7 +196,9 @@ describe("DocumentParseWorkerClient", () => {
     // does, carrying a conversion profile on its command line, and then never
     // finishes. Terminating the worker alone leaves that process running.
     const shared = new Int32Array(new SharedArrayBuffer(4));
-    const client = new DocumentParseWorkerClient("unused", 300, 10, () => new Worker(
+    // Long enough for a worker thread to boot and spawn under a loaded test
+    // run: a timeout that fires first finds no converter to stop.
+    const client = new DocumentParseWorkerClient("unused", 2_000, 10, () => new Worker(
       `const { spawn } = require("child_process");
        const { workerData } = require("worker_threads");
        const child = spawn(process.execPath, [
@@ -222,5 +224,5 @@ describe("DocumentParseWorkerClient", () => {
       converterPid ||= Atomics.load(shared, 0);
       if (converterPid && isRunning(converterPid)) process.kill(converterPid, "SIGKILL");
     }
-  });
+  }, 15_000);
 });
