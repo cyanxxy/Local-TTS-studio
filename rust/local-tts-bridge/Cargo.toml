@@ -21,6 +21,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha1 = "0.11"
 sha2 = "0.11"
+socket2 = "0.6"
 hex = "0.4"
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # `default-features = false` would be a no-op: hf-hub (via neutts) depends on
@@ -30,8 +31,6 @@ tungstenite = { version = "0.30", default-features = false, features = ["handsha
 ureq = { version = "3.4", features = ["rustls", "gzip"] }
 xet = { package = "hf-xet", version = "1.6" }
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
 
 # build.rs sets `cfg(qwen3_native)` for exactly these two targets; change both
 # together.
