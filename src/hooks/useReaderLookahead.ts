@@ -134,6 +134,9 @@ export function useReaderLookahead({
     : null;
 
   const [outcome, setOutcome] = useState<{ key: string; status: ReaderLookaheadStatus } | null>(null);
+  // Bumped when a render that yielded the engine has wound down, so it starts
+  // over while its key still holds.
+  const [yields, setYields] = useState(0);
   const jobRef = useRef<Job | null>(null);
   const finishedKeyRef = useRef<string | null>(null);
   const saveVersionRef = useRef(0);
@@ -214,11 +217,21 @@ export function useReaderLookahead({
     const job: Job = { key, controller: new AbortController(), running: true, done: Promise.resolve() };
     jobRef.current = job;
     job.done = render(job);
-  }, [currentSectionPlaying, key]);
+  }, [currentSectionPlaying, key, yields]);
 
+  // A render that yielded is not finished: once it has wound down it starts
+  // over, behind whatever it yielded to. What it yields to usually takes the
+  // engine (a generation, a retake), which changes the key, so the restart
+  // waits for that to end; a request that never started does not hold it up.
   const preempt = useCallback(() => {
     const job = jobRef.current;
-    if (job?.running) job.controller.abort(new DOMException("The look-ahead yielded to the engine.", "AbortError"));
+    if (!job?.running) return;
+    job.controller.abort(new DOMException("The look-ahead yielded to the engine.", "AbortError"));
+    void job.done.then(() => {
+      if (jobRef.current !== job) return;
+      setOutcome((current) => (current?.key === job.key && current.status === "rendering" ? null : current));
+      setYields((count) => count + 1);
+    });
   }, []);
   const isBusy = useCallback(() => jobRef.current?.running === true, []);
   const settled = useCallback(() => jobRef.current?.done ?? Promise.resolve(), []);

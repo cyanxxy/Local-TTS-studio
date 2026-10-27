@@ -39,6 +39,7 @@ import {
   listReaderDocuments,
   MAX_READER_AUDIO_MEMORY_CACHE_BYTES,
   MAX_READER_AUDIO_MEMORY_CACHE_ENTRIES,
+  mergeReaderDocumentEdits,
   saveCachedReaderAudio,
   saveReaderDocument,
   saveReaderProgress,
@@ -217,6 +218,10 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
   const documentSaveTimersRef = useRef(new Map<string, number>());
   const memoryAudioRef = useRef(new Map<string, CachedReaderAudio>());
   const inFlightSavesRef = useRef(new Set<Promise<void>>());
+  // The version of each book this tab last read from or wrote to storage: the
+  // base a save merges another tab's edits against.
+  const storedBaseRef = useRef(new Map<string, ReaderDocumentRecord>());
+  const documentSaveChainsRef = useRef(new Map<string, Promise<void>>());
   const sectionsRef = useRef(new Map<string, {
     text: string;
     chapters: ReaderDocumentRecord["chapters"];
@@ -254,10 +259,42 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     return tracked;
   }, [reportError]);
 
+  // Saves of one book run one at a time, each against the version the one
+  // before stored, so a merge never mistakes this tab's own earlier save for
+  // another tab's edit. With none in flight the write is issued at once, which
+  // a page-teardown flush relies on.
+  const saveDocument = useCallback((document: ReaderDocumentRecord): Promise<void> => {
+    const chains = documentSaveChainsRef.current;
+    const write = async () => {
+      const stored = await saveReaderDocument(document, storedBaseRef.current.get(document.id) ?? null);
+      storedBaseRef.current.set(document.id, stored);
+      if (stored === document) return;
+      // Another tab's edits were merged in. Carry them into this tab's copy,
+      // over anything edited here since this save was issued.
+      const current = documentsRef.current.find((entry) => entry.id === document.id);
+      if (!current) return;
+      const next = current === document ? stored : mergeReaderDocumentEdits(document, current, stored);
+      const nextDocuments = sortDocuments([
+        next,
+        ...documentsRef.current.filter((entry) => entry.id !== document.id),
+      ]);
+      documentsRef.current = nextDocuments;
+      setDocuments(nextDocuments);
+    };
+    const previous = chains.get(document.id);
+    const save = previous ? previous.catch(() => undefined).then(write) : write();
+    chains.set(document.id, save);
+    const release = () => {
+      if (chains.get(document.id) === save) chains.delete(document.id);
+    };
+    save.then(release, release);
+    return save;
+  }, []);
+
   const persistDocument = useCallback((document: ReaderDocumentRecord) => {
     if (!persistent) return;
-    void trackSave(saveReaderDocument(document));
-  }, [persistent, trackSave]);
+    void trackSave(saveDocument(document));
+  }, [persistent, saveDocument, trackSave]);
 
   // Reading position is the one thing that changes while a book plays, so it
   // is stored as its own small record instead of rewriting the whole book.
@@ -297,6 +334,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
           const initialized = await initializePersistentReaderLibrary(seedText);
           loaded = initialized.documents;
           activeId = initialized.activeDocumentId;
+          if (!cancelled) storedBaseRef.current = new Map(loaded.map((document) => [document.id, document]));
         } else {
           const seed = createReaderDocument({ text: seedText, sourceType: "text" });
           loaded = [seed];
@@ -364,13 +402,13 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
         continue;
       }
       const flushed = pendingTextIds.has(id) ? structurePendingTextDocument(latest) : latest;
-      void trackSave(saveReaderDocument(flushed));
+      void trackSave(saveDocument(flushed));
     }
     // Autosaves started before the flush are just as unsaved as the debounced
     // ones, so wait on the whole in-flight set rather than only what this call
     // issued.
     return Promise.allSettled([...inFlightSavesRef.current]).then(() => undefined);
-  }, [persistProgress, persistent, trackSave]);
+  }, [persistProgress, persistent, saveDocument, trackSave]);
 
   useEffect(() => {
     // React unmount is not part of closing a window or a browser tab, so the
@@ -406,11 +444,11 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     activeDocumentIdRef.current = document.id;
     setActiveDocumentIdState(document.id);
     if (persistent) {
-      await saveReaderDocument(document);
+      await saveDocument(document);
       await setActiveReaderDocumentId(document.id);
     }
     return document;
-  }, [persistent, replaceDocument]);
+  }, [persistent, replaceDocument, saveDocument]);
 
   const openDocument = useCallback(async (id: string) => {
     const existing = documentsRef.current.find((document) => document.id === id);
@@ -420,11 +458,11 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
     activeDocumentIdRef.current = id;
     setActiveDocumentIdState(id);
     if (persistent) {
-      await saveReaderDocument(opened);
+      await saveDocument(opened);
       await setActiveReaderDocumentId(id);
     }
     return opened;
-  }, [persistent, replaceDocument]);
+  }, [persistent, replaceDocument, saveDocument]);
 
   const deleteDocument = useCallback(async (id: string) => {
     const remaining = documentsRef.current.filter((document) => document.id !== id);
@@ -436,6 +474,7 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
       timers.current.delete(id);
     }
     pendingTextStructureIdsRef.current.delete(id);
+    storedBaseRef.current.delete(id);
     if (persistent) await deleteReaderDocument(id);
     for (const [cacheKey, audio] of memoryAudioRef.current) {
       if (audio.documentId === id) memoryAudioRef.current.delete(cacheKey);
@@ -447,13 +486,13 @@ export function useReaderLibrary(seedText: string): UseReaderLibraryReturn {
         replacement = createReaderDocument({ text: "Start a new document here.", sourceType: "text" });
         documentsRef.current = [replacement];
         setDocuments([replacement]);
-        if (persistent) await saveReaderDocument(replacement);
+        if (persistent) await saveDocument(replacement);
       }
       activeDocumentIdRef.current = replacement.id;
       setActiveDocumentIdState(replacement.id);
       if (persistent) await setActiveReaderDocumentId(replacement.id);
     }
-  }, [persistent]);
+  }, [persistent, saveDocument]);
 
   const finalizeActiveTextEdit = useCallback((documentId?: string) => {
     const id = documentId ?? activeDocumentIdRef.current;

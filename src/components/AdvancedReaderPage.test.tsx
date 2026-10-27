@@ -1057,6 +1057,31 @@ describe("AdvancedReaderPage", () => {
     expect(audioPlayerMock).toHaveBeenCalledTimes(dockRenders);
   });
 
+  it("keeps Resume auto-follow above the full-screen dock, not under it (U1)", () => {
+    const now = vi.spyOn(performance, "now").mockReturnValue(1e9);
+    try {
+      const { container } = renderReader({
+        fullScreen: true,
+        text: "Hello extraordinary world.",
+        totalDuration: 3,
+        isPlaying: true,
+      });
+      // A scroll by the reader (not by auto-follow) pauses following.
+      fireEvent.scroll(screen.getByRole("document", { name: "Reading Text" }));
+      const pill = screen.getByRole("button", { name: "Resume auto-follow" });
+
+      // Fixed to the viewport and lifted by the measured dock height, at the
+      // dock's stacking level, rather than at the bottom of the pane where the
+      // dock (z-40) covered it.
+      expect(pill).toHaveClass("fixed", "z-40", "bottom-[calc(var(--reader-dock-clearance,12rem)+0.75rem)]");
+      expect(pill).not.toHaveClass("bottom-5");
+      const page = container.firstElementChild as HTMLElement;
+      expect(page.style.getPropertyValue("--reader-dock-clearance")).toMatch(/^\d+px$/);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it("auto-scrolls again when the playback clock advances within one sentence", () => {
     const clientHeight = vi.spyOn(HTMLElement.prototype, "clientHeight", "get")
       .mockReturnValue(200);

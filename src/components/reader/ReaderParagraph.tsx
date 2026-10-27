@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { READER_HIGHLIGHT_SWATCHES } from "./readerHighlightColors";
-import type { OverlayPart, TextBlock } from "./readerTextLayout";
+import { sameOverlayParts, type OverlayPart, type TextBlock } from "./readerTextLayout";
 
 interface ReaderParagraphProps {
   block: TextBlock;
@@ -20,6 +20,23 @@ interface ReaderParagraphProps {
 // for the whole of every passage.
 function overlayPartClassName(isActive: boolean): string | undefined {
   return isActive ? "reader-chunk-highlight reader-chunk-highlight-active" : undefined;
+}
+
+/**
+ * The pane rebuilds every paragraph's parts when the spoken passage moves, so
+ * they are compared by what they draw: only the paragraphs the passage left
+ * or entered re-render.
+ */
+function sameParagraph(previous: ReaderParagraphProps, next: ReaderParagraphProps): boolean {
+  return previous.block.start === next.block.start
+    && previous.block.end === next.block.end
+    && previous.block.blankLineBefore === next.block.blankLineBefore
+    && previous.wordStart === next.wordStart
+    && previous.wordEnd === next.wordEnd
+    && previous.heading === next.heading
+    && previous.tabStop === next.tabStop
+    && previous.describedBy === next.describedBy
+    && sameOverlayParts(previous.parts, next.parts);
 }
 
 /**
@@ -102,4 +119,4 @@ export const ReaderParagraph = memo(function ReaderParagraph({
       })}
     </p>
   );
-});
+}, sameParagraph);

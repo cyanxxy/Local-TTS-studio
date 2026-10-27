@@ -15,8 +15,10 @@ const EPUB_TRANSFER_CHUNK_BYTES = 1024 * 1024;
 const EPUB_TRANSFER_TTL_MS = 60_000;
 // OCR and document conversion run in a one-shot worker thread. Terminating the
 // worker at the deadline stops native parser CPU work as well as unblocking the
-// renderer, and releasing it after each import prevents LiteParse/native state
-// from becoming part of the Electron main process's permanent footprint.
+// renderer (the LibreOffice conversion it may have started is stopped
+// separately; see documentConverterProcesses.ts), and releasing it after each
+// import prevents LiteParse/native state from becoming part of the Electron
+// main process's permanent footprint.
 const IMPORT_PARSE_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface PendingEpubTransfer {
@@ -125,9 +127,11 @@ export function registerDocumentIpc(
   return {
     name: "documents",
     beginShutdown() {
-      documentParser?.close();
+      // Holds the quit only while an abandoned import's LibreOffice is being
+      // stopped; otherwise it would outlive the app.
+      const stopped = documentParser?.close() ?? null;
       documentParser = null;
-      return null;
+      return stopped;
     },
   };
 }

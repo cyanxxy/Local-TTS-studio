@@ -98,18 +98,40 @@ export async function addChatterboxClipFromWav(buffer: ArrayBuffer, name: string
   return clip;
 }
 
+/**
+ * The worker keeps the references it was sent in a least-recently-used cache
+ * of this many entries (MAX_CACHED_REFERENCES in chatterbox.worker.ts; keep
+ * the two in step), the default voice among them.
+ */
+const WORKER_REFERENCE_SLOTS = 16;
+/**
+ * How many clips the host counts as still loaded in one worker: one slot
+ * fewer, as the default voice may hold it. Each use refreshes a clip here as
+ * GENERATE does there, so a clip this forgets may still be loaded (sending it
+ * again is cheap) but one it remembers has not been evicted.
+ */
+const HOST_TRACKED_REFERENCES = WORKER_REFERENCE_SLOTS - 1;
+
+/** Per worker, the clips sent to it, least recently used first. */
 const sentToWorker = new WeakMap<Worker, Map<string, Promise<void>>>();
 
 /**
  * Makes `referenceId` known to `worker`, sending the clip once per worker and
- * waiting until the worker has accepted it. The default voice needs nothing.
+ * waiting until the worker has accepted it. A clip the worker may have
+ * evicted to make room for others is sent again. The default voice needs
+ * nothing.
  */
 export function ensureChatterboxReference(worker: Worker, referenceId: string): Promise<void> {
   if (referenceId === CHATTERBOX_DEFAULT_REFERENCE_ID) return Promise.resolve();
   const known = sentToWorker.get(worker) ?? new Map<string, Promise<void>>();
   sentToWorker.set(worker, known);
   const pending = known.get(referenceId);
-  if (pending) return pending;
+  if (pending) {
+    // Marks it recently used, in the same order the worker's cache does.
+    known.delete(referenceId);
+    known.set(referenceId, pending);
+    return pending;
+  }
 
   const clip = getChatterboxClip(referenceId);
   if (!clip) {
@@ -140,7 +162,13 @@ export function ensureChatterboxReference(worker: Worker, referenceId: string): 
     );
   });
   known.set(referenceId, request);
+  while (known.size > HOST_TRACKED_REFERENCES) {
+    const [oldest] = known.keys();
+    known.delete(oldest);
+  }
   // A failed attempt may be retried, for example after the worker restarts.
-  request.catch(() => known.delete(referenceId));
+  request.catch(() => {
+    if (known.get(referenceId) === request) known.delete(referenceId);
+  });
   return request;
 }

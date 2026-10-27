@@ -44,8 +44,9 @@ describe("DownloadProgress", () => {
       />,
     );
 
-    const bar = container.querySelector(".progress-animated");
-    expect(bar).toHaveStyle({ width: "0%" });
+    // The fill slides in by transform (no layout per tick); empty means fully off the track.
+    const bar = container.querySelector(".bg-accent");
+    expect(bar).toHaveStyle({ transform: "translateX(-100%)" });
   });
 
   it("shows Electron-only Supertonic 3 preparation", () => {

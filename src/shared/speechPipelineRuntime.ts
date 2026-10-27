@@ -109,34 +109,46 @@ async function* remapChunks(
  *
  * The pipeline owns the pronunciation rules, so the engine's own copy of them
  * is cleared: applying them twice could rewrite a replacement.
+ *
+ * With `wrappers`, an engine's wrapped `synthesize` is reused for as long as
+ * its own keeps its identity. A runtime object changes with every model-state
+ * tick and streamed chunk while its `synthesize` does not, so callers that
+ * memoise on `synthesize` keep it across those. `resolveSettings` must then
+ * read the latest settings itself, as the first wrapper made is kept.
  */
 export function withSpeechPipeline<Id extends SurfaceEngineId>(
   id: Id,
   runtime: EngineRuntime<Id>,
   resolveSettings: (id: Id) => SpeechPipelineSettings,
+  wrappers?: WeakMap<object, unknown>,
 ): EngineRuntime<Id> {
+  const innerSynthesize = runtime.synthesize;
+  // Only a function can key the cache; a runtime without one is wrapped as is.
+  const cache = typeof innerSynthesize === "function" ? wrappers : undefined;
+  const reused = cache?.get(innerSynthesize) as EngineRuntime<Id>["synthesize"] | undefined;
+  if (reused) return { ...runtime, synthesize: reused };
   const boundary = speechBreakBoundary(id);
-  return {
-    ...runtime,
-    synthesize: (request: SynthesisRequest<Id>) => {
-      const plan = buildSpeechPlanSafe(request.text, resolveSettings(id), boundary);
-      const inner = runtime.synthesize({
-        ...request,
-        text: plan.spoken,
-        tuning: { ...request.tuning, pronunciationRules: [] },
-      });
-      return plan.identity ? inner : remapChunks(inner, createChunkRemapper(plan));
-    },
+  const synthesize = (request: SynthesisRequest<Id>) => {
+    const plan = buildSpeechPlanSafe(request.text, resolveSettings(id), boundary);
+    const inner = innerSynthesize({
+      ...request,
+      text: plan.spoken,
+      tuning: { ...request.tuning, pronunciationRules: [] },
+    });
+    return plan.identity ? inner : remapChunks(inner, createChunkRemapper(plan));
   };
+  cache?.set(innerSynthesize, synthesize);
+  return { ...runtime, synthesize };
 }
 
 /** `withSpeechPipeline` for every runtime in the map. */
 export function withSpeechPipelineAll(
   runtimes: EngineRuntimeMap,
   resolveSettings: (id: SurfaceEngineId) => SpeechPipelineSettings,
+  wrappers?: WeakMap<object, unknown>,
 ): EngineRuntimeMap {
   const entries = Object.entries(runtimes) as unknown as Array<[SurfaceEngineId, EngineRuntime<SurfaceEngineId>]>;
   return Object.fromEntries(
-    entries.map(([id, runtime]) => [id, withSpeechPipeline(id, runtime, resolveSettings)]),
+    entries.map(([id, runtime]) => [id, withSpeechPipeline(id, runtime, resolveSettings, wrappers)]),
   ) as unknown as EngineRuntimeMap;
 }

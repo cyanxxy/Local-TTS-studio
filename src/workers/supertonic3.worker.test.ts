@@ -279,13 +279,14 @@ describe("Supertonic 3 asset downloads", () => {
 
     const percents = loadProgress(messages);
     // Every 20-byte chunk of the 1,000-byte cold load is worth 1.88% of the
-    // 94% download span, whichever file it belongs to.
+    // 94% download span, whichever file it belongs to, reported as the nearest
+    // whole percent.
     expect(percents[0]).toBe(0);
     expect(percents.at(-1)).toBe(100);
     expect(percents.at(-2)).toBe(94);
     const downloads = percents.slice(1, -1);
     expect(downloads).toHaveLength(50);
-    downloads.forEach((percent, index) => expect(percent).toBeCloseTo((index + 1) * 1.88, 5));
+    downloads.forEach((percent, index) => expect(percent).toBe(Math.round((index + 1) * 1.88)));
   });
 
   it("loads verified assets from the cache and re-downloads one that fails verification", async () => {

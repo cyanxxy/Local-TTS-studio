@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from "vitest";
 import { PlaybackClock } from "../lib/playbackClock";
 import {
   buildAudioSignature,
+  buildReaderSections,
+  createReaderAudioCacheKey,
   createReaderDocument,
   type CachedReaderAudio,
 } from "../lib/readerDocument";
@@ -16,7 +18,7 @@ const book = createReaderDocument({
   text: "A paragraph long enough to fill several sections. ".repeat(900),
 });
 
-function setup(options: { loaded?: CachedReaderAudio | null; saveError?: Error } = {}) {
+function setup(options: { loaded?: CachedReaderAudio | null; saveError?: Error; lookup?: Promise<void> } = {}) {
   const clock = new PlaybackClock();
   const library = {
     activeDocument: book,
@@ -26,7 +28,10 @@ function setup(options: { loaded?: CachedReaderAudio | null; saveError?: Error }
     updateActiveText: vi.fn(),
     finalizeActiveTextEdit: vi.fn(),
     updateProgress: vi.fn(),
-    loadAudio: vi.fn(async () => options.loaded ?? null),
+    loadAudio: vi.fn(async () => {
+      await options.lookup;
+      return options.loaded ?? null;
+    }),
     saveAudio: vi.fn(async () => {
       if (options.saveError) throw options.saveError;
     }),
@@ -37,6 +42,7 @@ function setup(options: { loaded?: CachedReaderAudio | null; saveError?: Error }
     activeSegmentId: null,
     clock,
     getAudioCacheSnapshot: vi.fn(() => [chunk]),
+    getContentEpoch: vi.fn(() => 1),
     getCurrentTime: vi.fn(() => 1),
     getPlaybackSnapshot: vi.fn(() => ({ playbackRate: 1, totalDuration: 5, synthesisComplete: true })),
     isPlaying: false,
@@ -212,5 +218,71 @@ describe("useReaderSession", () => {
     act(() => quitting.result.current.flushAudio());
     await waitFor(() => expect(quitting.library.saveAudio).toHaveBeenCalled());
     expect(quitting.callbacks.onError).not.toHaveBeenCalled();
+  });
+
+  it("reports a new document that could not be created", async () => {
+    const { result, library, callbacks } = setup();
+    await waitFor(() => expect(library.loadAudio).toHaveBeenCalled());
+    library.createDocument.mockRejectedValueOnce(new Error("storage full"));
+
+    act(() => result.current.newDocument());
+
+    await waitFor(() => expect(callbacks.onError).toHaveBeenCalledWith("storage full"));
+  });
+
+  it("generates at once when asked while the section's saved audio is looked up, and restores none of it", async () => {
+    let finishLookup = () => undefined as void;
+    const lookup = new Promise<void>((resolve) => { finishLookup = resolve; });
+    const sections = buildReaderSections(book.text, book.chapters);
+    const text = book.text.slice(sections[0].start, sections[0].end);
+    const loaded: CachedReaderAudio = {
+      cacheKey: createReaderAudioCacheKey(book.id, sections[0].id),
+      documentId: book.id,
+      chapterId: sections[0].chapterId,
+      sectionId: sections[0].id,
+      signature: buildAudioSignature({ text, model: "kokoro", voice: "af_heart", tuning: {} }),
+      chunks: [{ audio: new Float32Array([0.5]).buffer, samplingRate: 24_000, text: "saved", index: 0, total: 1 }],
+      byteLength: 4,
+      currentTime: 0,
+      playbackRate: 1,
+      totalDuration: 1,
+      synthesisComplete: true,
+      updatedAt: 1,
+    };
+    const { result, library, player, callbacks } = setup({ loaded, lookup });
+    await waitFor(() => expect(library.loadAudio).toHaveBeenCalled());
+
+    act(() => result.current.generate());
+    expect(callbacks.generate).toHaveBeenCalledOnce();
+    await act(async () => { finishLookup(); });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(player.restoreAudioCache).not.toHaveBeenCalled();
+  });
+
+  it("keeps its navigation and edit commands while playback only moves the progress, and reads the newest record", async () => {
+    const { result, library, rerender } = setup();
+    await waitFor(() => expect(library.loadAudio).toHaveBeenCalled());
+    const before = result.current;
+
+    // A progress sample replaces the record but keeps its text and chapters.
+    library.activeDocument = { ...book, progress: { ...book.progress, positionSec: 9 } };
+    rerender();
+
+    expect(result.current.document).not.toBe(before.document);
+    expect(result.current.navigateToOffset).toBe(before.navigateToOffset);
+    expect(result.current.startSectionEdit).toBe(before.startSectionEdit);
+    expect(result.current.changeSectionText).toBe(before.changeSectionText);
+
+    act(() => result.current.navigateToOffset(book.text.length + 40));
+    expect(library.updateProgress).toHaveBeenCalledWith({
+      positionSec: 0, totalDurationSec: 0, textOffset: book.text.length,
+    });
+    act(() => result.current.startSectionEdit());
+    act(() => result.current.changeSectionText("Replacement."));
+    expect(library.updateActiveText).toHaveBeenCalledWith(
+      expect.stringContaining("Replacement."),
+      expect.objectContaining({ preserveText: true }),
+    );
   });
 });

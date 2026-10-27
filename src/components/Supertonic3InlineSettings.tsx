@@ -12,7 +12,7 @@ interface Props {
 }
 
 export function Supertonic3InlineSettings({ voice, language, onVoiceChange, onLanguageChange, seed, onSeedChange }: Props) {
-  const inputClass = "w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-2 text-sm text-text-primary";
+  const inputClass = "w-full rounded-lg border border-border bg-text-primary/[0.06] px-3 py-2 text-sm text-text-primary";
   return (
     <section aria-label="Supertonic 3 voice settings" className="space-y-3 rounded-2xl border border-border bg-text-primary/[0.03] p-3">
       <div>

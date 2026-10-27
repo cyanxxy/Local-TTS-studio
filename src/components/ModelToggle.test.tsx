@@ -116,6 +116,23 @@ describe("ModelToggle", () => {
     expect(kokoroButton).toBeDisabled();
     expect(kokoroButton).toHaveAttribute("title", "Disabled on iOS");
     expect(within(menu).getByText("Unavailable")).toBeInTheDocument();
+    // The reason tells the user what to do, so it wraps instead of truncating;
+    // a disabled button's title tooltip does not show in every browser.
+    expect(within(menu).getByText("Disabled on iOS")).not.toHaveClass("truncate");
+  });
+
+  it("keeps a model that has not started loading still, without a pinging ring", () => {
+    render(
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={() => {}}
+        kokoroState={{ ...loadingState, loading: false }}
+        supertonicState={readyState}
+      />,
+    );
+    const trigger = screen.getByTestId("model-picker-trigger");
+    expect(trigger.querySelector("[data-status='idle']")).toBeInTheDocument();
+    expect(trigger.querySelector(".animate-ping-ring")).toBeNull();
   });
 
   it("shows desktop models inside the same compact picker", () => {
@@ -429,5 +446,38 @@ describe("ModelToggle", () => {
     const menu = openPicker();
     expect(within(menu).getByTestId("model-option-paradee")).toHaveAttribute("aria-checked", "true");
     expect(within(menu).getByTestId("model-option-piper")).toHaveTextContent("VITS · Preparing");
+  });
+
+  it("places an open menu again when options change, not on every load-progress tick", () => {
+    const onModelChange = () => {};
+    const view = (progress: number) => (
+      <ModelToggle
+        activeModel="kokoro"
+        onModelChange={onModelChange}
+        kokoroState={{ ...loadingState, downloadProgress: progress }}
+        supertonicState={readyState}
+      />
+    );
+    const { rerender } = render(view(10));
+    openPicker();
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect");
+
+    try {
+      for (let progress = 11; progress < 20; progress += 1) rerender(view(progress));
+      expect(rectSpy).not.toHaveBeenCalled();
+
+      rerender(
+        <ModelToggle
+          activeModel="kokoro"
+          onModelChange={onModelChange}
+          kokoroState={loadingState}
+          supertonicState={readyState}
+          desktopModelOptions={[{ key: "audio8", label: "Audio8", onSelect: () => {} }]}
+        />,
+      );
+      expect(rectSpy).toHaveBeenCalled();
+    } finally {
+      rectSpy.mockRestore();
+    }
   });
 });

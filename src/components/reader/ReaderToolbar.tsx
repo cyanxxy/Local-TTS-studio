@@ -39,7 +39,7 @@ export function ReaderToolbar({
           className="glass-control relative flex h-12 w-12 shrink-0 items-center justify-center rounded-full text-text-secondary"
         >
           <Library size={16} />
-          <span className="absolute -top-1 -right-1 min-w-4 rounded-full bg-accent px-1 text-center font-mono text-2xs leading-4 text-white">
+          <span className="absolute -top-1 -right-1 min-w-4 rounded-full bg-accent-fill px-1 text-center font-mono text-2xs leading-4 text-white">
             {documentCount}
           </span>
         </button>

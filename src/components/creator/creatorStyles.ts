@@ -1,6 +1,6 @@
 /** Class names the Creator Toolkit sections share, so its controls look like one family. */
 
-export const fieldClass = "w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary placeholder:text-text-muted/50 disabled:cursor-not-allowed disabled:opacity-50";
+export const fieldClass = "w-full rounded-lg border border-border bg-text-primary/[0.06] px-2.5 py-2 text-xs text-text-primary placeholder:text-text-muted/50 disabled:cursor-not-allowed disabled:opacity-50";
 
 export const selectClass = fieldClass;
 

@@ -344,8 +344,114 @@ async function saveIndexedDbReaderProgress(documentId: string, progress: ReaderP
   }
 }
 
-async function saveIndexedDbReaderDocument(document: ReaderDocumentRecord): Promise<void> {
-  await withStore(DOCUMENTS_STORE, "readwrite", (store) => store.put(document));
+function sameStoredValue(left: unknown, right: unknown): boolean {
+  return left === right || JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * Merges one list of id-keyed annotations. An item changed on one side only
+ * takes that side's version, an item either side added is kept, and an item
+ * either side deleted stays deleted.
+ */
+function mergeAnnotations<T extends { id: string }>(
+  base: readonly T[],
+  local: readonly T[],
+  remote: readonly T[],
+): T[] {
+  const baseById = new Map(base.map((item) => [item.id, item]));
+  const localById = new Map(local.map((item) => [item.id, item]));
+  const remoteIds = new Set(remote.map((item) => item.id));
+  const merged: T[] = [];
+  for (const remoteItem of remote) {
+    const localItem = localById.get(remoteItem.id);
+    const baseItem = baseById.get(remoteItem.id);
+    if (!localItem) {
+      // Deleted here, or added there.
+      if (!baseItem) merged.push(remoteItem);
+      continue;
+    }
+    merged.push(baseItem && sameStoredValue(localItem, baseItem) ? remoteItem : localItem);
+  }
+  for (const localItem of local) {
+    // Added here; one that is in the base but not there was deleted there.
+    if (!remoteIds.has(localItem.id) && !baseById.has(localItem.id)) merged.push(localItem);
+  }
+  return merged;
+}
+
+/**
+ * Three-way merge of a book edited in two places since `base`, the version
+ * both started from: each tab of the web app keeps its own copy, and a save
+ * that wrote the whole stale copy would drop what the other tab added (a
+ * bookmark lost to a note). Annotations merge by id; any other field takes the
+ * side that changed it, this side on a conflict. The text and its chapters
+ * travel together, since chapters are offsets into that exact text. Reading
+ * progress takes the newer position.
+ */
+export function mergeReaderDocumentEdits(
+  base: ReaderDocumentRecord,
+  local: ReaderDocumentRecord,
+  remote: ReaderDocumentRecord,
+): ReaderDocumentRecord {
+  const merged: Record<string, unknown> = { ...remote };
+  const localRecord = local as unknown as Record<string, unknown>;
+  const baseRecord = base as unknown as Record<string, unknown>;
+  for (const key of new Set([...Object.keys(local), ...Object.keys(remote)])) {
+    if (
+      key === "text"
+      || key === "chapters"
+      || key === "progress"
+      || key === "bookmarks"
+      || key === "notes"
+      || key === "highlights"
+      || key === "updatedAt"
+      || key === "lastOpenedAt"
+    ) continue;
+    if (sameStoredValue(localRecord[key], baseRecord[key])) continue;
+    if (key in local) merged[key] = localRecord[key];
+    else delete merged[key];
+  }
+  if (local.text !== base.text) {
+    merged.text = local.text;
+    merged.chapters = local.chapters;
+  }
+  merged.progress = local.progress.updatedAt >= remote.progress.updatedAt ? local.progress : remote.progress;
+  merged.bookmarks = mergeAnnotations(base.bookmarks, local.bookmarks, remote.bookmarks);
+  merged.notes = mergeAnnotations(base.notes, local.notes, remote.notes);
+  if (local.highlights || remote.highlights) {
+    merged.highlights = mergeAnnotations(base.highlights ?? [], local.highlights ?? [], remote.highlights ?? [])
+      .sort((a, b) => a.start - b.start || a.end - b.end);
+  }
+  merged.lastOpenedAt = Math.max(local.lastOpenedAt, remote.lastOpenedAt);
+  // Newer than both, so a tab still holding `remote` as its base sees that
+  // the book changed again and merges in turn.
+  merged.updatedAt = Math.max(local.updatedAt, remote.updatedAt + 1);
+  return merged as unknown as ReaderDocumentRecord;
+}
+
+async function saveIndexedDbReaderDocument(
+  document: ReaderDocumentRecord,
+  base: ReaderDocumentRecord | null,
+): Promise<ReaderDocumentRecord> {
+  const database = await openReaderLibrary();
+  try {
+    const transaction = database.transaction(DOCUMENTS_STORE, "readwrite");
+    const store = transaction.objectStore(DOCUMENTS_STORE);
+    let saved = document;
+    if (base) {
+      // Read and write in one transaction, so no other tab's save can land
+      // between the check and the write.
+      const [stored] = normalizeDocumentRecords([await requestResult(store.get(document.id))]);
+      if (stored && stored.updatedAt !== base.updatedAt) {
+        saved = mergeReaderDocumentEdits(base, document, stored);
+      }
+    }
+    store.put(saved);
+    await transactionDone(transaction);
+    return saved;
+  } finally {
+    database.close();
+  }
 }
 
 async function deleteIndexedDbReaderDocument(id: string): Promise<void> {
@@ -383,10 +489,28 @@ async function setIndexedDbActiveReaderDocumentId(id: string): Promise<void> {
   await withStore(SETTINGS_STORE, "readwrite", (store) => store.put({ key: ACTIVE_DOCUMENT_KEY, value: id }));
 }
 
+function isQuotaExceededError(cause: unknown): boolean {
+  return typeof cause === "object" && cause !== null && (cause as { name?: unknown }).name === "QuotaExceededError";
+}
+
 async function saveIndexedDbCachedReaderAudio(audio: CachedReaderAudio): Promise<void> {
   const cacheKey = createReaderAudioCacheKey(audio.documentId, audio.sectionId);
   const byteLength = getCachedReaderAudioByteLength(audio.chunks);
   const normalized: CachedReaderAudio = { ...audio, cacheKey, byteLength };
+  try {
+    await writeIndexedDbCachedReaderAudio(normalized);
+  } catch (cause) {
+    // The size and entry limits only prune after a save succeeds, so a full
+    // origin would otherwise fail every save from here on. Make room by
+    // evicting the oldest sections, then try once more.
+    if (!isQuotaExceededError(cause) || !await evictOldestCachedReaderAudio(cacheKey, byteLength)) throw cause;
+    await writeIndexedDbCachedReaderAudio(normalized);
+  }
+  await pruneCachedReaderAudio(cacheKey);
+}
+
+async function writeIndexedDbCachedReaderAudio(normalized: CachedReaderAudio): Promise<void> {
+  const { cacheKey, byteLength } = normalized;
   const database = await openReaderLibrary();
   try {
     const transaction = database.transaction([CHAPTER_AUDIO_STORE, CHAPTER_AUDIO_META_STORE], "readwrite");
@@ -415,7 +539,36 @@ async function saveIndexedDbCachedReaderAudio(audio: CachedReaderAudio): Promise
   } finally {
     database.close();
   }
-  await pruneCachedReaderAudio(cacheKey);
+}
+
+/**
+ * Deletes the least recently written sections other than `protectedCacheKey`
+ * until they add up to `neededBytes`, or at least one. Resolves whether
+ * anything was deleted.
+ */
+async function evictOldestCachedReaderAudio(protectedCacheKey: string, neededBytes: number): Promise<boolean> {
+  const database = await openReaderLibrary();
+  try {
+    const transaction = database.transaction([CHAPTER_AUDIO_STORE, CHAPTER_AUDIO_META_STORE], "readwrite");
+    const audioStore = transaction.objectStore(CHAPTER_AUDIO_STORE);
+    const metadataStore = transaction.objectStore(CHAPTER_AUDIO_META_STORE);
+    const entries = await requestResult(metadataStore.getAll()) as ReaderAudioMetadata[];
+    entries.sort((a, b) => a.updatedAt - b.updatedAt);
+    let freedBytes = 0;
+    let evicted = 0;
+    for (const entry of entries) {
+      if (evicted > 0 && freedBytes >= neededBytes) break;
+      if (entry.cacheKey === protectedCacheKey) continue;
+      audioStore.delete(entry.cacheKey);
+      metadataStore.delete(entry.cacheKey);
+      freedBytes += entry.byteLength;
+      evicted += 1;
+    }
+    await transactionDone(transaction);
+    return evicted > 0;
+  } finally {
+    database.close();
+  }
 }
 
 async function getIndexedDbCachedReaderAudio(
@@ -538,10 +691,21 @@ export async function getReaderDocument(id: string): Promise<ReaderDocumentRecor
   return normalizeDocumentRecords(record ? [record] : [])[0] ?? null;
 }
 
-export async function saveReaderDocument(document: ReaderDocumentRecord): Promise<void> {
+/**
+ * Saves a book and resolves with the version stored. Given `base`, the stored
+ * version the caller's copy was edited from, a web save first merges in what
+ * another tab wrote since (see `mergeReaderDocumentEdits`), so the stored
+ * version can differ from `document`. The desktop app has one Reader window
+ * and writes `document` as given.
+ */
+export async function saveReaderDocument(
+  document: ReaderDocumentRecord,
+  base: ReaderDocumentRecord | null = null,
+): Promise<ReaderDocumentRecord> {
   const bridge = getDesktopReaderLibraryBridge();
-  if (!bridge) return saveIndexedDbReaderDocument(document);
+  if (!bridge) return saveIndexedDbReaderDocument(document, base);
   await bridge.saveDocument(document);
+  return document;
 }
 
 /**

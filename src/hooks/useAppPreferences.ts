@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useState } from "react";
 import {
   DEFAULT_APP_PREFERENCES,
   getInitialAppPreferences,
@@ -14,7 +14,11 @@ export function useAppPreferences() {
     persistAppPreferences(preferences);
   }, [preferences]);
 
-  useEffect(() => {
+  // A layout effect, so the theme attributes land before the first frame is
+  // painted: with a passive effect a user whose preference differs from the
+  // OS saw one frame in the wrong theme. (Before React runs at all, index.css
+  // follows prefers-color-scheme for the same reason.)
+  useLayoutEffect(() => {
     const root = document.documentElement;
     const media = window.matchMedia?.("(prefers-color-scheme: dark)");
 
@@ -34,6 +38,12 @@ export function useAppPreferences() {
     media?.addEventListener?.("change", apply);
     return () => media?.removeEventListener?.("change", apply);
   }, [preferences]);
+
+  // The desktop window's vibrancy material and native controls follow the
+  // native theme, not the page; hand the choice over so they match it.
+  useEffect(() => {
+    window.electron?.appearance?.setThemeSource(preferences.theme);
+  }, [preferences.theme]);
 
   const updatePreferences = useCallback((patch: Partial<AppPreferences>) => {
     setPreferences((current) => ({ ...current, ...patch }));

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { Search, Star, Upload } from "lucide-react";
 import { downloadBlob } from "../../lib/exportAudio";
 import type { PresetSynthesize } from "../../lib/presetSynthesis";
@@ -21,6 +21,7 @@ import type { CreateAuditionAudio } from "../../hooks/useAudition";
 import type { ApplyResult, ApplySurface } from "../../hooks/useVoiceApplier";
 import type { UseVoiceLibraryReturn } from "../../hooks/useVoiceLibrary";
 import { SavePresetForm } from "./SavePresetForm";
+import { useFocusRecovery } from "../useFocusRecovery";
 import { VoiceRow } from "./VoiceRow";
 import { errorCalloutClass, infoCalloutClass, inputClass, secondaryButtonClass } from "./ui";
 
@@ -155,8 +156,14 @@ export function VoiceLibraryPanel({ library, runtimeVoices, synthesize, renderKe
 
   const kokoroMissing = !runtimeVoices.kokoro || runtimeVoices.kokoro.length === 0;
 
+  // Deleting a voice removes the row its confirm button was in; focus lands
+  // on the list's first control instead of the page body.
+  const sectionRef = useRef<HTMLElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
+  useFocusRecovery(sectionRef, () => listRef.current?.querySelector<HTMLElement>("button:not([disabled])"));
+
   return (
-    <section aria-label="Voice library" className="space-y-4">
+    <section ref={sectionRef} aria-label="Voice library" className="space-y-4">
       <div className="flex flex-wrap items-end gap-3">
         <label className="relative min-w-48 flex-1">
           <span className="sr-only">Search voices</span>
@@ -249,7 +256,7 @@ export function VoiceLibraryPanel({ library, runtimeVoices, synthesize, renderKe
           {library.loading ? "Loading voices…" : "No voices match. Clear the filters, or clone or design a new voice."}
         </p>
       ) : (
-        <ul aria-label="Voices" className="space-y-2">
+        <ul ref={listRef} aria-label="Voices" className="space-y-2">
           {visible.map((voice) => (
             <VoiceRow
               key={voice.key}

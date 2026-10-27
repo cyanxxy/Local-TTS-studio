@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useId, useState } from "react";
 import { ChevronDown, RefreshCw, Trash2 } from "lucide-react";
 import type { ModelType } from "../types";
 import { getEngine } from "../models/registry";
@@ -13,7 +13,7 @@ interface SettingsPanelProps {
   onRedownloadActive: () => void;
 }
 
-export function SettingsPanel({
+export const SettingsPanel = memo(function SettingsPanel({
   activeModel,
   busy,
   status,
@@ -21,19 +21,24 @@ export function SettingsPanel({
   onRedownloadActive,
 }: SettingsPanelProps) {
   const [open, setOpen] = useState(false);
+  const panelId = useId();
   const modelLabel = getEngine(activeModel).label;
 
   return (
     <div className="glass rounded-[20px] overflow-hidden">
       {/* Toggle header */}
       <button
+        type="button"
         onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
         className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-text-primary/[0.07] transition-colors"
       >
         <span className="text-sm font-semibold text-text-secondary">
           Model storage
         </span>
         <ChevronDown
+          aria-hidden="true"
           size={14}
           className={`text-text-muted transition-transform duration-200 ${open ? "rotate-180" : ""}`}
         />
@@ -41,7 +46,7 @@ export function SettingsPanel({
 
       {/* Collapsible content */}
       {open && (
-        <div className="px-4 pb-4 flex flex-col gap-2 border-t border-black/5 animate-fade-up">
+        <div id={panelId} className="px-4 pb-4 flex flex-col gap-2 border-t border-border/60 animate-fade-up">
           <p className="text-sm text-text-muted pt-3 pb-1">
             Models download once and load from the local cache.
           </p>
@@ -89,4 +94,4 @@ export function SettingsPanel({
       )}
     </div>
   );
-}
+});

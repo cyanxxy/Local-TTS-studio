@@ -22,7 +22,9 @@ import { findDocumentMatches } from "../lib/readerSearch";
 import { ReaderAnnotationExportBar } from "./reader/ReaderAnnotationExportBar";
 import { ReaderHighlightList } from "./reader/ReaderHighlightList";
 import { countReaderAnnotations } from "./reader/readerAnnotationExport";
-import { useFocusTrap } from "./reader/useFocusTrap";
+import { focusableWithin, useFocusTrap } from "./reader/useFocusTrap";
+import { useFocusRecovery } from "./useFocusRecovery";
+import { progressFillStyle } from "./progressFill";
 
 export type ReaderSidebarTab = "library" | "contents" | "search" | "bookmarks" | "notes";
 
@@ -137,13 +139,20 @@ const DocumentCard = memo(function DocumentCard({
   onCancelDelete,
   onConfirmDelete,
 }: DocumentCardProps) {
+  const cardRef = useRef<HTMLDivElement>(null);
+  const deleteRef = useRef<HTMLButtonElement>(null);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  // Delete and its confirmation replace each other; focus follows to the one
+  // now shown (Cancel first, the safe choice) instead of dropping to the page.
+  useFocusRecovery(cardRef, () => cancelRef.current ?? deleteRef.current);
   const chapter = record.chapters.length > 1
     ? chapterAtOffset(record.chapters, record.progress.textOffset)
     : null;
   const timeLeft = formatListeningTimeLeft(record.text.length - record.progress.textOffset);
   return (
     <div
-      className={`group rounded-2xl border p-3 transition-all ${
+      ref={cardRef}
+      className={`group rounded-2xl border p-3 transition-[background-color,border-color,box-shadow] ${
         active
           ? "border-accent/30 bg-accent/[0.08] shadow-accent-sm"
           : "border-border bg-text-primary/[0.03] hover:bg-text-primary/[0.07]"
@@ -173,7 +182,7 @@ const DocumentCard = memo(function DocumentCard({
           </span>
         </div>
         <div className="mt-2 h-1 overflow-hidden rounded-full bg-border">
-          <div className="h-full rounded-full bg-accent" style={{ width: `${record.progress.percent}%` }} />
+          <div className="h-full w-full rounded-full bg-accent" style={progressFillStyle(record.progress.percent)} />
         </div>
         {chapter && (
           <p className="mt-2 truncate text-2xs font-medium text-text-secondary">{chapter.title}</p>
@@ -193,6 +202,7 @@ const DocumentCard = memo(function DocumentCard({
             Delete
           </button>
           <button
+            ref={cancelRef}
             type="button"
             onClick={onCancelDelete}
             className="text-text-muted hover:text-text-primary"
@@ -202,6 +212,7 @@ const DocumentCard = memo(function DocumentCard({
         </div>
       ) : (
         <button
+          ref={deleteRef}
           type="button"
           aria-label={`Delete ${record.title}`}
           onClick={() => onRequestDelete(record.id)}
@@ -250,7 +261,7 @@ export function ReaderLibrarySidebar({
   const [authorDraft, setAuthorDraft] = useState<string | null>(null);
   const [draftScope, setDraftScope] = useState({ open, tab, documentId: activeDocument?.id ?? "" });
   const [now, setNow] = useState(() => Date.now());
-  const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const keyboardTabNavRef = useRef(false);
@@ -387,6 +398,12 @@ export function ReaderLibrarySidebar({
   // The drawer floats above the page, so an untrapped Tab walks into controls
   // the user cannot see behind it. Initial focus is chosen per tab below.
   useFocusTrap(sidebarRef, { active: open, onEscape: handleClose, autoFocus: false });
+  // A confirmed delete removes the focused card; land on the current tab's
+  // first control (New document, on the library tab) rather than the body.
+  useFocusRecovery(sidebarRef, () => {
+    const panel = sidebarRef.current?.querySelector<HTMLElement>("[role='tabpanel']");
+    return panel ? focusableWithin(panel)[0] : null;
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -453,7 +470,8 @@ export function ReaderLibrarySidebar({
         onClick={handleClose}
         className="fixed inset-0 z-[45] bg-black/20 md:bg-transparent"
       />
-      <aside
+      {/* A div, not an aside: a complementary landmark cannot also be a dialog. */}
+      <div
         ref={sidebarRef}
         role="dialog"
         aria-modal="true"
@@ -461,7 +479,7 @@ export function ReaderLibrarySidebar({
         tabIndex={-1}
         className="glass-pop fixed inset-y-3 left-3 z-50 flex w-[min(23rem,calc(100vw-1.5rem))] flex-col overflow-hidden rounded-[26px] shadow-glass-lg md:absolute md:inset-y-0 md:left-0 md:w-[22rem] md:rounded-[28px]"
       >
-        <div className="flex items-center justify-between border-b border-black/5 px-4 py-3">
+        <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
           <div>
             <p className="font-display text-lg font-semibold text-text-primary">Your Reader</p>
             <p className="text-xs text-text-muted">
@@ -482,7 +500,7 @@ export function ReaderLibrarySidebar({
         <div
           role="tablist"
           aria-label="Reader library sections"
-          className="grid grid-cols-5 gap-1 border-b border-black/5 p-2"
+          className="grid grid-cols-5 gap-1 border-b border-border/60 p-2"
         >
           {TABS.map((item) => {
             const Icon = item.icon;
@@ -852,7 +870,7 @@ export function ReaderLibrarySidebar({
             </div>
           )}
         </div>
-      </aside>
+      </div>
     </>
   );
 }

@@ -1,4 +1,4 @@
-import { Suspense, useState } from "react";
+import { Suspense, useMemo, useState } from "react";
 import { Qwen3RuntimeProvider } from "../contexts/Qwen3RuntimeContext";
 import { AppFooter } from "../components/AppFooter";
 import { AppHeader } from "../components/AppHeader";
@@ -11,7 +11,7 @@ import { SurfaceErrorBoundary } from "../components/SurfaceErrorBoundary";
 import { getEngine } from "../models/registry";
 import { lazyWithRetry } from "./lazyWithRetry";
 import { SynthesisSessionProvider } from "./SynthesisSessionProvider";
-import { useSynthesisSession } from "./synthesisSessionContext";
+import { useSynthesisShell } from "./synthesisSessionContext";
 
 interface SynthesisAppProps {
   enableDesktopRuntimes: boolean;
@@ -30,7 +30,9 @@ const AppSettingsDialog = lazyWithRetry(() => import("../components/AppSettingsD
   .then((module) => module.AppSettingsDialog));
 
 function SynthesisShell({ enableDesktopRuntimes }: { enableDesktopRuntimes: boolean }) {
-  const { appSettings, chrome, environment, preferences, routing, studio } = useSynthesisSession();
+  // The shell's own slice of the session, so the header and footer do not
+  // re-render with every keystroke, model-state tick and streamed chunk.
+  const { appSettings, chrome, environment, preferences, routing, studioDesktopModel } = useSynthesisShell();
   const { browserSupport, desktopRuntimesAvailable } = environment;
   const { activePage, isReaderPage, isStudioPage } = routing;
   const isVoicesPage = activePage === "voices";
@@ -41,6 +43,24 @@ function SynthesisShell({ enableDesktopRuntimes }: { enableDesktopRuntimes: bool
     ? <BrowserSupportPanel message={browserSupport.message} />
     : null;
   const onSurface = isStudioPage || isReaderPage;
+  const { showWasmBadge, webgpuModeNote, showSingleThreadedNote } = chrome;
+  const cpuMode = useMemo(
+    () => (showWasmBadge ? { note: webgpuModeNote, singleThreaded: showSingleThreadedNote } : null),
+    [showSingleThreadedNote, showWasmBadge, webgpuModeNote],
+  );
+  // The badges name the runtimes this build ships, not the one that happens
+  // to be selected, so Audio8 is listed on the same terms as the browser
+  // models wherever it exists.
+  const runtimeBadges = useMemo(() => (
+    isStudioPage && localInferenceSupported && !browserSupport.message
+      ? [
+          // Supertonic 3 is the desktop build's Supertonic, so the name stays on both.
+          ...new Set(["Kokoro", "Supertonic", ...browserSupport.supportedModels.map((model) => getEngine(model).label)]),
+          "WebGPU · CPU",
+          ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : []),
+        ]
+      : null
+  ), [browserSupport.message, browserSupport.supportedModels, desktopRuntimesAvailable, isStudioPage, localInferenceSupported]);
 
   return (
     <div className="min-h-screen font-sans text-text-primary">
@@ -49,12 +69,10 @@ function SynthesisShell({ enableDesktopRuntimes }: { enableDesktopRuntimes: bool
         <AppHeader
           immersive={isReaderPage && readerImmersive}
           compact={isReaderPage}
-          subtitle={studio.desktopModel === "audio8"
+          subtitle={studioDesktopModel === "audio8"
             ? "Audio8 ONNX INT4 synthesis runs locally after its one-time model download."
             : "Text to speech, entirely on your device."}
-          cpuMode={chrome.showWasmBadge
-            ? { note: chrome.webgpuModeNote, singleThreaded: chrome.showSingleThreadedNote }
-            : null}
+          cpuMode={cpuMode}
           onOpenSettings={appSettings.onOpen}
           tabs={routing.tabs}
           activePage={activePage}
@@ -68,42 +86,35 @@ function SynthesisShell({ enableDesktopRuntimes }: { enableDesktopRuntimes: bool
 
         <ErrorBanner error={localInferenceSupported && onSurface ? chrome.visibleError : null} />
 
-        {/* Studio and Reader swap in place. Keying the wrapper on the page
-            replays the fade; the animation is opacity-only so the Reader's
-            fixed player dock keeps the viewport as its containing block. */}
-        <div key={activePage} className="animate-page-swap">
-          {isStudioPage ? (
-            localInferenceSupported ? <StudioSurface /> : browserSupportPanel
-          ) : isReaderPage ? (
-            localInferenceSupported
-              ? <ReaderSurface immersive={readerImmersive} onImmersiveChange={setReaderImmersive} />
-              : browserSupportPanel
-          ) : null}
-        </div>
+        {/* The page's own content; the header, notices and footer stay outside. */}
+        <main>
+          {/* Studio and Reader swap in place. Keying the wrapper on the page
+              replays the fade; the animation is opacity-only so the Reader's
+              fixed player dock keeps the viewport as its containing block. */}
+          <div key={activePage} className="animate-page-swap">
+            {isStudioPage ? (
+              localInferenceSupported ? <StudioSurface /> : browserSupportPanel
+            ) : isReaderPage ? (
+              localInferenceSupported
+                ? <ReaderSurface immersive={readerImmersive} onImmersiveChange={setReaderImmersive} />
+                : browserSupportPanel
+            ) : null}
+          </div>
 
-        {isVoicesPage && enableDesktopRuntimes && (
-          <SurfaceErrorBoundary name="The Voice Library" resetKeys={[activePage]}>
-            <Suspense fallback={null}>
-              <VoicesRoute />
-            </Suspense>
-          </SurfaceErrorBoundary>
-        )}
+          {isVoicesPage && enableDesktopRuntimes && (
+            <SurfaceErrorBoundary name="The Voice Library" resetKeys={[activePage]}>
+              <Suspense fallback={null}>
+                <VoicesRoute />
+              </Suspense>
+            </SurfaceErrorBoundary>
+          )}
 
-        <LocalRuntimePages enableDesktopRuntimes={enableDesktopRuntimes} />
+          <LocalRuntimePages enableDesktopRuntimes={enableDesktopRuntimes} />
+        </main>
 
         {!isReaderPage && (
           <AppFooter
-            // The badges name the runtimes this build ships, not the one that
-            // happens to be selected, so Audio8 is listed on the same terms as
-            // the browser models wherever it exists.
-            runtimeBadges={isStudioPage && localInferenceSupported && !browserSupport.message
-              ? [
-                  // Supertonic 3 is the desktop build's Supertonic, so the name stays on both.
-                  ...new Set(["Kokoro", "Supertonic", ...browserSupport.supportedModels.map((model) => getEngine(model).label)]),
-                  "WebGPU · CPU",
-                  ...(desktopRuntimesAvailable ? ["Audio8 · Native CPU"] : []),
-                ]
-              : null}
+            runtimeBadges={runtimeBadges}
             note={(isStudioPage ? chrome.activeModelSupportMessage ?? browserSupport.message : null)
               ?? "More local models as compatible runtimes land."}
           />

@@ -89,6 +89,9 @@ export function useReaderListeningProfile({
   // changes at once; this marks the render after them as settled even if a
   // setting refused to move, so one stubborn input cannot hold the Reader.
   const [appliedKey, setAppliedKey] = useState<string | null>(null);
+  // Leaving the Reader puts Studio's voice, quality and speed back, so the
+  // profile applied on this visit is not in place on the next one.
+  if (!active && appliedKey !== null) setAppliedKey(null);
 
   const applyProfile = useEffectEvent((target: ListeningTarget) => apply(target));
   useEffect(() => {
@@ -111,8 +114,11 @@ export function useReaderListeningProfile({
   // launch) is not applied, but the book's audio belongs to it all the same.
   const pending = profile !== null && !engineMatches;
 
+  // Keyed on the book's id and profile, never the record: a progress write
+  // replaces the record about once a second during playback, and the Reader
+  // controls this reaches are memoised.
   const remember = useCallback((change: ListeningChange) => {
-    if (!active || !document) return;
+    if (!active || documentId === null) return;
     const { engine: changedEngine, playbackRate: changedRate, ...rest } = change;
     const touchesEngine = changedEngine !== undefined || Object.keys(rest).length > 0;
     if (!touchesEngine) {
@@ -131,7 +137,7 @@ export function useReaderListeningProfile({
       engine,
       playbackRate: changedRate ?? stored?.playbackRate ?? base.playbackRate,
     });
-  }, [active, document, engineId, playbackRate, profile, quality, stored, surfaceEngineSettings, updateListening]);
+  }, [active, documentId, engineId, playbackRate, profile, quality, stored, surfaceEngineSettings, updateListening]);
 
   return { settled, pending, remember };
 }

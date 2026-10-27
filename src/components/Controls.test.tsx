@@ -111,4 +111,9 @@ describe("Controls", () => {
     fireEvent.click(screen.getByRole("button", { name: /stop/i }));
     expect(onStop).toHaveBeenCalledOnce();
   });
+
+  it("names the quality slider by its visible label (U11)", () => {
+    renderControls();
+    expect(screen.getByRole("slider", { name: "Quality" })).toBeInTheDocument();
+  });
 });

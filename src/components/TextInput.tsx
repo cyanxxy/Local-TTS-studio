@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from "react";
+import { memo, useLayoutEffect, useRef } from "react";
 import { FileUp, Loader2 } from "lucide-react";
 import { MIN_TEXT_LENGTH } from "../constants";
 import { stripSpeechBreakMarks } from "../lib/speechBreakMarks";
@@ -19,7 +19,7 @@ interface TextInputProps {
   spokenText?: string;
 }
 
-export function TextInput({ text, onTextChange, onImportDocument, isImportingDocument = false, spokenText }: TextInputProps) {
+export const TextInput = memo(function TextInput({ text, onTextChange, onImportDocument, isImportingDocument = false, spokenText }: TextInputProps) {
   // Count meaningful (trimmed) characters so the counter matches the generate gate.
   const spoken = spokenText === undefined ? text : stripSpeechBreakMarks(spokenText);
   const charCount = getMeaningfulTextLength(spoken);
@@ -95,4 +95,4 @@ export function TextInput({ text, onTextChange, onImportDocument, isImportingDoc
       </div>
     </div>
   );
-}
+});

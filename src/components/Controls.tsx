@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useId } from "react";
 import { Loader2, RefreshCw, Sparkles, Square } from "lucide-react";
 import { useControlsContext } from "./ControlsContext";
 
@@ -44,6 +44,7 @@ export function Controls() {
     loadingProgress,
     generationProgress,
   } = useControlsContext();
+  const qualityId = useId();
 
   const showRetry = !modelReady && !!modelError;
   const generateDisabled = isGenerating || (!showRetry && !canGenerate);
@@ -56,7 +57,7 @@ export function Controls() {
       {qualityRange && (
         <div>
           <div className="flex items-baseline justify-between mb-2.5">
-            <label className="text-sm font-semibold text-text-secondary">
+            <label htmlFor={qualityId} className="text-sm font-semibold text-text-secondary">
               Quality
             </label>
             <span className="font-mono text-sm font-medium text-text-primary tabular-nums">
@@ -64,6 +65,7 @@ export function Controls() {
             </span>
           </div>
           <input
+            id={qualityId}
             type="range"
             min={qualityRange.min}
             max={qualityRange.max}
@@ -90,9 +92,9 @@ export function Controls() {
             flex-1 py-3 px-5 rounded-2xl text-sm font-semibold tracking-wide
             flex items-center justify-center gap-2.5 transition-all duration-200
             ${isGenerating
-              ? "bg-accent text-white cursor-wait"
+              ? "bg-accent-fill text-white cursor-wait"
               : showRetry
-              ? "bg-danger text-white shadow-accent-sm hover:bg-danger/90 active:scale-[0.98]"
+              ? "bg-danger-fill text-white shadow-accent-sm hover:bg-danger-fill/90 active:scale-[0.98]"
               : !generateDisabled
               ? "glass-accent text-white"
               : "bg-border/70 text-text-muted cursor-not-allowed"
@@ -136,7 +138,7 @@ export function Controls() {
             onClick={onStop}
             aria-label="Stop generation"
             title="Stop generation"
-            className="flex h-11 w-full items-center justify-center rounded-2xl border border-danger/20 bg-danger-light text-danger shadow-glass-sm transition-all duration-200 hover:bg-danger hover:text-white active:scale-[0.96] sm:w-11"
+            className="flex h-11 w-full items-center justify-center rounded-2xl border border-danger/20 bg-danger-light text-danger shadow-glass-sm transition-all duration-200 hover:bg-danger-fill hover:text-white active:scale-[0.96] sm:w-11"
           >
             <Square size={14} />
           </button>

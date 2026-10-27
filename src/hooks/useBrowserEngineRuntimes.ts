@@ -214,7 +214,10 @@ export function useBrowserEngineRuntimes({
     let current = true;
     ensureChatterboxReference(worker, referenceId).then(
       () => {
-        if (current) setSyncedReference({ id: referenceId, state: chatterboxState });
+        if (!current) return;
+        setSyncedReference({ id: referenceId, state: chatterboxState });
+        // A later attempt (a restarted worker, the clip chosen again) worked.
+        setReferenceFailure((failure) => (failure?.id === referenceId ? null : failure));
       },
       (error: unknown) => {
         if (current) setReferenceFailure({ id: referenceId, message: error instanceof Error ? error.message : String(error) });
@@ -236,15 +239,50 @@ export function useBrowserEngineRuntimes({
     holdForeground();
     runGeneration();
   }, [canGenerate, holdForeground, runGeneration]);
-  const activeQueueBusy = activeQueue.busy;
+  // A retake asked for while a synthesize request still holds the worker (a
+  // Reader look-ahead it has just preempted, which is winding down) waits for
+  // that request to finish instead of being dropped. Requests queued behind
+  // it are held from the moment of asking, and run after the retake.
+  const runRetakeRef = useRef(runRetake);
+  useEffect(() => {
+    runRetakeRef.current = runRetake;
+  }, [runRetake]);
+  const waitingRetakeRef = useRef<(() => void) | null>(null);
+  const dropWaitingRetake = useCallback(() => {
+    waitingRetakeRef.current?.();
+    waitingRetakeRef.current = null;
+  }, []);
+  useEffect(() => dropWaitingRetake, [dropWaitingRetake]);
+  const activeQueueInstance = activeQueue.queue;
   const handleRetakeSegment = useCallback((segmentId: string) => {
-    if (isGenerationBusy || activeQueueBusy) return;
+    if (isGenerationBusy) return;
+    dropWaitingRetake();
     holdForeground();
-    runRetake(segmentId);
-  }, [activeQueueBusy, holdForeground, isGenerationBusy, runRetake]);
+    if (!activeQueueInstance.busy) {
+      runRetake(segmentId);
+      return;
+    }
+    const unsubscribe = activeQueueInstance.subscribe(() => {
+      if (activeQueueInstance.busy) return;
+      dropWaitingRetake();
+      // Held again before the queue starts its next request; the retake's
+      // own busy state keeps it held once that has rendered.
+      holdForeground();
+      runRetakeRef.current(segmentId);
+    });
+    waitingRetakeRef.current = unsubscribe;
+  }, [activeQueueInstance, dropWaitingRetake, holdForeground, isGenerationBusy, runRetake]);
 
-  // Unforced: only a running browser generation restarts its worker.
-  const cancelSurfaceGeneration = useCallback(() => cancelActiveGeneration(), [cancelActiveGeneration]);
+  // Unforced: only a running browser generation restarts its worker. Stopping
+  // also drops a retake still waiting for the worker.
+  const cancelSurfaceGeneration = useCallback(() => {
+    dropWaitingRetake();
+    cancelActiveGeneration();
+  }, [cancelActiveGeneration, dropWaitingRetake]);
+  const stopSurfaceGeneration = useCallback(() => {
+    dropWaitingRetake();
+    handleStop();
+  }, [dropWaitingRetake, handleStop]);
   const synthesisSeqRef = useRef(0);
   const synthesizeWith = useCallback(<Id extends BrowserEngineId>(
     model: Id,
@@ -330,7 +368,7 @@ export function useBrowserEngineRuntimes({
       stats: tts.stats,
       error: surfaceError,
       handleGenerate,
-      handleStop,
+      handleStop: stopSurfaceGeneration,
       retryLoad: retryActiveModelLoad,
       cancelActiveGeneration: cancelSurfaceGeneration,
       resetGeneratedAudio,
@@ -360,11 +398,11 @@ export function useBrowserEngineRuntimes({
     canGenerate,
     cancelSurfaceGeneration,
     handleGenerate,
-    handleStop,
     isGenerationBusy,
     resetGeneratedAudio,
     retryActiveModelLoad,
     states,
+    stopSurfaceGeneration,
     surfaceError,
     synthesizers,
     tts.generationProgress,

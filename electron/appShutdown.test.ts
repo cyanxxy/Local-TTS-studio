@@ -101,6 +101,75 @@ describe("createShutdownCoordinator", () => {
     expect(quit).toHaveBeenCalledTimes(1);
   });
 
+  it("holds a second quit that arrives while the barrier is still waiting", async () => {
+    vi.useFakeTimers();
+    const quit = vi.fn();
+    const coordinator = createShutdownCoordinator({ timeoutMs: 2_500, quit });
+    const flush = deferred();
+    coordinator.register(participant("reader-library", () => flush.promise));
+    coordinator.handleBeforeQuit({ preventDefault: vi.fn() });
+
+    // The user presses Cmd+Q again (or closes the last window) 300 ms later.
+    await vi.advanceTimersByTimeAsync(300);
+    const second = { preventDefault: vi.fn() };
+    coordinator.handleBeforeQuit(second);
+
+    expect(second.preventDefault).toHaveBeenCalledTimes(1);
+    expect(quit).not.toHaveBeenCalled();
+    flush.resolve();
+    await flushMicrotasks();
+    expect(quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps holding while it finishes up, then lets only its own quit through", async () => {
+    const quit = vi.fn();
+    const finished = deferred();
+    const finish = vi.fn(() => finished.promise);
+    const coordinator = createShutdownCoordinator({ timeoutMs: 60_000, quit, finish });
+    coordinator.register(participant("work", () => Promise.resolve()));
+
+    coordinator.handleBeforeQuit({ preventDefault: vi.fn() });
+    await flushMicrotasks();
+    expect(finish).toHaveBeenCalledTimes(1);
+    const duringFinish = { preventDefault: vi.fn() };
+    coordinator.handleBeforeQuit(duringFinish);
+    expect(duringFinish.preventDefault).toHaveBeenCalledTimes(1);
+    expect(quit).not.toHaveBeenCalled();
+
+    finished.resolve();
+    await flushMicrotasks();
+    expect(quit).toHaveBeenCalledTimes(1);
+    const own = { preventDefault: vi.fn() };
+    coordinator.handleBeforeQuit(own);
+    expect(own.preventDefault).not.toHaveBeenCalled();
+  });
+
+  it("still quits when finishing up fails", async () => {
+    const quit = vi.fn();
+    const coordinator = createShutdownCoordinator({
+      timeoutMs: 60_000,
+      quit,
+      finish: () => Promise.reject(new Error("log disk full")),
+    });
+    coordinator.register(participant("work", () => Promise.resolve()));
+
+    coordinator.handleBeforeQuit({ preventDefault: vi.fn() });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("never holds a later quit when nothing was outstanding", () => {
+    const coordinator = createShutdownCoordinator({ timeoutMs: 1_000, quit: vi.fn() });
+    coordinator.register(participant("idle", () => null));
+    coordinator.handleBeforeQuit({ preventDefault: vi.fn() });
+
+    const again = { preventDefault: vi.fn() };
+    coordinator.handleBeforeQuit(again);
+
+    expect(again.preventDefault).not.toHaveBeenCalled();
+  });
+
   it("quits at the timeout when a participant never settles", async () => {
     vi.useFakeTimers();
     const quit = vi.fn();

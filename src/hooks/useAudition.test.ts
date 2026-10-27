@@ -61,4 +61,33 @@ describe("useAudition", () => {
     unmount();
     expect(audio.pause).toHaveBeenCalled();
   });
+
+  describe("a clip replaced before its play() starts", () => {
+    // Browsers reject a pending play() with AbortError when pause() interrupts it.
+    class StartingAudio extends FakeAudio {
+      private rejectPlay: (error: unknown) => void = () => undefined;
+      override play = vi.fn(() => new Promise<undefined>((_resolve, reject) => { this.rejectPlay = reject; }));
+      override pause = vi.fn(() => {
+        this.rejectPlay(new DOMException("The play() request was interrupted by a call to pause().", "AbortError"));
+      });
+    }
+
+    it("is not reported as a failure when another clip replaces it", async () => {
+      const { result } = renderHook(() => useAudition(() => new StartingAudio()));
+      let first!: Promise<void>;
+      act(() => { first = result.current.play("preview-1", new Uint8Array([1])); });
+      act(() => { void result.current.play("preview-2", new Uint8Array([2])).catch(() => undefined); });
+      await expect(first).resolves.toBeUndefined();
+      expect(result.current.playingKey).toBe("preview-2");
+    });
+
+    it("is not reported as a failure when stopped", async () => {
+      const { result } = renderHook(() => useAudition(() => new StartingAudio()));
+      let first!: Promise<void>;
+      act(() => { first = result.current.play("preview-1", new Uint8Array([1])); });
+      act(() => result.current.stop());
+      await expect(first).resolves.toBeUndefined();
+      expect(result.current.playingKey).toBeNull();
+    });
+  });
 });

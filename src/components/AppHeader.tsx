@@ -134,7 +134,7 @@ export function AppHeader({
           {cpuMode && (
             <div className="flex flex-col items-end gap-1">
               <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-accent/25 bg-accent-light text-accent text-base font-semibold shadow-glass-sm">
-                <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)] animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-accent shadow-[0_0_8px_var(--color-accent)]" />
                 CPU mode
               </div>
               {cpuMode.note && (

@@ -17,6 +17,7 @@ import {
   splitPiperVoice,
 } from "../models/piper";
 import type { ModelState } from "../types";
+import { progressFillStyle } from "./progressFill";
 
 interface PiperVoiceBrowserProps {
   /** The GENERATE voice string: a catalog id, plus `#<speaker>` for multi-speaker voices. */
@@ -133,7 +134,7 @@ export function PiperVoiceBrowser({ voice, onVoiceChange, modelState }: PiperVoi
                     const next = event.target.valueAsNumber;
                     if (Number.isFinite(next)) chooseSpeaker(selected, next - 1);
                   }}
-                  className="mt-1 w-full rounded-lg border border-black/10 bg-text-primary/[0.06] px-3 py-1.5 text-sm text-text-primary"
+                  className="mt-1 w-full rounded-lg border border-border bg-text-primary/[0.06] px-3 py-1.5 text-sm text-text-primary"
                 />
               </label>
               <button
@@ -156,8 +157,8 @@ export function PiperVoiceBrowser({ voice, onVoiceChange, modelState }: PiperVoi
               </div>
               <div className="mt-1 h-1 overflow-hidden rounded-full bg-border">
                 <div
-                  className={`h-full rounded-full transition-all duration-500 ease-out ${progress < 99 ? "progress-animated" : "bg-success"}`}
-                  style={{ width: progress <= 0 ? "0%" : `${Math.max(4, progress)}%` }}
+                  className={`h-full w-full rounded-full transition-transform duration-500 ease-out ${progress < 99 ? "bg-accent" : "bg-success"}`}
+                  style={progressFillStyle(progress <= 0 ? 0 : Math.max(4, progress))}
                 />
               </div>
             </div>
@@ -218,7 +219,7 @@ export function PiperVoiceBrowser({ voice, onVoiceChange, modelState }: PiperVoi
           <div className="max-h-64 overflow-y-auto rounded-xl border border-border">
             {groups.map(({ accent, entries }, index) => (
               <section key={accent} aria-label={accent}>
-                {index > 0 && <div className="mx-3 border-t border-black/5" />}
+                {index > 0 && <div className="mx-3 border-t border-border/60" />}
                 <h4 className="px-3 pb-1 pt-2.5 text-xs font-semibold text-text-secondary">{accent}</h4>
                 {entries.map((entry) => (
                   <button

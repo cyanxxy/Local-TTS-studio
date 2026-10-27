@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import {
   normalizeReaderTextFragment,
   readerSectionAtOffset,
@@ -56,6 +56,12 @@ export interface ReaderSession extends ReaderSections {
   audioSignature: string | null;
   /** Saves the active section's audio now; call before anything replaces it. */
   flushAudio: () => void;
+  /**
+   * Generates the active section because the listener asked to. A lookup of
+   * its saved audio still running is dropped, so that audio is not restored
+   * into (or over) the generation.
+   */
+  generate: () => void;
   /** Turns to `section` and plays it, generating it first when it has no saved audio. */
   playSection: (section: ReaderSection) => void;
   /** Moves the reading position, turning to the section that holds it. */
@@ -150,15 +156,38 @@ export function useReaderSession({
     onSectionEnter: clearErrors,
     reportError,
   });
-  const { discardForEdit, flush, isRestorePending, requestRestore, setContinuation } = audioCache;
+  const {
+    abandonRestore,
+    discardForEdit,
+    flush,
+    isPartialAudio,
+    isRestorePending,
+    requestRestore,
+    setContinuation,
+  } = audioCache;
+
+  // A progress write replaces the record about once a second during playback,
+  // keeping its text and chapters. The commands below read the record when
+  // they run instead of depending on it, so the memoised Reader controls they
+  // are handed to keep their identity while a book plays.
+  const documentRef = useRef(document);
+  useLayoutEffect(() => {
+    documentRef.current = document;
+  }, [document]);
+
+  const generateNow = useCallback(() => {
+    abandonRestore();
+    generate();
+  }, [abandonRestore, generate]);
 
   const navigate = useCallback((
     textOffset: number,
     positionSec?: number,
     continuation?: ReaderAdvance,
   ) => {
-    if (!document) return;
-    const targetOffset = Math.max(0, Math.min(document.text.length, textOffset));
+    const current = documentRef.current;
+    if (!current) return;
+    const targetOffset = Math.max(0, Math.min(current.text.length, textOffset));
     const targetSection = readerSectionAtOffset(sections, targetOffset);
     if (targetSection && targetSection.id !== section?.id) {
       flush();
@@ -170,7 +199,7 @@ export function useReaderSession({
       totalDurationSec: 0,
       textOffset: targetOffset,
     });
-  }, [document, flush, requestRestore, section?.id, sections, setContinuation, updateProgress]);
+  }, [flush, requestRestore, section?.id, sections, setContinuation, updateProgress]);
 
   const navigateToOffset = useCallback((textOffset: number, positionSec?: number) => {
     navigate(textOffset, positionSec);
@@ -198,11 +227,14 @@ export function useReaderSession({
     flushProgress,
     autoAdvance,
     advance,
+    isPartialAudio,
+    regenerate: generate,
   });
 
   const editRef = useRef<SectionEdit | null>(null);
 
   const startSectionEdit = useCallback(() => {
+    const document = documentRef.current;
     if (!document || !section) return;
     editRef.current = {
       documentId: document.id,
@@ -211,10 +243,11 @@ export function useReaderSession({
       start: section.start,
       end: section.end,
     };
-  }, [document, section]);
+  }, [section]);
 
   const changeSectionText = useCallback((nextSectionText: string) => {
     const edit = editRef.current;
+    const document = documentRef.current;
     if (!document || (!edit && !section)) return;
     if (edit && edit.documentId !== document.id) return;
     // The editor replaces the span it opened on, even after the draft has
@@ -239,7 +272,7 @@ export function useReaderSession({
       },
     });
     clearErrors();
-  }, [clearErrors, discardForEdit, document, resetAudioForTextEdit, section, updateActiveText]);
+  }, [clearErrors, discardForEdit, resetAudioForTextEdit, section, updateActiveText]);
 
   const endSectionEdit = useCallback(() => {
     const edit = editRef.current;
@@ -257,8 +290,8 @@ export function useReaderSession({
 
   const newDocument = useCallback(() => {
     flush();
-    void createDocument(NEW_DOCUMENT);
-  }, [createDocument, flush]);
+    void createDocument(NEW_DOCUMENT).catch((cause: unknown) => onError(errorMessage(cause)));
+  }, [createDocument, flush, onError]);
 
   const openDocument = useCallback((id: string) => {
     flush();
@@ -274,6 +307,7 @@ export function useReaderSession({
     document,
     audioSignature: audioCache.signature,
     flushAudio: flush,
+    generate: generateNow,
     playSection,
     navigateToOffset,
     startSectionEdit,
@@ -290,6 +324,7 @@ export function useReaderSession({
     document,
     endSectionEdit,
     flush,
+    generateNow,
     navigateToOffset,
     newDocument,
     openDocument,

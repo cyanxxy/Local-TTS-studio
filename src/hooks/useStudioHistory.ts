@@ -38,8 +38,9 @@ function errorMessage(error: unknown): string {
  * Connects Studio to Generation History: every generation that finishes in
  * the shared player is saved, and saved ones can be replayed into the player,
  * exported with the Creator export settings, or reused (text, engine, voice
- * and tuning put back). Audio the user restored from history is not saved a
- * second time when it reports complete.
+ * and tuning put back). Audio the user restored from history, and Studio's
+ * own audio put back after a visit to the Reader, is not saved a second time
+ * when it reports complete.
  */
 export function useStudioHistory({ session, history }: UseStudioHistoryOptions): UseStudioHistoryReturn {
   const qwen3 = useQwen3Runtime();
@@ -82,8 +83,11 @@ export function useStudioHistory({ session, history }: UseStudioHistoryOptions):
     wasCompleteRef.current = isComplete;
     if (!isComplete || was) return;
     if (restoredEpochRef.current === getContentEpoch()) return;
-    const chunks = getAudioCacheSnapshot();
     const current = latest.current;
+    // Studio remounts after a visit to the Reader and then sees its earlier
+    // generation put back into the emptied player: that was saved already.
+    if (current.session.player.isPutBackStudioAudio?.()) return;
+    const chunks = getAudioCacheSnapshot();
     const { studio: studioNow } = current.session;
     const started = startRef.current;
     startRef.current = null;

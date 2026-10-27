@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => ({
   netFetch: vi.fn((url: string) => ({ fetched: url })),
   registerSchemes: vi.fn(),
   openWindows: [] as unknown[],
+  createdWindows: [] as Array<{ listeners: Map<string, Listener>; show: ReturnType<typeof vi.fn> }>,
+  destroyed: false,
+  shouldUseDarkColors: false,
 }));
 
 vi.mock("electron", () => ({
@@ -31,14 +34,35 @@ vi.mock("electron", () => ({
   BrowserWindow: class {
     static getAllWindows = () => mocks.openWindows;
 
+    readonly listeners = new Map<string, Listener>();
+    readonly show = vi.fn();
+
     constructor(options: Record<string, unknown>) {
       mocks.windowOptions.push(options);
+      mocks.createdWindows.push(this);
+    }
+
+    once(channel: string, listener: Listener) {
+      this.listeners.set(channel, listener);
+    }
+
+    isDestroyed() {
+      return mocks.destroyed;
+    }
+
+    isVisible() {
+      return this.show.mock.calls.length > 0;
     }
 
     loadURL(url: string) {
       mocks.loadedUrls.push(url);
       return mocks.loadResult;
     }
+  },
+  nativeTheme: {
+    get shouldUseDarkColors() {
+      return mocks.shouldUseDarkColors;
+    },
   },
   net: { fetch: mocks.netFetch },
   protocol: {
@@ -100,7 +124,20 @@ beforeEach(() => {
   mocks.netFetch.mockClear();
   mocks.registerSchemes.mockClear();
   mocks.openWindows = [];
+  mocks.createdWindows.length = 0;
+  mocks.destroyed = false;
+  mocks.shouldUseDarkColors = false;
 });
+
+function withPlatform(platform: NodeJS.Platform, run: () => void): void {
+  const original = Object.getOwnPropertyDescriptor(process, "platform")!;
+  Object.defineProperty(process, "platform", { value: platform });
+  try {
+    run();
+  } finally {
+    Object.defineProperty(process, "platform", original);
+  }
+}
 
 function fakeOpenWindow(minimized: boolean) {
   return {
@@ -139,7 +176,33 @@ describe("main window", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(error).toHaveBeenCalledWith("Failed to load app://-/desktop/studio:", expect.any(Error));
+    // Still shown: a hidden window could be neither seen nor closed.
+    expect(mocks.createdWindows[0].show).toHaveBeenCalledTimes(1);
     error.mockRestore();
+  });
+
+  it("keeps the window hidden until the page has painted", () => {
+    createMainWindow({ isDev: false, appDirectory: APP_DIRECTORY });
+    const [window] = mocks.createdWindows;
+
+    expect(mocks.windowOptions[0].show).toBe(false);
+    expect(window.show).not.toHaveBeenCalled();
+    window.listeners.get("ready-to-show")!();
+    expect(window.show).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    { platform: "win32", dark: true, color: "#101114" },
+    { platform: "linux", dark: true, color: "#101114" },
+    { platform: "win32", dark: false, color: "#f5f5f7" },
+    { platform: "darwin", dark: true, color: "#00000000" },
+  ] as const)("paints a $platform window ($color) for dark mode $dark before the page does", ({ platform, dark, color }) => {
+    mocks.shouldUseDarkColors = dark;
+
+    withPlatform(platform, () => createMainWindow({ isDev: false, appDirectory: APP_DIRECTORY }));
+
+    // macOS stays transparent for the vibrancy material.
+    expect(mocks.windowOptions[0].backgroundColor).toBe(color);
   });
 
   it("restores and focuses the open window for another launch", () => {
@@ -222,23 +285,25 @@ describe("session security", () => {
     const contents = attachWebContents();
     const navigate = contents.listeners.get("will-navigate")!;
 
-    const internal = { preventDefault: vi.fn() };
-    navigate(internal, "app://-/reader");
+    // Electron 45 passes the URL on the event; the positional one is deprecated.
+    const navigation = (url: string) => ({ url, preventDefault: vi.fn() });
+    const internal = navigation("app://-/reader");
+    navigate(internal);
     expect(internal.preventDefault).not.toHaveBeenCalled();
 
-    const external = { preventDefault: vi.fn() };
-    navigate(external, "https://github.com/cyanxxy/Local-TTS-studio");
+    const external = navigation("https://github.com/cyanxxy/Local-TTS-studio");
+    navigate(external);
     expect(external.preventDefault).toHaveBeenCalledTimes(1);
     expect(mocks.openExternal).toHaveBeenCalledWith("https://github.com/cyanxxy/Local-TTS-studio");
 
-    const hostile = { preventDefault: vi.fn() };
-    navigate(hostile, "https://example.com/phish");
+    const hostile = navigation("https://example.com/phish");
+    navigate(hostile);
     expect(hostile.preventDefault).toHaveBeenCalledTimes(1);
     expect(mocks.openExternal).toHaveBeenCalledTimes(1);
 
     // The dev server is not an app origin once packaged.
-    const devServer = { preventDefault: vi.fn() };
-    navigate(devServer, "http://localhost:5173/desktop/studio");
+    const devServer = navigation("http://localhost:5173/desktop/studio");
+    navigate(devServer);
     expect(devServer.preventDefault).toHaveBeenCalledTimes(1);
   });
 

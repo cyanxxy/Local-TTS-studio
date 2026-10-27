@@ -143,4 +143,21 @@ describe("withSpeechPipeline", () => {
     expect(wrapped.kokoro.synthesize).not.toBe(runtime.synthesize);
     expect(wrapped.audio8.synthesize).toEqual(expect.any(Function));
   });
+
+  it("reuses an engine's wrapped synthesize for as long as its own keeps its identity", () => {
+    const { runtime } = runtimeFor([]);
+    const wrappers = new WeakMap<object, unknown>();
+    const first = withSpeechPipelineAll({ kokoro: runtime } as unknown as EngineRuntimeMap, () => settings, wrappers);
+    // A model-state tick: a new runtime object around the same synthesize.
+    const tick = { ...runtime, generationProgress: 40 } as unknown as EngineRuntime<"kokoro">;
+    const second = withSpeechPipelineAll({ kokoro: tick } as unknown as EngineRuntimeMap, () => settings, wrappers);
+
+    expect(second.kokoro).not.toBe(first.kokoro);
+    expect(second.kokoro.generationProgress).toBe(40);
+    expect(second.kokoro.synthesize).toBe(first.kokoro.synthesize);
+
+    const { runtime: replaced } = runtimeFor([]);
+    const third = withSpeechPipelineAll({ kokoro: replaced } as unknown as EngineRuntimeMap, () => settings, wrappers);
+    expect(third.kokoro.synthesize).not.toBe(first.kokoro.synthesize);
+  });
 });

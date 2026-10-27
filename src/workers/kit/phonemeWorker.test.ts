@@ -105,7 +105,7 @@ describe("startPhonemeWorker loading", () => {
     harness.send({ type: "LOAD" });
     await vi.waitFor(() => expect(harness.ofType("READY")).toHaveLength(2));
 
-    expect(harness.ofType("LOAD_PROGRESS").map((message) => message.percent)).toEqual([0, 49.5, 99, 100]);
+    expect(harness.ofType("LOAD_PROGRESS").map((message) => message.percent)).toEqual([0, 50, 99, 100]);
     expect(harness.ofType("READY")[0]).toEqual({ type: "READY", voices: ["A", "B"], backend: "wasm" });
     expect(harness.engine.load).toHaveBeenCalledOnce();
   });

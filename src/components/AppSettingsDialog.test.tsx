@@ -1,7 +1,9 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { useRef, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { DEFAULT_APP_PREFERENCES } from "../lib/appPreferences";
 import { AppSettingsDialog } from "./AppSettingsDialog";
+import { ViewportPopover } from "./reader/ViewportPopover";
 
 describe("AppSettingsDialog", () => {
   it("lists the model credits and licences in a Credits section", () => {
@@ -127,5 +129,60 @@ describe("AppSettingsDialog", () => {
     unmount();
     rects.mockRestore();
     trigger.remove();
+  });
+
+  it("opens above a Reader popover, and one Escape closes only Settings (U2)", async () => {
+    const closePopover = vi.fn();
+    function ReaderWithSettings() {
+      const anchorRef = useRef<HTMLButtonElement>(null);
+      const popoverRef = useRef<HTMLDivElement>(null);
+      const [settingsOpen, setSettingsOpen] = useState(false);
+      return (
+        <>
+          <button ref={anchorRef} type="button">Appearance menu</button>
+          <ViewportPopover anchorRef={anchorRef} popoverRef={popoverRef} maxWidth={320} className="" ariaLabel="Reading appearance" onClose={closePopover}>
+            <button type="button" onClick={() => setSettingsOpen(true)}>Open settings</button>
+          </ViewportPopover>
+          <AppSettingsDialog
+            open={settingsOpen}
+            desktopModelsAvailable={false}
+            preferences={DEFAULT_APP_PREFERENCES}
+            onChange={vi.fn()}
+            onReset={vi.fn()}
+            onClose={() => setSettingsOpen(false)}
+          />
+        </>
+      );
+    }
+    render(<ReaderWithSettings />);
+    await act(() => new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve())));
+    const opener = screen.getByRole("button", { name: "Open settings" });
+    opener.focus();
+    fireEvent.click(opener);
+
+    const settings = screen.getByRole("dialog", { name: "Appearance" });
+    const popover = screen.getByRole("dialog", { name: "Reading appearance" });
+    // Settings stacks above the popover's z-[120].
+    expect(settings.parentElement).toHaveClass("z-[150]");
+    expect(popover).toHaveClass("z-[120]");
+
+    // A press inside Settings belongs to Settings, not to "outside the popover".
+    fireEvent.mouseDown(screen.getByRole("button", { name: "Dark" }));
+    expect(closePopover).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Appearance" })).not.toBeInTheDocument();
+    expect(closePopover).not.toHaveBeenCalled();
+    expect(opener).toHaveFocus();
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(closePopover).toHaveBeenCalledTimes(1);
+  });
+
+  it("fits the dynamic viewport so mobile browser chrome cannot cut it off", () => {
+    render(
+      <AppSettingsDialog open desktopModelsAvailable={false} preferences={DEFAULT_APP_PREFERENCES} onChange={vi.fn()} onReset={vi.fn()} onClose={vi.fn()} />,
+    );
+    expect(screen.getByRole("dialog")).toHaveClass("max-h-[min(46rem,calc(100dvh-2rem))]");
   });
 });

@@ -65,4 +65,15 @@ describe("SettingsPanel", () => {
     expect(screen.getByText("Re-download Kokoro").closest("button")).toBeDisabled();
     expect(screen.getByText("Working...")).toBeInTheDocument();
   });
+
+  it("reports whether Model storage is expanded (U11)", () => {
+    render(
+      <SettingsPanel activeModel="supertonic" busy={false} status={null} onClearCache={() => {}} onRedownloadActive={() => {}} />,
+    );
+    const toggle = screen.getByRole("button", { name: "Model storage" });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(document.getElementById(toggle.getAttribute("aria-controls")!)).toHaveTextContent("Clear Model Cache");
+  });
 });

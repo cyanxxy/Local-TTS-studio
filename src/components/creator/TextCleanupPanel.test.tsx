@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { TextCleanupPanel } from "./TextCleanupPanel";
 
@@ -93,5 +93,25 @@ describe("TextCleanupPanel", () => {
 
     render(<TextCleanupPanel text="Just [1] one." onTextChange={() => {}} />);
     expect(screen.getByText(/1 change: 1 citations\./)).toBeInTheDocument();
+  });
+
+  it("announces only the one-line summary, once typing pauses", () => {
+    vi.useFakeTimers();
+    try {
+      const { rerender } = render(<TextCleanupPanel text={MESSY} onTextChange={vi.fn()} />);
+      // The diff itself is not live: it would be re-read on every keystroke.
+      expect(screen.getByTestId("cleanup-preview").closest("[aria-live]")).toBeNull();
+      const status = screen.getByRole("status");
+      expect(status).toHaveTextContent("");
+
+      rerender(<TextCleanupPanel text={`${MESSY} [2]`} onTextChange={vi.fn()} />);
+      rerender(<TextCleanupPanel text={`${MESSY} [2] [3]`} onTextChange={vi.fn()} />);
+      expect(status).toHaveTextContent("");
+      act(() => vi.advanceTimersByTime(1000));
+      expect(status.textContent).toMatch(/^\d+ changes: .*citations/);
+      expect(status.textContent).not.toMatch(/Removed:/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

@@ -14,7 +14,7 @@ interface Options {
   isStudioPage: boolean;
   player: Pick<
     UseAudioPlayerReturn,
-    "getAudioCacheSnapshot" | "getCurrentTime" | "getPlaybackSnapshot" | "restoreAudioCache"
+    "getAudioCacheSnapshot" | "getContentEpoch" | "getCurrentTime" | "getPlaybackSnapshot" | "restoreAudioCache"
   >;
   setShowPlayer: (show: boolean) => void;
 }
@@ -29,11 +29,14 @@ interface Options {
  * The snapshot holds references to the player's PCM buffers, not copies.
  */
 export function useStudioAudioKeeper({ isStudioPage, player, setShowPlayer }: Options) {
-  const { getAudioCacheSnapshot, getCurrentTime, getPlaybackSnapshot, restoreAudioCache } = player;
+  const { getAudioCacheSnapshot, getContentEpoch, getCurrentTime, getPlaybackSnapshot, restoreAudioCache } = player;
   const snapshotRef = useRef<StudioAudioSnapshot | null>(null);
   // Whether the player's contents are the Reader's. Studio owns it until the
   // Reader first takes it over.
   const readerOwnsPlayerRef = useRef(false);
+  // The player's content epoch right after the last put-back, while the
+  // player still holds exactly that audio.
+  const putBackEpochRef = useRef<number | null>(null);
 
   const keep = useCallback(() => {
     if (readerOwnsPlayerRef.current) return;
@@ -52,6 +55,20 @@ export function useStudioAudioKeeper({ isStudioPage, player, setShowPlayer }: Op
     };
   }, [getAudioCacheSnapshot, getCurrentTime, getPlaybackSnapshot]);
 
+  // Studio's script was replaced while the Reader had the player (an import
+  // that finished there), so what was kept no longer speaks it. Returns false
+  // when Studio still owns the player: its audio is then the caller's to clear.
+  const dropKept = useCallback(() => {
+    if (!readerOwnsPlayerRef.current) return false;
+    snapshotRef.current = null;
+    return true;
+  }, []);
+
+  // Put-back audio is Studio's earlier generation, not a new one finishing.
+  const isPutBackAudio = useCallback(() => (
+    putBackEpochRef.current !== null && putBackEpochRef.current === getContentEpoch()
+  ), [getContentEpoch]);
+
   useEffect(() => {
     if (!isStudioPage || !readerOwnsPlayerRef.current) return;
     readerOwnsPlayerRef.current = false;
@@ -63,8 +80,9 @@ export function useStudioAudioKeeper({ isStudioPage, player, setShowPlayer }: Op
       playbackRate: snapshot.playbackRate,
       synthesisComplete: snapshot.synthesisComplete,
     });
+    putBackEpochRef.current = getContentEpoch();
     setShowPlayer(true);
-  }, [isStudioPage, restoreAudioCache, setShowPlayer]);
+  }, [getContentEpoch, isStudioPage, restoreAudioCache, setShowPlayer]);
 
-  return { keepStudioAudio: keep };
+  return { keepStudioAudio: keep, dropKeptStudioAudio: dropKept, isPutBackStudioAudio: isPutBackAudio };
 }

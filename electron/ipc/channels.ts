@@ -39,6 +39,7 @@ export const IPC_INVOKE_CHANNELS = [
 /** Fire-and-forget messages (`ipcRenderer.send` → `ipcMain.on`). */
 export const IPC_MESSAGE_CHANNELS = [
   "reader-library:flush-complete",
+  "app:set-theme-source",
 ] as const;
 
 /** Messages that transfer a MessagePort (`ipcRenderer.postMessage` → `ipcMain.on`). */

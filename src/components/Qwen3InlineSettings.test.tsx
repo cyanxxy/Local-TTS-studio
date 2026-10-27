@@ -86,4 +86,58 @@ describe("Qwen3InlineSettings", () => {
     fireEvent.click(screen.getByText("good clip"));
     expect(screen.queryByText(/This clip is only/)).not.toBeInTheDocument();
   });
+
+  /** Types `chars` one by one at the end of the field, as a user with the caret at the end would. */
+  function typeAtEnd(input: HTMLInputElement, chars: string) {
+    for (const char of chars) fireEvent.change(input, { target: { value: input.value + char } });
+  }
+
+  it("lets max tokens be cleared and retyped instead of clamping every keystroke (F1)", async () => {
+    await renderSettings();
+    const input = screen.getByRole("spinbutton", { name: "Qwen max tokens per passage" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "" } });
+    expect(input.value).toBe("");
+    typeAtEnd(input, "128");
+    expect(input.value).toBe("128");
+    fireEvent.blur(input);
+    expect(input.value).toBe("128");
+  });
+
+  it("lets top-k be cleared and retyped (F1)", async () => {
+    await renderSettings();
+    const input = screen.getByRole("spinbutton", { name: "Qwen top-k" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "" } });
+    typeAtEnd(input, "40");
+    fireEvent.blur(input);
+    expect(input.value).toBe("40");
+  });
+
+  it("commits an in-range value as it is typed, so a shortcut that generates from the field gets it", async () => {
+    function MaxTokens() {
+      return <output aria-label="committed">{useQwen3Runtime().maxNewTokens}</output>;
+    }
+    await act(async () => {
+      render(
+        <Qwen3RuntimeProvider>
+          <Qwen3InlineSettings />
+          <MaxTokens />
+        </Qwen3RuntimeProvider>,
+      );
+    });
+    const input = screen.getByRole("spinbutton", { name: "Qwen max tokens per passage" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "" } });
+    typeAtEnd(input, "128");
+    // No blur yet: Ctrl+Enter inside the field must already see 128.
+    expect(screen.getByLabelText("committed")).toHaveTextContent("128");
+  });
+
+  it("clamps a value past the maximum when the field is left", async () => {
+    await renderSettings();
+    const input = screen.getByRole("spinbutton", { name: "Qwen max tokens per passage" }) as HTMLInputElement;
+    fireEvent.change(input, { target: { value: "4096" } });
+    expect(input.value).toBe("4096");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(input.value).toBe("384");
+  });
 });
+

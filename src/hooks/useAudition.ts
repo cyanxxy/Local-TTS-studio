@@ -13,6 +13,10 @@ export type CreateAuditionAudio = (url: string) => AuditionAudio;
 
 const createBrowserAudio: CreateAuditionAudio = (url) => new Audio(url);
 
+function isAbortError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as { name?: unknown }).name === "AbortError";
+}
+
 export interface UseAuditionReturn {
   /** The key of the clip that is playing, or null. */
   playingKey: string | null;
@@ -61,6 +65,10 @@ export function useAudition(createAudio: CreateAuditionAudio = createBrowserAudi
     try {
       await audio.play();
     } catch (error) {
+      // Pausing a clip whose play() has not started yet rejects that play()
+      // with AbortError. When another clip or a stop replaced it, that is the
+      // switch the user asked for, not a failure to report.
+      if (currentRef.current !== entry && isAbortError(error)) return;
       finish();
       throw error;
     }

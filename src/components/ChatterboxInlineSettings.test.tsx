@@ -39,8 +39,9 @@ describe("ChatterboxInlineSettings", () => {
     expect(onChange).toHaveBeenLastCalledWith({ temperature: 1.5 });
     fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "42" } });
     expect(onChange).toHaveBeenLastCalledWith({ seed: 42 });
+    // Out-of-range input is rejected rather than wiping the seed.
     fireEvent.change(screen.getByLabelText("Seed"), { target: { value: "-5" } });
-    expect(onChange).toHaveBeenLastCalledWith({ seed: null });
+    expect(onChange).toHaveBeenLastCalledWith({ seed: 42 });
 
     rerender(<ChatterboxInlineSettings settings={{ ...chatterboxEngine.defaultSettings, seed: 42 }} onChange={onChange} modelState={READY} />);
     expect(screen.getByLabelText("Seed")).toHaveValue(42);

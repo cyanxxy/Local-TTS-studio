@@ -424,7 +424,13 @@ export const ReaderTextPane = memo(function ReaderTextPane({
         <button
           type="button"
           onClick={onResumeFollow}
-          className="absolute bottom-5 left-1/2 z-10 -translate-x-1/2 glass rounded-full px-4 py-2 text-xs font-semibold text-accent transition-transform active:scale-[0.98]"
+          // In the full-screen layout the player dock floats over the bottom of
+          // this pane, so the pill rides just above the dock (the page measures
+          // the dock into --reader-dock-clearance) instead of under it, where
+          // its click landed on the dock's Play button.
+          className={`${fullScreen
+            ? "fixed bottom-[calc(var(--reader-dock-clearance,12rem)+0.75rem)] z-40"
+            : "absolute bottom-5 z-10"} left-1/2 -translate-x-1/2 glass rounded-full px-4 py-2 text-xs font-semibold text-accent transition-transform active:scale-[0.98]`}
         >
           Resume auto-follow
         </button>

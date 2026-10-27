@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AudioExportRequest } from "../lib/audioExportClient";
 import type { LoudnessReport } from "../lib/audio/loudness";
 import type { ExportOptions, ExportProgress, ExportResult } from "../lib/exportAudio";
@@ -88,5 +88,10 @@ export function useAudioExport({ download, options, presetId, getFileName, onErr
 
   const cancel = useCallback(() => controllerRef.current?.abort(), []);
 
-  return { isExporting: progress !== null, progress, summary, start, cancel };
+  // The session hands this to Studio's Creator tools and the export context on
+  // every render, so it keeps its identity until the export itself changes.
+  return useMemo(
+    () => ({ isExporting: progress !== null, progress, summary, start, cancel }),
+    [cancel, progress, start, summary],
+  );
 }

@@ -79,6 +79,24 @@ describe("useReaderListeningProfile", () => {
     expect(result.current.settled).toBe(true);
   });
 
+  it("applies the profile again when the Reader returns after Studio's settings were put back", () => {
+    const profile = { engine: "audio8" as const, voice: "Clara", playbackRate: 1.5, updatedAt: 1 };
+    const document = withProfile(profile);
+    const { result, apply, rerender } = setup({ document, engineId: "kokoro" });
+    act(() => vi.advanceTimersByTime(1));
+    expect(apply).toHaveBeenCalledOnce();
+
+    // Studio is shown (its settings go back), then the Reader again.
+    rerender({ document, engineId: "kokoro", active: false });
+    rerender({ document, engineId: "kokoro", active: true });
+    expect(result.current.settled).toBe(false);
+
+    act(() => vi.advanceTimersByTime(1));
+    expect(apply).toHaveBeenCalledTimes(2);
+    expect(apply).toHaveBeenLastCalledWith({ engine: profile, playbackRate: 1.5 });
+    expect(result.current.settled).toBe(true);
+  });
+
   it("does not hold the Reader when a setting refuses to move", () => {
     const profile = { engine: "audio8" as const, voice: "Clara", playbackRate: 1, updatedAt: 1 };
     const { result, apply } = setup({ document: withProfile(profile), engineId: "kokoro" });
@@ -183,5 +201,17 @@ describe("useReaderListeningProfile", () => {
     const none = setup({ document: null, engineId: "kokoro" });
     act(() => none.result.current.remember({ voice: "x" }));
     expect(none.updateListening).not.toHaveBeenCalled();
+  });
+
+  it("keeps `remember` while playback only moves the book's progress", () => {
+    const listening = { engine: "kokoro", voice: "af_heart", updatedAt: 1 } as ReaderListeningProfile;
+    const playing = withProfile(listening);
+    const { result, rerender } = setup({ document: playing, engineId: "kokoro" });
+    const remember = result.current.remember;
+
+    // A progress sample replaces the record and keeps its profile.
+    rerender({ document: { ...playing, progress: { ...playing.progress, positionSec: 12 } }, engineId: "kokoro" });
+
+    expect(result.current.remember).toBe(remember);
   });
 });

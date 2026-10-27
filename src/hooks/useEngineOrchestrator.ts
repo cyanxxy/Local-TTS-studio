@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQwen3Runtime } from "../contexts/Qwen3RuntimeContext";
 import {
   getDefaultSupportedModel,
@@ -24,6 +24,7 @@ import type { GenerationTuningSettings } from "../types";
 import { useAudio8Runtime, type Audio8Runtime } from "./useAudio8Runtime";
 import type { UseAudioPlayerReturn } from "./useAudioPlayer";
 import { useBrowserEngineRuntimes, type UseBrowserEngineRuntimesReturn } from "./useBrowserEngineRuntimes";
+import { useQwen3LiveSettings } from "./useQwen3LiveSettings";
 import { useQwen3LocalRuntime } from "./useQwen3LocalRuntime";
 import { useSpeechPipeline } from "./useSpeechPipeline";
 import { useSupertonic3Runtime } from "./useSupertonic3Runtime";
@@ -100,6 +101,12 @@ export interface UseEngineOrchestratorReturn {
   /** Stops every engine's surface generation (unforced) and clears what each put in the player. */
   retireAllAudio: () => void;
   selectBrowserModel: (surface: Surface, model: BrowserEngineId) => void;
+  /**
+   * Makes `model` the chosen browser model again without retiring any audio:
+   * Studio's choice put back after the Reader switched the shared model for a
+   * book. The audio on screen then is not the switched model's to clear.
+   */
+  putBackBrowserModel: (model: BrowserEngineId) => void;
   selectDesktopModel: (surface: Surface, engine: DesktopInlineEngineId) => void;
   /**
    * Changes an input that shapes `engine`'s audio. When that engine drives the
@@ -119,7 +126,8 @@ export interface UseEngineOrchestratorReturn {
  *
  * Engines are activated per surface. A browser or Supertonic 3 model stays
  * loaded while either surface selects it, so switching pages reloads nothing;
- * only the generation of the surface being left is stopped.
+ * only the generation of the surface being left is stopped, even when the
+ * page shown next runs the same engine.
  */
 export function useEngineOrchestrator({
   surface,
@@ -180,12 +188,15 @@ export function useEngineOrchestrator({
   const visibleEngineId: SurfaceEngineId | null = surface === null ? null : engineIds[surface];
   const selects = (engine: SurfaceEngineId) => studioEngineId === engine || readerEngineId === engine;
 
+  // Only the settings, not the whole provider value, whose identity also
+  // changes with a model download's progress or a setup refresh.
+  const qwen3LiveSettings = useQwen3LiveSettings(qwen3Settings);
   const languageSettings = useMemo(() => ({
     kokoro: engineSettings.kokoro,
     supertonic: engineSettings.supertonic,
     supertonic3: engineSettings.supertonic3,
-    qwen3: qwen3Settings,
-  }), [engineSettings.kokoro, engineSettings.supertonic, engineSettings.supertonic3, qwen3Settings]);
+    qwen3: qwen3LiveSettings,
+  }), [engineSettings.kokoro, engineSettings.supertonic, engineSettings.supertonic3, qwen3LiveSettings]);
   const pipeline = useSpeechPipeline({
     text,
     choices: speech,
@@ -301,23 +312,36 @@ export function useEngineOrchestrator({
     qwen3,
   }), [audio8, browser.runtimes, qwen3, supertonic3, wrapRuntimes]);
 
-  const retireAllAudio = useCallback(() => {
-    const all = Object.values(runtimes);
-    for (const runtime of all) runtime.cancelActiveGeneration();
-    for (const runtime of all) runtime.resetGeneratedAudio();
+  // The map changes identity with every model-state tick and streamed chunk,
+  // so the commands below read it from a ref instead of depending on it: a
+  // handler built on them (and every memoised control it reaches) would
+  // otherwise change identity just as often. They only run from event
+  // handlers and effects, after the ref has caught up.
+  const runtimesRef = useRef(runtimes);
+  useLayoutEffect(() => {
+    runtimesRef.current = runtimes;
   }, [runtimes]);
 
-  // When the visible engine changes, whether because the page or its
-  // selection did, the engine left behind stops: its audio would otherwise
-  // keep streaming into the player under a surface that did not ask for it.
-  // Switching between surfaces that select the same engine changes nothing
-  // here, so a generation continues across that switch.
-  const previousVisibleEngineRef = useRef(visibleEngineId);
+  const retireAllAudio = useCallback(() => {
+    const all = Object.values(runtimesRef.current);
+    for (const runtime of all) runtime.cancelActiveGeneration();
+    for (const runtime of all) runtime.resetGeneratedAudio();
+  }, []);
+
+  // When the page or its engine selection changes, the generation of the
+  // surface left behind stops: its audio would otherwise keep streaming into
+  // the player under a surface that did not ask for it. That holds when the
+  // page shown next runs the same engine too, because the player is shared:
+  // a Reader section would stream on into the Studio audio put back there.
+  // (Leaving the Reader saves its audio first; see `handlePageNavigation`.)
+  const previousVisibleRef = useRef({ surface, engine: visibleEngineId });
   useEffect(() => {
-    const previous = previousVisibleEngineRef.current;
-    previousVisibleEngineRef.current = visibleEngineId;
-    if (previous !== null && previous !== visibleEngineId) runtimes[previous].cancelActiveGeneration();
-  }, [runtimes, visibleEngineId]);
+    const previous = previousVisibleRef.current;
+    previousVisibleRef.current = { surface, engine: visibleEngineId };
+    if (previous.engine === null) return;
+    if (previous.surface === surface && previous.engine === visibleEngineId) return;
+    runtimesRef.current[previous.engine].cancelActiveGeneration();
+  }, [surface, visibleEngineId]);
 
   const { loadModel } = browser;
   const selectBrowserModel = useCallback((target: Surface, model: BrowserEngineId) => {
@@ -333,6 +357,12 @@ export function useEngineOrchestrator({
     onEngineChange();
   }, [activeModel, beforeReaderAudioChange, browserSupport, desktopModels, loadModel, onEngineChange, retireAllAudio]);
 
+  const putBackBrowserModel = useCallback((model: BrowserEngineId) => {
+    if (model === chosenModel) return;
+    setChosenModel(model);
+    if (isModelSupportedInBrowser(model, browserSupport)) loadModel(model);
+  }, [browserSupport, chosenModel, loadModel]);
+
   const selectDesktopModel = useCallback((target: Surface, engine: DesktopInlineEngineId) => {
     if (target === "reader") beforeReaderAudioChange();
     if (desktopModels[target] === engine) return;
@@ -344,13 +374,13 @@ export function useEngineOrchestrator({
   const changeEngineInput = useCallback((engine: SurfaceEngineId, apply: () => void) => {
     if (engine === visibleEngineId) {
       if (surface === "reader") beforeReaderAudioChange();
-      const runtime = runtimes[engine];
+      const runtime = runtimesRef.current[engine];
       runtime.cancelActiveGeneration();
       runtime.resetGeneratedAudio();
     }
     apply();
     onEngineChange();
-  }, [beforeReaderAudioChange, onEngineChange, runtimes, surface, visibleEngineId]);
+  }, [beforeReaderAudioChange, onEngineChange, surface, visibleEngineId]);
 
   const { voicesInUse } = browser;
   const surfaceEngineSettings = useMemo<SurfaceEngineSettings>(() => ({
@@ -362,8 +392,8 @@ export function useEngineOrchestrator({
     chatterbox: { ...chatterboxSettings, voice: voicesInUse.chatterbox },
     audio8: engineSettings.audio8,
     supertonic3: engineSettings.supertonic3,
-    qwen3: qwen3Settings,
-  }), [chatterboxSettings, engineSettings.audio8, engineSettings.supertonic3, qwen3Settings, supertonicSettings.language, voicesInUse]);
+    qwen3: qwen3LiveSettings,
+  }), [chatterboxSettings, engineSettings.audio8, engineSettings.supertonic3, qwen3LiveSettings, supertonicSettings.language, voicesInUse]);
 
   const desktopModelOptions = useMemo(() => {
     const optionsFor = (target: Surface) => describeDesktopModelOptions(
@@ -414,6 +444,7 @@ export function useEngineOrchestrator({
     desktopModelOptions,
     retireAllAudio,
     selectBrowserModel,
+    putBackBrowserModel,
     selectDesktopModel,
     changeEngineInput,
   };

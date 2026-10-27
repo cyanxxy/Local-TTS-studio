@@ -1,4 +1,4 @@
-import { useContext, useRef, useCallback, useEffect, useState, type ReactNode } from "react";
+import { useContext, useId, useRef, useCallback, useEffect, useState, type ReactNode } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -18,6 +18,7 @@ import type { GenerationStats } from "../types";
 import { PLAYBACK_RATES } from "../constants";
 import { usePlaybackSelector, usePlaybackTime, type PlaybackClock } from "../lib/playbackClock";
 import { AudioExportContext } from "./AudioExportContext";
+import { progressFillStyle } from "./progressFill";
 
 type AudioPlayerVariant = "panel" | "dock";
 type PrimaryActionIcon = "generate" | "retry" | "loading";
@@ -223,18 +224,21 @@ function SeekBar({ clock, totalDuration, hasAudio, compact, onSeek }: SeekBarPro
       aria-valuenow={Math.round(progress)}
       aria-valuetext={`${formatTime(currentTime)} of ${formatTime(totalDuration)}`}
     >
-      <div className={`absolute left-0 right-0 top-1/2 -translate-y-1/2 ${compact ? "h-1" : "h-1.5"} rounded-full ${hasAudio ? "bg-border-strong" : "bg-border"}`} />
+      {/* The fill and thumb move every frame during playback, so they move by
+          transform: a width or left change would re-lay-out the bar 60 times
+          a second. */}
+      <div className={`absolute left-0 right-0 top-1/2 -translate-y-1/2 overflow-hidden ${compact ? "h-1" : "h-1.5"} rounded-full ${hasAudio ? "bg-border-strong" : "bg-border"}`}>
+        <div className="h-full w-full rounded-full bg-accent" style={progressFillStyle(progress)} />
+      </div>
       <div
-        className={`absolute left-0 top-1/2 ${compact ? "h-1" : "h-1.5"} -translate-y-1/2 rounded-full bg-accent`}
-        style={{ width: `${progress}%` }}
-      />
-      <div
-        className="absolute top-1/2 h-3 w-3 -translate-y-1/2 rounded-full bg-accent opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
-        style={{
-          left: `calc(${progress}% - 6px)`,
-          boxShadow: "var(--shadow-accent-lg)",
-        }}
-      />
+        className="pointer-events-none absolute inset-x-0 top-1/2 h-3 -translate-y-1/2"
+        style={{ transform: `translateX(${progress}%)` }}
+      >
+        <div
+          className="absolute top-0 -left-1.5 h-3 w-3 rounded-full bg-accent opacity-0 transition-opacity group-hover:opacity-100 group-focus-visible:opacity-100"
+          style={{ boxShadow: "var(--shadow-accent-lg)" }}
+        />
+      </div>
     </div>
   );
 }
@@ -294,7 +298,12 @@ interface OverflowAction {
 
 /**
  * On phones the dock's secondary controls do not fit beside the transport, so
- * they collapse into one menu instead of sliding underneath it.
+ * they collapse into one panel instead of sliding underneath it.
+ *
+ * A disclosure rather than an ARIA menu: the panel holds a speed <select>,
+ * which a role="menu" may not contain, and plain buttons in a group need no
+ * roving arrow-key focus. Opening moves focus into the panel, Escape closes
+ * it and returns focus to the trigger, and tabbing out closes it.
  */
 function OverflowMenu({
   actions,
@@ -307,30 +316,50 @@ function OverflowMenu({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const panelId = useId();
+
+  const close = useCallback((returnFocus: boolean) => {
+    setOpen(false);
+    if (returnFocus) triggerRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (!open) return;
+    panelRef.current
+      ?.querySelector<HTMLElement>("select:not([disabled]), button:not([disabled])")
+      ?.focus();
     const handlePointer = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const handleKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
+      if (!rootRef.current?.contains(event.target as Node)) close(false);
     };
     document.addEventListener("pointerdown", handlePointer);
-    document.addEventListener("keydown", handleKey);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointer);
-      document.removeEventListener("keydown", handleKey);
-    };
-  }, [open]);
+    return () => document.removeEventListener("pointerdown", handlePointer);
+  }, [close, open]);
 
   return (
-    <div ref={rootRef} className="relative">
+    <div
+      ref={rootRef}
+      className="relative"
+      onKeyDown={(event) => {
+        if (event.key !== "Escape" || !open) return;
+        // Handled here so a surrounding dialog's Escape does not also fire.
+        event.preventDefault();
+        event.stopPropagation();
+        close(true);
+      }}
+      onBlur={(event) => {
+        if (open && !rootRef.current?.contains(event.relatedTarget as Node | null) && event.relatedTarget !== null) {
+          close(false);
+        }
+      }}
+    >
       <button
+        ref={triggerRef}
         type="button"
         aria-label="More playback options"
-        aria-haspopup="menu"
         aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
         onClick={() => setOpen((value) => !value)}
         className="flex h-[44px] w-[44px] items-center justify-center rounded-full text-text-muted transition-colors hover:bg-text-primary/[0.07] hover:text-text-primary"
       >
@@ -338,7 +367,9 @@ function OverflowMenu({
       </button>
       {open && (
         <div
-          role="menu"
+          ref={panelRef}
+          id={panelId}
+          role="group"
           aria-label="Playback options"
           className="glass-pop absolute right-0 bottom-full z-10 mb-2 w-52 rounded-2xl p-1.5"
         >
@@ -352,10 +383,9 @@ function OverflowMenu({
             <button
               key={action.key}
               type="button"
-              role="menuitem"
               disabled={action.disabled}
               onClick={() => {
-                setOpen(false);
+                close(true);
                 action.onSelect();
               }}
               className={`flex w-full items-center gap-2.5 rounded-[10px] px-3 py-2.5 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
@@ -455,7 +485,7 @@ export function AudioPlayer({
   // accent; while playing, Pause steps back to an outlined control.
   const centerClass = effectivePrimaryAction
     ? centerTone === "danger"
-      ? "border border-danger/30 bg-danger-light text-danger shadow-glass-sm hover:bg-danger hover:text-white"
+      ? "border border-danger/30 bg-danger-light text-danger shadow-glass-sm hover:bg-danger-fill hover:text-white"
       : centerTone === "neutral" || effectivePrimaryAction.disabled
         ? "border border-border/70 bg-text-primary/[0.03] text-text-muted/70"
         : "glass-accent text-white"
@@ -484,7 +514,7 @@ export function AudioPlayer({
   );
 
   const statsPanel = statsVisible && (
-    <div className={`${compact ? "px-4 py-2 gap-4" : embedded ? "px-6 py-3 gap-6" : "px-5 py-3 gap-6"} flex flex-wrap items-center border-b border-black/5`}>
+    <div className={`${compact ? "px-4 py-2 gap-4" : embedded ? "px-6 py-3 gap-6" : "px-5 py-3 gap-6"} flex flex-wrap items-center border-b border-border/60`}>
       {stats.firstLatency !== null && (
         <div className="flex flex-col">
           <span className="font-mono text-base font-semibold leading-none text-accent tabular-nums">
@@ -554,7 +584,7 @@ export function AudioPlayer({
       onClick={onStop}
       aria-label="Stop generation"
       title="Stop generation"
-      className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger hover:text-white"
+      className="flex h-[44px] w-[44px] shrink-0 items-center justify-center rounded-full text-danger transition-all duration-200 hover:bg-danger-fill hover:text-white"
     >
       <Square size={12} />
     </button>
@@ -639,7 +669,7 @@ export function AudioPlayer({
               </button>
             </>
           ) : (
-            <span className="truncate font-mono text-2xs text-text-muted/70">
+            <span className="truncate font-mono text-2xs text-text-muted">
               {sectionText}
             </span>
           )}
@@ -720,7 +750,7 @@ export function AudioPlayer({
         </div>
       </div>
       {statusLabel && (
-        <div className="mt-2 text-center font-mono text-2xs text-text-muted/70">
+        <div className="mt-2 text-center font-mono text-2xs text-text-muted">
           {statusLabel}
         </div>
       )}

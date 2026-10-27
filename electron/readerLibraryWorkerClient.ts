@@ -37,6 +37,9 @@ const MAX_AUDIO_CHUNKS = 16_384;
 const MAX_AUDIO_CHUNK_BYTES = 16 * 1024 * 1024;
 const MAX_AUDIO_ENTRY_BYTES = 256 * 1024 * 1024;
 
+/** How long `close()` waits for the worker to finish its writes and exit before terminating it. */
+export const READER_LIBRARY_WORKER_CLOSE_TIMEOUT_MS = 2_000;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -169,7 +172,7 @@ export class ReaderLibraryWorkerClient {
     const timedOut = await Promise.race([
       this.#exitPromise.then(() => false),
       new Promise<true>((resolve) => {
-        timeout = setTimeout(() => resolve(true), 2_000);
+        timeout = setTimeout(() => resolve(true), READER_LIBRARY_WORKER_CLOSE_TIMEOUT_MS);
       }),
     ]);
     if (timeout) clearTimeout(timeout);

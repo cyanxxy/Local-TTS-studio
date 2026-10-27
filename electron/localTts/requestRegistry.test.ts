@@ -85,16 +85,17 @@ describe("BridgeRequestRegistry", () => {
     expect(registry.isCancelled("c")).toBe(false);
   });
 
-  it("cancels on a main-frame navigation to a new document, not on in-page or subframe navigation", () => {
+  it("cancels when the main frame commits a new document, not on a navigation that was blocked", () => {
     const { registry, stop } = setup();
     const sender = new FakeSender(1);
     registry.register("r1", "qwen3", "generate", asSender(sender));
 
-    sender.emit("did-start-navigation", { isMainFrame: true, isSameDocument: true });
-    sender.emit("did-start-navigation", { isMainFrame: false, isSameDocument: false });
+    // will-navigate blocked it (e.g. a file dropped on the window): the page that
+    // owns the generation is still there.
+    sender.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
     expect(stop).not.toHaveBeenCalled();
 
-    sender.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+    sender.emit("did-navigate", {}, "app://-/studio", 200, "OK");
     expect(stop).toHaveBeenCalledWith("r1");
   });
 
@@ -107,7 +108,7 @@ describe("BridgeRequestRegistry", () => {
 
     expect(stop).toHaveBeenCalledWith("r1");
     expect(sender.listenerCount("render-process-gone")).toBe(0);
-    expect(sender.listenerCount("did-start-navigation")).toBe(0);
+    expect(sender.listenerCount("did-navigate")).toBe(0);
   });
 
   it("watches each renderer once however many requests it starts", () => {

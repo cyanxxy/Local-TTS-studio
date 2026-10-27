@@ -9,7 +9,7 @@ import {
   subscribeChatterboxClips,
   type ChatterboxClip,
 } from "./chatterboxClips";
-import { ChatterboxReferenceError } from "./chatterboxReference";
+import { ChatterboxReferenceError, createChatterboxReferenceStore } from "./chatterboxReference";
 import { encodeWavPcm16 } from "./wavCodec";
 
 function speech(seconds: number, rate: number, amplitude = 0.3): Float32Array {
@@ -164,5 +164,74 @@ describe("ensureChatterboxReference", () => {
   it("fails clearly when the clip is no longer loaded", async () => {
     await expect(ensureChatterboxReference(asWorker(new FakeWorker()), "gone~Voice"))
       .rejects.toThrow("no longer loaded");
+  });
+
+  describe("against the worker's bounded reference cache", () => {
+    /**
+     * Registers SET_REFERENCE in the same 16-entry LRU chatterbox.worker.ts
+     * keeps (MAX_CACHED_REFERENCES), which also holds the default voice.
+     */
+    class CachingWorker extends FakeWorker {
+      store = createChatterboxReferenceStore<unknown>(16);
+      constructor() {
+        super();
+        this.store.register("chatterbox-default", "digest-default", { audio: new Float32Array(1), durationSec: 1 });
+      }
+      override postMessage(message: Record<string, unknown>, options?: StructuredSerializeOptions) {
+        if (message.type === "SET_REFERENCE") {
+          const id = String(message.referenceId);
+          this.store.register(id, `digest-${id}`, { audio: message.audio as Float32Array, durationSec: 1 });
+        }
+        super.postMessage(message, options);
+      }
+      /** What GENERATE does with a reference: resolves it, marking it recently used. */
+      generate(referenceId: string) {
+        if (!this.store.resolve(referenceId)) throw new Error(`Reference voice "${referenceId}" is not loaded.`);
+      }
+      sent(referenceId: string) {
+        return this.posted.filter(({ message }) => message.referenceId === referenceId).length;
+      }
+    }
+    const clip = (id: string): ChatterboxClip => ({ id, name: id, durationSec: 1, audio: new Float32Array(240), samplingRate: 24_000 });
+
+    it("sends a clip again once the worker can have evicted it", async () => {
+      setChatterboxClipResolver(clip);
+      const worker = new CachingWorker();
+      for (let index = 1; index <= 17; index += 1) {
+        await ensureChatterboxReference(asWorker(worker), `clone-${index}`);
+        worker.generate("chatterbox-default");
+      }
+      expect(worker.store.resolve("clone-1")).toBeNull();
+
+      await ensureChatterboxReference(asWorker(worker), "clone-1");
+      expect(worker.sent("clone-1")).toBe(2);
+      expect(() => worker.generate("clone-1")).not.toThrow();
+    });
+
+    it("keeps a clip that is still in use instead of resending it", async () => {
+      setChatterboxClipResolver(clip);
+      const worker = new CachingWorker();
+      for (let index = 1; index <= 15; index += 1) await ensureChatterboxReference(asWorker(worker), `clone-${index}`);
+      await ensureChatterboxReference(asWorker(worker), "clone-1");
+      worker.generate("clone-1");
+      await ensureChatterboxReference(asWorker(worker), "clone-16");
+
+      await ensureChatterboxReference(asWorker(worker), "clone-1");
+      expect(worker.sent("clone-1")).toBe(1);
+      expect(() => worker.generate("clone-1")).not.toThrow();
+    });
+
+    it("never leaves a clip it reports ready unloaded in the worker", async () => {
+      setChatterboxClipResolver(clip);
+      const worker = new CachingWorker();
+      // A dialogue cycling through more cloned voices than the worker holds,
+      // with the default voice in use between them.
+      for (let turn = 0; turn < 120; turn += 1) {
+        const referenceId = `clone-${(turn * 7) % 23}`;
+        await ensureChatterboxReference(asWorker(worker), referenceId);
+        expect(() => worker.generate(referenceId)).not.toThrow();
+        if (turn % 3 === 0) worker.generate("chatterbox-default");
+      }
+    });
   });
 });

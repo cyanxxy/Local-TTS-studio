@@ -278,6 +278,10 @@ declare global {
       documents?: DocumentsBridge;
       localTts?: LocalTtsBridge;
       audio8?: Audio8Bridge;
+      appearance?: {
+        /** Hands the app's colour theme to the native side (vibrancy, native controls). */
+        setThemeSource: (source: "system" | "light" | "dark") => void;
+      };
     };
   }
 }

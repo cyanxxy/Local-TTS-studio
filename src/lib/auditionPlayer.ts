@@ -53,29 +53,41 @@ export function createAuditionPlayer(createContext: AudioContextFactory = defaul
         onEnded?.();
         return;
       }
-      context ??= createContext();
-      if (context.state === "suspended") await context.resume();
-      const buffer = context.createBuffer(1, audio.samples.length, audio.sampleRate);
-      buffer.copyToChannel(audio.samples as Float32Array<ArrayBuffer>, 0);
-      const node = context.createBufferSource();
-      node.buffer = buffer;
-      node.connect(context.destination);
       let ended = false;
       const done = () => {
         if (ended) return;
         ended = true;
         onEnded?.();
       };
-      node.onended = () => {
-        if (source === node) {
-          source = null;
-          finish = null;
-        }
-        done();
-      };
-      source = node;
+      const active = context ??= createContext();
+      // Claimed before the resume below, so a stop, another play or dispose
+      // while the context resumes ends this audition (`finish` moves on) and
+      // it never starts on top of the next one or on a closed context.
       finish = done;
-      node.start();
+      try {
+        if (active.state === "suspended") await active.resume();
+        if (finish !== done || context !== active) return;
+        const buffer = active.createBuffer(1, audio.samples.length, audio.sampleRate);
+        buffer.copyToChannel(audio.samples as Float32Array<ArrayBuffer>, 0);
+        const node = active.createBufferSource();
+        node.buffer = buffer;
+        node.connect(active.destination);
+        node.onended = () => {
+          if (source === node) {
+            source = null;
+            finish = null;
+          }
+          done();
+        };
+        source = node;
+        node.start();
+      } catch (cause) {
+        // A failure after this audition was replaced or stopped is not its own.
+        if (finish !== done) return;
+        finish = null;
+        source = null;
+        throw cause;
+      }
     },
     stop,
     dispose: () => {

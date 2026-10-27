@@ -334,4 +334,15 @@ describe("ExportSettings", () => {
     renderSettings({ audioExport: makeExport({ summary: { ...SUMMARY, limiterReductionDb: 0 } }) });
     expect(screen.getByText("not needed")).toBeInTheDocument();
   });
+
+  it("keeps Cancel export enabled when the audio is cleared mid-export", () => {
+    const audioExport = makeExport({ isExporting: true, progress: { phase: "encoding", fraction: 0.4 } });
+    renderSettings({ hasAudio: false, audioExport });
+    const cancel = screen.getByRole("button", { name: /Cancel export/ });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(audioExport.cancel).toHaveBeenCalledOnce();
+    expect(screen.getByRole("progressbar", { name: "Export progress" })).toBeInTheDocument();
+  });
 });
+

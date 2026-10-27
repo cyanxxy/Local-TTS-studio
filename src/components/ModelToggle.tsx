@@ -81,6 +81,11 @@ function StatusDot({ state, unavailable = false }: { state: ModelState; unavaila
   if (state.error) {
     return <span data-status="error" className="h-1.5 w-1.5 shrink-0 rounded-full bg-danger" />;
   }
+  // The ring only pulses while something is happening; a model that has not
+  // started loading sits still instead of pinging forever.
+  if (!state.loading) {
+    return <span data-status="idle" className="h-1.5 w-1.5 shrink-0 rounded-full bg-text-muted" />;
+  }
   return (
     <span data-status="loading" className="relative h-1.5 w-1.5 shrink-0">
       <span className="absolute inset-0 rounded-full bg-text-muted animate-ping-ring" />
@@ -154,6 +159,10 @@ export function ModelToggle({
     return () => document.removeEventListener("pointerdown", closeFromOutside);
   }, [open]);
 
+  // The menu is placed again when options come or go, not when one's load
+  // progress changes its detail text: that arrives many times a second while a
+  // model downloads, and every placement reads layout.
+  const choiceCount = choices.length;
   useLayoutEffect(() => {
     if (!open) return;
     const placeMenu = () => {
@@ -207,7 +216,7 @@ export function ModelToggle({
       window.visualViewport?.removeEventListener("resize", placeMenu);
       window.visualViewport?.removeEventListener("scroll", placeMenu);
     };
-  }, [choices, open]);
+  }, [choiceCount, open]);
 
   const availableChoiceIndexes = choices
     .map((choice, choiceIndex) => ({ choice, choiceIndex }))
@@ -312,10 +321,11 @@ export function ModelToggle({
           </span>
           <span className="mt-1 flex min-w-0 items-center gap-1.5 text-xs font-medium text-text-muted">
             {selected.state && <StatusDot state={selected.state} unavailable={Boolean(selected.unavailableReason)} />}
-            <span className="truncate">{selected.unavailableReason ?? selected.detail}</span>
+            {/* An unavailable reason explains what to do, so it wraps rather than truncating. */}
+            <span className={selected.unavailableReason ? "min-w-0 break-words" : "truncate"}>{selected.unavailableReason ?? selected.detail}</span>
           </span>
         </span>
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/5 bg-text-primary/[0.04] text-text-muted transition-colors group-hover:text-accent">
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border/60 bg-text-primary/[0.04] text-text-muted transition-colors group-hover:text-accent">
           <ChevronDown aria-hidden="true" size={17} className={`transition-transform duration-200 ${open ? "rotate-180" : ""}`} />
         </span>
       </button>
@@ -385,7 +395,7 @@ export function ModelToggle({
                 <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border ${
                   choice.selected
                     ? "border-accent/30 bg-accent-light text-accent"
-                    : "border-black/5 bg-text-primary/[0.04] text-transparent"
+                    : "border-border/60 bg-text-primary/[0.04] text-transparent"
                 }`}>
                   <Check aria-hidden="true" size={15} strokeWidth={2.5} />
                 </span>
@@ -407,7 +417,7 @@ export function ModelToggle({
                   </span>
                   <span className="mt-0.5 flex min-w-0 items-center gap-1.5 text-xs text-text-muted">
                     {choice.state && <StatusDot state={choice.state} unavailable={unavailable} />}
-                    <span className="truncate">{choice.unavailableReason ?? choice.detail}</span>
+                    <span className={choice.unavailableReason ? "min-w-0 break-words" : "truncate"}>{choice.unavailableReason ?? choice.detail}</span>
                   </span>
                 </span>
               </button>

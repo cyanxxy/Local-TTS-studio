@@ -36,6 +36,13 @@ interface Options {
   autoAdvance: boolean;
   /** Turns to `next`; `continuation` is null when the page should turn without playing. */
   advance: (next: ReaderSection, continuation: ReaderAdvance | null) => void;
+  /**
+   * The player holds the section's audio as saved before it finished
+   * streaming; see `ReaderAudioCache.isPartialAudio`.
+   */
+  isPartialAudio?: () => boolean;
+  /** Generates the active section again. */
+  regenerate?: () => void;
 }
 
 export interface ReaderProgress {
@@ -64,6 +71,8 @@ export function useReaderProgress({
   flushProgress,
   autoAdvance,
   advance,
+  isPartialAudio,
+  regenerate,
 }: Options): ReaderProgress {
   const {
     activeSegmentId,
@@ -76,6 +85,7 @@ export function useReaderProgress({
   } = player;
   const lastProgressUpdateRef = useRef(0);
   const autoAdvancedSectionRef = useRef<string | null>(null);
+  const regeneratedSectionRef = useRef<string | null>(null);
   const autoAdvanceHeldRef = useRef(false);
   const sectionId = section?.id ?? null;
 
@@ -141,6 +151,7 @@ export function useReaderProgress({
 
   useEffect(() => {
     autoAdvancedSectionRef.current = null;
+    regeneratedSectionRef.current = null;
   }, [sectionId]);
 
   const maybeAutoAdvance = useCallback(() => {
@@ -148,16 +159,28 @@ export function useReaderProgress({
       !active
       || !autoAdvance
       || !section
-      || !nextSection
       || isRestorePending()
       || isGenerating
-      || !isSynthesisComplete
       || isPlaying
       || segments.length === 0
       || totalDuration <= 0
       || getCurrentTime() < totalDuration - 0.02
-      || autoAdvancedSectionRef.current === section.id
     ) return;
+    if (!isSynthesisComplete) {
+      // Played to the end of audio saved before the section finished: the
+      // rest of it has never been made, so continuing generates the section
+      // again (once) instead of stopping here, and then moves on as usual.
+      if (
+        !regenerate
+        || autoAdvanceHeldRef.current
+        || regeneratedSectionRef.current === section.id
+        || !isPartialAudio?.()
+      ) return;
+      regeneratedSectionRef.current = section.id;
+      regenerate();
+      return;
+    }
+    if (!nextSection || autoAdvancedSectionRef.current === section.id) return;
     autoAdvancedSectionRef.current = section.id;
     advance(nextSection, autoAdvanceHeldRef.current ? null : { autoPlay: true, autoGenerate: true });
   }, [
@@ -166,10 +189,12 @@ export function useReaderProgress({
     autoAdvance,
     getCurrentTime,
     isGenerating,
+    isPartialAudio,
     isPlaying,
     isRestorePending,
     isSynthesisComplete,
     nextSection,
+    regenerate,
     section,
     segments.length,
     totalDuration,

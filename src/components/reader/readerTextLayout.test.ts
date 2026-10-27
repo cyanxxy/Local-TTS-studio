@@ -4,6 +4,7 @@ import {
   chapterHeadingBlockStart,
   clamp,
   groupPartsByBlock,
+  sameOverlayParts,
   splitTextBlocks,
 } from "./readerTextLayout";
 
@@ -124,5 +125,23 @@ describe("clamp", () => {
     expect(clamp(-1, 0, 10)).toBe(0);
     expect(clamp(11, 0, 10)).toBe(10);
     expect(clamp(5, 0, 10)).toBe(5);
+  });
+});
+
+describe("sameOverlayParts", () => {
+  it("tells apart only the paragraphs a passage move actually changes", () => {
+    const text = "First paragraph here.\nSecond paragraph here.\nThird paragraph here.";
+    const blocks = splitTextBlocks(text);
+    const before = groupPartsByBlock(blocks, buildOverlayParts(text, blocks, { start: blocks[0].start, end: blocks[0].end }));
+    const after = groupPartsByBlock(blocks, buildOverlayParts(text, blocks, { start: blocks[1].start, end: blocks[1].end }));
+
+    // Every rebuilt list is new, but only the passage's old and new paragraphs differ.
+    expect(after[2].parts).not.toBe(before[2].parts);
+    expect(after.map((group, index) => sameOverlayParts(before[index].parts, group.parts))).toEqual([false, false, true]);
+    expect(sameOverlayParts(before[0].parts, before[0].parts.slice(0, 0))).toBe(false);
+    expect(sameOverlayParts(
+      [{ text: "a", start: 0, isActive: false }],
+      [{ text: "a", start: 0, isActive: false, highlight: "yellow" }],
+    )).toBe(false);
   });
 });

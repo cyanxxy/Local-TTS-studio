@@ -67,21 +67,26 @@ function setup(overrides: {
   loadError?: Error;
   segments?: ReaderSegment[];
   keepMismatchedAudio?: boolean;
+  /** Holds the lookup until it settles. */
+  lookup?: Promise<void>;
 } = {}) {
   const library = {
     loadAudio: vi.fn(async () => {
+      await overrides.lookup;
       if (overrides.loadError) throw overrides.loadError;
       return overrides.loaded ?? null;
     }),
     saveAudio: vi.fn<(audio: CachedReaderAudio) => Promise<void>>(async () => undefined),
     clearAudio: vi.fn(async () => undefined),
   };
+  let contentEpoch = 1;
   const player = {
     getAudioCacheSnapshot: vi.fn(() => [chunk]),
+    getContentEpoch: vi.fn(() => contentEpoch),
     getCurrentTime: vi.fn(() => 2.5),
     getPlaybackSnapshot: vi.fn(() => ({ playbackRate: 1.5, totalDuration: 9, synthesisComplete: false })),
     isSynthesisComplete: false,
-    restoreAudioCache: vi.fn(),
+    restoreAudioCache: vi.fn(() => { contentEpoch += 1; }),
     segments: overrides.segments ?? [],
     togglePlay: vi.fn(async () => undefined),
   };
@@ -111,7 +116,7 @@ function setup(overrides: {
       segments: player.segments,
     } as { signatureParts: typeof parts | null; segments: ReaderSegment[]; complete?: boolean },
   });
-  return { ...view, library, player, callbacks };
+  return { ...view, library, player, callbacks, replacePlayerAudio: () => { contentEpoch += 1; } };
 }
 
 const segment = (id: string): ReaderSegment => ({
@@ -382,5 +387,46 @@ describe("useReaderAudioCache", () => {
     const { result } = setup({ loaded: cachedAudio() });
     expect(result.current.isRestorePending()).toBe(true);
     await waitFor(() => expect(result.current.isRestorePending()).toBe(false));
+  });
+
+  it("generates a section again when continuous listening enters audio saved before it finished", async () => {
+    const { rerender, player, callbacks, result } = setup({ signatureParts: null, loaded: cachedAudio({ synthesisComplete: false }) });
+    act(() => result.current.setContinuation({ sectionId: sections[0].id, autoPlay: true, autoGenerate: true }));
+    rerender({ signatureParts: parts, segments: [] });
+
+    await waitFor(() => expect(callbacks.generate).toHaveBeenCalledTimes(1));
+    // Restored first, so the partial audio is there if the engine cannot generate now.
+    expect(player.restoreAudioCache).toHaveBeenCalledWith([chunk], expect.objectContaining({ synthesisComplete: false }));
+    expect(player.togglePlay).not.toHaveBeenCalled();
+  });
+
+  it("restores audio saved before it finished as partial, and says so until the player's audio changes", async () => {
+    const { player, callbacks, result, replacePlayerAudio } = setup({ loaded: cachedAudio({ synthesisComplete: false }) });
+    await waitFor(() => expect(player.restoreAudioCache).toHaveBeenCalledTimes(1));
+    expect(callbacks.generate).not.toHaveBeenCalled();
+    expect(result.current.isPartialAudio()).toBe(true);
+
+    // A generation empties the player first.
+    replacePlayerAudio();
+    expect(result.current.isPartialAudio()).toBe(false);
+
+    const finished = setup({ loaded: cachedAudio() });
+    await waitFor(() => expect(finished.player.restoreAudioCache).toHaveBeenCalledTimes(1));
+    expect(finished.result.current.isPartialAudio()).toBe(false);
+  });
+
+  it("does not restore saved audio into a generation asked for while the lookup ran", async () => {
+    let finishLookup = () => undefined as void;
+    const lookup = new Promise<void>((resolve) => { finishLookup = resolve; });
+    const { player, result, callbacks } = setup({ loaded: cachedAudio(), lookup });
+    await waitFor(() => expect(result.current.isRestorePending()).toBe(true));
+
+    act(() => result.current.abandonRestore());
+    expect(result.current.isRestorePending()).toBe(false);
+    await act(async () => { finishLookup(); });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(player.restoreAudioCache).not.toHaveBeenCalled();
+    expect(callbacks.setShowPlayer).not.toHaveBeenCalled();
   });
 });

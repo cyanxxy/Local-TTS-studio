@@ -94,13 +94,38 @@ interface PersistedDialogue {
   overrides: Record<string, VoicePreset>;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * The shape casting and rendering read from a voice choice. Storage outlives
+ * the code that wrote it and can be edited by hand, so this checks shape only:
+ * an unknown engine or voice still fails at render with a clear message.
+ */
+function isPersistedPreset(value: unknown): value is VoicePreset {
+  return isRecord(value)
+    && typeof value.engineId === "string"
+    && value.engineId.length > 0
+    && typeof value.voiceId === "string"
+    && isRecord(value.settings)
+    && (value.mode === undefined || typeof value.mode === "string")
+    && (value.libraryVoiceId === undefined || typeof value.libraryVoiceId === "string")
+    && (value.label === undefined || typeof value.label === "string");
+}
+
 function readPersisted(key: string | null): PersistedDialogue | null {
   if (!key) return null;
   try {
     const raw = window.localStorage.getItem(key);
     const value = raw ? JSON.parse(raw) as Partial<PersistedDialogue> : null;
     if (!value || typeof value.source !== "string") return null;
-    const overrides = value.overrides && typeof value.overrides === "object" ? value.overrides : {};
+    // A malformed choice is dropped, so its speaker is cast from the pool
+    // again, rather than crashing the page on every load.
+    const overrides = Object.fromEntries(
+      Object.entries(isRecord(value.overrides) ? value.overrides : {})
+        .filter(([, preset]) => isPersistedPreset(preset)),
+    ) as Record<string, VoicePreset>;
     return { source: value.source, overrides };
   } catch {
     return null;

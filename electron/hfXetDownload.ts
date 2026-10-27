@@ -1,5 +1,5 @@
 import { spawn, type ChildProcessByStdio } from "child_process";
-import type { Readable } from "stream";
+import type { Readable, Writable } from "stream";
 
 export interface HfXetProgress {
   downloadedBytes: number;
@@ -56,21 +56,28 @@ export function runHfXetDownloader({
       reject(new Error("Qwen3 model download cancelled."));
       return;
     }
-    let child: ChildProcessByStdio<null, Readable, Readable>;
+    let child: ChildProcessByStdio<Writable, Readable, Readable>;
     try {
       child = spawnProcess(binaryPath, [
         "--repo", modelRepo,
         "--revision", revision,
         "--file", fileName,
         "--destination", destination,
+        // The kill timers below die with this process. If it is killed outright
+        // (a crash, SIGKILL, Task Manager), the OS closes the stdin pipe instead
+        // and the downloader exits on that, as the WebSocket bridge does.
+        "--exit-with-parent",
       ], {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
       });
     } catch (error) {
       reject(error);
       return;
     }
+    // Nothing is ever written; the pipe only has to stay open. A downloader
+    // that exits first must not turn the pipe into an unhandled 'error'.
+    child.stdin.on("error", () => {});
 
     let stdoutBuffer = "";
     let stderr = "";

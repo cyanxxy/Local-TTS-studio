@@ -57,7 +57,7 @@ export function LocalRuntimeSidebar({
         )}
       </div>
 
-      <div className="border border-black/10 rounded-xl p-4 bg-surface/55">
+      <div className="border border-border rounded-xl p-4 bg-surface/55">
         <h3 className="text-sm font-semibold text-text-secondary">Cache</h3>
 
         <div className="mt-2 space-y-1 font-mono text-xs text-text-secondary">

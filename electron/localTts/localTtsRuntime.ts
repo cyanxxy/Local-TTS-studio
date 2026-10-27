@@ -111,7 +111,7 @@ export interface LocalTtsRuntime {
   clearCache(request: unknown): Promise<{ path: string; cleared: boolean }>;
   qwen3Setup(request: unknown): Promise<Qwen3SetupResult>;
   downloadQwen3Model(request: unknown, event: IpcMainInvokeEvent): Promise<Qwen3ModelDownloadResult>;
-  chooseQwen3ModelDir(request: unknown): Promise<Qwen3ModelDirChoice>;
+  chooseQwen3ModelDir(request: unknown, event: IpcMainInvokeEvent): Promise<Qwen3ModelDirChoice>;
   readonly shutdown: ShutdownParticipant;
 }
 
@@ -505,7 +505,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
 
     qwen3Setup: (request) => qwen3.setup(request),
     downloadQwen3Model: (request, event) => qwen3.download(request, event.sender),
-    chooseQwen3ModelDir: (request) => qwen3.chooseModelDir(request),
+    chooseQwen3ModelDir: (request, event) => qwen3.chooseModelDir(request, event.sender),
 
     // Holds the quit for the worker pool shutdown and any one-shot probe
     // children (SIGTERM + SIGKILL escalation), and for every lifecycle activity

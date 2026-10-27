@@ -32,12 +32,15 @@ interface Overrides {
   autoAdvance?: boolean;
   segments?: ReaderSegment[];
   totalDuration?: number;
+  /** The player holds audio saved before the section finished. */
+  partial?: boolean;
 }
 
 function setup(overrides: Overrides = {}) {
   const clock = new PlaybackClock();
   const updateProgress = vi.fn();
   const advance = vi.fn();
+  const regenerate = vi.fn();
   const view = renderHook((props: Overrides) => useReaderProgress({
     active: props.active ?? true,
     document,
@@ -59,8 +62,10 @@ function setup(overrides: Overrides = {}) {
     updateProgress,
     autoAdvance: props.autoAdvance ?? true,
     advance,
+    isPartialAudio: () => props.partial ?? false,
+    regenerate,
   }), { initialProps: overrides });
-  return { ...view, clock, updateProgress, advance };
+  return { ...view, clock, updateProgress, advance, regenerate };
 }
 
 describe("useReaderProgress", () => {
@@ -162,5 +167,33 @@ describe("useReaderProgress", () => {
     act(() => clock.set(4));
     expect(updateProgress).not.toHaveBeenCalled();
     expect(advance).not.toHaveBeenCalled();
+  });
+
+  it("generates a section again, once, when audio saved before it finished is played out", () => {
+    const { clock, advance, regenerate, rerender } = setup({ isSynthesisComplete: false, partial: true });
+    act(() => clock.set(4));
+    expect(regenerate).toHaveBeenCalledTimes(1);
+    expect(advance).not.toHaveBeenCalled();
+    act(() => clock.set(3.99));
+    act(() => clock.set(4));
+    expect(regenerate).toHaveBeenCalledTimes(1);
+
+    // The regenerated section then continues as usual.
+    rerender({ isSynthesisComplete: true });
+    act(() => clock.set(3.99));
+    act(() => clock.set(4));
+    expect(advance).toHaveBeenCalledWith(second, { autoPlay: true, autoGenerate: true });
+  });
+
+  it("waits at the end of a stream that stopped short unless it is saved audio that never finished", () => {
+    const stopped = setup({ isSynthesisComplete: false });
+    act(() => stopped.clock.set(4));
+    expect(stopped.regenerate).not.toHaveBeenCalled();
+    expect(stopped.advance).not.toHaveBeenCalled();
+
+    const held = setup({ isSynthesisComplete: false, partial: true });
+    act(() => held.result.current.setAutoAdvanceHold(true));
+    act(() => held.clock.set(4));
+    expect(held.regenerate).not.toHaveBeenCalled();
   });
 });

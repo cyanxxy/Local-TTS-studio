@@ -7,7 +7,7 @@ import {
   type RefObject,
 } from "react";
 import { createPortal } from "react-dom";
-import { useFocusTrap } from "./useFocusTrap";
+import { isTopFocusTrap, useFocusTrap } from "./useFocusTrap";
 
 interface ViewportPopoverProps {
   anchorRef: RefObject<HTMLElement | null>;
@@ -25,10 +25,14 @@ interface ViewportPopoverProps {
 }
 
 interface PopoverPosition {
-  top: number;
+  /** Exactly one of `top` and `bottom` is set: below the anchor it hangs from its top edge, above it sits on its bottom edge. */
+  top?: number;
+  bottom?: number;
   left: number;
   width: number;
   maxHeight: number;
+  /** The corner nearest the anchor, so the opening scale grows out of it. */
+  transformOrigin: string;
 }
 
 /**
@@ -75,9 +79,13 @@ export function ViewportPopover({
       const availableAbove = rect.top - viewportTop - gap - gutter;
       const openAbove = availableBelow < 220 && availableAbove > availableBelow;
       const maxHeight = Math.max(96, Math.min(672, openAbove ? availableAbove : availableBelow));
-      const top = openAbove
-        ? Math.max(viewportTop + gutter, rect.top - gap - maxHeight)
-        : rect.bottom + gap;
+      // Opening above, the popover is pinned by its bottom edge: placing its
+      // top at `maxHeight` above the anchor left a gap as tall as the space
+      // the content did not use whenever it was shorter than the room.
+      const layoutViewportHeight = document.documentElement.clientHeight || window.innerHeight;
+      const top = openAbove ? undefined : rect.bottom + gap;
+      const bottom = openAbove ? layoutViewportHeight - (rect.top - gap) : undefined;
+      const transformOrigin = openAbove ? "bottom right" : "top right";
 
       // The capture-phase scroll listener fires for every reader auto-follow
       // step, several times a second; handing back the same object keeps an open
@@ -85,11 +93,12 @@ export function ViewportPopover({
       setPosition((previous) => (
         previous
         && previous.top === top
+        && previous.bottom === bottom
         && previous.left === left
         && previous.width === width
         && previous.maxHeight === maxHeight
           ? previous
-          : { top, left, width, maxHeight }
+          : { top, bottom, left, width, maxHeight, transformOrigin }
       ));
     };
 
@@ -130,6 +139,9 @@ export function ViewportPopover({
       // reopen it on the click that follows this press.
       if (popoverRef.current?.contains(target) || anchorRef.current?.contains(target)) return;
       if (keepOpenWithin && target instanceof Element && target.closest(keepOpenWithin)) return;
+      // A press inside a surface stacked above this one (Settings opened over
+      // the popover) belongs to that surface.
+      if (!isTopFocusTrap(popoverRef.current)) return;
       close();
     };
     document.addEventListener("mousedown", handlePointerDown);

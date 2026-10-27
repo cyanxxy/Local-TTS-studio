@@ -14,6 +14,8 @@ interface Options {
   controls: RefObject<LookaheadControls>;
   /** The engine can start its own generation (false while a background render holds it). */
   canGenerate: boolean;
+  /** The engine is running its own generation. */
+  isGenerating: boolean;
   startGenerate: () => void;
   /** A request pending for one section is dropped when this changes (another section or book). */
   scopeKey: string | null;
@@ -26,11 +28,24 @@ interface Options {
  * is aborted and the generation starts once it has wound down and the engine
  * reports it can generate. That does not depend on `canGenerate` changing: a
  * render still in its cache check or cooldown never held the engine at all.
+ *
+ * `waiting` is true from such a request until its generation is under way (or
+ * the request is dropped). A render that yielded starts over once it has wound
+ * down, so it must treat the engine as taken meanwhile.
  */
-export function useGenerateAfterLookahead({ controls, canGenerate, startGenerate, scopeKey }: Options) {
+export function useGenerateAfterLookahead({ controls, canGenerate, isGenerating, startGenerate, scopeKey }: Options) {
   const pendingRef = useRef(false);
+  const [waiting, setWaiting] = useState(false);
   // Bumped when the aborted render has wound down, to run the effect below.
   const [windDowns, setWindDowns] = useState(0);
+
+  const [waitingScope, setWaitingScope] = useState(scopeKey);
+  if (waitingScope !== scopeKey) {
+    setWaitingScope(scopeKey);
+    setWaiting(false);
+  }
+  // The generation took the engine; the look-ahead now waits on that instead.
+  if (waiting && isGenerating) setWaiting(false);
 
   const requestGenerate = useCallback(() => {
     const current = controls.current;
@@ -40,11 +55,13 @@ export function useGenerateAfterLookahead({ controls, canGenerate, startGenerate
     }
     current.preempt();
     pendingRef.current = true;
+    setWaiting(true);
     void current.settled().then(() => setWindDowns((count) => count + 1));
   }, [controls, startGenerate]);
 
   const cancelPending = useCallback(() => {
     pendingRef.current = false;
+    setWaiting(false);
   }, []);
 
   useEffect(() => {
@@ -57,5 +74,5 @@ export function useGenerateAfterLookahead({ controls, canGenerate, startGenerate
     startGenerate();
   }, [canGenerate, controls, startGenerate, windDowns]);
 
-  return { requestGenerate, cancelPending };
+  return { requestGenerate, cancelPending, waiting };
 }

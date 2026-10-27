@@ -11,9 +11,10 @@ import {
 
 type Handler = (event: unknown, request: unknown) => unknown;
 
-function makeEvent(url: string, frameUrl?: string | null, ports: unknown[] = []) {
+/** `url` is the web contents' current URL; the sending frame's defaults to it. */
+function makeEvent(url: string, frameUrl: string | null = url, ports: unknown[] = []) {
   return {
-    senderFrame: frameUrl === undefined ? undefined : frameUrl === null ? null : { url: frameUrl },
+    senderFrame: frameUrl === null ? null : { url: frameUrl },
     sender: { getURL: () => url },
     ports,
   };
@@ -60,9 +61,13 @@ describe("assertTrustedIpcSender", () => {
     expect(() => assertTrustedIpcSender(makeEvent("https://example.com"))).toThrow(UNTRUSTED_SENDER_MESSAGE);
   });
 
-  it("falls back to the web contents URL once the sending frame is gone", () => {
-    expect(ipcSenderUrl(makeEvent("app://-/reader", null))).toBe("app://-/reader");
+  it("trusts the sending frame only, and no one once that frame is gone", () => {
     expect(ipcSenderUrl(makeEvent("https://evil.test", "app://-/studio"))).toBe("app://-/studio");
+    // The web contents now shows an app page, but the frame that sent this
+    // message navigated away or was destroyed: it may not have been the app's.
+    expect(ipcSenderUrl(makeEvent("app://-/reader", null))).toBeNull();
+    expect(() => assertTrustedIpcSender(makeEvent("app://-/reader", null))).toThrow(UNTRUSTED_SENDER_MESSAGE);
+    expect(() => assertTrustedIpcSender(makeEvent("app://-/reader", "https://evil.test/"))).toThrow(UNTRUSTED_SENDER_MESSAGE);
   });
 });
 

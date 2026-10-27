@@ -28,8 +28,9 @@ describe("createLoadProgress", () => {
     progress.update("b.bin", 300);
     progress.complete("a.bin");
 
-    // b.bin announcing its size drops the true fraction to 12.5%; that is not reported.
-    expect(reports).toEqual([50, 87.5, 100]);
+    // b.bin announcing its size drops the true fraction to 12.5%; that is not
+    // reported. 87.5% reads as the nearest whole percent.
+    expect(reports).toEqual([50, 88, 100]);
   });
 
   it("weighs a file of unknown size only once it completes", () => {
@@ -89,6 +90,22 @@ describe("createLoadProgress", () => {
     progress.update("model.onnx", 50);
 
     expect(reports).toEqual([90, 10, 50]);
+  });
+
+  it("reports whole percents only, however finely the bytes arrive, and still ends at the range end", () => {
+    const { report, reports } = collect();
+    const progress = createLoadProgress({ report, range: [0, 90.5], expectedBytes: { "model.onnx": 1_000_000 } });
+
+    // Network chunks of 100 bytes: 10,000 updates for one file.
+    for (let loaded = 100; loaded < 1_000_000; loaded += 100) progress.update("model.onnx", loaded);
+    progress.complete("model.onnx");
+
+    expect(reports.length).toBeLessThanOrEqual(91);
+    expect(reports.slice(0, -1).every(Number.isInteger)).toBe(true);
+    expect(reports.every((percent, index) => index === 0 || percent > reports[index - 1])).toBe(true);
+    // The fractional end of the range is reported exactly on completion.
+    expect(reports.at(-2)).toBe(90);
+    expect(reports.at(-1)).toBe(90.5);
   });
 
   it("reports nothing once closed, even when abandoned downloads keep going", () => {

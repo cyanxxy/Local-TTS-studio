@@ -139,6 +139,38 @@ describe("VoiceDesignPanel", () => {
     expect(screen.getByLabelText("Choose preview 1")).toBeDisabled();
   });
 
+  it("cancels a slow preview run, keeping what finished (F3)", async () => {
+    let signalSeen: AbortSignal | undefined;
+    let calls = 0;
+    synthesize = vi.fn<PresetSynthesize>(async function* (_text, preset, signal) {
+      calls += 1;
+      if (calls === 1) {
+        yield { audio: speech(6, preset.settings.seed ?? 0), samplingRate: RATE };
+        return;
+      }
+      signalSeen = signal;
+      // A minutes-long render: it ends only when aborted.
+      await new Promise<void>((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)));
+    });
+    renderPanel();
+    fireEvent.change(screen.getByLabelText("Voice description"), { target: { value: "A warm, low narrator" } });
+    const generateButton = screen.getByRole("button", { name: "Generate 3 previews" });
+    generateButton.focus();
+    fireEvent.click(generateButton);
+    await waitFor(() => expect(screen.getByText("Rendering…")).toBeInTheDocument());
+    const cancel = screen.getByRole("button", { name: "Cancel" });
+    // Generate disabled itself; focus moved to Cancel rather than the page.
+    expect(cancel).toHaveFocus();
+
+    await act(async () => { fireEvent.click(cancel); });
+    expect(signalSeen?.aborted).toBe(true);
+    expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+    expect(screen.getAllByText(/^Ready/)).toHaveLength(1);
+    expect(screen.getAllByText("Cancelled")).toHaveLength(2);
+    expect(screen.getByRole("button", { name: "Generate new previews" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Generate new previews" })).toHaveFocus();
+  });
+
   it("explains a missing model and blocks generating", () => {
     renderPanel({ available: false, unavailableReason: "Install VoiceDesign first." });
     expect(screen.getByText("Install VoiceDesign first.")).toBeInTheDocument();

@@ -109,6 +109,21 @@ describe("DialogueStudioView", () => {
     expect(running.cancel).toHaveBeenCalled();
   });
 
+  it("keeps focus on the action button as Render turns into Cancel and back", () => {
+    const castableEngines = [{ id: "kokoro" as const, label: "Kokoro" }, { id: "audio8" as const, label: "Audio8" }];
+    const voicesFor = (engineId: string) => VOICES[engineId as keyof typeof VOICES] ?? [];
+    const idle = makeDialogue(SCRIPT);
+    const { rerender } = render(<DialogueStudioView dialogue={idle} castableEngines={castableEngines} voicesFor={voicesFor} />);
+    const renderButton = screen.getByRole("button", { name: "Render dialogue" });
+    renderButton.focus();
+
+    rerender(<DialogueStudioView dialogue={makeDialogue(SCRIPT, { status: "rendering", progress: { position: 1, total: 2 } })} castableEngines={castableEngines} voicesFor={voicesFor} />);
+    expect(screen.getByRole("button", { name: /Cancel \(turn 1 of 2\)/ })).toHaveFocus();
+
+    rerender(<DialogueStudioView dialogue={makeDialogue(SCRIPT, { status: "cancelled" })} castableEngines={castableEngines} voicesFor={voicesFor} />);
+    expect(screen.getByRole("button", { name: "Render dialogue" })).toHaveFocus();
+  });
+
   it("will not render without a plan and names the speakers that lack a voice", () => {
     const script = parseDialogueScript(SCRIPT);
     view(makeDialogue(SCRIPT, { plan: null, uncastSpeakers: script.speakers }));

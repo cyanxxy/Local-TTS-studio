@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { exportAudioChunks } from "../lib/audioExportClient";
 import {
   exportAudiobook,
@@ -101,10 +101,28 @@ export function useAudiobookExport({
   const controllerRef = useRef<AbortController | null>(null);
   const resumeRef = useRef<{ documentId: string; store: EncodedChapterStore } | null>(null);
   const documentId = document?.id ?? null;
+  const { hasAudio, loadAudio } = library;
+
+  // A progress write replaces the record about once a second during playback,
+  // and the export menu this reaches is memoised. The plan is keyed on the
+  // fields it reads; `start` reads the record when it runs.
+  const title = document?.title;
+  const author = document?.author;
+  const text = document?.text;
+  const chapters = document?.chapters;
+  const planSource = useMemo(() => (
+    documentId === null || title === undefined || author === undefined || text === undefined || chapters === undefined
+      ? null
+      : { id: documentId, title, author, text, chapters }
+  ), [author, chapters, documentId, text, title]);
+  const documentRef = useRef(document);
+  useLayoutEffect(() => {
+    documentRef.current = document;
+  }, [document]);
 
   const planFor = useCallback((scope: AudiobookScope) => (
-    document ? planAudiobook(document, sections, scope) : null
-  ), [document, sections]);
+    planSource ? planAudiobook(planSource, sections, scope) : null
+  ), [planSource, sections]);
 
   // Another book starts afresh: its chapters and this one's never mix.
   useEffect(() => {
@@ -113,6 +131,7 @@ export function useAudiobookExport({
   useEffect(() => () => controllerRef.current?.abort(), []);
 
   const start = useCallback((scope: AudiobookScope, format: AudiobookFormat) => {
+    const document = documentRef.current;
     if (!document || controllerRef.current) return;
     const plan = planAudiobook(document, sections, scope);
     if (!signatureParts) {
@@ -133,8 +152,8 @@ export function useAudiobookExport({
       load: async (planned, signal) => {
         if (planned.text.trim().length === 0) return { chunks: [], reused: true };
         const signature = signatureFor(planned.text);
-        if (await library.hasAudio(document.id, planned.section.id, signature)) {
-          const cached = await library.loadAudio(document.id, planned.section.id);
+        if (await hasAudio(document.id, planned.section.id, signature)) {
+          const cached = await loadAudio(document.id, planned.section.id);
           if (cached?.signature === signature && cached.synthesisComplete === true && cached.chunks.length > 0) {
             return { chunks: cached.chunks, reused: true };
           }
@@ -178,7 +197,7 @@ export function useAudiobookExport({
     }).finally(() => {
       if (controllerRef.current === controller) controllerRef.current = null;
     });
-  }, [document, encode, engineId, library, renderSection, save, sections, signatureParts]);
+  }, [encode, engineId, hasAudio, loadAudio, renderSection, save, sections, signatureParts]);
 
   const cancel = useCallback(() => {
     controllerRef.current?.abort(new DOMException("The export was cancelled.", "AbortError"));

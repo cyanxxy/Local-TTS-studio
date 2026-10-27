@@ -28,4 +28,9 @@ describe("BrowserSupportPanel", () => {
     expect(screen.getByRole("heading", { name: /limited set of models/ })).toBeInTheDocument();
     expect(screen.getByText("Supertonic runs on iOS.")).toBeInTheDocument();
   });
+
+  it("does not pulse the steady 'all local' dot", () => {
+    const { container } = render(<AppFooter runtimeBadges={["Kokoro"]} note="unused" />);
+    expect(container.querySelector(".animate-pulse")).toBeNull();
+  });
 });

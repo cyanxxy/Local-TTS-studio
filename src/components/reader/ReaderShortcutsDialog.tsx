@@ -9,7 +9,15 @@ export function ReaderShortcutsDialog({ onClose }: { onClose: () => void }) {
   useFocusTrap(dialogRef, { active: true, onEscape: onClose });
 
   return createPortal(
-    <div className="fixed inset-0 z-[130] flex items-center justify-center bg-black/25 p-4" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-[130] flex items-center justify-center bg-black/25 p-4"
+      // Dismiss on a press that starts on the backdrop itself. A click would
+      // also fire for a drag that began inside the dialog (selecting text)
+      // and was released over the backdrop.
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
       <div
         ref={dialogRef}
         role="dialog"
@@ -17,7 +25,6 @@ export function ReaderShortcutsDialog({ onClose }: { onClose: () => void }) {
         aria-label="Keyboard shortcuts"
         data-reader-shortcuts=""
         tabIndex={-1}
-        onClick={(event) => event.stopPropagation()}
         className="glass-pop w-full max-w-sm rounded-2xl p-5"
       >
         <div className="mb-3 flex items-center justify-between">

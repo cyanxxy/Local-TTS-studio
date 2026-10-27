@@ -321,6 +321,31 @@ describe("AudioPlayer", () => {
     expect(screen.queryByText(/RTF/)).toBeNull();
   });
 
+  it("opens the overflow as a disclosure: focus moves in, Escape returns it (U9)", () => {
+    renderPlayer({ variant: "dock", totalDuration: 10, segmentCount: 2, activeSegmentNumber: 1, onPlaybackRateChange: vi.fn() });
+    const trigger = screen.getByRole("button", { name: "More playback options" });
+    trigger.focus();
+    fireEvent.click(trigger);
+
+    // A speed <select> may not live in a role="menu", so this is a plain group.
+    expect(screen.queryByRole("menu")).toBeNull();
+    const panel = screen.getByRole("group", { name: "Playback options" });
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
+    expect(trigger).toHaveAttribute("aria-controls", panel.id);
+    expect(within(panel).getByRole("combobox", { name: "Playback speed" })).toHaveFocus();
+
+    fireEvent.keyDown(within(panel).getByRole("combobox", { name: "Playback speed" }), { key: "Escape" });
+    expect(screen.queryByRole("group", { name: "Playback options" })).toBeNull();
+    expect(trigger).toHaveFocus();
+  });
+
+  it("moves the seek fill and thumb by transform, not by width (U10)", () => {
+    const { container } = renderPlayer({ totalDuration: 10, segmentCount: 1, clock: clockAt(5) });
+    const slider = screen.getByRole("slider", { name: "Seek" });
+    expect(slider.querySelector("[style*='width']")).toBeNull();
+    expect(container.querySelector("[style*='translateX(-50%)']")).not.toBeNull();
+  });
+
   it("collects secondary dock actions in an overflow menu for small screens", () => {
     const onDownload = vi.fn();
     const onStop = vi.fn();
@@ -336,13 +361,13 @@ describe("AudioPlayer", () => {
     });
 
     fireEvent.click(screen.getByRole("button", { name: "More playback options" }));
-    const menu = screen.getByRole("menu", { name: "Playback options" });
-    fireEvent.click(within(menu).getByRole("menuitem", { name: "Download audio" }));
+    const panel = screen.getByRole("group", { name: "Playback options" });
+    fireEvent.click(within(panel).getByRole("button", { name: "Download audio" }));
     expect(onDownload).toHaveBeenCalledOnce();
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByRole("group", { name: "Playback options" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "More playback options" }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "Stop generation" }));
+    fireEvent.click(within(screen.getByRole("group", { name: "Playback options" })).getByRole("button", { name: "Stop generation" }));
     expect(onStop).toHaveBeenCalledOnce();
   });
 
@@ -419,7 +444,7 @@ describe("AudioPlayer", () => {
     it("keeps the cancel action in the overflow menu", () => {
       const { audioExport } = renderExporting("dock");
       fireEvent.click(screen.getByRole("button", { name: "More playback options" }));
-      fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: "Cancel export (37%)" }));
+      fireEvent.click(within(screen.getByRole("group", { name: "Playback options" })).getByRole("button", { name: "Cancel export (37%)" }));
       expect(audioExport.cancel).toHaveBeenCalledOnce();
     });
 
