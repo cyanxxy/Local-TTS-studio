@@ -217,6 +217,10 @@ pub fn neutts_codes_from_f32(data: Vec<f32>) -> Result<Vec<i32>> {
             (0.0..=MAX_NEUTTS_REFERENCE_CODE_VALUE as f32).contains(&code),
             "NeuTTS reference codes must be between 0 and {MAX_NEUTTS_REFERENCE_CODE_VALUE}."
         );
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "checked above: a whole number within the reference code range"
+        )]
         codes.push(code as i32);
     }
     Ok(codes)

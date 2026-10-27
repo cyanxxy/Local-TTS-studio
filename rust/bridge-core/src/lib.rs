@@ -15,5 +15,11 @@ pub mod ws;
 
 // Exercise the vendored sampler/prompt policy with the model-free tests.
 #[cfg(test)]
+#[allow(
+    clippy::allow_attributes_without_reason,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    reason = "vendored upstream source, kept as upstream wrote it"
+)]
 #[path = "../../vendor/qwen3-tts-rs/src/generation_policy.rs"]
 mod qwen_generation_policy;
