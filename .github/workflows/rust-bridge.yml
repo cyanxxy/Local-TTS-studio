@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # No toolchain argument: rustup installs the active toolchain, so the
       # channel, profile, and components all come from rust-toolchain.toml
       # rather than being restated here. Needs rustup 1.28+, which the runner
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Advisories, licences, bans, and sources per rust/deny.toml. The
       # action's default `--all-features` is dropped so CI checks the same
       # graph as a local `cargo deny check`.
@@ -79,8 +79,8 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "26.0"
       CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: ".nvmrc"
           cache: npm
@@ -98,7 +98,7 @@ jobs:
             echo "OPENSSL_DIR=$openssl_dir"
             echo "PKG_CONFIG_PATH=$openssl_dir/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
           } >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: rust -> local-tts-bridge/target
           env-vars: CARGO_TARGET_DIR MACOSX_DEPLOYMENT_TARGET
@@ -129,7 +129,7 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}\rust\target
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install --no-self-update
       # tch 0.20 needs LibTorch 2.7.0 (docs/local-runtimes.md). The CPU build is
       # enough to compile and lint the LibTorch code path.
@@ -141,7 +141,7 @@ jobs:
           Invoke-WebRequest -Uri "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.7.0%2Bcpu.zip" -OutFile $zip
           Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
           "LIBTORCH=$(Join-Path $env:RUNNER_TEMP 'libtorch')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: rust -> target
           env-vars: CARGO_TARGET_DIR LIBTORCH
