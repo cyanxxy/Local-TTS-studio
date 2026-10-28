@@ -61,7 +61,7 @@ function qwen3ModeFor(preset: VoicePreset): Qwen3Mode {
 
 const QWEN3_MODE_NAMES: Record<Qwen3Mode, string> = {
   customVoice: "CustomVoice",
-  voiceClone: "Base (voice clone)",
+  voiceClone: "voice clone",
   voiceDesign: "VoiceDesign",
 };
 
@@ -81,7 +81,7 @@ function pickQwen3Profile(context: PresetRequestContext, mode: Qwen3Mode): { pro
     if (entry) return { profile, modelPath: entry.modelDir };
   }
   throw new PresetRequestError(
-    `Install a Qwen3 ${QWEN3_MODE_NAMES[mode]} model in Qwen3 model setup to render this voice.`,
+    `The Qwen3 ${QWEN3_MODE_NAMES[mode]} model isn't downloaded yet. Choose Studio or Reader on this voice to download it.`,
   );
 }
 

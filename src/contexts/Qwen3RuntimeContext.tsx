@@ -101,6 +101,8 @@ interface Qwen3RuntimeContextValue extends Qwen3RuntimeSettings {
   setReferenceText: (text: string) => void;
   refreshSetup: () => Promise<void>;
   downloadModel: () => Promise<void>;
+  /** Switch to `repo` and download it, as picking it and pressing Download would. */
+  installModel: (repo: string) => void;
   chooseModelPath: () => Promise<void>;
   clearError: () => void;
 }
@@ -196,16 +198,17 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     setReadiness(entry.readiness);
   }, []);
 
-  const fetchSetup = useCallback((): Promise<void> => {
+  // `target` is the profile being switched to when the switch has not rendered yet.
+  const fetchSetup = useCallback((target: Qwen3Profile = profile): Promise<void> => {
     const bridge = window.electron?.localTts;
     if (!bridge?.getQwen3Setup) return Promise.resolve();
     const version = ++setupVersionRef.current;
     const isCurrent = () => mountedRef.current && version === setupVersionRef.current;
-    return bridge.getQwen3Setup({ modelRepo: profile.repo })
+    return bridge.getQwen3Setup({ modelRepo: target.repo })
       .then((nextSetup) => {
         if (!isCurrent()) return;
         setSetup(nextSetup);
-        applyProfileSetup(profile, nextSetup);
+        applyProfileSetup(target, nextSetup);
       })
       .catch((nextError: unknown) => {
         if (isCurrent()) setError(errorMessage(nextError));
@@ -213,23 +216,23 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
       .finally(() => {
         if (!isCurrent()) return;
         setSetupRefreshing(false);
-        setSetupLoadedRepo(profile.repo);
+        setSetupLoadedRepo(target.repo);
       });
   }, [applyProfileSetup, profile]);
 
-  const refreshSetup = useCallback(async () => {
+  const refreshSetup = useCallback(async (target?: Qwen3Profile) => {
     if (!window.electron?.localTts?.getQwen3Setup) return;
     setSetupRefreshing(true);
     setError(null);
-    await fetchSetup();
+    await fetchSetup(target);
   }, [fetchSetup]);
 
   // A later operation on the profile (a path, a download) answers what a
   // pending read would have: its result is no longer awaited.
-  const supersedeSetup = useCallback(() => {
+  const supersedeSetup = useCallback((repo: string = profile.repo) => {
     setupVersionRef.current += 1;
     setSetupRefreshing(false);
-    setSetupLoadedRepo(profile.repo);
+    setSetupLoadedRepo(repo);
   }, [profile.repo]);
 
   useEffect(() => {
@@ -299,26 +302,27 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     setReadiness(nextReadiness);
   }, [profile.repo, profileSetup?.readiness, setup, supersedeSetup]);
 
-  const downloadModel = useCallback(async () => {
+  // `target` is the selected profile, or the one being switched to in the same event.
+  const downloadProfile = useCallback(async (target: Qwen3Profile) => {
     const bridge = window.electron?.localTts;
     if (!bridge?.downloadQwen3Model) return;
     const operationVersion = ++modelPathOperationVersionRef.current;
     const downloadVersion = ++downloadVersionRef.current;
-    supersedeSetup();
+    supersedeSetup(target.repo);
     setDownloadBusy(true);
     setDownloadProgress(null);
     setError(null);
     try {
-      const result = await bridge.downloadQwen3Model({ modelRepo: profile.repo });
+      const result = await bridge.downloadQwen3Model({ modelRepo: target.repo });
       if (
         !mountedRef.current
         || operationVersion !== modelPathOperationVersionRef.current
         || downloadVersion !== downloadVersionRef.current
       ) return;
-      modelPathOverridesRef.current.delete(profile.repo);
+      modelPathOverridesRef.current.delete(target.repo);
       setModelPathState(result.modelDir);
       setReadiness(result.readiness);
-      await refreshSetup();
+      await refreshSetup(target);
     } catch (nextError) {
       if (mountedRef.current && downloadVersion === downloadVersionRef.current) {
         setError(errorMessage(nextError));
@@ -328,7 +332,17 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
         setDownloadBusy(false);
       }
     }
-  }, [profile.repo, refreshSetup, supersedeSetup]);
+  }, [refreshSetup, supersedeSetup]);
+
+  const downloadModel = useCallback(() => downloadProfile(profile), [downloadProfile, profile]);
+
+  const installModel = useCallback((repo: string) => {
+    const next = getQwen3Profile(repo);
+    if (!next || !profiles.some((candidate) => candidate.repo === repo)) return;
+    // Switching first, so the download that follows is not superseded by it.
+    if (next.repo !== profile.repo) setProfileRepo(repo);
+    void downloadProfile(next);
+  }, [downloadProfile, profile.repo, profiles, setProfileRepo]);
 
   const chooseModelPath = useCallback(async () => {
     const bridge = window.electron?.localTts;
@@ -437,10 +451,11 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     setReferenceText,
     refreshSetup,
     downloadModel,
+    installModel,
     chooseModelPath,
     clearError: () => setError(null),
   }), [
-    available, chooseModelPath, downloadBusy, downloadModel, downloadProgress, error, instruct, language,
+    available, chooseModelPath, downloadBusy, downloadModel, downloadProgress, error, installModel, instruct, language,
     maxNewTokens, modelPath, profile, profileSetup, profiles, readiness, referenceAudioBase64,
     referenceAudioDurationSec, referenceAudioName, referenceAudioSignature, referenceText, refreshSetup, seed, setInstruct, setLanguage,
     setMaxNewTokens, setModelPath, setProfileRepo, setReferenceAudio, setSeed, setSpeaker, setTemperature, setTopK,

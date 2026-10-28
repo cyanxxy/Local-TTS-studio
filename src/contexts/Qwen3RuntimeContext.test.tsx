@@ -375,6 +375,33 @@ describe("Qwen3RuntimeProvider", () => {
     expect(screen.getByRole("status")).toHaveTextContent("/models/custom|verified|false");
   });
 
+  it("installs a missing profile: switches to it and downloads that profile, not the old one", async () => {
+    const missingBase = setupResult();
+    missingBase.profiles[1] = { ...missingBase.profiles[1], readiness: "missing" as never, modelDir: "/models/base" };
+    const getQwen3Setup = vi.fn().mockResolvedValue(missingBase);
+    const downloadQwen3Model = vi.fn().mockImplementation(async () => {
+      getQwen3Setup.mockResolvedValue(setupResult());
+      return { modelRepo: BASE_REPO, revision: "a".repeat(40), modelDir: "/models/base", downloadedFiles: 3, skippedFiles: 0, readiness: "verified" };
+    });
+    window.electron = {
+      isElectron: true, platform: "darwin", arch: "arm64",
+      localTts: { getQwen3Setup, downloadQwen3Model, subscribeQwen3DownloadProgress: vi.fn(() => () => undefined) },
+    } as never;
+    function InstallConsumer() {
+      const state = useQwen3Runtime();
+      return <>
+        <output>{`${state.profile.repo}|${state.modelPath}|${state.readiness}|${state.downloadBusy}`}</output>
+        <button onClick={() => state.installModel(BASE_REPO)}>install</button>
+      </>;
+    }
+    render(<Qwen3RuntimeProvider><InstallConsumer /></Qwen3RuntimeProvider>);
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(`${CUSTOM_REPO}|/models/custom|verified|false`));
+    await act(async () => { fireEvent.click(screen.getByText("install")); });
+    expect(downloadQwen3Model).toHaveBeenCalledTimes(1);
+    expect(downloadQwen3Model).toHaveBeenCalledWith({ modelRepo: BASE_REPO });
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent(`${BASE_REPO}|/models/base|verified|false`));
+  });
+
   it("does not apply an old profile download after the selected profile changes", async () => {
     let finishDownload!: (value: {
       modelRepo: string;

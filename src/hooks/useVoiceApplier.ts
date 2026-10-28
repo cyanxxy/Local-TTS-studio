@@ -27,6 +27,8 @@ type Qwen3Controls = Pick<
   profiles: readonly Qwen3Profile[];
   setup: { profiles: ReadonlyArray<{ repo: string; readiness: string }> } | null;
   setProfileRepo: (repo: string) => void;
+  /** Switch to a profile and start downloading it. */
+  installModel: (repo: string) => void;
   setSpeaker: (speaker: string) => void;
   setLanguage: (language: string) => void;
   setInstruct: (instruct: string) => void;
@@ -58,6 +60,11 @@ interface PendingQwen3 {
 }
 
 const DESKTOP_ENGINES: readonly string[] = ["audio8", "supertonic3"];
+const QWEN3_MODE_MODEL_NAMES: Record<Qwen3Profile["mode"], string> = {
+  customVoice: "CustomVoice",
+  voiceClone: "voice clone",
+  voiceDesign: "VoiceDesign",
+};
 const SURFACE_NAME: Record<ApplySurface, string> = { studio: "Studio", reader: "the Reader" };
 
 function qwen3ModeFor(voice: CatalogVoice): Qwen3Profile["mode"] {
@@ -175,7 +182,15 @@ export function useVoiceApplier(deps: VoiceApplierDeps): (voice: CatalogVoice, s
       const mode = qwen3ModeFor(voice);
       const profile = pickInstalledProfile(qwen3, mode);
       if (!profile) {
-        return { ok: false, message: `Install a Qwen3 ${mode === "voiceClone" ? "Base" : mode === "voiceDesign" ? "VoiceDesign" : "CustomVoice"} model in Qwen3 model setup first.` };
+        // Nothing of this mode is installed: start the smallest one downloading
+        // and open its setup page, where the progress shows, rather than leave
+        // the user to find and pick the right model themselves.
+        const missing = qwen3.profiles.find((candidate) => candidate.mode === mode);
+        const name = QWEN3_MODE_MODEL_NAMES[mode];
+        if (!missing) return { ok: false, message: `This build has no Qwen3 ${name} model.` };
+        qwen3.installModel(missing.repo);
+        current.navigate("qwen3");
+        return { ok: false, message: `Downloading the Qwen3 ${name} model. Use ${voice.name} again once it finishes.` };
       }
       let reference: PendingQwen3["reference"] = null;
       if (mode === "voiceClone") {

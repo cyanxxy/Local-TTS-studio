@@ -4,6 +4,15 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Using a cloned voice without a Qwen3 voice-clone (Base) model only said
+  "Install a Qwen3 Base model in Qwen3 model setup first", and setup's
+  Download button fetched whichever model the picker showed, usually the
+  CustomVoice one already installed. Choosing Studio or Reader on such a voice
+  now selects the 0.6B Base model, starts its download and opens the Qwen3
+  page with the progress; the Voice Library preview says to do so.
+
 ## [1.10.2] - 2026-10-27
 
 ### Added
