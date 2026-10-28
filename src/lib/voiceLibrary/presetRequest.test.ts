@@ -135,7 +135,7 @@ describe("buildPresetRequest", () => {
   it("explains what is missing instead of failing inside the bridge", async () => {
     const noModel = context({ qwen3Setup: setupOf(customVoice) });
     await expect(buildPresetRequest("Hi.", preset({ engineId: "qwen3", voiceId: "x", mode: "voiceDesign" }), noModel))
-      .rejects.toThrow(/Install a Qwen3 VoiceDesign model/);
+      .rejects.toThrow(/Qwen3 VoiceDesign model isn't downloaded yet/);
     await expect(buildPresetRequest("Hi.", preset({ engineId: "qwen3", voiceId: "x", mode: "voiceClone" }), context()))
       .rejects.toThrow(/no saved reference/);
     const missingAudio = context({ loadVoiceAudio: async () => null });

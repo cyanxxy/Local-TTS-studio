@@ -35,6 +35,7 @@ function setup(overrides: Partial<VoiceApplierDeps> = {}, qwen: Partial<VoiceApp
     referenceAudioBase64: null,
     setup: { profiles: [customVoice, base, design].map((profile) => ({ repo: profile.repo, readiness: "verified" })) },
     setProfileRepo: vi.fn(),
+    installModel: vi.fn(),
     setSpeaker: vi.fn(),
     setLanguage: vi.fn(),
     setInstruct: vi.fn(),
@@ -124,12 +125,19 @@ describe("useVoiceApplier", () => {
     expect(qwen3.setProfileRepo).not.toHaveBeenCalled();
   });
 
-  it("explains a missing Qwen3 model or reference instead of half-applying", async () => {
+  it("starts downloading a missing Base model and opens its setup page instead of half-applying", async () => {
     const none = setup({}, { setup: { profiles: [] } });
     let result;
     await act(async () => { result = await none.hook.result.current(entry(clone), "studio"); });
-    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("Install a Qwen3 Base model") });
+    expect(result).toMatchObject({ ok: false, message: expect.stringContaining("Downloading the Qwen3 voice clone model") });
+    expect(none.qwen3.installModel).toHaveBeenCalledWith(base.repo);
+    expect(none.deps.navigate).toHaveBeenCalledWith("qwen3");
+    expect(none.deps.selectDesktopModel).not.toHaveBeenCalled();
     expect(none.qwen3.setProfileRepo).not.toHaveBeenCalled();
+  });
+
+  it("explains a missing Qwen3 runtime or reference instead of half-applying", async () => {
+    let result;
 
     const unavailable = setup({}, { available: false });
     await act(async () => { result = await unavailable.hook.result.current(entry(qwenPreset), "studio"); });
