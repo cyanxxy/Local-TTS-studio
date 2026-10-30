@@ -16,6 +16,7 @@
 import { promises as fs, type Dirent } from "fs";
 import path from "path";
 import { getDirectorySizeBytes } from "../directorySize";
+import { removeTreeOptions } from "../fsRetry";
 import type { LocalCacheInfo } from "../localTtsIpc";
 import type { NativeModelDescriptor } from "./descriptor";
 
@@ -66,7 +67,7 @@ export async function clearNativeModelCache(
   model: CacheLocation,
 ): Promise<{ path: string; cleared: boolean }> {
   const cachePath = getNativeModelCacheDir(userDataPath, model);
-  await fs.rm(cachePath, { recursive: true, force: true });
+  await fs.rm(cachePath, removeTreeOptions());
   return { path: cachePath, cleared: true };
 }
 
@@ -104,7 +105,7 @@ export async function pruneStaleNativeModelRevisions(
 
   const pruned = await Promise.all(stale.map(async (name) => {
     try {
-      await fs.rm(path.join(cachePath, name), { recursive: true, force: true });
+      await fs.rm(path.join(cachePath, name), removeTreeOptions());
       return name;
     } catch (err) {
       console.warn(`[${model.cacheNamespace}] Could not prune stale model revision ${name}:`, err);

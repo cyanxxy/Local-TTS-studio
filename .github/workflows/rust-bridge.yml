@@ -10,6 +10,8 @@ on:
       # Controls how the vendored qwen3-tts-rs tree is checked out.
       - ".gitattributes"
       - "scripts/*rust*"
+      - "scripts/verify-electron-package.mjs"
+      - "scripts/install-windows.ps1"
       - ".npmrc"
       - ".nvmrc"
       - "package.json"
@@ -22,6 +24,8 @@ on:
       # Controls how the vendored qwen3-tts-rs tree is checked out.
       - ".gitattributes"
       - "scripts/*rust*"
+      - "scripts/verify-electron-package.mjs"
+      - "scripts/install-windows.ps1"
       - ".npmrc"
       - ".nvmrc"
       - "package.json"
@@ -125,7 +129,7 @@ jobs:
   check-windows:
     name: Check bridge (Windows x64)
     runs-on: windows-2025
-    timeout-minutes: 90
+    timeout-minutes: 120
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}\rust\target
     steps:
@@ -139,6 +143,10 @@ jobs:
           $ProgressPreference = "SilentlyContinue"
           $zip = Join-Path $env:RUNNER_TEMP "libtorch.zip"
           Invoke-WebRequest -Uri "https://download.pytorch.org/libtorch/cpu/libtorch-win-shared-with-deps-2.7.0%2Bcpu.zip" -OutFile $zip
+          # PyTorch publishes no checksums; the digest is pinned here and in
+          # scripts/install-windows.ps1, so a re-uploaded archive fails both.
+          $digest = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLowerInvariant()
+          if ($digest -ne "2267cd447052bc839df147afc03865b5569336f9a45c43841142844e2011a561") { throw "The LibTorch archive changed: $digest" }
           Expand-Archive -Path $zip -DestinationPath $env:RUNNER_TEMP
           "LIBTORCH=$(Join-Path $env:RUNNER_TEMP 'libtorch')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -154,3 +162,20 @@ jobs:
       # not run: they would need the LibTorch DLLs on PATH and models.
       - name: Clippy
         run: cargo clippy --locked --release --manifest-path rust/Cargo.toml --all-targets -- -D warnings
+      # Build, package, install and start what a Windows user gets, through the
+      # one-command installer under Windows PowerShell 5.1, the shell every
+      # Windows 11 has: its private Node, the bridge with its LibTorch and
+      # Visual C++ runtime DLLs (build-rust-bridge.mjs fails when the runtime
+      # cannot be found), the NSIS installer, which the afterPack check
+      # inspects (scripts/verify-electron-package.mjs), and a silent per-user
+      # install. The runner image already has every prerequisite, so winget is
+      # never needed here.
+      - name: Check prerequisites with the Windows installer
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Check -Source .
+      - name: Build and install with the Windows installer
+        shell: powershell
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Source .
+      - name: Probe installed bridge
+        shell: pwsh
+        run: '& "$env:LOCALAPPDATA\Programs\Open TTS\resources\dist-rust\open-tts-local-bridge.exe" --action probe --model qwen3 --cache-dir "$env:RUNNER_TEMP\open-tts-probe"'

@@ -93,7 +93,7 @@ parse_args() {
 
 check_platform() {
   say "Checking this Mac"
-  [[ $(uname -s) == Darwin ]] || die "This installer is for macOS. On Windows, see docs/development.md."
+  [[ $(uname -s) == Darwin ]] || die "This installer is for macOS. On Windows, use scripts/install-windows.ps1."
   [[ $(sysctl -n hw.optional.arm64 2>/dev/null || echo 0) == 1 ]] \
     || die "Open TTS needs an Apple Silicon Mac (M1 or newer)."
   [[ $(sysctl -n sysctl.proc_translated 2>/dev/null || echo 0) == 0 ]] \

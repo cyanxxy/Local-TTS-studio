@@ -184,6 +184,36 @@ describe("createShutdownCoordinator", () => {
     expect(quit).toHaveBeenCalledTimes(1);
   });
 
+  it("gives only the participant that asks for it a longer wait", async () => {
+    vi.useFakeTimers();
+    const quit = vi.fn();
+    const coordinator = createShutdownCoordinator({ timeoutMs: 2_500, quit });
+    const slow = deferred();
+    coordinator.register(participant("wedged", () => new Promise(() => undefined)));
+    coordinator.register({ ...participant("documents", () => slow.promise), timeoutMs: 10_000 });
+
+    coordinator.handleBeforeQuit({ preventDefault: vi.fn() });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(quit).not.toHaveBeenCalled();
+
+    slow.resolve();
+    await flushMicrotasks();
+    expect(quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("still cuts the longer wait off at the participant's own bound", async () => {
+    vi.useFakeTimers();
+    const quit = vi.fn();
+    const coordinator = createShutdownCoordinator({ timeoutMs: 2_500, quit });
+    coordinator.register({ ...participant("documents", () => new Promise(() => undefined)), timeoutMs: 10_000 });
+
+    coordinator.handleBeforeQuit({ preventDefault: vi.fn() });
+    await vi.advanceTimersByTimeAsync(9_999);
+    expect(quit).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(quit).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps waiting for the others when one participant's work rejects", async () => {
     const quit = vi.fn();
     const onParticipantError = vi.fn();

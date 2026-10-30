@@ -1,5 +1,6 @@
 import { promises as fs } from "fs";
 import path from "path";
+import { renameWithRetry } from "./fsRetry";
 import { FileDigestCache } from "./nativeModels/fileDigest";
 import { readHubJson, requestUrl, type UrlRequest } from "./nativeModels/hubHttps";
 import { createProgressThrottle } from "./nativeModels/progressThrottle";
@@ -344,7 +345,7 @@ export async function adoptLegacyQwen3ModelDir(
 
   await fs.mkdir(path.dirname(revisionDir), { recursive: true });
   try {
-    await fs.rename(legacyDir, revisionDir);
+    await renameWithRetry(legacyDir, revisionDir);
   } catch (error) {
     // Setup and download IPC can race during renderer startup. If another
     // caller already adopted the directory, use its result; otherwise retain

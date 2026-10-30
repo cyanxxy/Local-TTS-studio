@@ -5,6 +5,7 @@ import { EventEmitter } from "events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { NativeFailureDiagnostics } from "../errors";
 import { BRIDGE_RESULT_PREFIX } from "../localTtsIpc";
+import { bridgeWorkingDirectory } from "./bridgeEnvironment";
 import { createProbeRunner, type ProbeRunnerOptions } from "./probeRunner";
 
 class FakeChild extends EventEmitter {
@@ -96,7 +97,7 @@ describe("createProbeRunner", () => {
     expect(spawn).toHaveBeenCalledWith(
       REQUEST.bridgeBinary,
       ["--action", "probe", "--model", "qwen3", "--cache-dir", REQUEST.cacheDir],
-      { stdio: ["pipe", "pipe", "pipe"], env: REQUEST.env, cwd: REQUEST.cacheDir },
+      { stdio: ["pipe", "pipe", "pipe"], env: REQUEST.env, cwd: bridgeWorkingDirectory(REQUEST.cacheDir), windowsHide: true },
     );
     expect(children[0].stdinWrites).toEqual(["{}"]);
     expect(children[0].stdinEnded).toBe(true);

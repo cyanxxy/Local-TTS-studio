@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { MSVC_RUNTIME_MIN_VERSION, msvcRedistVersionIsCurrent } from "./msvc-runtime.mjs";
 import { resolveRustTargetDir, rustBuildEnv } from "./rust-target-dir.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -25,6 +26,9 @@ const nativeLibraryPattern = process.platform === "win32"
   : process.platform === "darwin"
     ? /^lib(ggml|llama|mtmd).*\.dylib$/i
     : /^lib(ggml|llama|mtmd).*\.so(?:\.\d+)*$/i;
+
+// The Visual C++ runtime's redistributable DLLs; see copyMsvcRuntime.
+const MSVC_RUNTIME_DLL = /^(?:vcruntime140(?:_\d+)?|msvcp140(?:_[a-z0-9_]+)?|concrt140|vccorlib140|vcomp140)\.dll$/i;
 
 if (!fs.existsSync(manifestPath)) {
   throw new Error(`Rust bridge manifest not found at ${manifestPath}`);
@@ -99,6 +103,10 @@ if (process.platform === "win32") {
   }
 }
 
+if (process.platform === "win32") {
+  copyMsvcRuntime();
+}
+
 if (process.platform !== "win32") {
   fs.chmodSync(copiedBinaryPath, 0o755);
   fs.chmodSync(copiedXetDownloaderPath, 0o755);
@@ -108,6 +116,84 @@ if (process.platform === "darwin") {
   if (process.arch === "arm64") copyMlxMetallib();
   makeSelfContainedDarwin(outDir, copiedBinaryPath);
   makeSelfContainedDarwin(outDir, copiedXetDownloaderPath);
+}
+
+// The bridge, LibTorch, llama.cpp's OpenMP build and onnxruntime-node all link
+// the Visual C++ runtime dynamically, and a clean Windows install does not have
+// it. Ship the redistributable DLLs app-locally (Microsoft's supported
+// alternative to running vc_redist): next to the bridge here, and next to the
+// app executable through `win.extraFiles`, for the native modules Electron loads.
+// MSVC_RUNTIME_DLL (top of file) names the files.
+//
+// An app-local runtime is loaded ahead of the one in System32, so it must be at
+// least as new as the toolset any shipped binary was built with: a module
+// compiled with MSVC 14.40 (VS 2022 17.10) or later crashes in std::mutex on an
+// older msvcp140.dll, and the prebuilt onnxruntime-node and sharp addons are
+// built with current toolsets. msvcRedistVersionIsCurrent refuses older redists.
+function msvcRedistRoots() {
+  const roots = [];
+  if (process.env.VCToolsRedistDir) roots.push(process.env.VCToolsRedistDir);
+  const vswhere = path.join(
+    process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
+    "Microsoft Visual Studio",
+    "Installer",
+    "vswhere.exe",
+  );
+  if (fs.existsSync(vswhere)) {
+    const installations = execFileSync(vswhere, [
+      "-latest",
+      "-products",
+      "*",
+      "-requires",
+      "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+      "-property",
+      "installationPath",
+    ], { encoding: "utf8" }).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (const installation of installations) {
+      const msvcDir = path.join(installation, "VC", "Redist", "MSVC");
+      if (!fs.existsSync(msvcDir)) continue;
+      const versions = fs.readdirSync(msvcDir)
+        .filter((name) => /^\d+(?:\.\d+)+$/.test(name))
+        .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+      roots.push(...versions.map((version) => path.join(msvcDir, version)));
+    }
+  }
+  return roots;
+}
+
+function copyMsvcRuntime() {
+  const roots = msvcRedistRoots();
+  const outdated = roots.filter((root) => !msvcRedistVersionIsCurrent(root));
+  for (const root of roots.filter((candidate) => msvcRedistVersionIsCurrent(candidate))) {
+    const archDir = path.join(root, "x64");
+    if (!fs.existsSync(archDir)) continue;
+    const runtimeDirs = fs.readdirSync(archDir)
+      .filter((name) => /^Microsoft\.VC\d+\.(?:CRT|OpenMP)$/i.test(name))
+      .map((name) => path.join(archDir, name));
+    if (!runtimeDirs.some((dir) => /\.CRT$/i.test(dir))) continue;
+    const copied = [];
+    for (const dir of runtimeDirs) {
+      for (const name of fs.readdirSync(dir)) {
+        if (!MSVC_RUNTIME_DLL.test(name) || copiedNativeLibraries.has(name)) continue;
+        fs.copyFileSync(path.join(dir, name), path.join(outDir, name));
+        copiedNativeLibraries.add(name);
+        copied.push(name);
+      }
+    }
+    console.log(`Bundled the Visual C++ runtime from ${archDir}: ${copied.join(", ")}`);
+    return;
+  }
+  if (outdated.length > 0) {
+    throw new Error(
+      `Windows packaging bundles the Visual C++ runtime, but the newest redistributable found (${outdated[0]}) `
+      + `is older than ${MSVC_RUNTIME_MIN_VERSION.join(".")}, which the shipped native modules need. Update the `
+      + "Visual Studio C++ build tools (Visual Studio Installer > Update).",
+    );
+  }
+  throw new Error(
+    "Windows packaging bundles the Visual C++ runtime, but no x64 redistributable was found. "
+    + "Install the Visual Studio C++ build tools, or run from a Developer prompt so VCToolsRedistDir is set.",
+  );
 }
 
 // MLX first looks next to the running executable for its compiled Metal kernels.

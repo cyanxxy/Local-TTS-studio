@@ -5,6 +5,7 @@ import { promises as fs } from "fs";
 import type { ShutdownParticipant } from "../appShutdown";
 import type { DiagnosticsLogger } from "../diagnostics";
 import { getDirectorySizeBytes } from "../directorySize";
+import { removeTreeOptions } from "../fsRetry";
 import {
   describeError,
   errorMessage,
@@ -47,6 +48,7 @@ import {
   type WorkerExitReason,
 } from "../webSocketBridgeWorker";
 import {
+  bridgeWorkingDirectory,
   buildRustBridgeEnv,
   createBridgeEnvironment,
   type BridgeEnvironmentOptions,
@@ -204,7 +206,8 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
             {
               stdio: ["pipe", "pipe", "pipe"],
               env: { ...env, OPEN_TTS_WS_AUTH_TOKEN: authToken },
-              cwd: cacheDir,
+              cwd: bridgeWorkingDirectory(cacheDir),
+              windowsHide: true,
             },
           ),
       });
@@ -497,7 +500,7 @@ export function createLocalTtsRuntime(options: LocalTtsRuntimeOptions): LocalTts
       return lifecycle.clear(model, async () => {
         await webSocketBridgeWorkers?.shutdown(model);
         try {
-          await fs.rm(cachePath, { recursive: true, force: true });
+          await fs.rm(cachePath, removeTreeOptions());
         } finally {
           // Managed Qwen3 folders live inside this cache; even a partial
           // removal must be noticed by the next request.

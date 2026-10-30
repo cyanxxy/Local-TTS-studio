@@ -1,17 +1,20 @@
 diff --git a/Cargo.toml b/Cargo.toml
-index 7dca060..51dbbc7 100644
+index 7dca060..569759e 100644
 --- a/Cargo.toml
 +++ b/Cargo.toml
-@@ -16,7 +16,7 @@ exclude = ["models/", "*.wav", ".DS_Store"]
+@@ -16,7 +16,10 @@ exclude = ["models/", "*.wav", ".DS_Store"]
  tch = { version = "0.20", optional = true }
  
  # Tokenization
 -tokenizers = "0.21"
-+tokenizers = "0.23"
++# Open TTS: no `esaxx_fast`. Its C++ is built with the static MSVC runtime (/MT),
++# which cannot link with LibTorch and llama.cpp (/MD) on Windows, and it only
++# speeds up Unigram training, which inference never runs.
++tokenizers = { version = "0.23", default-features = false, features = ["onig", "progressbar"] }
  
  # Serialization
  serde = { version = "1.0", features = ["derive"] }
-@@ -25,39 +25,57 @@ serde_json = "1.0"
+@@ -25,39 +28,57 @@ serde_json = "1.0"
  # Audio processing
  hound = "3.5"
  rubato = "0.16"
@@ -85,7 +88,7 @@ index 7dca060..51dbbc7 100644
  
  [build-dependencies]
  cmake = "0.1"
-@@ -65,26 +83,37 @@ cmake = "0.1"
+@@ -65,26 +86,37 @@ cmake = "0.1"
  [[bin]]
  name = "tts"
  path = "src/bin/tts.rs"

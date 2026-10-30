@@ -46,6 +46,23 @@ describe("useAppShortcuts", () => {
     expect(props.onNavigate).toHaveBeenNthCalledWith(2, "reader");
   });
 
+  it("switches pages by physical digit key on layouts whose digit row types other characters", () => {
+    const { props } = setup();
+
+    expect(press({ key: "&", code: "Digit1", ctrlKey: true }).defaultPrevented).toBe(true);
+    press({ key: "é", code: "Digit2", ctrlKey: true });
+    expect(props.onNavigate).toHaveBeenNthCalledWith(1, "studio");
+    expect(props.onNavigate).toHaveBeenNthCalledWith(2, "reader");
+  });
+
+  it("leaves shifted digit combinations alone", () => {
+    const { props } = setup();
+
+    expect(press({ key: "!", code: "Digit1", ctrlKey: true, shiftKey: true }).defaultPrevented).toBe(false);
+    press({ key: "@", code: "Digit2", ctrlKey: true, shiftKey: true });
+    expect(props.onNavigate).not.toHaveBeenCalled();
+  });
+
   it("leaves everything but the settings shortcut to an open settings dialog", () => {
     const visible = surface();
     const { props } = setup({ settingsOpen: true, surface: visible });

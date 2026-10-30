@@ -143,7 +143,7 @@ export const QWEN3_PROFILES = [
     provider: "libtorch",
     platforms: ["win32"],
     weightFormat: "safetensors",
-    label: "CustomVoice · 0.6B · CUDA/CPU",
+    label: "CustomVoice · 0.6B · LibTorch",
     requiredFiles: REQUIRED_MODEL_FILES,
   },
   {
@@ -154,7 +154,7 @@ export const QWEN3_PROFILES = [
     provider: "libtorch",
     platforms: ["win32"],
     weightFormat: "safetensors",
-    label: "CustomVoice · 1.7B · CUDA/CPU",
+    label: "CustomVoice · 1.7B · LibTorch",
     requiredFiles: REQUIRED_MODEL_FILES,
   },
   {
@@ -165,7 +165,7 @@ export const QWEN3_PROFILES = [
     provider: "libtorch",
     platforms: ["win32"],
     weightFormat: "safetensors",
-    label: "Voice clone · 0.6B · CUDA/CPU",
+    label: "Voice clone · 0.6B · LibTorch",
     requiredFiles: REQUIRED_MODEL_FILES,
   },
   {
@@ -176,7 +176,7 @@ export const QWEN3_PROFILES = [
     provider: "libtorch",
     platforms: ["win32"],
     weightFormat: "safetensors",
-    label: "Voice clone · 1.7B · CUDA/CPU",
+    label: "Voice clone · 1.7B · LibTorch",
     requiredFiles: REQUIRED_MODEL_FILES,
   },
   {
@@ -187,7 +187,7 @@ export const QWEN3_PROFILES = [
     provider: "libtorch",
     platforms: ["win32"],
     weightFormat: "safetensors",
-    label: "VoiceDesign · 1.7B · CUDA/CPU",
+    label: "VoiceDesign · 1.7B · LibTorch",
     requiredFiles: REQUIRED_MODEL_FILES,
   },
 ] as const satisfies readonly Qwen3Profile[];

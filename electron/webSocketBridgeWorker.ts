@@ -327,16 +327,19 @@ export function createWebSocketBridgeWorkerPool<TModel extends string>({
   }
 
   function killWorker(model: TModel, worker: Worker, reason: WorkerExitReason): void {
+    let shutdownSent = false;
     try {
       if (isOpen(worker.socket)) {
         worker.socket.send(SHUTDOWN_COMMAND);
+        shutdownSent = true;
       }
     } catch {
       // Best-effort graceful shutdown before hard kill.
     }
     disposeWorker(model, worker, reason);
     closeQuietly(worker.socket);
-    worker.process.hardKill();
+    // A failed bridge may be hung; it gets no grace to act on the command.
+    worker.process.hardKill({ shutdownSent: shutdownSent && reason !== "failed" });
   }
 
   async function killWorkerAndWait(model: TModel, worker: Worker): Promise<void> {

@@ -113,6 +113,7 @@
     "productName": "Open TTS",
     "mac": {
       "artifactName": "Open-TTS-${version}-macOS-${arch}-unsigned.${ext}",
+      "icon": "build/icon.icns",
       "category": "public.app-category.productivity",
       "minimumSystemVersion": "26.0",
       "identity": null,
@@ -147,6 +148,7 @@
     },
     "win": {
       "artifactName": "Open-TTS-${version}-Windows-${arch}-CPU-unsigned.${ext}",
+      "icon": "build/icon.ico",
       "files": [
         "dist/**/*",
         "dist-electron/**/*",
@@ -154,6 +156,19 @@
         "!**/node_modules/onnxruntime-node/bin/napi-v6/linux{,/**/*}",
         "!**/node_modules/onnxruntime-node/bin/napi-v6/darwin{,/**/*}",
         "!**/node_modules/onnxruntime-node/bin/napi-v6/win32/!(${arch}){,/**/*}"
+      ],
+      "extraFiles": [
+        {
+          "from": "dist-rust",
+          "to": ".",
+          "filter": [
+            "vcruntime140*.dll",
+            "msvcp140*.dll",
+            "concrt140.dll",
+            "vccorlib140.dll",
+            "vcomp140.dll"
+          ]
+        }
       ],
       "target": [
         {

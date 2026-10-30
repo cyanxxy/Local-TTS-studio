@@ -59,5 +59,10 @@ export default {
     ...base.win,
     artifactName: "Open-TTS-${version}-Windows-${arch}-CPU.${ext}",
     forceCodeSigning: true,
+    // electron-builder signs only .exe files by default. Smart App Control in
+    // enforcement mode also refuses unsigned DLLs and native modules, which
+    // here are the bridge's LibTorch and llama.cpp libraries, the Visual C++
+    // runtime, and the onnxruntime, sharp and LiteParse addons.
+    signExts: [".dll", ".node"],
   },
 };

@@ -65,6 +65,52 @@ describe("Electron package file scope", () => {
     expect(fs.existsSync(path.resolve("scripts/verify-electron-package.mjs"))).toBe(true);
   });
 
+  /* onnxruntime-node and the bridge link the Visual C++ runtime dynamically and a clean Windows
+     install lacks it, so build-rust-bridge.mjs stages the DLLs in dist-rust and the Windows build
+     also copies them beside the app executable, where Electron's native modules look. */
+  it("ships the Visual C++ runtime beside the Windows executable", () => {
+    const extraFiles = (metadata.build?.win as { extraFiles?: Array<{ from: string; to: string; filter: string[] }> })?.extraFiles ?? [];
+    expect(extraFiles).toContainEqual(expect.objectContaining({
+      from: "dist-rust",
+      to: ".",
+      filter: expect.arrayContaining(["vcruntime140*.dll", "msvcp140*.dll"]),
+    }));
+    expect(metadata.build?.mac).not.toHaveProperty("extraFiles");
+  });
+
+  /* Each platform gets its own file: the ICO fills its canvas for Windows' small sizes, and the
+     ICNS follows Apple's grid (an 824 px squircle on a 1024 px canvas), without which macOS 26
+     shows the icon inside a grey tile. */
+  it("gives the Windows executable and installer the Open TTS icon", () => {
+    const icon = (metadata.build?.win as { icon?: string })?.icon;
+    expect(icon).toBe("build/icon.ico");
+    const ico = fs.readFileSync(path.resolve(icon!));
+    expect(ico.readUInt16LE(2)).toBe(1);
+    const sizes = Array.from({ length: ico.readUInt16LE(4) }, (_, i) => ico.readUInt8(6 + i * 16) || 256);
+    expect(sizes).toEqual(expect.arrayContaining([16, 32, 48, 256]));
+  });
+
+  it("gives the macOS app the Open TTS icon", () => {
+    const icon = (metadata.build?.mac as { icon?: string })?.icon;
+    expect(icon).toBe("build/icon.icns");
+    const icns = fs.readFileSync(path.resolve(icon!));
+    expect(icns.subarray(0, 4).toString("latin1")).toBe("icns");
+    expect(icns.readUInt32BE(4)).toBe(icns.length);
+  });
+
+  it("names the Windows runtime files a package cannot start without", async () => {
+    const { missingWindowsRuntimeFiles } = await import("./scripts/verify-electron-package.mjs");
+    const present = new Set([
+      path.join("res", "dist-rust", "open-tts-local-bridge.exe"),
+      path.join("res", "dist-rust", "open-tts-hf-xet-downloader.exe"),
+      ...["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"].map((name) => path.join("res", "dist-rust", name)),
+    ]);
+
+    expect(missingWindowsRuntimeFiles("app", "res", (file: import("node:fs").PathLike) => present.has(String(file)))).toEqual(
+      ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"].map((name) => path.join("app", name)),
+    );
+  });
+
   /* @huggingface/transformers declares sharp as a hard dependency and imports it at module scope,
      so any Audio8 generation loads sharp's prebuilt binary. Electron copies .node files out of
      app.asar into a temp directory before dlopen, which breaks sharp's @loader_path-relative rpath
@@ -98,7 +144,8 @@ describe("Electron package file scope", () => {
       identity: "Developer ID Application",
       notarize: true,
     });
-    expect(release.win).toMatchObject({ forceCodeSigning: true });
+    expect(release.win).toMatchObject({ forceCodeSigning: true, signExts: [".dll", ".node"] });
+    expect(release.mac).not.toHaveProperty("signExts");
 
     expect(metadata.build?.mac).toMatchObject({
       hardenedRuntime: false,

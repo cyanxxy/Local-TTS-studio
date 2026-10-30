@@ -25,7 +25,11 @@ IndexedDB.
 Electron uses the public-domain SQLite engine included with its Node.js runtime
 through `node:sqlite`; there is no native package to install or rebuild. The
 database is named `reader-library.sqlite3` and lives under Electron's
-platform-specific `app.getPath("userData")` directory. A dedicated worker owns
+platform-specific `app.getPath("userData")` directory. On Windows a new install
+moves that directory from the roaming `%APPDATA%\Open TTS` to
+`%LOCALAPPDATA%\Open TTS`, so domain profiles do not sync gigabytes of model
+cache at every sign-in; an install that already has the roaming folder keeps
+using it (`electron/userDataLocation.ts`). A dedicated worker owns
 the connection so database waits and large writes cannot block Electron's main
 thread. Generated PCM crosses process boundaries one bounded chunk at a time
 with backpressure instead of as one large IPC payload.
