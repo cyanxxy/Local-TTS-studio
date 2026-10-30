@@ -16,7 +16,10 @@ exclude = ["models/", "*.wav", ".DS_Store"]
 tch = { version = "0.20", optional = true }
 
 # Tokenization
-tokenizers = "0.23"
+# Open TTS: no `esaxx_fast`. Its C++ is built with the static MSVC runtime (/MT),
+# which cannot link with LibTorch and llama.cpp (/MD) on Windows, and it only
+# speeds up Unigram training, which inference never runs.
+tokenizers = { version = "0.23", default-features = false, features = ["onig", "progressbar"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }

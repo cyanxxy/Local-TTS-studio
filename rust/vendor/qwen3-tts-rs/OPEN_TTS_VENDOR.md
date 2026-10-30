@@ -59,7 +59,13 @@ native backend used by Open TTS.
 
 The patch also refreshes the source-compatible `tokenizers`, `base64`, and
 `tower-http` dependency majors, and pins `base64` to `default-features = false`
-with only `std` so 0.23's default `simd-unsafe` engines stay out of the build;
+with only `std` so 0.23's default `simd-unsafe` engines stay out of the build.
+`tokenizers` also drops its default `esaxx_fast` feature (keeping `onig` and
+`progressbar`): `esaxx-rs` builds its C++ with the static MSVC runtime (`/MT`,
+hard-coded in its build script), and MSVC refuses to link it into a bridge
+whose LibTorch and llama.cpp use the dynamic one (`/MD`, LNK2038). The feature
+only speeds up Unigram training; without it `tokenizers` uses its pure-Rust
+suffix array, and inference never reaches either;
 native/audio-coupled dependencies remain at their pinned versions. Only the
 `tokenizers` and `base64` bumps are verified here: both are used by the crate
 library, which Open TTS compiles through the vendored MLX backend and covers

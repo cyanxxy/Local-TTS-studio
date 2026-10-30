@@ -28,6 +28,11 @@ All notable changes to Open TTS are documented here.
   page with the progress; the Voice Library preview says to do so.
 - Choosing such a voice again while its model downloads joins that download
   instead of starting a second one.
+- The Windows bridge did not link: `tokenizers`' default `esaxx_fast`
+  feature compiles C++ with the static MSVC runtime (`/MT`), which MSVC will
+  not link with LibTorch and llama.cpp (`/MD`, LNK2038). The vendored
+  `qwen3-tts-rs` now leaves that training-only feature out; CI had only run
+  Clippy on Windows, which never links.
 - Windows: a console window no longer opens each time a model's bridge starts
   or is probed (`windowsHide`).
 - Windows: the bridge now receives `Path`, `windir`, `APPDATA`,
