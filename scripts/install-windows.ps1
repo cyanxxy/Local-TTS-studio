@@ -256,11 +256,17 @@ Set OPEN_TTS_INSTALL_HOME to keep the installer's files somewhere other than
     $cmake = Find-Command 'cmake'
     if ($cmake) { Note "CMake: $cmake" }
 
-    # libclang, which bindgen loads to generate the llama.cpp bindings.
+    # libclang, which bindgen loads to generate the llama.cpp bindings. bindgen
+    # also takes the compiler's own headers from the `clang` it finds on PATH,
+    # and a libclang of another version cannot parse them (`use of undeclared
+    # identifier '__builtin_ia32_...'`), so the clang already on PATH wins, and
+    # whichever folder is chosen goes to the front of PATH below.
+    $clangOnPath = Find-Command 'clang'
     $libclangDirs = @(
       $env:LIBCLANG_PATH,
-      (Join-Path $vs 'VC\Tools\Llvm\x64\bin'),
-      (Join-Path $env:ProgramFiles 'LLVM\bin')
+      $(if ($clangOnPath) { Split-Path $clangOnPath } else { $null }),
+      (Join-Path $env:ProgramFiles 'LLVM\bin'),
+      (Join-Path $vs 'VC\Tools\Llvm\x64\bin')
     ) | Where-Object { $_ -and (Test-Path (Join-Path $_ 'libclang.dll')) }
     $libclang = $libclangDirs | Select-Object -First 1
     if (-not $libclang) {
@@ -273,6 +279,7 @@ Set OPEN_TTS_INSTALL_HOME to keep the installer's files somewhere other than
       if (-not (Test-Path (Join-Path $libclang 'libclang.dll'))) { Die 'LLVM did not install. Install it from https://llvm.org, then run the installer again.' }
     }
     $env:LIBCLANG_PATH = $libclang
+    if (Test-Path (Join-Path $libclang 'clang.exe')) { Add-PathFront $libclang }
     Note "libclang: $libclang"
   }
 
