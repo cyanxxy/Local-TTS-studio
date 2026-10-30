@@ -13,11 +13,12 @@ import {
   sanitizeNativeOutput,
   withNativeOutput,
 } from "../nativeOutput";
+import { bridgeWorkingDirectory } from "./bridgeEnvironment";
 
 export type SpawnBridgeProcess = (
   command: string,
   args: string[],
-  options: { stdio: ["pipe", "pipe", "pipe"]; env: NodeJS.ProcessEnv; cwd: string },
+  options: { stdio: ["pipe", "pipe", "pipe"]; env: NodeJS.ProcessEnv; cwd: string; windowsHide: boolean },
 ) => ChildProcessWithoutNullStreams;
 
 export interface ProbeRequest {
@@ -105,7 +106,10 @@ export function createProbeRunner({
           {
             stdio: ["pipe", "pipe", "pipe"],
             env,
-            cwd: cacheDir,
+            cwd: bridgeWorkingDirectory(cacheDir),
+            // The bridge is a console program; without this a packaged
+            // Windows app opens a console window for every probe.
+            windowsHide: true,
           },
         );
         children.set(requestId, child);

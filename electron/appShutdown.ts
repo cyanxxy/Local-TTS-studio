@@ -9,10 +9,16 @@ export interface ShutdownParticipant {
    * has to wait for, or null when there is nothing outstanding.
    */
   beginShutdown(): Promise<unknown> | null;
+  /**
+   * How long the quit waits for this participant's work, when that is longer
+   * than the coordinator's `timeoutMs`. Only this participant gets the longer
+   * wait; the others stay bounded by `timeoutMs`.
+   */
+  readonly timeoutMs?: number;
 }
 
 export interface ShutdownCoordinatorOptions {
-  /** Upper bound on how long the quit waits for its participants. */
+  /** Upper bound on how long the quit waits for a participant without its own `timeoutMs`. */
   timeoutMs: number;
   /** Re-issues the quit once the barrier has settled (`app.quit`). */
   quit: () => void;
@@ -83,6 +89,12 @@ export function createShutdownCoordinator({
       shuttingDown = true;
 
       const outstanding: Promise<void>[] = [];
+      const timers: ReturnType<typeof setTimeout>[] = [];
+      // Each participant's work, cut off at its own bound.
+      const bounded = (work: Promise<void>, limitMs: number) => Promise.race([
+        work,
+        new Promise<void>((resolve) => { timers.push(setTimeout(resolve, limitMs)); }),
+      ]);
       for (const participant of participants) {
         let work: Promise<unknown> | null;
         try {
@@ -92,7 +104,10 @@ export function createShutdownCoordinator({
           continue;
         }
         if (work) {
-          outstanding.push(work.then(() => undefined, (error: unknown) => report(participant.name, error)));
+          outstanding.push(bounded(
+            work.then(() => undefined, (error: unknown) => report(participant.name, error)),
+            Math.max(timeoutMs, participant.timeoutMs ?? 0),
+          ));
         }
       }
       if (outstanding.length === 0) {
@@ -104,17 +119,13 @@ export function createShutdownCoordinator({
       // bounded window to run; otherwise their unref'd timers die with the
       // process and a child that ignores SIGTERM survives the app.
       event.preventDefault();
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, timeoutMs);
-      });
       const release = () => {
         released = true;
         quit();
       };
       // A failed `finish` still quits.
-      void Promise.race([Promise.all(outstanding), timeout]).then(() => {
-        clearTimeout(timer);
+      void Promise.all(outstanding).then(() => {
+        for (const timer of timers) clearTimeout(timer);
         return finish?.();
       }).then(release, release);
     },

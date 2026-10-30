@@ -6,6 +6,7 @@ import {
   importDocumentFromDialog,
   type DocumentParser,
 } from "../documentImport";
+import { CONVERTER_LIST_TIMEOUT_MS } from "../documentConverterProcesses";
 import { DocumentParseWorkerClient } from "../documentParseWorkerClient";
 import { isRecord } from "../guards";
 import { importRemoteDocument } from "../urlImport";
@@ -126,6 +127,9 @@ export function registerDocumentIpc(
 
   return {
     name: "documents",
+    // Stopping an abandoned import's LibreOffice lists processes first, which on
+    // Windows is a PowerShell CIM query that can take seconds just to start.
+    ...(process.platform === "win32" ? { timeoutMs: CONVERTER_LIST_TIMEOUT_MS + 500 } : {}),
     beginShutdown() {
       // Holds the quit only while an abandoned import's LibreOffice is being
       // stopped; otherwise it would outlive the app.

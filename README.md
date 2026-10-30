@@ -71,7 +71,20 @@ How the installer works, step by step: [Development](./docs/development.md#one-c
 
 ### Windows
 
-There is no installer yet. Build the Windows x64 app from source with `npm run dist:win` (needs LibTorch 2.7.0); see [Development](./docs/development.md).
+Run this in PowerShell on a Windows 11 x64 PC:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/cyanxxy/Local-TTS-studio/main/scripts/install-windows.ps1)))
+```
+
+The installer adds the Visual Studio C++ build tools and anything else missing (through winget; Windows asks for permission), builds the latest release on your PC, and installs **Open TTS** for your user with Start menu and desktop shortcuts. The first install takes 30 to 60 minutes and about 40 GB of disk. Voice models download the first time you use each one.
+
+- **Check first:** add ` -Check` after the last parenthesis to list anything missing without changing your PC.
+- **Update:** run the same command again.
+- **Uninstall:** remove Open TTS in Settings > Apps, then delete `%LOCALAPPDATA%\OpenTTS-Installer` and `C:\ott-target\installer` (build files). Your library and models are in `%LOCALAPPDATA%\Open TTS`.
+- **Smart App Control:** a local build is unsigned, so it cannot run while Smart App Control is on. The installer checks and stops before building; turn it off in Windows Security > App & browser control.
+
+How the installer works, step by step: [Development](./docs/development.md#one-command-windows-install).
 
 GitHub Releases contain source code only; Open TTS does not publish unsigned downloads.
 

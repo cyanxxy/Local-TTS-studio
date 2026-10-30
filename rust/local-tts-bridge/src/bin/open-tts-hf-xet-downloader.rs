@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
+use open_tts_bridge_core::fs_retry::rename_with_retry;
 use serde::Serialize;
 use xet::xet_session::{HeaderMap, XetFileInfo, XetSessionBuilder};
 
@@ -230,7 +231,7 @@ fn run(args: Args) -> Result<()> {
             metadata.size
         );
     }
-    std::fs::rename(&temporary_path, &args.destination).with_context(|| {
+    rename_with_retry(&temporary_path, &args.destination).with_context(|| {
         format!(
             "Could not move the completed download to {}",
             args.destination.display()

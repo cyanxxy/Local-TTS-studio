@@ -32,6 +32,40 @@ function verifyArchive(archivePath) {
   }
 }
 
+// electron-builder's Arch enum, as afterPack reports it.
+const ARCH_NAMES = ["ia32", "x64", "armv7l", "arm64", "universal"];
+
+// What a Windows package cannot start the bridge or load onnxruntime without:
+// the bridge itself and the Visual C++ runtime, both beside the bridge and
+// beside the app executable (see copyMsvcRuntime in build-rust-bridge.mjs).
+const WINDOWS_RUNTIME_FILES = ["vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"];
+
+export function missingWindowsRuntimeFiles(appOutDir, resourcesPath, exists = fs.existsSync) {
+  const bridgeDir = path.join(resourcesPath, "dist-rust");
+  return [
+    path.join(bridgeDir, "open-tts-local-bridge.exe"),
+    path.join(bridgeDir, "open-tts-hf-xet-downloader.exe"),
+    ...WINDOWS_RUNTIME_FILES.flatMap((name) => [path.join(bridgeDir, name), path.join(appOutDir, name)]),
+  ].filter((file) => !exists(file));
+}
+
+function verifyWindowsRuntime(context, resourcesPath) {
+  const missing = missingWindowsRuntimeFiles(context.appOutDir, resourcesPath);
+  if (missing.length > 0) {
+    throw new Error(`Packaged Windows app is missing runtime files: ${missing.join(", ")}`);
+  }
+  // The onnxruntime-node pruning keeps one Windows architecture through an
+  // extglob; a glob that silently stopped matching would ship all of them.
+  const ortWin32 = path.join(resourcesPath, "app.asar.unpacked", "node_modules", "onnxruntime-node", "bin", "napi-v6", "win32");
+  const arches = fs.readdirSync(ortWin32, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+  const expected = ARCH_NAMES[context.arch];
+  if (arches.length !== 1 || arches[0] !== expected) {
+    throw new Error(`Packaged ONNX Runtime Windows architectures are ${arches.join(", ") || "none"}; expected ${expected}.`);
+  }
+}
+
 function verifyNativeRuntime(resourcesPath, platform) {
   const nativeRoot = path.join(
     resourcesPath,
@@ -55,4 +89,5 @@ export default async function verifyElectronPackage(context) {
   const resourcesPath = resourcesDirectory(context);
   verifyArchive(path.join(resourcesPath, "app.asar"));
   verifyNativeRuntime(resourcesPath, context.electronPlatformName);
+  if (context.electronPlatformName === "win32") verifyWindowsRuntime(context, resourcesPath);
 }

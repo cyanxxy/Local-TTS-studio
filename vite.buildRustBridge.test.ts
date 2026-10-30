@@ -3,6 +3,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { msvcRedistVersionIsCurrent } from "./scripts/msvc-runtime.mjs";
 
 const root = process.cwd();
 const buildScript = fs.readFileSync(path.join(root, "scripts/build-rust-bridge.mjs"), "utf-8");
@@ -31,5 +32,26 @@ describe("Rust runtime packaging", () => {
     expect(packageJson.scripts["build:qwen3-mlx-tools"]).toBeUndefined();
     expect(packageJson.scripts["build:rust:all"]).toBeUndefined();
     expect(packageJson.scripts["profile:qwen3"]).toBeUndefined();
+  });
+});
+
+describe("bundled Visual C++ runtime", () => {
+  it.each([
+    "C:\\BuildTools\\VC\\Redist\\MSVC\\14.40.33807",
+    "C:\\BuildTools\\VC\\Redist\\MSVC\\14.44.35112\\",
+    "C:\\BuildTools\\VC\\Redist\\MSVC\\14.50.35717",
+  ])("accepts %s, new enough for every shipped module", (root) => {
+    expect(msvcRedistVersionIsCurrent(root)).toBe(true);
+  });
+
+  it.each([
+    "C:\\BuildTools\\VC\\Redist\\MSVC\\14.38.33135",
+    "C:\\BuildTools\\VC\\Redist\\MSVC\\v143",
+  ])("refuses %s, which modules built with MSVC 14.40+ crash on", (root) => {
+    expect(msvcRedistVersionIsCurrent(root)).toBe(false);
+  });
+
+  it("checks the redist version before bundling it", () => {
+    expect(buildScript).toContain("msvcRedistVersionIsCurrent(candidate)");
   });
 });

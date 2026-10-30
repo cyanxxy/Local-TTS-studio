@@ -6,6 +6,7 @@
 //! Nothing here may link a native runtime: `npm run test:rust:policy` runs
 //! this crate's tests without MLX, Metal, or LibTorch.
 
+pub mod fs_retry;
 pub mod neutts_request;
 pub mod protocol;
 pub mod qwen3;

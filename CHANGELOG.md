@@ -4,6 +4,20 @@ All notable changes to Open TTS are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- One-command Windows installer, `scripts/install-windows.ps1`, the Windows
+  counterpart of `install-macos.sh`: it installs the Visual Studio C++ build
+  tools and other missing prerequisites through winget, downloads a private
+  Node and a checksum-pinned LibTorch 2.7.0, builds the latest release, and
+  installs it per user through the NSIS installer. It stops early when Smart
+  App Control would block the unsigned build. Windows CI runs it end to end.
+- Desktop builds carry an Open TTS icon instead of the stock Electron one:
+  `build/icon.ico` (16–256 px) on the Windows executable, taskbar and
+  installer, and `build/icon.icns` on macOS, drawn on Apple's icon grid so
+  macOS 26 does not put it inside a grey tile. The 1024 px masters are
+  `build/icon-source.png` and `build/icon-macos-source.png`.
+
 ### Fixed
 
 - Using a cloned voice without a Qwen3 voice-clone (Base) model only said
@@ -12,6 +26,38 @@ All notable changes to Open TTS are documented here.
   CustomVoice one already installed. Choosing Studio or Reader on such a voice
   now selects the 0.6B Base model, starts its download and opens the Qwen3
   page with the progress; the Voice Library preview says to do so.
+- Choosing such a voice again while its model downloads joins that download
+  instead of starting a second one.
+- Windows: a console window no longer opens each time a model's bridge starts
+  or is probed (`windowsHide`).
+- Windows: the bridge now receives `Path`, `windir`, `APPDATA`,
+  `LOCALAPPDATA` and the other system variables. The allow-list compared
+  names case-sensitively, and Windows reports them as `Path` and `windir`.
+- Windows: "Clear cache" no longer fails half-way with EBUSY/EPERM. The
+  bridge ran with the cache directory as its working directory, which pins it
+  against deletion there, and removals and renames did not retry while
+  Defender scanned freshly written weights.
+- Windows: a bridge that was sent a shutdown command gets the grace period to
+  exit (its stdin is closed, as SIGTERM would ask elsewhere) instead of being
+  killed in the same tick; a hung one is still terminated at once.
+- Windows packages bundle the Visual C++ runtime (14.40 or newer), beside the
+  bridge and beside `Open TTS.exe`. Without it the bridge and
+  `onnxruntime-node` failed to load on a clean Windows install. Signed Windows
+  builds also sign every DLL and native module, which Smart App Control
+  requires.
+- Windows: the app sets its AppUserModelID to match the installer's shortcuts,
+  a new install keeps its data and models in `%LOCALAPPDATA%` rather than the
+  roaming profile, and quitting during a document import waits long enough to
+  stop the LibreOffice it started, without lengthening any other quit.
+- Windows Qwen3 profiles were labelled "CUDA/CPU", but stock Windows builds
+  link the CPU LibTorch; they now read "LibTorch".
+- The Reader shortcuts dialog shows Shift, Alt and Ctrl outside macOS instead
+  of macOS glyphs, and Ctrl+1/Ctrl+2 switch pages on AZERTY keyboards.
+- A Windows checkout with `core.autocrlf=true` no longer converts the
+  digest-pinned vendored `qwen3-tts-rs` tree to CRLF.
+- `npm run setup:desktop` on Windows checks for the Visual Studio C++ build
+  tools, libclang and LibTorch 2.7.0, and CI now builds, packages, installs
+  and probes the Windows app instead of only linting the bridge.
 
 ## [1.10.2] - 2026-10-27
 

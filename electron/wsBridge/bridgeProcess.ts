@@ -28,6 +28,8 @@ export interface BridgeProcessOptions {
   connectTimeoutMs: number;
   /** How long a terminated process gets before SIGKILL. */
   killGraceMs: number;
+  /** Defaults to `process.platform`; decides how `hardKill` asks first. */
+  platform?: NodeJS.Platform;
   /** Every chunk the process prints, after it has been added to the tails. */
   onOutput: (stream: BridgeOutputStream, chunk: Buffer) => void;
   /**
@@ -53,6 +55,7 @@ export class BridgeProcess {
   readonly outputClosed: Promise<void>;
   readonly #authToken: string;
   readonly #killGraceMs: number;
+  readonly #platform: NodeJS.Platform;
   readonly #stdoutTail = new NativeOutputTail();
   readonly #stderrTail = new NativeOutputTail();
   #exitCode: number | null = null;
@@ -62,6 +65,7 @@ export class BridgeProcess {
     this.child = child;
     this.#authToken = options.authToken;
     this.#killGraceMs = options.killGraceMs;
+    this.#platform = options.platform ?? process.platform;
 
     let resolveExited!: () => void;
     this.exited = new Promise((resolve) => {
@@ -174,13 +178,28 @@ export class BridgeProcess {
     return Promise.race([this.outputClosed, delay(OUTPUT_DRAIN_GRACE_MS)]);
   }
 
-  /** SIGTERM now, SIGKILL after the grace period. Safe on an exited process. */
-  hardKill(): void {
+  /**
+   * SIGTERM now, SIGKILL after the grace period. Safe on an exited process.
+   * Windows has no SIGTERM: every `kill()` there terminates at once. A bridge
+   * that was just sent a shutdown command (`shutdownSent`) is asked by closing
+   * its stdin instead (it exits when its parent pipe closes) and terminated
+   * only after the grace period; any other, such as a hung one being replaced,
+   * is terminated right away rather than left holding its model meanwhile.
+   */
+  hardKill({ shutdownSent = false }: { shutdownSent?: boolean } = {}): void {
     const { child } = this;
-    try {
-      child.kill();
-    } catch {
-      // Already exited.
+    if (this.#platform === "win32" && shutdownSent) {
+      try {
+        child.stdin.end();
+      } catch {
+        // Already closed.
+      }
+    } else {
+      try {
+        child.kill();
+      } catch {
+        // Already exited.
+      }
     }
     setTimeout(() => {
       try {

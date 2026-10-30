@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  isSupportedLibtorchVersion,
   isSupportedNodeVersion,
   isSupportedNpmVersion,
   parseNpmUserAgent,
@@ -112,5 +113,15 @@ describe("source setup script", () => {
     expect(parseSetupArgs(["--web"])).toEqual({ target: "web", checkOnly: false });
     expect(() => parseSetupArgs([])).toThrow("Choose exactly one setup target");
     expect(() => parseSetupArgs(["--web", "--desktop"])).toThrow("Choose exactly one setup target");
+  });
+});
+
+describe("isSupportedLibtorchVersion", () => {
+  it.each(["2.7.0", "2.7.0+cpu", "2.7.0+cu128"])("accepts %s, which tch 0.20 links", (version) => {
+    expect(isSupportedLibtorchVersion(version)).toBe(true);
+  });
+
+  it.each(["2.7.1+cpu", "2.6.0+cu126", "2.70.0"])("rejects %s", (version) => {
+    expect(isSupportedLibtorchVersion(version)).toBe(false);
   });
 });

@@ -13,6 +13,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use open_tts_bridge_core::fs_retry::rename_with_retry;
 use rten::Model;
 use rten_tensor::NdTensor;
 use rten_tensor::prelude::*;
@@ -151,7 +152,7 @@ fn ensure_model_file(cache_dir: &Path, progress: &mut dyn FnMut(String)) -> Resu
             format!("Failed to replace invalid encoder model {}", path.display())
         })?;
     }
-    fs::rename(&temp_path, &path).with_context(|| {
+    rename_with_retry(&temp_path, &path).with_context(|| {
         format!(
             "Failed to move downloaded encoder model into place at {}",
             path.display()

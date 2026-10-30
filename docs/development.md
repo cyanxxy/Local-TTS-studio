@@ -12,7 +12,8 @@ process in [releasing.md](./releasing.md).
 - Desktop builds run on Apple Silicon macOS or Windows x64 only. `npm run setup:desktop` rejects Intel macOS, Windows on Arm, and Linux outright.
 - Native prerequisites for desktop builds, which `npm run setup:desktop` hard-fails on rather than installing for you:
   - macOS: `brew install cmake libomp openssl@3 pkg-config`, plus Xcode's Metal Toolchain (`xcodebuild -downloadComponent MetalToolchain`), which newer Xcode releases no longer include by default
-  - Windows: CMake on `PATH`, plus `LIBTORCH` pointing at a LibTorch 2.7.0 release directory
+  - Windows: Visual Studio 2022 or its Build Tools with the "Desktop development with C++" workload (the build packages the Visual C++ runtime from it), CMake on `PATH`, LLVM for `libclang` (`clang` on `PATH` or `LIBCLANG_PATH` set), plus `LIBTORCH` pointing at a LibTorch 2.7.0 release directory
+  - Windows: the default Rust target directory is `<drive>:\ott-target\<hash>` rather than under `%TEMP%`, because llama.cpp's CMake tree otherwise crosses the 260-character path limit under a long user profile; set `CARGO_TARGET_DIR` to choose another short path
 - The Rust scripts build for the app's minimum macOS (`minimumSystemVersion`, currently 26.0) unless `MACOSX_DEPLOYMENT_TARGET` is already set, matching CI, so a bridge built on a newer macOS still runs on the oldest supported release.
 - The web app alone can run without Rust; desktop commands build `rust/local-tts-bridge` before launching Electron.
 - Optional document tools for desktop imports: LibreOffice for Office/OpenDocument files, ImageMagick for images, and Ghostscript for PDFs that require it.
@@ -106,6 +107,27 @@ In order, it:
 6. Replaces `/Applications/Open TTS.app` (or `~/Applications` when `/Applications` is not writable) only after the build succeeds, and refuses while the app is running.
 
 Options: `--check` reports what is missing without changing anything; `--ref <tag-or-branch>` builds something other than the latest release; `--source <dir>` builds an existing checkout in place; `--app-dir <dir>` installs elsewhere. `OPEN_TTS_INSTALL_HOME` moves the installer's folder. Pass options through the pipe with `| bash -s -- --check`. Each run writes `install.log` in the installer's folder. Running it again updates the app. Deleting the app and the installer's folder uninstalls it; the user's library and models stay in `~/Library/Application Support/Open TTS`.
+
+### One-command Windows install
+
+`scripts/install-windows.ps1` is the same path for Windows 11 x64. It runs in Windows PowerShell 5.1, which every Windows 11 has, and in PowerShell 7:
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/cyanxxy/Local-TTS-studio/main/scripts/install-windows.ps1)))
+```
+
+The script-block form takes options after the last parenthesis (`... ))) -Check`); the familiar `irm ... | iex` also works, without options, because Windows PowerShell 5.1 cannot pass arguments through `Invoke-Expression`. A saved copy runs with `powershell -ExecutionPolicy Bypass -File install-windows.ps1 -Check`. The build happens on the PC, so the result carries no Mark of the Web and SmartScreen does not prompt for it.
+
+In order, it:
+
+1. Checks for x64 Windows 11 (build 22000+) and about 40 GB free, and stops before building while Smart App Control is on (`HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy`, `VerifiedAndReputablePolicyState` = 1), because it blocks unsigned apps such as a local build. Evaluation mode only warns.
+2. Finds a Visual Studio with the x64 C++ tools through `vswhere`, or installs Visual Studio 2022 Build Tools through winget with the `VCTools` workload (recommended components, which include the Windows SDK and CMake) plus `VC.Llvm.Clang` for libclang. CMake comes from `PATH`, that Visual Studio, or winget (`Kitware.CMake`); libclang from `LIBCLANG_PATH`, that Visual Studio, `C:\Program Files\LLVM`, or winget (`LLVM.LLVM`). Git comes from winget (`Git.Git`) when missing. winget itself (App Installer) must be present, as it is on Windows 11.
+3. Clones or updates the latest release tag in `%LOCALAPPDATA%\OpenTTS-Installer\source` with `core.autocrlf=false`, so the digest-pinned vendored tree checks out byte for byte.
+4. Downloads Node at the `.nvmrc` version (checksum-verified) and the npm in `packageManager`, and LibTorch 2.7.0 CPU (checked against a pinned SHA-256, which Windows CI also checks) unless `LIBTORCH` already names a 2.7.0 build, all into the same folder. It reuses an existing rustup, or installs rustup there with `--no-modify-path`. npm runs through `npm.cmd`, which the default Restricted execution policy allows. The user's `PATH` and any system Node are never changed.
+5. Runs `node scripts/setup.mjs --desktop --check`, `npm ci`, `npm run build:electron` and `electron-builder --win nsis --x64`, with Rust output in `C:\ott-target\installer` (short, for MAX_PATH).
+6. Runs the NSIS installer silently for the current user (`/S /currentuser`, plus `/D=` for `-AppDir`), which installs to `%LOCALAPPDATA%\Programs\Open TTS` with shortcuts and a Settings > Apps entry. It refuses while the app is running.
+
+Options: `-Check`, `-Ref <tag-or-branch>`, `-Source <dir>`, `-AppDir <dir>`, as on macOS (`--check` style also works). `OPEN_TTS_INSTALL_HOME` moves the installer's folder, and each run writes `install.log` there. Windows CI (`.github/workflows/rust-bridge.yml`) runs `-Check` and then a full `-Source .` build and install under Windows PowerShell, and starts the installed bridge.
 
 **Signed builds.** For end-user distribution, `npm run dist:signed:mac` and `npm run dist:signed:win` build against `electron-builder.release.mjs`, which sets `forceCodeSigning` so the build fails rather than emitting an unsigned artifact. macOS additionally enables the hardened runtime and notarization, and aborts before packing unless a complete set of Apple notarization credentials is present.
 

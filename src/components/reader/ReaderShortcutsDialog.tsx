@@ -1,12 +1,14 @@
 import { useRef } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
-import { READER_SHORTCUTS } from "./readerShortcuts";
+import { isMacPlatform } from "../../lib/appShortcuts";
+import { READER_SHORTCUTS, readerShortcutKeys } from "./readerShortcuts";
 import { useFocusTrap } from "./useFocusTrap";
 
 export function ReaderShortcutsDialog({ onClose }: { onClose: () => void }) {
   const dialogRef = useRef<HTMLDivElement>(null);
   useFocusTrap(dialogRef, { active: true, onEscape: onClose });
+  const mac = isMacPlatform(window.electron?.platform ?? navigator.platform);
 
   return createPortal(
     <div
@@ -44,7 +46,7 @@ export function ReaderShortcutsDialog({ onClose }: { onClose: () => void }) {
               <dt className="text-text-secondary">{shortcut.action}</dt>
               <dd>
                 <kbd className="rounded-md border border-border bg-text-primary/[0.04] px-1.5 py-0.5 font-mono text-xs text-text-primary">
-                  {shortcut.keys}
+                  {readerShortcutKeys(shortcut, mac)}
                 </kbd>
               </dd>
             </div>

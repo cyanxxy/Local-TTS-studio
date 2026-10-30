@@ -151,7 +151,7 @@ export function LocalRuntimeQwenSetup(props: QwenModelSetupProps) {
             </div>
             <p className="mt-1 text-sm leading-5 text-text-secondary">{setupDescription}</p>
             <p className="mt-2 text-xs text-text-muted">
-              {props.qwen3Profile.label} · {props.qwen3Profile.provider === "mlx" ? "Apple Silicon" : "Windows CUDA/CPU"}
+              {props.qwen3Profile.label} · {props.qwen3Profile.provider === "mlx" ? "Apple Silicon" : "Windows x64"}
             </p>
           </div>
         </div>

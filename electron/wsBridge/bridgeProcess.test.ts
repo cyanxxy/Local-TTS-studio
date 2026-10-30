@@ -10,6 +10,7 @@ const TOKEN = "a".repeat(64);
 class FakeChild extends EventEmitter {
   stdout = new EventEmitter();
   stderr = new EventEmitter();
+  stdin = { end: vi.fn() };
   killSignals: Array<string | undefined> = [];
   kill = (signal?: string) => {
     this.killSignals.push(signal);
@@ -17,7 +18,7 @@ class FakeChild extends EventEmitter {
   };
 }
 
-function start(overrides: { connectTimeoutMs?: number } = {}) {
+function start(overrides: { connectTimeoutMs?: number; platform?: NodeJS.Platform } = {}) {
   const child = new FakeChild();
   const output: Array<[BridgeOutputStream, string]> = [];
   const onExit = vi.fn();
@@ -25,6 +26,7 @@ function start(overrides: { connectTimeoutMs?: number } = {}) {
     authToken: TOKEN,
     connectTimeoutMs: overrides.connectTimeoutMs ?? 5_000,
     killGraceMs: 2_000,
+    platform: overrides.platform ?? "darwin",
     onOutput: (stream, chunk) => output.push([stream, chunk.toString("utf-8")]),
     onExit,
   });
@@ -176,6 +178,25 @@ describe("BridgeProcess lifecycle", () => {
 
     vi.advanceTimersByTime(2_000);
     expect(child.killSignals).toEqual([undefined, "SIGKILL"]);
+  });
+
+  it("asks a Windows bridge sent a shutdown through stdin and terminates it only after the grace period", () => {
+    vi.useFakeTimers();
+    const { bridge, child } = start({ platform: "win32" });
+    bridge.hardKill({ shutdownSent: true });
+    expect(child.stdin.end).toHaveBeenCalledTimes(1);
+    expect(child.killSignals).toEqual([]);
+
+    vi.advanceTimersByTime(2_000);
+    expect(child.killSignals).toEqual(["SIGKILL"]);
+  });
+
+  it("terminates any other Windows bridge at once", () => {
+    vi.useFakeTimers();
+    const { bridge, child } = start({ platform: "win32" });
+    bridge.hardKill();
+    expect(child.stdin.end).not.toHaveBeenCalled();
+    expect(child.killSignals).toEqual([undefined]);
   });
 
   it("tolerates a kill that throws on an exited process", () => {

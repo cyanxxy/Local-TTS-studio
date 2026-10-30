@@ -53,6 +53,39 @@ function requireTool(command, installHint, { args, subject = command } = {}) {
   }
 }
 
+// LibTorch distributions record their version, e.g. "2.7.0+cpu", in build-version.
+function readLibtorchVersion(libtorchDir) {
+  try {
+    return fs.readFileSync(path.join(libtorchDir, "build-version"), "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+export function isSupportedLibtorchVersion(version) {
+  return /^2\.7\.0(?:\+|$)/.test(version);
+}
+
+function hasMsvcBuildTools() {
+  const vswhere = path.join(
+    process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
+    "Microsoft Visual Studio",
+    "Installer",
+    "vswhere.exe",
+  );
+  if (!fs.existsSync(vswhere)) return false;
+  const result = spawnSync(vswhere, [
+    "-latest",
+    "-products",
+    "*",
+    "-requires",
+    "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+    "-property",
+    "installationPath",
+  ], { encoding: "utf8" });
+  return !result.error && result.status === 0 && result.stdout.trim().length > 0;
+}
+
 function checkDesktopRequirements() {
   requireTool("cargo", "Install Rust from https://rustup.rs/.");
   requireTool("rustc", "Install Rust from https://rustup.rs/.");
@@ -88,6 +121,29 @@ function checkDesktopRequirements() {
     if (!libtorch || !fs.existsSync(path.join(libtorch, "lib"))) {
       throw new Error(
         "Set LIBTORCH to a compatible LibTorch 2.7.0 release directory. See docs/local-runtimes.md.",
+      );
+    }
+    const libtorchVersion = readLibtorchVersion(libtorch);
+    if (libtorchVersion && !isSupportedLibtorchVersion(libtorchVersion)) {
+      throw new Error(
+        `LIBTORCH points to LibTorch ${libtorchVersion}; tch 0.20 needs 2.7.0. See docs/local-runtimes.md.`,
+      );
+    }
+    // The Rust build links with MSVC, llama.cpp compiles C++ through CMake, and
+    // the bridge packages the Visual C++ runtime from the same installation.
+    if (!hasMsvcBuildTools()) {
+      throw new Error(
+        "The Visual Studio C++ build tools are required for desktop builds. Install Visual Studio 2022 "
+        + "(or its Build Tools) with the \"Desktop development with C++\" workload.",
+      );
+    }
+    // bindgen generates the llama.cpp bindings and loads libclang to do it.
+    // clang-sys also finds it without PATH in the LLVM installer's default folder.
+    const defaultLlvm = path.join(process.env.ProgramFiles ?? "C:\\Program Files", "LLVM", "bin", "libclang.dll");
+    if (!process.env.LIBCLANG_PATH && !fs.existsSync(defaultLlvm) && !toolWorks("clang")) {
+      throw new Error(
+        "libclang is required for desktop builds. Install LLVM (winget install LLVM.LLVM) and put it on PATH, "
+        + "or set LIBCLANG_PATH to the folder that holds libclang.dll.",
       );
     }
     return;

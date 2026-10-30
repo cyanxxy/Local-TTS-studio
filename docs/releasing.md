@@ -108,7 +108,10 @@ unsigned artifact:
 - Apple Silicon macOS 26+: `npm run dist:signed:mac` with `CSC_LINK`,
   `CSC_KEY_PASSWORD`, and Apple notarization credentials.
 - Windows x64: `npm run dist:signed:win` with `LIBTORCH` plus `WIN_CSC_LINK` and
-  `WIN_CSC_KEY_PASSWORD` (or configured Azure Trusted Signing).
+  `WIN_CSC_KEY_PASSWORD` (or configured Azure Trusted Signing). The release
+  config also signs every `.dll` and `.node` file (`signExts`), not only the
+  executables, because Smart App Control in enforcement mode refuses unsigned
+  DLLs and native modules.
 
 **No workflow in this repository runs either command.** `release-desktop.yml`
 has only `ubuntu-24.04` jobs, there is no macOS or Windows packaging job, and no

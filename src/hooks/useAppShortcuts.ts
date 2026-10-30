@@ -38,9 +38,18 @@ export function useAppShortcuts(options: UseAppShortcutsOptions): void {
 
     if (settingsOpen) return;
 
-    if (primaryModifier && (event.key === "1" || event.key === "2")) {
+    // By physical key as well: on AZERTY layouts the unshifted digit row
+    // types "&" and "é", so Ctrl+1 never reports a key of "1". Only unshifted,
+    // so Ctrl+Shift+1 ("!") stays free as it was.
+    const byCode = !event.shiftKey;
+    const page = event.key === "1" || (byCode && (event.code === "Digit1" || event.code === "Numpad1"))
+      ? "studio"
+      : event.key === "2" || (byCode && (event.code === "Digit2" || event.code === "Numpad2"))
+        ? "reader"
+        : null;
+    if (primaryModifier && page) {
       event.preventDefault();
-      options.onNavigate(event.key === "1" ? "studio" : "reader");
+      options.onNavigate(page);
       return;
     }
 

@@ -3,7 +3,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export function resolveRustTargetDir(rootDir) {
+/**
+ * A target directory outside the checkout, whose path contains a space that
+ * the vendored `mp3lame-sys` build script cannot handle. On Windows it sits at
+ * the drive root rather than under `%TEMP%`: llama.cpp's CMake tree nests deep
+ * enough below the target directory to cross the 260-character MAX_PATH limit
+ * that MSVC and CMake still observe when it starts under a long user profile.
+ */
+export function resolveRustTargetDir(rootDir, platform = process.platform) {
   if (process.env.CARGO_TARGET_DIR) {
     return path.resolve(process.env.CARGO_TARGET_DIR);
   }
@@ -12,6 +19,9 @@ export function resolveRustTargetDir(rootDir) {
     .update(path.resolve(rootDir))
     .digest("hex")
     .slice(0, 12);
+  if (platform === "win32") {
+    return path.win32.join(path.win32.parse(os.tmpdir()).root, "ott-target", workspaceKey);
+  }
   return path.join(os.tmpdir(), "open-tts-rust-target", workspaceKey);
 }
 

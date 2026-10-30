@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain } from "electron";
+import fs from "fs";
 import os from "os";
 import path from "path";
 import { createShutdownCoordinator } from "./appShutdown";
@@ -14,6 +15,7 @@ import { registerLocalTtsIpc } from "./ipc/registerLocalTtsIpc";
 import { READER_LIBRARY_QUIT_BUDGET_MS, registerReaderLibraryIpc } from "./ipc/registerReaderLibraryIpc";
 import { createTrustedIpc } from "./ipc/trusted";
 import { RUST_CANCEL_KILL_AFTER_MS } from "./localTts/localTtsRuntime";
+import { windowsLocalUserDataPath } from "./userDataLocation";
 
 // The composition root: the single-instance lock, process-wide switches, the
 // window, the diagnostics log, one registration per IPC feature and the quit
@@ -28,6 +30,16 @@ const isDev = !app.isPackaged;
 // all resolved relative to the compiled main bundle.
 const windowOptions = { isDev, appDirectory: __dirname };
 const userDataPath = () => app.getPath("userData");
+
+// Both before anything reads userData, the single-instance lock included.
+if (process.platform === "win32") {
+  const localUserData = windowsLocalUserDataPath(app.getPath("userData"), process.env, fs.existsSync);
+  if (localUserData) app.setPath("userData", localUserData);
+  // Matches the AppUserModelID the installer's shortcuts carry (electron-builder
+  // derives it from `build.appId`), so taskbar pinning and grouping and the
+  // media controls attribute the window to Open TTS.
+  app.setAppUserModelId("com.opentts.desktop");
+}
 
 // A second copy would share userData with this one (the Reader library
 // database, the model caches and the diagnostics log), so it hands its launch
@@ -70,7 +82,8 @@ function start(): void {
   // bounded by its own timeout: the Reader flush and worker close, and a
   // SIGTERM-ignoring bridge child's SIGKILL escalation. The outer cap covers the
   // longer of the two, plus 500 ms for that last step to land, so it only ever
-  // cuts short a participant whose own bound failed.
+  // cuts short a participant whose own bound failed. The documents participant
+  // carries a longer bound of its own on Windows (registerDocumentIpc).
   const shutdown = createShutdownCoordinator({
     timeoutMs: Math.max(READER_LIBRARY_QUIT_BUDGET_MS, RUST_CANCEL_KILL_AFTER_MS) + 500,
     // What the participants logged while the barrier held gets a bounded chance

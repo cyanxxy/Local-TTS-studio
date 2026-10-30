@@ -164,6 +164,9 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
   const setupVersionRef = useRef(0);
   const modelPathOperationVersionRef = useRef(0);
   const downloadVersionRef = useRef(0);
+  // The repo whose download is in flight, so asking to install it again joins
+  // that download instead of starting a second one.
+  const downloadingRepoRef = useRef<string | null>(null);
   // A setup refresh describes managed downloads. Explicit external selections
   // belong to the user and survive inventory refreshes and profile switches.
   const modelPathOverridesRef = useRef(new Map<string, ModelPathSelection>());
@@ -309,6 +312,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     const operationVersion = ++modelPathOperationVersionRef.current;
     const downloadVersion = ++downloadVersionRef.current;
     supersedeSetup(target.repo);
+    downloadingRepoRef.current = target.repo;
     setDownloadBusy(true);
     setDownloadProgress(null);
     setError(null);
@@ -328,6 +332,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
         setError(errorMessage(nextError));
       }
     } finally {
+      if (downloadVersion === downloadVersionRef.current) downloadingRepoRef.current = null;
       if (mountedRef.current && downloadVersion === downloadVersionRef.current) {
         setDownloadBusy(false);
       }
@@ -341,6 +346,7 @@ export function Qwen3RuntimeProvider({ children }: { children: ReactNode }) {
     if (!next || !profiles.some((candidate) => candidate.repo === repo)) return;
     // Switching first, so the download that follows is not superseded by it.
     if (next.repo !== profile.repo) setProfileRepo(repo);
+    if (downloadingRepoRef.current === repo) return;
     void downloadProfile(next);
   }, [downloadProfile, profile.repo, profiles, setProfileRepo]);
 

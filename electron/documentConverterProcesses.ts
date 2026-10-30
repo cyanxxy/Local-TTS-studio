@@ -10,7 +10,8 @@ import { execFile } from "node:child_process";
 export const LITEPARSE_CONVERTER_MARKER = "liteparse-lo-profile-";
 
 const PROFILE_TOKEN = /liteparse-lo-profile-[^\s"'/\\]+/g;
-const LIST_TIMEOUT_MS = 10_000;
+/** Upper bound on one process listing; the quit cap on Windows leaves room for it. */
+export const CONVERTER_LIST_TIMEOUT_MS = 10_000;
 const LIST_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
 export interface ProcessEntry {
@@ -44,7 +45,7 @@ export function listProcesses(platform: NodeJS.Platform = process.platform): Pro
     execFile(
       file,
       args,
-      { encoding: "utf8", timeout: LIST_TIMEOUT_MS, maxBuffer: LIST_MAX_BUFFER_BYTES, windowsHide: true },
+      { encoding: "utf8", timeout: CONVERTER_LIST_TIMEOUT_MS, maxBuffer: LIST_MAX_BUFFER_BYTES, windowsHide: true },
       (error, stdout) => {
         if (error) reject(error);
         else resolve(parseProcessList(stdout));
