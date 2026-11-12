@@ -18,7 +18,7 @@ neutts = { version = "0.1.1", features = ["espeak"] }
 # 0.27 gates loading `.rten` files behind `rten_format`; the pinned NeuCodec
 # encoder is published only in that format.
 rten = { version = "0.27", features = ["rten_format"] }
-rten-tensor = "0.27"
+rten-tensor = "0.28"
 open-tts-bridge-core = { path = "../bridge-core" }
 serde.workspace = true
 serde_json.workspace = true
