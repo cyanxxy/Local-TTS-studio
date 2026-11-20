@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { kokoroOnnxWasmAssetPlugin } from "./vite.kokoroAssets.ts";
 
 const ROOT_DIR = dirname(fileURLToPath(import.meta.url));
+const IS_SHARD_RUN = process.argv.some((arg) => arg === "--shard" || arg.startsWith("--shard="));
 
 export default defineConfig({
   plugins: [kokoroOnnxWasmAssetPlugin(ROOT_DIR) as never],
@@ -58,12 +59,18 @@ export default defineConfig({
         "src/vite-env.d.ts",
         "src/test-setup.ts",
       ],
-      thresholds: {
-        branches: 100,
-        functions: 100,
-        lines: 100,
-        statements: 100,
-      },
+      // A `--shard` run covers only its slice of the test files, so the gate
+      // cannot hold there. CI shards the suite and enforces these thresholds
+      // when `vitest --merge-reports --coverage` combines every shard's blob;
+      // an unsharded `vitest run --coverage` enforces them directly.
+      thresholds: IS_SHARD_RUN
+        ? undefined
+        : {
+            branches: 100,
+            functions: 100,
+            lines: 100,
+            statements: 100,
+          },
     },
   },
 });

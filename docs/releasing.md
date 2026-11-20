@@ -20,14 +20,32 @@ Before a release branch merges, `.github/workflows/ci.yml` validates linting,
 the Electron type check, Vitest with the coverage thresholds from
 `vitest.config.ts`, and the web build on the Node release pinned in `.nvmrc`.
 A Node 26 leg repeats Vitest (without coverage) and the web build, since lint,
-the type check, and the coverage gate do not depend on the Node version. A
+the type check, and the coverage gate do not depend on the Node version. These
+run as parallel jobs: one job lints, type-checks, and builds on the pinned
+Node, Vitest on the pinned Node is split into three shards, and one unsharded
+Node 26 job runs Vitest and the web build. Only the pinned-Node tests are
+sharded because the GitHub Free plan's 20 concurrent jobs are shared with every
+other repository on the account. Each shard uploads a
+blob report; a merge job combines them, applies the coverage thresholds to the
+combined coverage (a `--shard` run skips them, since it sees only its slice),
+and runs `scripts/check-vitest-shards.mjs` to prove the shards together ran
+every test file an unsharded run would collect. A
 separate job in the same workflow runs the native-bridge integration test
 (`electron/rustLocalBridge.test.ts`) on Linux in its own Vitest process, so the
 Cargo build it performs cannot slow the timing-sensitive Electron tests. On
 pull requests that job runs only when a bridge input changed: the Rust sources
 and toolchain, the `scripts/*rust*` wrappers, the test file, the Vitest config,
-setup file, and plugin it loads, the npm install inputs, `.gitattributes`, or
-`ci.yml` itself. Pushes to `main` and manual runs always run it.
+setup file, and plugin it loads, the npm install inputs, `.gitattributes`,
+`ci.yml` itself, or the shared `.github/actions/npm-install` action. Pushes to
+`main` and manual runs always run it.
+
+CI caches are seeded only from `main`, so pull requests read them without
+adding their own. `.github/actions/npm-install` restores `node_modules` keyed on
+the OS, Node major, `package-lock.json`, and `.npmrc`, and runs `npm ci` only on
+a miss. The Linux bridge job restores Cargo's registry and the whole target
+directory as one archive keyed on `rust-toolchain.toml` and `rust/Cargo.lock`,
+so llama.cpp's CMake libraries and the rlib that links them always restore
+together.
 `.github/workflows/rust-bridge.yml` additionally checks formatting, checks the
 Rust dependencies with `cargo-deny` against `rust/deny.toml`, builds,
 Clippy-lints, tests, and probes the native bridge on Apple Silicon, and
@@ -38,8 +56,8 @@ it triggers on changes to Rust sources, the bridge build scripts,
 Actions tab.
 
 The final `Lint, test, and build web` check preserves the branch-protection
-context and succeeds only when both Node matrix entries have passed and the
-Linux bridge integration has either passed or was skipped because the change
+context and succeeds only when the lint/build job, every test shard, the shard
+merge, and the Node 26 job have passed and the Linux bridge integration has either passed or was skipped because the change
 detection found no bridge inputs.
 
 Workflow actions are pinned to commit SHAs with the release version in a

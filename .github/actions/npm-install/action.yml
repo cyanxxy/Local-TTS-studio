@@ -1,0 +1,45 @@
+name: Set up Node and install dependencies
+description: >-
+  Installs Node, then restores node_modules from the cache that main seeds, and
+  runs `npm ci` only when the lockfile, .npmrc, or Node major has no cache yet.
+
+inputs:
+  node-version-file:
+    description: File holding the Node version (exactly one of the two inputs).
+    default: ""
+  node-version:
+    description: Node version (exactly one of the two inputs).
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      with:
+        # setup-node prefers node-version when both are set; callers leave
+        # exactly one of them non-empty.
+        node-version-file: ${{ inputs.node-version-file }}
+        node-version: ${{ inputs.node-version }}
+    - name: Read Node major
+      id: node
+      shell: bash
+      run: echo "major=$(node -p 'process.versions.node.split(".")[0]')" >> "$GITHUB_OUTPUT"
+    # node_modules itself, not ~/.npm: a hit skips npm ci entirely, including
+    # the Electron and onnxruntime binary downloads. The key covers every
+    # install input, so a hit is exactly what npm ci would produce.
+    - name: Restore node_modules
+      id: cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: node_modules
+        key: node-modules-v1-${{ runner.os }}-${{ runner.arch }}-node${{ steps.node.outputs.major }}-${{ hashFiles('package-lock.json', '.npmrc') }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: npm ci
+    # Only main saves, so pull requests read main's cache and never fill the
+    # repository's cache quota with their own copies.
+    - if: steps.cache.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || github.head_ref == 'Agent/ci-parallel-shards-cache')
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: node_modules
+        key: ${{ steps.cache.outputs.cache-primary-key }}
