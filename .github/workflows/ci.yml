@@ -51,7 +51,7 @@ jobs:
           # the Vitest config, setup, and plugin it loads, the npm install
           # inputs, .gitattributes (it controls how rust/vendor is checked
           # out), and this workflow.
-          bridge_paths='^(rust/|rust-toolchain\.toml$|scripts/[^/]*rust[^/]*$|electron/rustLocalBridge\.test\.ts$|vitest\.config\.ts$|src/test-setup\.ts$|vite\.kokoroAssets\.ts$|package\.json$|package-lock\.json$|\.npmrc$|\.nvmrc$|\.gitattributes$|\.github/workflows/ci\.yml$)'
+          bridge_paths='^(rust/|rust-toolchain\.toml$|scripts/[^/]*rust[^/]*$|electron/rustLocalBridge\.test\.ts$|vitest\.config\.ts$|src/test-setup\.ts$|vite\.kokoroAssets\.ts$|package\.json$|package-lock\.json$|\.npmrc$|\.nvmrc$|\.gitattributes$|\.github/workflows/ci\.yml$|\.github/actions/npm-install/)'
           if grep -qE "$bridge_paths" <<<"$changed"; then
             echo "bridge=true" >> "$GITHUB_OUTPUT"
           else
@@ -59,19 +59,18 @@ jobs:
             echo "bridge=false" >> "$GITHUB_OUTPUT"
           fi
 
-  checks:
-    name: Lint, test, and build web (Node ${{ matrix.node.label }})
+  static:
+    name: Lint, type-check, and build web (Node ${{ matrix.node.label }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         node:
           # The release runtime pinned in .nvmrc, plus the newest major that
-          # package.json `engines.node` admits. vitest.config.ts carries a
-          # Node 26 specific workaround, so that leg keeps it honest. Lint, the
-          # Electron type check, and the coverage gate do not depend on the
-          # Node version, so only the pinned leg (`full`) runs them.
+          # package.json `engines.node` admits. Lint and the Electron type
+          # check do not depend on the Node version, so only the pinned leg
+          # (`full`) runs them; both legs build the web app.
           - label: pinned
             file: .nvmrc
             full: true
@@ -80,26 +79,102 @@ jobs:
             full: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          # setup-node prefers node-version when both are set; the matrix
-          # leaves exactly one of them non-empty.
+          persist-credentials: false
+      - uses: ./.github/actions/npm-install
+        with:
           node-version-file: ${{ matrix.node.file }}
           node-version: ${{ matrix.node.version }}
-          cache: npm
-      - run: npm ci
       - if: matrix.node.full
         run: npm run lint
       # lint:rust is deliberately not run here: Clippy needs the full native
       # build, so rust-bridge.yml on macOS is this repo's native gate.
       - if: matrix.node.full
         run: npx tsc --noEmit -p tsconfig.electron.json
-      # --coverage makes the 100% thresholds in vitest.config.ts a real gate.
+      - run: npm run build:web
+
+  test:
+    name: Test (Node ${{ matrix.node.label }}, shard ${{ matrix.shard }}/3)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          # vitest.config.ts carries a Node 26 specific workaround, so that leg
+          # keeps it honest. The coverage gate does not depend on the Node
+          # version, so only the pinned leg collects coverage.
+          - label: pinned
+            file: .nvmrc
+            coverage: true
+          - label: "26"
+            version: "26"
+            coverage: false
+        # Keep in step with the `/3` in the name and the run step below.
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/npm-install
+        with:
+          node-version-file: ${{ matrix.node.file }}
+          node-version: ${{ matrix.node.version }}
       # rustLocalBridge.test.ts compiles the native bridge in beforeAll and runs
       # in its own job below so the cargo build cannot starve timing-sensitive
-      # Electron tests in this process.
-      - run: npx vitest run ${{ matrix.node.full && '--coverage' || '' }} --exclude "electron/rustLocalBridge.test.ts"
-      - run: npm run build:web
+      # Electron tests in this process. Each shard writes a blob report; the
+      # `test-merge` job merges them, enforces the 100% coverage gate from
+      # vitest.config.ts, and proves every test file ran.
+      - run: >-
+          npx vitest run
+          --shard=${{ matrix.shard }}/3
+          --exclude "electron/rustLocalBridge.test.ts"
+          --reporter=default --reporter=blob
+          ${{ matrix.node.coverage && '--coverage' || '' }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vitest-blob-${{ matrix.node.label }}-${{ matrix.shard }}
+          path: .vitest/blob/
+          if-no-files-found: error
+          retention-days: 1
+          include-hidden-files: true
+
+  test-merge:
+    name: Merge test shards and enforce coverage
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/npm-install
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: vitest-blob-pinned-*
+          path: .vitest/blob-pinned
+          merge-multiple: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: vitest-blob-26-*
+          path: .vitest/blob-26
+          merge-multiple: true
+      - name: List the test files an unsharded run would collect
+        run: npx vitest list --filesOnly --exclude "electron/rustLocalBridge.test.ts" --json="$RUNNER_TEMP/expected.json"
+      # --coverage on the merge applies the thresholds in vitest.config.ts to
+      # the combined coverage of every shard.
+      - name: Merge pinned-Node shards and enforce the coverage gate
+        run: |
+          npx vitest run --merge-reports=.vitest/blob-pinned --coverage \
+            --reporter=dot --reporter=json --outputFile.json="$RUNNER_TEMP/pinned.json"
+          node scripts/check-vitest-shards.mjs "$RUNNER_TEMP/expected.json" "$RUNNER_TEMP/pinned.json"
+      - name: Merge Node 26 shards
+        run: |
+          npx vitest run --merge-reports=.vitest/blob-26 \
+            --reporter=dot --reporter=json --outputFile.json="$RUNNER_TEMP/node26.json"
+          node scripts/check-vitest-shards.mjs "$RUNNER_TEMP/expected.json" "$RUNNER_TEMP/node26.json"
 
   bridge-linux:
     name: Bridge integration test (Linux)
@@ -111,40 +186,65 @@ jobs:
     timeout-minutes: 45
     env:
       # rustLocalBridge.test.ts honours CARGO_TARGET_DIR; point it inside the
-      # workspace so Swatinem/rust-cache can see and cache the build.
+      # workspace so the cache steps below can find the build.
       CARGO_TARGET_DIR: ${{ github.workspace }}/rust/local-tts-bridge/target
       # The test only needs a working binary. Skipping debug info shortens the
       # dev-profile compile and link; debug assertions stay on.
       CARGO_PROFILE_DEV_DEBUG: "0"
+      # Incremental state only helps the workspace crates, which a fresh
+      # checkout rebuilds anyway, and it would bloat the cached target dir.
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
-          node-version-file: ".nvmrc"
-          cache: npm
+          persist-credentials: false
+      - uses: ./.github/actions/npm-install
+        with:
+          node-version-file: .nvmrc
       - name: Install pinned Rust toolchain
         # No toolchain argument: rustup installs the active toolchain, so the
         # channel, profile, and components all come from rust-toolchain.toml.
         run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      # The whole target dir and Cargo home, restored as one archive, instead of
+      # Swatinem/rust-cache: rust-cache prunes target entries it does not
+      # recognise, which split llama-cpp-sys's rlib from the CMake-built shared
+      # libraries it links (see rust-bridge.yml). One archive restores them
+      # together, and tar keeps the mtimes Cargo's build-script freshness checks
+      # compare. Workspace crates still rebuild, since checkout gives their
+      # sources new mtimes; only the dependency tree comes from the cache.
+      - name: Restore Cargo build cache
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          workspaces: rust -> local-tts-bridge/target
-          env-vars: CARGO_TARGET_DIR
-          # Mirrors rust-bridge.yml: llama-cpp-sys keeps shared CMake dylibs in a
-          # non-Cargo directory inside target, and rust-cache prunes non-dependency
-          # target entries before saving. Cache the CMake tree explicitly, but
-          # rebuild Cargo artifacts.
-          cache-targets: false
-          cache-directories: rust/local-tts-bridge/target/llama-cmake-cache
-          key: ci-bridge-linux-llama-cmake-only-v2
-      - run: npm ci
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            rust/local-tts-bridge/target
+          key: bridge-linux-cargo-v1-${{ hashFiles('rust-toolchain.toml', 'rust/Cargo.lock') }}
+          # A newer lockfile still starts from the last dependency build, so
+          # only the changed crates compile.
+          restore-keys: bridge-linux-cargo-v1-
       - run: npm run test:rust:policy
       - run: npx vitest run electron/rustLocalBridge.test.ts
+      # Only main saves, and only when the lockfile or toolchain changed, so
+      # pull requests reuse main's build without adding caches of their own.
+      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            rust/local-tts-bridge/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   checks-complete:
     # Keep the branch-protection context stable as the underlying jobs expand.
     name: Lint, test, and build web
-    needs: [changes, checks, bridge-linux]
+    needs: [changes, static, test, test-merge, bridge-linux]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -153,7 +253,9 @@ jobs:
         shell: bash
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
-          WEB_RESULT: ${{ needs.checks.result }}
+          STATIC_RESULT: ${{ needs.static.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          MERGE_RESULT: ${{ needs.test-merge.result }}
           BRIDGE_NEEDED: ${{ needs.changes.outputs.bridge }}
           BRIDGE_RESULT: ${{ needs.bridge-linux.result }}
         # The bridge job may be skipped only when the change detection itself
@@ -161,7 +263,9 @@ jobs:
         run: |
           set -euo pipefail
           test "$CHANGES_RESULT" = success
-          test "$WEB_RESULT" = success
+          test "$STATIC_RESULT" = success
+          test "$TEST_RESULT" = success
+          test "$MERGE_RESULT" = success
           if [[ "$BRIDGE_NEEDED" == "true" ]]; then
             test "$BRIDGE_RESULT" = success
           else

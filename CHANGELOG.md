@@ -18,6 +18,13 @@ All notable changes to Open TTS are documented here.
   macOS 26 does not put it inside a grey tile. The 1024 px masters are
   `build/icon-source.png` and `build/icon-macos-source.png`.
 
+### Changed
+
+- CI runs lint/build, three Vitest shards per Node version, and the Linux
+  bridge test in parallel. The 100% coverage gate is enforced on the merged
+  shard coverage, and a merge step proves every test file ran. `node_modules`
+  and the Linux bridge's Cargo build are cached from `main`.
+
 ### Fixed
 
 - Using a cloned voice without a Qwen3 voice-clone (Base) model only said

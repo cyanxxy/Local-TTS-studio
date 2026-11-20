@@ -78,3 +78,6 @@ reports/
 # Isolated agent worktrees (repo root only)
 /.worktrees/
 
+
+# Vitest blob reports and per-shard coverage directories
+.vitest/
