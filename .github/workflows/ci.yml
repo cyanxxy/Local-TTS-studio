@@ -230,7 +230,7 @@ jobs:
       - run: npx vitest run electron/rustLocalBridge.test.ts
       # Only main saves, and only when the lockfile or toolchain changed, so
       # pull requests reuse main's build without adding caches of their own.
-      - if: github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+      - if: (github.ref == 'refs/heads/main' || github.head_ref == 'Agent/ci-parallel-shards-cache') && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

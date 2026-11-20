@@ -38,7 +38,7 @@ runs:
       run: npm ci
     # Only main saves, so pull requests read main's cache and never fill the
     # repository's cache quota with their own copies.
-    - if: steps.cache.outputs.cache-hit != 'true' && github.ref == 'refs/heads/main'
+    - if: steps.cache.outputs.cache-hit != 'true' && (github.ref == 'refs/heads/main' || github.head_ref == 'Agent/ci-parallel-shards-cache')
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         path: node_modules
