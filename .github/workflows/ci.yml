@@ -60,56 +60,32 @@ jobs:
           fi
 
   static:
-    name: Lint, type-check, and build web (Node ${{ matrix.node.label }})
+    name: Lint, type-check, and build web
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        node:
-          # The release runtime pinned in .nvmrc, plus the newest major that
-          # package.json `engines.node` admits. Lint and the Electron type
-          # check do not depend on the Node version, so only the pinned leg
-          # (`full`) runs them; both legs build the web app.
-          - label: pinned
-            file: .nvmrc
-            full: true
-          - label: "26"
-            version: "26"
-            full: false
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
       - uses: ./.github/actions/npm-install
         with:
-          node-version-file: ${{ matrix.node.file }}
-          node-version: ${{ matrix.node.version }}
-      - if: matrix.node.full
-        run: npm run lint
+          node-version-file: .nvmrc
+      - run: npm run lint
       # lint:rust is deliberately not run here: Clippy needs the full native
       # build, so rust-bridge.yml on macOS is this repo's native gate.
-      - if: matrix.node.full
-        run: npx tsc --noEmit -p tsconfig.electron.json
+      - run: npx tsc --noEmit -p tsconfig.electron.json
       - run: npm run build:web
 
+  # The jobs below share the account-wide limit of 20 concurrent jobs on the
+  # GitHub Free plan with every other repository, so only the pinned-Node
+  # tests, which gate the PR, are sharded.
   test:
-    name: Test (Node ${{ matrix.node.label }}, shard ${{ matrix.shard }}/3)
+    name: Test (Node pinned, shard ${{ matrix.shard }}/3)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
-        node:
-          # vitest.config.ts carries a Node 26 specific workaround, so that leg
-          # keeps it honest. The coverage gate does not depend on the Node
-          # version, so only the pinned leg collects coverage.
-          - label: pinned
-            file: .nvmrc
-            coverage: true
-          - label: "26"
-            version: "26"
-            coverage: false
         # Keep in step with the `/3` in the name and the run step below.
         shard: [1, 2, 3]
     steps:
@@ -118,8 +94,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/npm-install
         with:
-          node-version-file: ${{ matrix.node.file }}
-          node-version: ${{ matrix.node.version }}
+          node-version-file: .nvmrc
       # rustLocalBridge.test.ts compiles the native bridge in beforeAll and runs
       # in its own job below so the cargo build cannot starve timing-sensitive
       # Electron tests in this process. Each shard writes a blob report; the
@@ -130,10 +105,10 @@ jobs:
           --shard=${{ matrix.shard }}/3
           --exclude "electron/rustLocalBridge.test.ts"
           --reporter=default --reporter=blob
-          ${{ matrix.node.coverage && '--coverage' || '' }}
+          --coverage
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: vitest-blob-${{ matrix.node.label }}-${{ matrix.shard }}
+          name: vitest-blob-${{ matrix.shard }}
           path: .vitest/blob/
           if-no-files-found: error
           retention-days: 1
@@ -153,28 +128,36 @@ jobs:
           node-version-file: .nvmrc
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: vitest-blob-pinned-*
-          path: .vitest/blob-pinned
-          merge-multiple: true
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: vitest-blob-26-*
-          path: .vitest/blob-26
+          pattern: vitest-blob-*
+          path: .vitest/blob
           merge-multiple: true
       - name: List the test files an unsharded run would collect
         run: npx vitest list --filesOnly --exclude "electron/rustLocalBridge.test.ts" --json="$RUNNER_TEMP/expected.json"
       # --coverage on the merge applies the thresholds in vitest.config.ts to
       # the combined coverage of every shard.
-      - name: Merge pinned-Node shards and enforce the coverage gate
+      - name: Merge shards and enforce the coverage gate
         run: |
-          npx vitest run --merge-reports=.vitest/blob-pinned --coverage \
-            --reporter=dot --reporter=json --outputFile.json="$RUNNER_TEMP/pinned.json"
-          node scripts/check-vitest-shards.mjs "$RUNNER_TEMP/expected.json" "$RUNNER_TEMP/pinned.json"
-      - name: Merge Node 26 shards
-        run: |
-          npx vitest run --merge-reports=.vitest/blob-26 \
-            --reporter=dot --reporter=json --outputFile.json="$RUNNER_TEMP/node26.json"
-          node scripts/check-vitest-shards.mjs "$RUNNER_TEMP/expected.json" "$RUNNER_TEMP/node26.json"
+          npx vitest run --merge-reports=.vitest/blob --coverage \
+            --reporter=dot --reporter=json --outputFile.json="$RUNNER_TEMP/merged.json"
+          node scripts/check-vitest-shards.mjs "$RUNNER_TEMP/expected.json" "$RUNNER_TEMP/merged.json"
+
+  node-26:
+    # The newest major that package.json `engines.node` admits; vitest.config.ts
+    # carries a Node 26 specific workaround, so this job keeps it honest. Lint,
+    # the Electron type check, and the coverage gate do not depend on the Node
+    # version, so it repeats only the web build and an unsharded Vitest run.
+    name: Test and build web (Node 26)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/npm-install
+        with:
+          node-version: "26"
+      - run: npx vitest run --exclude "electron/rustLocalBridge.test.ts"
+      - run: npm run build:web
 
   bridge-linux:
     name: Bridge integration test (Linux)
@@ -244,7 +227,7 @@ jobs:
   checks-complete:
     # Keep the branch-protection context stable as the underlying jobs expand.
     name: Lint, test, and build web
-    needs: [changes, static, test, test-merge, bridge-linux]
+    needs: [changes, static, test, test-merge, node-26, bridge-linux]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -256,6 +239,7 @@ jobs:
           STATIC_RESULT: ${{ needs.static.result }}
           TEST_RESULT: ${{ needs.test.result }}
           MERGE_RESULT: ${{ needs.test-merge.result }}
+          NODE26_RESULT: ${{ needs.node-26.result }}
           BRIDGE_NEEDED: ${{ needs.changes.outputs.bridge }}
           BRIDGE_RESULT: ${{ needs.bridge-linux.result }}
         # The bridge job may be skipped only when the change detection itself
@@ -266,6 +250,7 @@ jobs:
           test "$STATIC_RESULT" = success
           test "$TEST_RESULT" = success
           test "$MERGE_RESULT" = success
+          test "$NODE26_RESULT" = success
           if [[ "$BRIDGE_NEEDED" == "true" ]]; then
             test "$BRIDGE_RESULT" = success
           else

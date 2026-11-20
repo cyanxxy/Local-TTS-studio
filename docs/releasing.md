@@ -21,8 +21,11 @@ the Electron type check, Vitest with the coverage thresholds from
 `vitest.config.ts`, and the web build on the Node release pinned in `.nvmrc`.
 A Node 26 leg repeats Vitest (without coverage) and the web build, since lint,
 the type check, and the coverage gate do not depend on the Node version. These
-run as parallel jobs: one job per Node version lints, type-checks, and builds,
-and Vitest is split into three shards per Node version. Each shard uploads a
+run as parallel jobs: one job lints, type-checks, and builds on the pinned
+Node, Vitest on the pinned Node is split into three shards, and one unsharded
+Node 26 job runs Vitest and the web build. Only the pinned-Node tests are
+sharded because the GitHub Free plan's 20 concurrent jobs are shared with every
+other repository on the account. Each shard uploads a
 blob report; a merge job combines them, applies the coverage thresholds to the
 combined coverage (a `--shard` run skips them, since it sees only its slice),
 and runs `scripts/check-vitest-shards.mjs` to prove the shards together ran
@@ -53,8 +56,8 @@ it triggers on changes to Rust sources, the bridge build scripts,
 Actions tab.
 
 The final `Lint, test, and build web` check preserves the branch-protection
-context and succeeds only when the lint/build jobs, every test shard, and the
-shard merge have passed and the Linux bridge integration has either passed or was skipped because the change
+context and succeeds only when the lint/build job, every test shard, the shard
+merge, and the Node 26 job have passed and the Linux bridge integration has either passed or was skipped because the change
 detection found no bridge inputs.
 
 Workflow actions are pinned to commit SHAs with the release version in a

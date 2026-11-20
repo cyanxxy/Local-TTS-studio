@@ -20,8 +20,8 @@ All notable changes to Open TTS are documented here.
 
 ### Changed
 
-- CI runs lint/build, three Vitest shards per Node version, and the Linux
-  bridge test in parallel. The 100% coverage gate is enforced on the merged
+- CI runs lint/build, three pinned-Node Vitest shards, a Node 26 job, and the
+  Linux bridge test in parallel. The 100% coverage gate is enforced on the merged
   shard coverage, and a merge step proves every test file ran. `node_modules`
   and the Linux bridge's Cargo build are cached from `main`.
 
