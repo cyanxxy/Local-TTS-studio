@@ -22,7 +22,7 @@ jobs:
     outputs:
       bridge: ${{ steps.filter.outputs.bridge }}
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # A pull_request run checks out GitHub's test merge commit, whose
           # first parent is the base branch tip, so HEAD^1..HEAD is the PR diff.
@@ -79,8 +79,8 @@ jobs:
             version: "26"
             full: false
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           # setup-node prefers node-version when both are set; the matrix
           # leaves exactly one of them non-empty.
@@ -117,8 +117,8 @@ jobs:
       # dev-profile compile and link; debug assertions stay on.
       CARGO_PROFILE_DEV_DEBUG: "0"
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: ".nvmrc"
           cache: npm
@@ -126,7 +126,7 @@ jobs:
         # No toolchain argument: rustup installs the active toolchain, so the
         # channel, profile, and components all come from rust-toolchain.toml.
         run: rustup toolchain install --no-self-update
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: rust -> local-tts-bridge/target
           env-vars: CARGO_TARGET_DIR
